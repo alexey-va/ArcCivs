@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -11,6 +12,28 @@ import java.util.UUID
 import java.util.zip.GZIPInputStream
 
 class CivsInfrastructureTest : FunSpec({
+    test("the measured infrastructure bound admits piece 128 preserves retained walls and refuses piece 129") {
+        val base = settlementPlanCity().copy(radius = 128, research = CivResearchState(CivResearchId.entries.toSet()))
+        fun wall(index: Int): CivBuilding {
+            val point = CivPosition(index % 16 * 4 - 30, 64, index / 16 * 4 + 24)
+            return CivBuilding(UUID(141, index.toLong()), BuildingType.WALL, 1, point, 0, "fixture/wall/$index",
+                CivBox(point, point.copy(y = 67)), point.copy(y = 65, z = point.z - 1), BuildingPhase.ACTIVE)
+        }
+        val old = base.copy(buildings = base.buildings + (0 until 96).map(::wall))
+        CivsRules.validate(Gson().fromJson(Gson().toJson(old), Settlement::class.java)) shouldBe old
+        val before = base.copy(buildings = base.buildings + (0 until 127).map(::wall))
+        CivsRules.validate(before) shouldBe before
+        val admitted = CivsRules.placeSite(before, before.owner, wall(127))
+        admitted.buildings.count { it.type.isInfrastructure } shouldBe 128
+        admitted.buildings.take(before.buildings.size) shouldBe before.buildings
+        admitted.workers shouldBe before.workers
+        admitted.stock shouldBe before.stock
+        CivsRules.buildingCount(admitted) shouldBe 1
+        CivsRules.validate(admitted) shouldBe admitted
+        shouldThrow<CivsRejection> { CivsRules.placeSite(admitted, admitted.owner, wall(128)) }.reason shouldBe "building-limit"
+        CivsSettlementLayout.MAXIMUM_PIECES shouldBe CivsRules.MAX_INFRASTRUCTURE
+    }
+
     test("generated Sponge capture preserves negative coordinates stepped floors and barrier gaps") {
         val low = CivPosition(-17, 63, -9)
         val high = CivPosition(-16, 66, -9)

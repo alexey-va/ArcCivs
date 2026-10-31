@@ -122,7 +122,8 @@ internal data class CitizenSpawnSearch(val point: CivPosition?, val at: Long, va
 
 internal fun citizenHasViewer(worldId: UUID, point: CitizenPoint, viewers: List<CitizenViewer>, range: Int): Boolean =
     viewers.any { it.worldId == worldId && it.point.distanceSquared(point) <= range.toDouble() * range }
-internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerceIn(0, 48) - active).coerceIn(0, 2)
+internal fun citizenSpawnBudget(active: Int, maximum: Int): Int =
+    (maximum.coerceIn(0, CivsSettings.MAXIMUM_NPCS) - active).coerceIn(0, 2)
 
 internal const val CITIZEN_SPAWN_CANDIDATE_LIMIT = 13 * 9
 

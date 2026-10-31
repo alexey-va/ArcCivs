@@ -102,7 +102,7 @@ class CivsResearchIndustryTest : FunSpec({
     }
 
     test("one bound university keeps the paid city project when its researcher moves to a replacement") {
-        // Reserve one of the fixed sixteen plots for this replacement-university scenario.
+        // Keep the original village shape while adding a replacement university.
         val base = industryCity().let { it.copy(buildings = it.buildings.filterNot { b -> b.type == BuildingType.PLAN_BOARD }) }
         val original = CivsResearch.university(base)!!
         val replacement = industryBuilding(BuildingType.UNIVERSITY, 16).copy(id = UUID(0, 1))
@@ -216,11 +216,13 @@ class CivsResearchIndustryTest : FunSpec({
         val food = assigned(BuildingType.FARM); val wood = assigned(BuildingType.FORESTER); val stone = assigned(BuildingType.QUARRY)
         val extra = assigned(BuildingType.QUARRY)
         val before = CivsRules.validate(base.copy(workers = listOf(food, wood, stone, extra)))
+        before.workers.count { it.assignment == stone.assignment } shouldBe 2
         val previous = requireNotNull(citizenPlan(before, extra))
         val project = CivResearchProject(UUID.randomUUID(), CivResearchId.MATERIALS, CivsResearch.cost(before, CivResearchId.MATERIALS), 3, funded = true)
         val city = before.copy(research = CivResearchState(project = project))
         CivsAutonomy.waitingReassignment(city, extra) shouldBe true
-        listOf(food, wood, stone).forEach { CivsAutonomy.waitingReassignment(city, it) shouldBe false }
+        CivsAutonomy.waitingReassignment(city, stone) shouldBe true
+        listOf(food, wood).forEach { CivsAutonomy.waitingReassignment(city, it) shouldBe false }
         CivsRules.autoAssign(city, city.owner, 1_000) { false } shouldBe city
         val deferred = requireNotNull(citizenPlan(city, extra))
         deferred.idleReason shouldBe "waiting-reassignment"
@@ -240,6 +242,7 @@ class CivsResearchIndustryTest : FunSpec({
         reassigned.workers.first { it.id == extra.id }.assignment shouldBe reassigned.buildings.first { it.type == BuildingType.WAREHOUSE }.id
         reassigned.workers.first { it.id == extra.id }.completedCycles shouldBe 1L
         listOf(food, wood, stone).forEach { expected -> reassigned.workers.first { it.id == expected.id }.assignment shouldBe expected.assignment }
+        listOf(food, wood, stone).forEach { CivsAutonomy.waitingReassignment(reassigned, it) shouldBe false }
         val paused = deferred.copy(idleReason = "autonomy-paused")
         citizenCurrentPlan(previous, CitizenPhase.WORKING) { paused } shouldBe paused
         citizenCurrentPlan(previous, CitizenPhase.PAUSED) { deferred } shouldBe deferred
@@ -280,7 +283,7 @@ class CivsResearchIndustryTest : FunSpec({
         courier?.let { assigned.workers.first { worker -> worker.id == it.id } shouldBe it }
     }
 
-    test("full sixteen-plot village keeps its board and advances only researched hall and new industry upgrades") {
+    test("legacy sixteen-plot village keeps its board and finishes legal existing upgrades before expansion") {
         val base = industryCity().copy(research = CivResearchState(CivResearchId.entries.toSet()))
         val board = base.buildings.single { it.type == BuildingType.PLAN_BOARD }
         val city = CivsRules.validate(base)
@@ -294,10 +297,27 @@ class CivsResearchIndustryTest : FunSpec({
         var finished = hallThree
         for (type in listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER))
             finished = finished.copy(buildings = finished.buildings.map { if (it.type == type) it.copy(level = 3) else it })
-        CivsAutonomy.nextGoal(finished) shouldBe null
+        for (type in listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM, BuildingType.WAREHOUSE,
+            BuildingType.HOUSE, BuildingType.HOUSE, BuildingType.HOUSE, BuildingType.BUILDER_HUT,
+            BuildingType.TAVERN, BuildingType.GUARD_TOWER, BuildingType.BLACKSMITH)) {
+            val building = finished.buildings.first { it.type == type && it.level < it.type.maxLevel }
+            val goal = requireNotNull(CivsAutonomy.nextGoal(finished))
+            goal.type shouldBe type
+            goal.buildingId shouldBe building.id
+            goal.targetLevel shouldBe building.level + 1
+            CivsResearch.required(type, goal.targetLevel)?.let { CivsResearch.has(finished, it) shouldBe true }
+            finished = finished.copy(buildings = finished.buildings.map {
+                if (it.id == building.id) it.copy(level = goal.targetLevel) else it
+            })
+        }
+        finished.buildings.size shouldBe 16
+        CivsRules.buildingCount(finished) shouldBe 16
         finished.buildings.first { it.type == BuildingType.PLAN_BOARD } shouldBe board
-        finished.buildings.filter { it.type !in setOf(BuildingType.TOWN_HALL, BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.PLAN_BOARD) }
-            .all { it.level == 2 } shouldBe true
+        finished.buildings shouldBe city.buildings.map { it.copy(level = it.type.maxLevel) }
+        val expansion = requireNotNull(CivsAutonomy.nextGoal(finished))
+        expansion.type shouldBe BuildingType.WAREHOUSE
+        expansion.targetLevel shouldBe 1
+        expansion.buildingId shouldBe null
         CivsResearch.required(BuildingType.SMELTERY, 2) shouldBe CivResearchId.MATERIALS
         CivsResearch.required(BuildingType.CRUSHER, 3) shouldBe CivResearchId.ENGINEERING
         CivsResearch.required(BuildingType.BLACKSMITH, 3) shouldBe null

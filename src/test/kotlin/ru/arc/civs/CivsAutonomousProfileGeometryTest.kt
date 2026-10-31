@@ -8,19 +8,19 @@ import java.util.UUID
 /** Spatial contracts only: private schematic voxels are neither fixtures nor test dependencies. */
 class CivsAutonomousProfileGeometryTest : FunSpec({
     for (style in CivsBlueprints.STYLES) for (rotation in listOf(0, 90, 180, 270)) {
-        test("$style researched sixteen-building profile fits real family bounds at radius96 with hall rotation$rotation") {
+        test("$style researched complete profile fits real maximum family bounds at radius128 with hall rotation$rotation") {
             val hall = profileBuilding(style, BuildingType.TOWN_HALL, 1, CivPosition(120, 64, -80), rotation)
                 .copy(phase = BuildingPhase.SITE)
             // Service founds around the authored control, which is offset from the entrance.
             // Completed research isolates the entire spatial profile from its funding/work progression.
             var city = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Geometry", UUID.randomUUID(),
-                requireNotNull(hall.control), 96, style, Stock(100_000, 100_000, 100_000),
+                requireNotNull(hall.control), 128, style, Stock(100_000, 100_000, 100_000),
                 listOf(hall), emptyList(), autonomy = CivAutonomy(), research = CivResearchState(CivResearchId.entries.toSet()))
             var goals = 0
             var newSites = 0
             while (true) {
                 val goal = CivsAutonomy.nextGoal(city) ?: break
-                check(++goals <= 34) { "Autonomous profile did not finish" }
+                check(++goals <= 100) { "Autonomous profile did not finish" }
                 val existing = goal.buildingId?.let(city::building)
                 if (existing != null) {
                     val upgraded = profileBuilding(style, existing.type, goal.targetLevel, existing.anchor,
@@ -33,16 +33,20 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
 
                 val current = profileBuilding(style, goal.type, 1)
                 val future = profileBuilding(style, goal.type, goal.type.maxLevel, id = current.id)
-                val candidates = CivsAutonomousGeometry.candidates(city, current, future)
-                candidates shouldBe CivsAutonomousGeometry.candidates(city, current, future)
-                check(candidates.size in 1..64) { "$style ${goal.type} has ${candidates.size} candidates" }
                 var columns = 0
-                val selected = candidates.map { CivsAutonomousGeometry.atHeight(it.building, 64) }.firstOrNull { candidate ->
-                    val b = candidate.bounds
-                    columns += (b.max.x - b.min.x + 1) * (b.max.z - b.min.z + 1)
-                    check(columns <= CivsAutonomousPlacement.MAXIMUM_SURFACE_COLUMNS)
-                    profileConnected(city, candidate)
-                } ?: error("$style ${goal.type} has no connected site")
+                fun connected(candidates: List<CivsAutonomousCandidate>): CivBuilding? {
+                    check(candidates.size <= 64) { "$style ${goal.type} exceeded its bounded candidate stage" }
+                    return candidates.map { CivsAutonomousGeometry.atHeight(it.building, 64) }.firstOrNull { candidate ->
+                        val b = candidate.bounds
+                        columns += (b.max.x - b.min.x + 1) * (b.max.z - b.min.z + 1)
+                        check(columns <= CivsAutonomousPlacement.MAXIMUM_SURFACE_COLUMNS)
+                        profileConnected(city, candidate)
+                    }
+                }
+                val candidates = CivsSettlementLayout.candidates(city, current, future)
+                candidates shouldBe CivsSettlementLayout.candidates(city, current, future)
+                val selected = connected(candidates) ?: connected(CivsSettlementLayout.infill(city, current, future))
+                    ?: error("$style ${goal.type} has no connected frontage or infill site")
                 val placed = profileBuilding(style, goal.type, 1, selected.anchor, selected.rotation, current.id)
                 civsContainsBox(selected.bounds, placed.bounds) shouldBe true
                 placed.entrance shouldBe selected.entrance
@@ -50,16 +54,15 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
                 newSites++
             }
 
-            goals shouldBe 34
-            newSites shouldBe 15
-            city.buildings.size shouldBe 16
-            city.buildings.count { it.type == BuildingType.HOUSE } shouldBe 3
+            goals shouldBe 100
+            newSites shouldBe 33
+            city.buildings.size shouldBe 34
+            city.buildings.count { it.type == BuildingType.HOUSE } shouldBe 16
             city.buildings.map { it.type }.toSet() shouldBe CivsAutonomy.profile.toSet()
             city.buildings.all { building ->
                 building.phase == BuildingPhase.ACTIVE && building.level == when (building.type) {
-                    BuildingType.TOWN_HALL, BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER -> 3
-                    BuildingType.BLACKSMITH, BuildingType.PLAN_BOARD -> 1
-                    else -> 2
+                    BuildingType.PLAN_BOARD -> 1
+                    else -> 3
                 }
             } shouldBe true
             city.buildings.forEach { building ->
@@ -74,9 +77,12 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
                 }
                 profileConnected(city.copy(buildings = others), building) shouldBe true
             }
-            val farm = city.buildings.single { it.type == BuildingType.FARM }
-            (CivsWorksiteLayouts.field(farm).size >= 72) shouldBe true
-            CivsWorksiteLayouts.irrigation(farm).isNotEmpty() shouldBe true
+            val farms = city.buildings.filter { it.type == BuildingType.FARM }
+            farms.size shouldBe 3
+            farms.forEach { farm ->
+                (CivsWorksiteLayouts.field(farm).size >= 72) shouldBe true
+                CivsWorksiteLayouts.irrigation(farm).isNotEmpty() shouldBe true
+            }
         }
     }
 })

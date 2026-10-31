@@ -89,7 +89,10 @@ internal class CivsCityDiagnostics(
             "citizens" -> citizens.debug(cityId, workerId)
             "worksites" -> worksites.debug(selectedWorkers?.mapTo(hashSetOf()) { it.id },
                 selectedWorkers?.mapNotNullTo(hashSetOf()) { it.assignment })
-            "supply" -> supply.debug(cityId, workerId) + ("forestrySurplus" to authority.forestrySurplusDebug(cityId))
+            "supply" -> {
+                val focus = selected.asSequence().flatMap { it.workers.asSequence() }.firstOrNull { it.id == workerId }?.assignment
+                supply.debug(cityId, workerId, focus) + ("forestrySurplus" to authority.forestrySurplusDebug(cityId))
+            }
             "storage" -> storage.debug(cityId)
             "chunks" -> chunkLoading.debug(cityId, if (cityId == null) null else selected.mapTo(hashSetOf()) { it.owner })
             "construction" -> rows(construction::debug)

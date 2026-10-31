@@ -7,6 +7,77 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsAutonomyTest : FunSpec({
+    test("a legacy town upgrades an existing supported building before requesting missing expansion parcels") {
+        val types = CivsAutonomy.profile + List(2) { BuildingType.HOUSE }
+        val city = autonomyCity().copy(buildings = types.mapIndexed { index, type ->
+            val x = index % 4 * 16 - 24
+            val z = index / 4 * 16 - 24
+            autonomyBuilding(type, type.maxLevel, BuildingPhase.ACTIVE, index).copy(
+                anchor = CivPosition(x, 64, z), entrance = CivPosition(x, 65, z),
+                bounds = CivBox(CivPosition(x - 3, 62, z - 7), CivPosition(x + 3, 70, z - 1)),
+                control = CivPosition(x + 1, 65, z - 1))
+        }, research = CivResearchState(CivResearchId.entries.toSet()))
+        CivsRules.validate(city) shouldBe city
+        city.buildings.size shouldBe 16
+        city.buildings.count { it.type == BuildingType.WAREHOUSE } shouldBe 1
+        for (type in listOf(BuildingType.FORESTER, BuildingType.WAREHOUSE)) {
+            val old = city.buildings.first { it.type == type }.copy(level = 2)
+            val before = city.copy(buildings = city.buildings.map { if (it.id == old.id) old else it })
+            val goal = requireNotNull(CivsAutonomy.nextGoal(before))
+            Triple(goal.type, goal.targetLevel, goal.buildingId) shouldBe Triple(type, 3, old.id)
+            val unsupported = requireNotNull(CivsAutonomy.nextGoal(before) { if (it.id == old.id) 2 else it.type.maxLevel })
+            (unsupported.type to unsupported.buildingId) shouldBe (BuildingType.WAREHOUSE to null)
+            before.stock shouldBe city.stock
+            before.constructionQueue shouldBe city.constructionQueue
+        }
+    }
+
+    test("additional housing waits for engineering hall three and existing legal maximum upgrades") {
+        val types = CivsAutonomy.baseProfile + List(2) { BuildingType.HOUSE } +
+            listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH)
+        val city = autonomyCity().copy(buildings = types.mapIndexed { index, type ->
+            autonomyBuilding(type, minOf(2, type.maxLevel), BuildingPhase.ACTIVE, index)
+        }, research = CivResearchState(setOf(CivResearchId.MATERIALS, CivResearchId.METALLURGY)))
+        CivsAutonomy.nextGoal(city) shouldBe null
+        val engineered = city.copy(research = CivResearchState(CivResearchId.entries.toSet()))
+        CivsAutonomy.nextGoal(engineered)?.type shouldBe BuildingType.TOWN_HALL
+        CivsAutonomy.nextGoal(engineered)?.targetLevel shouldBe 3
+        val hallThree = engineered.copy(buildings = engineered.buildings.map {
+            if (it.type == BuildingType.TOWN_HALL) it.copy(level = 3) else it
+        })
+        CivsAutonomy.nextGoal(hallThree)?.type shouldBe BuildingType.UNIVERSITY
+        val maximum = engineered.copy(buildings = engineered.buildings.map { it.copy(level = it.type.maxLevel) })
+        var growing = maximum
+        val expansion = mutableListOf<BuildingType>()
+        repeat(5) { index ->
+            val goal = requireNotNull(CivsAutonomy.nextGoal(growing))
+            goal.buildingId shouldBe null
+            expansion += goal.type
+            growing = growing.copy(buildings = growing.buildings + autonomyBuilding(goal.type, 3, BuildingPhase.ACTIVE, 100 + index))
+        }
+        expansion shouldBe listOf(BuildingType.WAREHOUSE, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM, BuildingType.FARM)
+        CivsAutonomy.nextGoal(growing)?.let { it.type to it.targetLevel } shouldBe (BuildingType.HOUSE to 1)
+        val complete = growing.copy(buildings = growing.buildings + (0 until 13).map {
+            autonomyBuilding(BuildingType.HOUSE, 3, BuildingPhase.ACTIVE, 200 + it)
+        })
+        CivsAutonomy.nextGoal(complete) shouldBe null
+        CivsRules.MAX_POPULATION shouldBe 24
+        CivsRules.MAX_RESIDENTS shouldBe 28
+        CivsRules.MAX_BUILDER_WORK_CREDIT shouldBe 768
+    }
+
+    test("the final development tail obeys retained catalog maxima and metallurgy for the smith") {
+        val types = CivsAutonomy.completeProfile
+        val city = autonomyCity().copy(buildings = types.mapIndexed { index, type ->
+            autonomyBuilding(type, type.maxLevel, BuildingPhase.ACTIVE, index).let {
+                if (type == BuildingType.BLACKSMITH) it.copy(level = 1) else it
+            }
+        }, research = CivResearchState(CivResearchId.entries.toSet()))
+        CivsAutonomy.nextGoal(city)?.let { it.type to it.targetLevel } shouldBe (BuildingType.BLACKSMITH to 2)
+        CivsAutonomy.nextGoal(city) { if (it.type == BuildingType.BLACKSMITH) 1 else it.type.maxLevel } shouldBe null
+        CivsAutonomy.nextGoal(city.copy(research = CivResearchState(setOf(CivResearchId.ENGINEERING, CivResearchId.MATERIALS)))).shouldBe(null)
+    }
+
     test("decorations use bounded separate slots after the complete functional town") {
         for (automatic in listOf(false, true)) {
             var city = autonomyCity().copy(autonomy = if (automatic) CivAutonomy() else null,
@@ -26,8 +97,8 @@ class CivsAutonomyTest : FunSpec({
             }
             repeat(CivsRules.decorationLimit(city)) { city = CivsRules.placeSite(city, city.owner, decor(it)) }
             CivsRules.validate(city) shouldBe city
-            CivsRules.buildingCount(city) shouldBe 16
-            city.buildings.count { it.type == BuildingType.DECORATION } shouldBe if (automatic) 2 else 8
+            CivsRules.buildingCount(city) shouldBe 34
+            city.buildings.count { it.type == BuildingType.DECORATION } shouldBe if (automatic) 6 else 8
             city.buildings.filter { it.type == BuildingType.DECORATION }.forEach {
                 CivsRules.slots(city, it) shouldBe 0
                 CivsProduction.options(it.type).isEmpty() shouldBe true
@@ -104,7 +175,7 @@ class CivsAutonomyTest : FunSpec({
     }
 
     test("a full established village without a board still advances upgrades and infrastructure") {
-        val types = CivsAutonomy.baseProfile.filterNot { it == BuildingType.PLAN_BOARD } +
+        val types = CivsAutonomy.baseProfile.filterNot { it == BuildingType.PLAN_BOARD } + List(CivsRules.MAX_BUILDINGS - 16) { BuildingType.HOUSE } +
             listOf(BuildingType.HOUSE, BuildingType.HOUSE, BuildingType.UNIVERSITY, BuildingType.SMELTERY,
                 BuildingType.CRUSHER, BuildingType.BLACKSMITH, BuildingType.BAKERY)
         types.size shouldBe CivsRules.MAX_BUILDINGS

@@ -129,15 +129,20 @@ internal class CivsSupplyDispatcher(
     fun cityIds(): Set<UUID> { checkOwner(); return cities.keys.toSet() }
 
     /** Owner observations only: no capture, acceptance, future joins or reservation changes. */
-    internal fun debug(cityId: UUID?, workerId: UUID? = null): Map<String, Any?> {
+    internal fun debug(cityId: UUID?, workerId: UUID? = null, focusBuildingId: UUID? = null): Map<String, Any?> {
         checkOwner()
         val now = clock()
+        val focus = focusBuildingId.takeIf { workerId != null }
+        val tool = "IRON_PICKAXE"
         fun point(p: CivPosition) = "${p.x},${p.y},${p.z}"
         fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
             "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
         val selected = cities.entries.filter { cityId == null || it.key == cityId }
         fun selectedPlans(city: City) = city.plans.entries.filter {
-            workerId == null || it.key == workerId || it.value.cargo.sourceWorkerId == workerId }
+            workerId == null || it.key == workerId || it.value.cargo.sourceWorkerId == workerId || focus != null &&
+                (it.value.cargo.sourceBuildingId == focus || it.value.cargo.targetBuildingId == focus ||
+                    it.value.destinationBuildingId == focus) }
+        fun requests(values: List<CivSupplyRequest>) = values.filter { focus == null || it.buildingId == focus }
         return sample(selected) { (id, city) ->
             val plans = selectedPlans(city)
             val job = city.job
@@ -146,6 +151,7 @@ internal class CivsSupplyDispatcher(
                 "requested" to city.requested, "failure" to city.failure,
                 "retryAfterMillis" to if (city.after > now) city.after - now else 0L,
                 "acceptedGeneration" to city.acceptedGeneration,
+                "focusBuilding" to focus?.toString(),
                 "capture" to city.captured?.let { mapOf("generation" to it.generation,
                     "ageMillis" to (now - it.at).coerceAtLeast(0), "generationStale" to (it.generation != city.generation),
                     "stores" to it.stores, "requests" to it.requests, "couriers" to it.couriers,
@@ -167,7 +173,8 @@ internal class CivsSupplyDispatcher(
                         "assignedAgeMillis" to city.lastAssigned[worker]?.let { (now - it).coerceAtLeast(0) }) },
                 "reservations" to mapOf("waitingPickup" to plans.count { !it.value.carrying },
                     "carrying" to plans.count { it.value.carrying }, "units" to plans.sumOf { it.value.cargo.amount }),
-                "crafts" to sample(city.crafts.values.filter { workerId == null || it.workerId == workerId }) { craft ->
+                "crafts" to sample(city.crafts.values.filter { workerId == null || it.workerId == workerId || focus != null &&
+                    (it.buildingId == focus || it.targetBuildingId == focus) }) { craft ->
                     val carried = city.observation?.craftWorkers?.firstOrNull { it.workerId == craft.workerId }?.carried.orEmpty()
                     val missing = craft.inputs.mapValues { (material, count) -> (count - (carried[material] ?: 0L)).coerceAtLeast(0) }
                         .filterValues { it > 0 }
@@ -178,20 +185,41 @@ internal class CivsSupplyDispatcher(
                         "construction" to craft.constructionId?.toString(), "epoch" to city.observation?.craftEpoch?.toString(),
                         "missingCarriedAtCapture" to missing,
                         "statusAtCapture" to if (missing.isEmpty()) "crafting" else "waiting-materials") },
-                "acceptedRequests" to city.observation?.let { accepted -> sample(accepted.requests) { request -> mapOf(
+                "acceptedStores" to city.observation?.let { accepted ->
+                    val capture = (accepted.inputKey as? CivSupplyObservation)?.capture
+                    val stores = accepted.stores.values.filter { it.id == focus || (it.stock[tool] ?: 0L) > 0 ||
+                        it.type == BuildingType.WAREHOUSE }.sortedWith(compareBy<CivSupplyStore> {
+                        when { it.id == focus -> 0; (it.stock[tool] ?: 0L) > 0 -> 1; else -> 2 }
+                    }.thenBy { it.id.toString() })
+                    sample(stores) { store -> mapOf("building" to store.id.toString(), "type" to store.type?.name,
+                        "control" to point(store.control), "plainStock" to
+                            if (accepted.autonomousStock) null else mapOf(tool to (store.stock[tool] ?: 0L)),
+                        "desiredStock" to mapOf(tool to (store.desiredStock[tool] ?: 0L)),
+                        "capacity" to mapOf("emptySlots" to store.capacity.emptySlots,
+                            "partialRoom" to mapOf(tool to (store.capacity.partialRoom[tool] ?: 0L)),
+                            "outputEmptySlots" to store.capacity.outputEmptySlots, "virtualRoom" to store.capacity.virtualRoom),
+                        "upgradingOrder" to capture?.stores?.get(store.id)?.key?.upgradingOrder?.toString())
+                    } + mapOf("source" to "accepted-observation-cache", "freshNativeRead" to false,
+                        "autonomousStock" to accepted.autonomousStock,
+                        "generation" to city.acceptedGeneration, "generationStale" to (city.acceptedGeneration != city.generation),
+                        "captureStartedAtMillis" to capture?.startedAtMillis,
+                        "ageMillis" to capture?.startedAtMillis?.let { (now - it).coerceAtLeast(0) })
+                },
+                "acceptedRequests" to city.observation?.let { accepted -> sample(requests(accepted.requests)) { request -> mapOf(
                     "building" to request.buildingId.toString(), "material" to request.material,
                     "needed" to request.needed, "inTransit" to request.inTransit, "construction" to request.construction) } },
-                "capturedRequests" to snapshot?.let { sample(it.requests) { request -> mapOf(
+                "capturedRequests" to snapshot?.let { sample(requests(it.requests)) { request -> mapOf(
                     "building" to request.buildingId.toString(), "material" to request.material,
                     "needed" to request.needed, "inTransit" to request.inTransit, "construction" to request.construction) } },
                 "capturedWorkerSources" to snapshot?.let { sample(it.workerSources.filter {
-                    workerId == null || it.workerId == workerId }) { source -> mapOf("worker" to source.workerId.toString(),
+                    workerId == null || it.workerId == workerId || it.buildingId == focus }) { source -> mapOf("worker" to source.workerId.toString(),
                     "building" to source.buildingId.toString(), "meeting" to point(source.meeting),
                     "excess" to sample(source.excess.entries) { mapOf("material" to it.key, "amount" to it.value) }) } },
                 "waitingTasks" to city.ages.size,
                 "blockedWorkers" to sample(city.blockedWorkers.entries.filter { workerId == null || it.key == workerId }) {
                     mapOf("worker" to it.key.toString(), "remainingMillis" to (it.value - now).coerceAtLeast(0)) },
-                "blockedTrips" to sample(city.blockedTrips.entries.filter { workerId == null || it.key.worker == workerId }) {
+                "blockedTrips" to sample(city.blockedTrips.entries.filter { workerId == null || it.key.worker == workerId ||
+                    focus != null && (it.key.source == focus || it.key.target == focus) }) {
                     mapOf("source" to it.key.source.toString(), "sourceWorker" to it.key.worker?.toString(),
                         "target" to it.key.target.toString(), "material" to it.key.material,
                         "remainingMillis" to (it.value - now).coerceAtLeast(0)) })

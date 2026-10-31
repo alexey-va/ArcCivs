@@ -33,6 +33,27 @@ resident meals, research and population. `autonomy` selects automatic planning,
 placement and staffing; it must not select a second production or navigation engine.
 New building types follow the ordinary validation and recipe rules.
 
+The maximum profile contains 34 ordinary buildings: 16 houses, two foresters,
+two quarries, three farms, two warehouses and the remaining civic/industry types.
+Town hall adult limits are 5/12/24; four nursery places at the highest level
+still require real beds. New founding defaults to radius 128 and an unaccepted
+layout may use a 72-block half-width. Saved territory, adopted parcels, captured
+work and paid infrastructure keep their geometry. A failed bounded extension
+does not invalidate the older town or prevent a legal existing upgrade.
+
+Caledonia fortifications use one reviewed composite recipe per paid decoration:
+a source-hashed corner tower and two native-Core-rotated wall ends. Its immutable
+proof identifies actual ground barriers, interior witnesses and clear three-wide
+wall-walk ports. Full bounding boxes remain occupied. A forecast may reserve
+these plots, but runtime wall generation requires matching ACTIVE geometry and
+the captured construction digest. Functional development precedes optional
+bastions; bastions precede their joining infrastructure. Legacy walls retain
+their original recipe. No arbitrary decoration supplies a wall-mask exception.
+The composite compiler separately proves a connected level-seven deck with
+full support and two cells of headroom, admitting paired authored spruce doors
+as normally openable passages. This is detached geometry, not native collision
+or NPC traversal acceptance; source door states remain unchanged.
+
 Producers return excess native items to their own work building, retaining tools,
 food and accepted recipe inputs. Couriers collect from fixed building containers
 and deliver through the shared supply allocator and inventory journal. They do

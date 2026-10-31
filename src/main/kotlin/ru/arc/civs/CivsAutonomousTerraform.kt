@@ -32,7 +32,8 @@ internal data class CivTerraformCell(val position: CivPosition, val data: String
 
 internal fun civsTerrainKey(x: Int, z: Int): Long = (x.toLong() shl 32) xor (z.toLong() and 0xffff_ffffL)
 
-internal data class CivTerraformOption(val building: CivBuilding, val effort: Long, val streetFrontage: Boolean = false)
+internal data class CivTerraformOption(val building: CivBuilding, val effort: Long, val streetFrontage: Boolean = false,
+    val spatialPriority: Int = 0)
 internal data class CivRouteSearchStats(val expanded: Int, val enqueued: Int, val peakQueue: Int,
     val discovered: Int, val elapsedMillis: Long, val outcome: String, val from: CivPosition, val to: CivPosition)
 
@@ -114,13 +115,19 @@ internal object CivsAutonomousTerraform {
                 rejected("outside-world", building.anchor)
                 return@mapNotNull null
             }
+            if (!building.type.isInfrastructure && !CivsRules.workRouteWithinReach(city, building.entrance)) {
+                rejected("work-route-too-long", building.entrance)
+                return@mapNotNull null
+            }
             val nearest = sources(city, building).minOfOrNull { source ->
                 abs(source.x - building.entrance.x) + abs(source.z - building.entrance.z) +
                     abs(source.y - building.entrance.y) * 3
             } ?: return@mapNotNull null
-            CivTerraformOption(building, heights.sumOf { abs(it - y).toLong() } + nearest * 4L, candidate.streetFrontage)
+            CivTerraformOption(building, heights.sumOf { abs(it - y).toLong() } + nearest * 4L,
+                candidate.streetFrontage, candidate.spatialPriority)
         }
-    }.sortedWith(compareByDescending<CivTerraformOption> { it.streetFrontage }.thenBy { it.effort }.thenBy { it.building.entrance.x }
+    }.sortedWith(compareBy<CivTerraformOption> { it.spatialPriority }.thenByDescending { it.streetFrontage }
+        .thenBy { it.effort }.thenBy { it.building.entrance.x }
         .thenBy { it.building.entrance.z }.thenBy { it.building.anchor.y })
 
     fun draft(city: Settlement, option: CivTerraformOption, surface: CivTerrainSurface,
@@ -129,6 +136,8 @@ internal object CivsAutonomousTerraform {
         preferredRoads: Set<Long> = emptySet(), waterFoundations: List<CivWaterFoundation> = emptyList(),
         inspectRoute: (CivRouteSearchStats) -> Unit = {}): CivTerraformDraft {
         val building = option.building
+        if (!building.type.isInfrastructure && access.reservedFortificationPorts.any {
+                CivsAutonomousGeometry.overlaps(building.bounds, it) }) throw CivsRejection("building-overlap")
         val waterColumns = civsWaterFoundationColumns(building, waterFoundations)
         waterColumns.values.forEach { f ->
             val native = surface.at(f.x, f.z) ?: throw CivsRejection("autonomy-terrain")
@@ -150,8 +159,13 @@ internal object CivsAutonomousTerraform {
         val obstacles = (city.buildings + listOfNotNull(city.construction?.plannedBuilding))
             .filter { it.id != building.id && !civsPublicTransit(it) }.distinctBy { it.id }
             .map { CivsAutonomousGeometry.futureBounds(city, it) }
-        val routeObstacles = obstacles + additionalObstacles
+        // Port reservations own a future five-wide wall. Ordinary three-wide approaches keep one shoulder away too.
+        val portObstacles = if (building.type.isInfrastructure) emptyList() else access.reservedFortificationPorts.map {
+            CivBox(it.min.copy(x = it.min.x - 1, z = it.min.z - 1), it.max.copy(x = it.max.x + 1, z = it.max.z + 1))
+        }
+        val routeObstacles = obstacles + additionalObstacles + portObstacles
         val routeFailures = sortedMapOf<String, Int>()
+        // A short facing link may lack room to grade into the flat apron; the ordinary guarded search can approach from the side.
         val route = reservedRoute?.also { points ->
             if (points.isEmpty() || points.size > MAXIMUM_ROUTE_LENGTH || points.last() != building.entrance ||
                 points.first() !in sources(city, building) || points.any { p ->
@@ -159,11 +173,11 @@ internal object CivsAutonomousTerraform {
                 } || points.zipWithNext().any { (a, b) -> abs(a.x - b.x) + abs(a.z - b.z) != 1 || abs(a.y - b.y) > 1 })
                 throw CivsRejection("autonomy-no-path")
         } ?: (if (option.streetFrontage) frontageRoute(city, building, surface, access, routeObstacles, standing, preferredRoads, inspectRoute)
-        else sources(city, building).asSequence().mapNotNull {
+        else null) ?: sources(city, building).asSequence().mapNotNull {
             route(city, building, surface, routeObstacles, standing, it, preferredRoads, inspectRoute) { reason ->
                 routeFailures.merge(reason, 1, Int::plus)
             }
-        }.firstOrNull()) ?: throw CivsRejection("autonomy-no-path",
+        }.firstOrNull() ?: throw CivsRejection("autonomy-no-path",
             mapOf("stage" to "route-search") + routeFailures.mapValues { it.value.toString() })
         if (route.any { civsTerrainKey(it.x, it.z) in waterColumns }) throw CivsRejection("autonomy-no-path")
         val columns = linkedMapOf<Long, CivTerraformColumn>()
@@ -419,11 +433,25 @@ internal object CivsAutonomousTerraform {
         val goalApproach = if (to == building.entrance)
             CivsAutonomousGeometry.approach(building).map { civsTerrainKey(it.x, it.z) }.toSet()
             else setOf(civsTerrainKey(to.x, to.z))
+        val discounted = preferredRoads.mapNotNull { key -> standing[key] }
+        val discountedBounds = discounted.takeIf { it.isNotEmpty() }?.let { points ->
+            CivBox(CivPosition(points.minOf { it.x }, 0, points.minOf { it.z }),
+                CivPosition(points.maxOf { it.x }, 0, points.maxOf { it.z }))
+        }
+        fun outsideSteps(from: Int, to: Int, low: Int, high: Int): Int {
+            val outside = abs(from - to) - abs(from.coerceIn(low, high) - to.coerceIn(low, high))
+            // The first destination inside the interval already receives the shared-road discount.
+            val entering = from < low && to >= low || from > high && to <= high
+            return outside - if (entering) 1 else 0
+        }
         fun distance(n: Node): Int {
             val horizontal = abs(n.x - target.x) + abs(n.z - target.z)
             val vertical = abs(n.y - target.y)
             // Every vertical change also consumes a horizontal step; both terms are lower bounds on real cost.
-            return maxOf(horizontal, vertical) * (if (preferredRoads.isEmpty()) 10 else 6) + vertical * 8
+            val bounds = discountedBounds ?: return maxOf(horizontal, vertical) * 10 + vertical * 8
+            val unshared = outsideSteps(n.x, target.x, bounds.min.x, bounds.max.x) +
+                outsideSteps(n.z, target.z, bounds.min.z, bounds.max.z)
+            return maxOf(horizontal, vertical) * 6 + vertical * 8 + unshared * 4
         }
         fun allowed(x: Int, y: Int, z: Int): Boolean {
             if (!city.contains(x, z) || y <= surface.minHeight || y + 2 >= surface.maxHeight) return false

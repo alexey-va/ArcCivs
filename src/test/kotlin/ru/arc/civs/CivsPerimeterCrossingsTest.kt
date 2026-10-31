@@ -12,6 +12,19 @@ class CivsPerimeterCrossingsTest : FunSpec({
     fun road(x: Int) = (-2..2).map { CivPosition(x, 65, it) }
     fun has(box: CivBox, p: CivPosition) = p.x in box.min.x..box.max.x && p.z in box.min.z..box.max.z
 
+    test("a new fourth frontage preserves its north passage while an extra retained north crossing gets its own opening") {
+        val city = settlementPlanCity().copy(radius = 128)
+        val source = CivsSettlementLayout.frame(city)
+        source.gates.map { it.side }.toSet() shouldBe setOf(0, 1, 2, 3)
+        val crossing = (-74..-70).map { CivPosition(12, 65, it) }
+        val result = CivsPerimeterCrossings.adapt(source, listOf(crossing), emptyList())
+        result.gates.size shouldBe 5
+        source.gates.all { old -> old in result.gates } shouldBe true
+        crossing.none { p -> result.wallObstacles.any { has(it, p) } } shouldBe true
+        result.gates.single { it.center.x == 12 }.side shouldBe 0
+        CivsSettlementLayout.frame(city.copy(autonomy = CivAutonomy(layoutHalfWidth = 56))).gates.size shouldBe 3
+    }
+
     test("retained routes cut oriented gates while preserving the rest of a wall") {
         val source = frame()
         val routes = listOf(road(-6), road(6))

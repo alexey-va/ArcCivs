@@ -8,6 +8,7 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.Base64
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
@@ -20,6 +21,9 @@ internal class CivsLayoutDebug(
     private val executor: Executor,
     private val loadPlan: (UUID) -> CompletableFuture<CivPlacementPlan?>,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val loadFortification: (String) -> CompletableFuture<CivFortificationTemplate?> = {
+        CompletableFuture.completedFuture(null)
+    },
 ) : AutoCloseable {
     private class Export(val city: UUID) {
         val cancelled = AtomicBoolean()
@@ -46,6 +50,20 @@ internal class CivsLayoutDebug(
         val started = clock()
         val captured = snapshot(city)
         val runtime = runtimeSnapshot.mapValues { detached(it.value) }
+        val fortification = runCatching { loadFortification(captured.style) }
+            .getOrElse { CompletableFuture.failedFuture(it) }.handleAsync({ template, failure ->
+                operation.check()
+                when {
+                    failure != null -> mapOf("status" to "unavailable",
+                        "error" to (CivsDiagnostics.rejection(failure)?.reason ?: "fortification-load-failed"))
+                    template == null -> mapOf("status" to "unsupported")
+                    else -> mapOf("status" to "compiled", "evidence" to "verified-source-and-native-Core-block-state-transforms-not-world-placement",
+                        "building" to template.building, "cells" to template.cells, "proof" to template.proof,
+                        "sources" to template.sources, "sourceSha256" to template.sourceSha256,
+                        "recipeSha256" to template.recipeSha256,
+                        "sourceBytesBase64" to Base64.getEncoder().encodeToString(template.sourceBytes))
+                }
+            }, executor)
         val surface: CompletableFuture<out CivTerrainSurface?> = runCatching { terrain?.invoke()?.also { operation.terrain = it } }
             .getOrElse { CompletableFuture.failedFuture(it) }
             ?: CompletableFuture.completedFuture(null)
@@ -74,11 +92,12 @@ internal class CivsLayoutDebug(
                 }, executor)
             }, executor)
         }
-        val prepared = chain.thenCombineAsync(surface, { _, field ->
+        val prepared = chain.thenCombineAsync(surface, { _, field -> field }, executor).thenCombineAsync(fortification, { field, fort ->
             operation.check()
             val terrainCompleted = clock()
             val terrainRow = field?.let { surfaceRow(it, started, terrainCompleted) }
-            val rows = document(captured, worldName, pluginVersion, started, plans.toList(), terrainRow, runtime)
+            val rows = document(captured, worldName, pluginVersion, started, plans.toList(), terrainRow, runtime) +
+                ("fortification_template" to fort)
             val bytes = gson.toJson(rows).toByteArray(Charsets.UTF_8)
             if (bytes.size > MAX_BYTES) throw CivsRejection("layout-export-too-large")
             operation.check()

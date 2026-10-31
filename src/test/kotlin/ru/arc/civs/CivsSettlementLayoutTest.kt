@@ -86,12 +86,17 @@ class CivsSettlementLayoutTest : FunSpec({
         }
     }
 
-    test("the hall frame has three explicit passages and disjoint perimeter strips in every rotation") {
+    test("the new hall frame has four explicit passages and disjoint perimeter strips in every rotation") {
         for (rotation in listOf(0, 90, 180, 270)) {
             val city = layoutFixtureCity(rotation)
             val frame = CivsSettlementLayout.frame(city)
             frame shouldBe CivsSettlementLayout.frame(city)
-            frame.gates.size shouldBe 3
+            frame.gates.size shouldBe 4
+            frame.gates.map { it.side }.toSet() shouldBe setOf(0, 1, 2, 3)
+            val northernStem = frame.streets.last()
+            layoutAxisRoute(northernStem.from, northernStem.to).none {
+                city.buildings.first().bounds.contains(it.x, it.y, it.z)
+            } shouldBe true
             frame.wallObstacles.forEachIndexed { index, box ->
                 frame.wallObstacles.drop(index + 1).none { CivsAutonomousGeometry.overlaps(box, it) } shouldBe true
             }
@@ -105,7 +110,7 @@ class CivsSettlementLayoutTest : FunSpec({
     }
 
     test("street frontage reserves final envelopes and keeps all new producers outside the core") {
-        val city = layoutFixtureCity()
+        val city = layoutFixtureCity().copy(radius = 128)
         val frame = CivsSettlementLayout.frame(city)
         for (type in listOf(BuildingType.HOUSE, BuildingType.TAVERN, BuildingType.GUARD_TOWER,
             BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)) {
@@ -216,16 +221,16 @@ class CivsSettlementLayoutTest : FunSpec({
         searches.clear()
         (runCatching { CivsAutonomousTerraform.draft(city, option, blocked, access, frame.wallObstacles,
             inspectRoute = searches::add) }.exceptionOrNull() as? CivsRejection)?.reason shouldBe "autonomy-no-path"
-        searches.size shouldBe 1
-        searches.single().expanded shouldBe 1
+        searches.size shouldBe 2
+        searches.all { it.from == start && it.expanded == 1 && it.outcome == "route-exhausted" } shouldBe true
     }
 
     test("an unstarted legacy ring fits around pinned buildings and a persisted ring never shifts") {
         val city = layoutFixtureCity()
-        val house = layoutFixtureBuilding(BuildingType.HOUSE, CivPosition(-56, 64, 25))
+        val house = layoutFixtureBuilding(BuildingType.HOUSE, CivPosition(-CivsSettlementLayout.MAXIMUM_HALF_WIDTH, 64, 25))
         val legacy = city.copy(buildings = city.buildings + house, autonomy = CivAutonomy())
         val selected = CivsSettlementLayout.frame(legacy)
-        (selected.halfWidth < 56) shouldBe true
+        (selected.halfWidth < CivsSettlementLayout.MAXIMUM_HALF_WIDTH) shouldBe true
         (selected.wallObstacles + selected.gates.map { it.passage }).none {
             CivsAutonomousGeometry.overlaps(it, house.bounds)
         } shouldBe true
@@ -233,6 +238,19 @@ class CivsSettlementLayoutTest : FunSpec({
         val pinned = legacy.copy(autonomy = CivAutonomy(layoutHalfWidth = selected.halfWidth))
         CivsSettlementLayout.frame(pinned.copy(radius = 128, buildings = pinned.buildings +
             layoutFixtureBuilding(BuildingType.TAVERN, selected.wallObstacles.first().min))) shouldBe selected
+    }
+
+    test("legacy infrastructure without a width journal retains its old frame while new explicit frames remain larger") {
+        val base = layoutFixtureCity()
+        val point = base.center.copy(z = base.center.z + 20)
+        val road = CivBuilding(layoutId("pre-frame-journal-road"), BuildingType.ROAD, 1, point, 0, "civs/generated/road",
+            CivBox(point, point), point, BuildingPhase.ACTIVE, transit = listOf(point))
+        val legacy = base.copy(buildings = base.buildings + road, autonomy = CivAutonomy())
+        CivsSettlementLayout.frame(legacy).halfWidth shouldBe 56
+        CivsSettlementLayout.frame(legacy).gates.size shouldBe 3
+        val current = legacy.copy(autonomy = CivAutonomy(layoutHalfWidth = CivsSettlementLayout.MAXIMUM_HALF_WIDTH))
+        CivsSettlementLayout.frame(current).halfWidth shouldBe CivsSettlementLayout.MAXIMUM_HALF_WIDTH
+        current.building(road.id) shouldBe road
     }
 
     test("real infrastructure owns nonoverlapping boxes and explicit open gate thresholds") {

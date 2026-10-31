@@ -94,15 +94,25 @@ class CivsPopulationLifecycleTest : FunSpec({
         after.workers.single { it.id == id(102) }.homeId shouldBe child.homeId
         after.workers.count(CivsResidents::isChild) shouldBe 1
     }
-    test("twelve existing adults admit two visible children without increasing workforce or builder credit") {
+    test("twenty four adults admit four nursery children without increasing accepted builder credit") {
         var nextId = 200
-        var current = city()
-        repeat(CivsPopulation.BIRTH_MINUTES + 1) {
+        val base = city()
+        val houses = (2..5).map { n -> base.buildings.last().copy(id = id(n), anchor = CivPosition(n * 6, 64, 0),
+            bounds = CivBox(CivPosition(n * 6 - 1, 63, -1), CivPosition(n * 6 + 1, 69, 1)),
+            entrance = CivPosition(n * 6, 64, 2)) }
+        var current = CivsRules.validate(base.copy(buildings = listOf(base.buildings.first()) + houses,
+            workers = (100..123).map { n -> CivWorker(id(n), "Resident $n", null,
+                homeId = houses[(n - 100) / 6].id,
+                sex = if ((n - 100) % 6 == 0) CivSex.FEMALE else CivSex.MALE) },
+            families = houses.mapIndexed { index, home ->
+                CivFamily(id(100 + index * 6), id(101 + index * 6), home.id, 0)
+            }))
+        repeat(CivsPopulation.BIRTH_MINUTES + 3) {
             current = CivsPopulation.advance(current, emptySet(), { _, _, _ -> "Child" }, { id(nextId++) })
         }
-        current.workers.size shouldBe 14
-        current.workers.count(CivsResidents::isChild) shouldBe 2
-        current.workers.count { !CivsResidents.isChild(it) } shouldBe 12
+        current.workers.size shouldBe 28
+        current.workers.count(CivsResidents::isChild) shouldBe 4
+        current.workers.count { !CivsResidents.isChild(it) } shouldBe 24
         CivsRules.MAX_BUILDER_WORK_CREDIT shouldBe 768
         val saved = CivsRules.validate(Gson().fromJson(Gson().toJson(current), Settlement::class.java))
         saved shouldBe current
@@ -113,7 +123,7 @@ class CivsPopulationLifecycleTest : FunSpec({
         current.workers.filter(CivsResidents::isChild).all { it.childMinutes == 179 && it.assignment == null } shouldBe true
         val removed = CivsRules.hurtResident(current, current.owner, current.workers.first().id, 100.0)
         val replacement = CivsPopulation.advance(removed, childIds, { _, _, _ -> "Child" }, { id(nextId++) })
-        replacement.workers.count { !CivsResidents.isChild(it) } shouldBe 12
+        replacement.workers.count { !CivsResidents.isChild(it) } shouldBe 24
         replacement.workers.count { it.id in childIds && !CivsResidents.isChild(it) } shouldBe 1
     }
     test("legacy awake history does not become age and dormant residents never age") {

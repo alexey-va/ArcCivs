@@ -64,12 +64,17 @@ internal class CivsAutonomousPlacement(
                 first.thenCombine(last) { x, y -> x.building to y.building }
             }
             val frame = CivsSettlementLayout.frame(city)
+            val fortification: CompletableFuture<CivFortificationTemplate?> = if (frame.halfWidth > 56 && city.autonomy?.plan == null &&
+                city.buildings.none { it.type.isInfrastructure }) blueprints.fortification(city.style)
+                else CompletableFuture.completedFuture(null)
             val waterColumns = (listOf(frame.core) + frame.gates.map { it.passage }).flatMapTo(hashSetOf()) { box ->
                 (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
             }
             val inputs = loadAccess(city).thenCombine(world.autonomousHeightField(city, hall, hall, waterColumns)) { access, surface -> access to surface }
+                .thenCombine(fortification) { input, template -> Triple(input.first, input.second, template) }
             CompletableFuture.allOf(*templates.values.toTypedArray()).thenCombineAsync(inputs, { _, input ->
-                CivsSettlementPlans.prepare(city, templates.mapValues { it.value.join() }, input.second, input.first)
+                CivsSettlementPlans.prepare(city, templates.mapValues { it.value.join() }, input.second, input.first,
+                    fortification = input.third)
             }, executor)
         }.getOrElse { CompletableFuture.failedFuture(it) }
         prepared.whenComplete { value, failure ->
@@ -160,6 +165,7 @@ internal class CivsAutonomousPlacement(
         private var access = CivAutonomousAccess()
         private var pieces = emptyMap<UUID, CivSettlementPiece>()
         private var templates: Pair<CivBuilding, CivBuilding>? = null
+        private var fortificationTemplate: CivFortificationTemplate? = null
         @Volatile private var infillTried = false
         @Volatile private var frontageCandidates = 0
         @Volatile private var infillCandidates = 0
@@ -189,6 +195,14 @@ internal class CivsAutonomousPlacement(
         private fun catalog() {
             phase = "catalog"
             if (infrastructure && pinned == null) {
+                val unacceptedFortifications = adopted?.plots.orEmpty().filter { it.fortification != null &&
+                    (city.building(it.building.id)?.phase != BuildingPhase.ACTIVE ||
+                        it.building.id !in access.acceptedFortifications) }
+                if (unacceptedFortifications.isNotEmpty()) {
+                    rejections["fortification-not-active"] = unacceptedFortifications.size
+                    fail("autonomy-layout-obstructed")
+                    return
+                }
                 val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
                 phase = "surface"
                 val waterColumns = (frame().wallObstacles + frame().gates.map { it.passage }).flatMapTo(hashSetOf()) { box ->
@@ -201,7 +215,8 @@ internal class CivsAutonomousPlacement(
                     val reservedCity = city.copy(buildings = city.buildings + adopted?.plots.orEmpty()
                         .filter { city.building(it.building.id) == null }.map { it.building.copy(bounds = it.envelope) })
                     val plan = CivsSettlementLayout.infrastructure(reservedCity, frame(), field,
-                        (access.routes.values + pavingRoutes).distinct(), access.infrastructure, pavingRoutes, access.routes.values)
+                        (access.routes.values + pavingRoutes).distinct(), access.infrastructure, pavingRoutes, access.routes.values,
+                        acceptedFortifications = access.acceptedFortifications)
                     rejections.putAll(plan.rejected)
                     blockers = plan.blockers
                     if (blockers.isNotEmpty()) CivsDiagnostics.record(java.util.logging.Level.WARNING, city.id,
@@ -223,6 +238,20 @@ internal class CivsAutonomousPlacement(
                 return
             }
             if (reservation != null) {
+                if (reservation.fortification != null && pinned == null) {
+                    phase = "fortification"
+                    await(blueprints.fortification(city.style)) { template ->
+                        if (template == null || !CivsSettlementPlans.matchesFortification(reservation, template)) {
+                            fail("autonomy-catalog-changed")
+                        } else {
+                            fortificationTemplate = template
+                            resolvedCatalogEntry = template.building.schematicId
+                            candidates = listOf(CivsAutonomousCandidate(reservation.building.copy(bounds = reservation.envelope)))
+                            captureSurface()
+                        }
+                    }
+                    return
+                }
                 candidates = listOf(CivsAutonomousCandidate(reservation.building.copy(bounds = reservation.envelope)))
                 captureSurface()
                 return
@@ -389,6 +418,8 @@ internal class CivsAutonomousPlacement(
                                 blueprints.prepareInfrastructure(piece, city.worldId, bytes, buildingId)
                             }
                         }
+                        fortificationTemplate != null -> blueprints.prepareFortification(fortificationTemplate, buildingId, city.worldId,
+                            draft.building.anchor, draft.building.rotation)
                         resolvedCatalogEntry != null -> blueprints.prepareEntry(requireNotNull(resolvedCatalogEntry), buildingId, city.worldId,
                             draft.building.anchor, 2, draft.building.rotation)
                         else -> blueprints.prepare(city.style, type, level, buildingId, city.worldId,
@@ -454,7 +485,8 @@ internal class CivsAutonomousPlacement(
     }
 }
 
-internal data class CivsAutonomousCandidate(val building: CivBuilding, val streetFrontage: Boolean = false)
+internal data class CivsAutonomousCandidate(val building: CivBuilding, val streetFrontage: Boolean = false,
+    val spatialPriority: Int = 0)
 
 /** Authored entrances face the centre; footprints grow outward around an open central approach. */
 internal object CivsAutonomousGeometry {

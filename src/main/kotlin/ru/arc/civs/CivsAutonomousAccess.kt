@@ -5,7 +5,9 @@ import kotlin.math.abs
 
 /** Retained completed approaches; this is a detached view of existing journals, not a second registry. */
 internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>> = emptyMap(),
-    val infrastructure: List<CivSettlementPiece> = emptyList()) {
+    val infrastructure: List<CivSettlementPiece> = emptyList(),
+    val acceptedFortifications: Set<UUID> = emptySet(),
+    val reservedFortificationPorts: List<CivBox> = emptyList()) {
     /** Earlier roads win when an older release recorded incompatible heights at the same column. */
     fun standing(city: Settlement, exceptBuildingId: UUID): Map<Long, CivPosition> = buildMap {
         require(city.buildings.size <= CivsRules.MAX_SITES)
@@ -24,6 +26,15 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
         fun from(city: Settlement, plans: List<CivPlacementPlan>): CivAutonomousAccess {
             require(city.buildings.size <= CivsRules.MAX_SITES && plans.size <= CivsRules.MAX_SITES)
             val retained = plans.associateBy { it.building.id }
+            val fortifications = CivsSettlementPlans.current(city)?.plots.orEmpty().mapNotNull { plot ->
+                val metadata = plot.fortification ?: return@mapNotNull null
+                val actual = city.building(plot.building.id) ?: return@mapNotNull null
+                val plan = retained[actual.id] ?: return@mapNotNull null
+                actual.id.takeIf { actual.phase == BuildingPhase.ACTIVE && plan.id == actual.id && plan.cityId == city.id && plan.worldId == city.worldId &&
+                    plan.capturedSha256 == metadata.sourceSha256 &&
+                    CivsSettlementPlans.sameFortificationGeometry(actual, plot.building) &&
+                    CivsSettlementPlans.sameFortificationGeometry(plan.building, plot.building) }
+            }.toSet()
             return CivAutonomousAccess(buildMap {
                 city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.forEach { building ->
                     val plan = retained[building.id] ?: return@forEach
@@ -43,7 +54,10 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                         put(building.id, override.route.toList())
                     } else put(building.id, route.toList())
                 }
-            }, CivsSettlementLayout.accepted(city, plans))
+            }, CivsSettlementLayout.accepted(city, plans), fortifications,
+                CivsSettlementPlans.current(city)?.plots.orEmpty().flatMap { plot ->
+                    plot.fortification?.let { CivsSettlementPlans.portReservations(it.proof) }.orEmpty()
+                })
         }
     }
 }

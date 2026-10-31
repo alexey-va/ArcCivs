@@ -417,7 +417,7 @@ internal fun CivsUi.showAdmin(player: Player, page: Int = 0, error: Component? =
         tr(player, "label.state") to tr(player, if (host.ready()) "admin.ready" else "admin.starting"),
         tr(player, "label.cities") to text.literal(cities.size),
         tr(player, "label.active-npcs") to tr(player, "common.fraction", "value" to host.activeNpcCount(),
-            "limit" to plugin.config.getInt("maximum-active-npcs", 48)),
+            "limit" to plugin.config.getInt("maximum-active-npcs", CivsSettings.MAXIMUM_NPCS)),
     ), frame = DialogTables.Frame.RARE), error?.let(::body)), buildList {
         add(button(player, "autonomous", "autonomy.open", LAND, appearance = Action.FOUND) { showAutonomous(player) })
         cities.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, city ->

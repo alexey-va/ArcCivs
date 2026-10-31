@@ -10,26 +10,35 @@ internal object CivsSettlementPerimeter {
     private val neighbours = listOf(-1 to -1, 0 to -1, 1 to -1, -1 to 0, 1 to 0, -1 to 1, 0 to 1, 1 to 1)
 
     fun adapt(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
-        routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>): CivSettlementFrame {
+        routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>,
+        fortifications: Map<UUID, CivFortificationProof> = emptyMap()): CivSettlementFrame {
         val box = frame.core
         val width = box.max.x - box.min.x + 1
         val height = box.max.z - box.min.z + 1
-        require(width in 1..113 && height in 1..113)
+        val maximumSize = CivsSettlementLayout.MAXIMUM_HALF_WIDTH * 2 + 1
+        require(width in 1..maximumSize && height in 1..maximumSize)
         val area = width * height
         fun index(x: Int, z: Int): Int? = if (x in box.min.x..box.max.x && z in box.min.z..box.max.z)
             (z - box.min.z) * width + x - box.min.x else null
         fun point(i: Int) = CivPosition(box.min.x + i % width, city.center.y, box.min.z + i / width)
-        val inner = city.buildings.filter { !it.type.isInfrastructure && it.type !in exterior }
+        val inner = city.buildings.filter { !it.type.isInfrastructure && it.type !in exterior && it.id !in fortifications }
         val occupied = city.buildings.filterNot { it.type.isInfrastructure }.map { it.bounds }
+        val fortificationGround = fortifications.values.flatMap { it.groundBarrier }
+            .associateBy { civsTerrainKey(it.x, it.z) }
         val externalRoutes = routes.filterKeys { city.building(it)?.type in exterior }.values.toList()
-        val externalColumns = externalRoutes.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val externalPoints = externalRoutes.flatten().distinctBy { civsTerrainKey(it.x, it.z) }
+        val externalColumns = externalPoints.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val externalFootprints = mutableMapOf<Long, MutableList<CivPosition>>()
+        if (frame.fortified) for (p in externalPoints) for (dx in -2..2) for (dz in -2..2)
+            externalFootprints.getOrPut(civsTerrainKey(p.x + dx, p.z + dz)) { mutableListOf() } += p
         val retainedFloors = retainedRoutes.flatten().associate { civsTerrainKey(it.x, it.z) to it.y - 1 }
         fun clear(p: CivPosition) = surface.at(p.x, p.z)?.let { it.loaded &&
             (it.natural || it.waterTopY != null && it.waterBottomY != null && it.topY == it.waterTopY &&
                 it.groundY == it.waterTopY && it.waterTopY.toLong() - it.waterBottomY in 1L..CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH.toLong() ||
                 retainedFloors[civsTerrainKey(p.x, p.z)] == it.groundY && it.topY == it.groundY) } == true &&
             occupied.none { CivsAutonomousGeometry.horizontalContains(it, p) }
-        fun gateClear(p: CivPosition) = (-1..1).all { dx -> (-1..1).all { dz ->
+        val gateRadius = if (frame.fortified) 2 else 1
+        fun gateClear(p: CivPosition) = (-gateRadius..gateRadius).all { dx -> (-gateRadius..gateRadius).all { dz ->
             clear(p.copy(x = p.x + dx, z = p.z + dz))
         } }
         val seeds = BooleanArray(area)
@@ -40,19 +49,51 @@ internal object CivsSettlementPerimeter {
             CivsAutonomousGeometry.approach(building).forEach(::seed)
             routes[building.id].orEmpty().forEach(::seed)
         }
+        fortifications.forEach { (id, proof) ->
+            proof.interiorWitnesses.forEach(::seed)
+            city.building(id)?.let(CivsAutonomousGeometry::approach)?.forEach(::seed)
+            routes[id].orEmpty().forEach(::seed)
+        }
+        fun ground(x: Int, z: Int): Int? = fortificationGround[civsTerrainKey(x, z)]?.y ?: surface.at(x, z)?.groundY
+        fun gentle(p: CivPosition): Boolean {
+            val y = ground(p.x, p.z) ?: return false
+            return listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1).all { (dx, dz) ->
+                val native = surface.at(p.x + dx, p.z + dz) ?: return@all false
+                !native.natural || ground(p.x + dx, p.z + dz)?.let { abs(it - y) <= 1 } == true
+            }
+        }
+        fun wideClear(p: CivPosition): Boolean = (-2..2).all { dx -> (-2..2).all { dz ->
+            val q = p.copy(x = p.x + dx, z = p.z + dz)
+            val key = civsTerrainKey(q.x, q.z)
+            if (key in fortificationGround) true else {
+                val at = index(q.x, q.z)
+                at != null && !seeds[at] && clear(q) && gentle(q) &&
+                    listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1).all { (sx, sz) ->
+                        fortificationGround[civsTerrainKey(q.x + sx, q.z + sz)]?.let { it.y == ground(q.x, q.z) } != false
+                    }
+            }
+        } }
         val source = area * 2
         val sink = source + 1
         val cut = Cut(sink + 1)
+        var firstSteepSeed: CivPosition? = null
         for (i in 0 until area) {
             val p = point(i)
-            val road = civsTerrainKey(p.x, p.z) in externalColumns
-            val ground = surface.at(p.x, p.z)?.groundY
-            val gentle = ground != null && listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1).all { (dx, dz) ->
-                surface.at(p.x + dx, p.z + dz)?.let { !it.natural || abs(it.groundY - ground) <= 1 } ?: false
+            val roadPoints = externalFootprints[civsTerrainKey(p.x, p.z)].orEmpty()
+            val road = if (frame.fortified) roadPoints.isNotEmpty() else civsTerrainKey(p.x, p.z) in externalColumns
+            val ground = ground(p.x, p.z)
+            val gentle = gentle(p)
+            if (seeds[i] && !gentle && firstSteepSeed == null) firstSteepSeed = p.copy(y = ground ?: p.y)
+            val fortification = civsTerrainKey(p.x, p.z) in fortificationGround
+            val gateRoom = if (!road) true else if (!frame.fortified) gateClear(p) else roadPoints.all { crossing ->
+                gateClear(crossing) && (-2..2).all { dx -> (-2..2).all { dz ->
+                    index(crossing.x + dx, crossing.z + dz)?.let { !seeds[it] } != false
+                } }
             }
-            val eligible = !seeds[i] && clear(p) && if (road) gateClear(p) else gentle
+            val eligible = !seeds[i] && (fortification || clear(p) && (if (road) gateRoom else gentle) &&
+                (!frame.fortified || wideClear(p)))
             // A small grid preference removes arbitrary one-cell zigzags among equally short cuts.
-            val cost = if (!eligible) Cut.INFINITE else if (road) 100 else
+            val cost = if (!eligible) Cut.INFINITE else if (fortification) 0 else if (road) 100 else
                 10 + (if (surface.at(p.x, p.z)?.waterTopY != null) 10 else 0) +
                     if (Math.floorMod(p.x, 4) == 0 || Math.floorMod(p.z, 4) == 0) 0 else 2
             cut.edge(i * 2, i * 2 + 1, cost)
@@ -63,12 +104,34 @@ internal object CivsSettlementPerimeter {
                 cut.edge(i * 2 + 1, neighbour * 2, Cut.INFINITE)
             }
         }
-        val reachable = cut.separate(source, sink)
-        val wallCells = (0 until area).filter { reachable[it * 2] && !reachable[it * 2 + 1] }
+        val reachable = try { cut.separate(source, sink) } catch (failure: CivsRejection) {
+            if (failure.values["stage"] != "no-dry-perimeter") throw failure
+            val boundarySeeds = (0 until area).filter { seeds[it] &&
+                (it % width == 0 || it % width == width - 1 || it / width == 0 || it / width == height - 1) }
+            val routeBoundary = inner.asSequence().flatMap { building -> routes[building.id].orEmpty().asSequence()
+                .map { building to it } }.firstOrNull { (_, p) ->
+                    p.x !in box.min.x + 1 until box.max.x || p.z !in box.min.z + 1 until box.max.z }
+            throw CivsRejection(failure.reason, failure.values + mapOf(
+                "inner_boundary_seeds" to boundarySeeds.size.toString(),
+                "first_boundary_seed" to (boundarySeeds.firstOrNull()?.let(::point)?.toString() ?: "none"),
+                "first_steep_seed" to (firstSteepSeed?.toString() ?: "none"),
+                "inner_route_boundary" to (routeBoundary?.let { (b, p) -> "${b.type}:${b.id}:$p" } ?: "none")))
+                .also { it.initCause(failure) }
+        }
+        val cutCells = (0 until area).filter { reachable[it * 2] && !reachable[it * 2 + 1] }
             .mapTo(linkedSetOf()) { point(it) }
+        val wallCells = if (!frame.fortified) cutCells else buildSet {
+            cutCells.filter { civsTerrainKey(it.x, it.z) !in fortificationGround }.forEach { p ->
+                for (dx in -2..2) for (dz in -2..2) {
+                    val q = p.copy(x = p.x + dx, z = p.z + dz)
+                    if (civsTerrainKey(q.x, q.z) !in fortificationGround) add(q)
+                }
+            }
+        }.toMutableSet()
         if (wallCells.isEmpty()) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "empty-dry-perimeter"))
         val crossing = externalRoutes.flatMap { route -> route.filter { p ->
-            index(p.x, p.z)?.let { reachable[it * 2] && !reachable[it * 2 + 1] } == true
+            if (frame.fortified) p.copy(y = city.center.y) in wallCells else
+                index(p.x, p.z)?.let { reachable[it * 2] && !reachable[it * 2 + 1] } == true
         } }.distinctBy { civsTerrainKey(it.x, it.z) }.toMutableList()
         val gates = mutableListOf<CivSettlementGate>()
         while (crossing.isNotEmpty()) {
@@ -76,11 +139,12 @@ internal object CivsSettlementPerimeter {
             val group = mutableListOf(first)
             var grew: Boolean
             do {
-                val adjacent = crossing.filter { p -> group.any { abs(it.x - p.x) <= 2 && abs(it.z - p.z) <= 2 } }
+                val adjacent = crossing.filter { p -> group.any {
+                    abs(it.x - p.x) <= gateRadius * 2 && abs(it.z - p.z) <= gateRadius * 2 } }
                 group += adjacent; crossing.removeAll(adjacent.toSet()); grew = adjacent.isNotEmpty()
             } while (grew)
-            val passage = CivBox(CivPosition(group.minOf { it.x } - 1, city.center.y, group.minOf { it.z } - 1),
-                CivPosition(group.maxOf { it.x } + 1, city.center.y, group.maxOf { it.z } + 1))
+            val passage = CivBox(CivPosition(group.minOf { it.x } - gateRadius, city.center.y, group.minOf { it.z } - gateRadius),
+                CivPosition(group.maxOf { it.x } + gateRadius, city.center.y, group.maxOf { it.z } + gateRadius))
             for (x in passage.min.x..passage.max.x) for (z in passage.min.z..passage.max.z)
                 if (!clear(CivPosition(x, city.center.y, z)))
                     throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "gate-clearance", "x" to "$x", "z" to "$z"))
@@ -135,6 +199,7 @@ internal object CivsSettlementPerimeter {
                 val queue = ArrayDeque<Int>(); queue += source
                 while (queue.isNotEmpty()) {
                     val v = queue.removeFirst()
+                    if (level[sink] >= 0 && level[v] >= level[sink]) break
                     for (edge in graph[v]) {
                         spend()
                         if (edge.capacity > 0 && level[edge.to] < 0) { level[edge.to] = level[v] + 1; queue += edge.to }
@@ -146,6 +211,7 @@ internal object CivsSettlementPerimeter {
                     var depth = 0; path[0] = source; flow[0] = INFINITE
                     while (depth >= 0 && path[depth] != sink) {
                         val v = path[depth]
+                        if (level[v] >= level[sink]) cursor[v] = graph[v].size
                         while (cursor[v] < graph[v].size) {
                             spend()
                             val edge = graph[v][cursor[v]]

@@ -13,6 +13,18 @@ class CivsSettingsTest : FunSpec({
         settings.navigation.searchNodesPerBatch shouldBe 256
         settings.navigation.nativeOperationsPerTick shouldBe 10000
         settings.worksites shouldBe CivsWorksiteSettings()
+        settings.maximumNpcs shouldBe 64
+        settings.radius shouldBe 128
+    }
+
+    test("two mature towns fit the actor ceiling while old configured limits remain valid") {
+        val config = YamlConfiguration().apply { set("schematics-root", "schematics") }
+        for (limit in listOf(1, 48, 64)) {
+            config.set("maximum-active-npcs", limit)
+            CivsSettings.read(config).maximumNpcs shouldBe limit
+        }
+        config.set("maximum-active-npcs", 65)
+        shouldThrow<IllegalArgumentException> { CivsSettings.read(config) }
     }
 
     test("bundled search and native limits match backward-compatible defaults") {

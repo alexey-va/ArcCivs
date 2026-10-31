@@ -23,12 +23,12 @@ mysql:
   fail-fast: false
 schematics-root: /home/freedeeml/McFine/arc_schematics
 allowed-worlds: [vanilla, survival]
-settlement-radius: 96
+settlement-radius: 128
 maximum-settlements: 500
 maximum-building-volume: 50000
 maximum-previews: 4
 preview-seconds: 120
-maximum-active-npcs: 48
+maximum-active-npcs: 64
 npc-viewer-range: 96
 chunk-loading:
   maximum-chunks: 2048

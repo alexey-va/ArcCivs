@@ -84,6 +84,7 @@ class CivsBlueprints(
     private val captured = service.open("arccivs-construction", capturedRoot)
     private data class Builtin(val bytes: ByteArray, val sha256: String)
     private val builtins = mutableMapOf<String, CompletableFuture<Builtin>>()
+    private var fortificationRequest: CompletableFuture<CivFortificationTemplate?>? = null
     private var closed = false
     @Volatile private var catalog = CivBlueprintCatalog.EMPTY
     private val catalogLoad = CompletableFuture.supplyAsync({
@@ -194,6 +195,95 @@ class CivsBlueprints(
             requireVolume(snapshot)
             CivsWorkstations.authoredControls(building, snapshot)
         }, executor)
+
+    /** One reviewed optional style. Source reads, native-state transforms and the pure merge stay off Main. */
+    @Synchronized
+    internal fun fortification(style: String): CompletableFuture<CivFortificationTemplate?> {
+        if (closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
+        if (style != CivsFortifications.STYLE) return CompletableFuture.completedFuture(null)
+        fortificationRequest?.let { return it.copy() }
+        val request: CompletableFuture<CivFortificationTemplate?> = catalogLoad.thenComposeAsync({
+            val towerEntry = catalog.entry(CivsFortifications.TOWER_ID)
+            val wallEntry = catalog.entry(CivsFortifications.WALL_ID)
+            if (towerEntry == null || wallEntry == null) CompletableFuture.completedFuture<CivFortificationTemplate?>(null)
+            else {
+                if (towerEntry.hash != CivsFortifications.TOWER_SHA256 || wallEntry.hash != CivsFortifications.WALL_SHA256 ||
+                    towerEntry.type != BuildingType.DECORATION || wallEntry.type != BuildingType.DECORATION)
+                    throw CivsRejection("blueprint-unavailable", mapOf("fortification" to "catalog-hash"))
+                val tower = source.loadVerified(CivsFortifications.TOWER_ID, CivsFortifications.TOWER_SHA256,
+                    ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES).thenCompose {
+                    source.transform(it, ArcSchematicTransform(0, false))
+                }
+                val wall = source.loadVerified(CivsFortifications.WALL_ID, CivsFortifications.WALL_SHA256,
+                    ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+                val west = wall.thenCompose { source.transform(it, ArcSchematicTransform(0, false)) }
+                val south = wall.thenCompose { source.transform(it, ArcSchematicTransform(1, false)) }
+                CompletableFuture.allOf(tower, west, south).thenApplyAsync<CivFortificationTemplate?>({
+                    val template = CivsFortifications.compile(tower.join(), west.join(), south.join(), dataVersion)
+                    if (template.cells.size.toLong() > maximumVolume) throw CivsRejection("building-too-large")
+                    synchronized(this) { if (closed) throw CivsRejection("not-ready") }
+                    template
+                }, executor)
+            }
+        }, executor)
+        fortificationRequest = request
+        request.whenComplete { _, failure -> if (failure != null) synchronized(this) {
+            if (fortificationRequest === request) fortificationRequest = null
+        } }
+        return request.copy()
+    }
+
+    /** The ordinary construction owner later journals these canonical bytes under its own placement UUID. */
+    internal fun prepareFortification(template: CivFortificationTemplate?, buildingId: UUID, worldId: UUID,
+        anchor: CivPosition, rotation: Int): CompletableFuture<CivBlueprint> {
+        if (template == null) return CompletableFuture.failedFuture(CivsRejection("blueprint-unavailable"))
+        if (rotation !in listOf(0, 90, 180, 270)) return CompletableFuture.failedFuture(CivsRejection("invalid-plan"))
+        return CompletableFuture.supplyAsync({
+            synchronized(this) { if (closed) throw CivsRejection("not-ready") }
+            val bytes = template.sourceBytes
+            if (CivsFortifications.sha256(bytes) != template.sourceSha256) throw CivsRejection("invalid-plan")
+            AtomicFileStore(capturedRoot, Path.of("builtin", "fortifications", "${template.sourceSha256}.schem"),
+                CivsStore.MAX_SCHEMATIC_BYTES.toLong(), { value: ByteArray -> value }, { it }).write(bytes)
+            bytes
+        }, executor).thenCompose { bytes ->
+            captured.loadVerified("builtin/fortifications/${template.sourceSha256}", template.sourceSha256,
+                ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES).thenCompose { original ->
+                CivsBlueprintGeometry.entrance(original)
+                captured.transform(original, ArcSchematicTransform(rotation / 90, false))
+            }.thenApplyAsync({ snapshot ->
+                synchronized(this) { if (closed) throw CivsRejection("not-ready") }
+                requireVolume(snapshot)
+                val cells = worldCells(snapshot, anchor)
+                if (snapshot.fileSha256 != template.sourceSha256 || snapshot.origin != ArcSchematicPoint(0, 0, 0) ||
+                    snapshot.volume != template.cells.size.toLong() ||
+                    cells.any { it.blockData.substringBefore('[') == "minecraft:structure_void" }) throw CivsRejection("invalid-plan")
+                fun point(p: ArcSchematicPoint) = CivsBlueprintGeometry.rotate(p, rotation / 90).let {
+                    CivPosition(Math.addExact(anchor.x, it.x), Math.addExact(anchor.y, it.y), Math.addExact(anchor.z, it.z))
+                }
+                val expected = template.cells.filterNot { it.isBarrier }.associate { point(it.position) to it.blockData }
+                val actual = cells.filterNot { it.isBarrier }.associate {
+                    CivPosition(it.position.x, it.position.y, it.position.z) to it.blockData
+                }
+                if (expected.keys != actual.keys || rotation == 0 && expected != actual) throw CivsRejection("invalid-plan")
+                val bounds = CivBox(CivPosition(anchor.x + snapshot.minimum.x, anchor.y + snapshot.minimum.y, anchor.z + snapshot.minimum.z),
+                    CivPosition(anchor.x + snapshot.maximum.x, anchor.y + snapshot.maximum.y, anchor.z + snapshot.maximum.z))
+                val corners = listOf(template.building.bounds.min, template.building.bounds.max,
+                    template.building.bounds.min.copy(z = template.building.bounds.max.z),
+                    template.building.bounds.max.copy(z = template.building.bounds.min.z))
+                    .map { point(ArcSchematicPoint(it.x, it.y, it.z)) }
+                if (bounds != CivBox(CivPosition(corners.minOf { it.x }, corners.minOf { it.y }, corners.minOf { it.z }),
+                        CivPosition(corners.maxOf { it.x }, corners.maxOf { it.y }, corners.maxOf { it.z }))) throw CivsRejection("invalid-plan")
+                val building = template.building.copy(id = buildingId, anchor = anchor, rotation = rotation, bounds = bounds,
+                    entrance = template.building.entrance.let { point(ArcSchematicPoint(it.x, it.y, it.z)) })
+                rejectHazards(cells)
+                val surface = exposedCells(cells)
+                if (surface.size > 6_000) throw CivsRejection("preview-too-large")
+                val materials = CivsMaterials.required(CivPlacementPlan(buildingId, buildingId, worldId, building,
+                    cells.map { CivPlanBlock(CivPosition(it.position.x, it.position.y, it.position.z), "minecraft:air", it.blockData) }))
+                CivBlueprint(building, worldId, snapshot, cells, surface, bytes.copyOf(), materials)
+            }, executor)
+        }
+    }
 
     fun prepare(
         style: String, type: BuildingType, level: Int, buildingId: UUID, worldId: UUID,
@@ -363,7 +453,7 @@ class CivsBlueprints(
     fun repair(worldId: UUID, blocks: List<ArcSchematicBlock>): ArcSchematicOperation = captured.repairConnections(worldId, blocks)
 
     override fun close() {
-        synchronized(this) { closed = true; builtins.clear() }
+        synchronized(this) { closed = true; builtins.clear(); fortificationRequest = null }
         source.close(); captured.close()
     }
 

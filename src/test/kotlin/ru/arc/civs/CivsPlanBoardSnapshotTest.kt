@@ -19,7 +19,7 @@ class CivsPlanBoardSnapshotTest : FunSpec({
         val captured = civsPlanBoardCapture(city)
         val snapshot = civsPlanBoardSnapshot(captured, emptyList())
         snapshot.plan shouldBe plan
-        snapshot.plan!!.plots.size shouldBe 16
+        snapshot.plan!!.plots.size shouldBe 34
         snapshot.plannedBuildings shouldBe emptyList()
         city.buildings shouldBe base.buildings
         (civsPlanBoardLayoutKey(base) != civsPlanBoardLayoutKey(city)) shouldBe true

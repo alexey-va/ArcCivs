@@ -14,10 +14,16 @@ class CivsSettlementPlanTest : FunSpec({
         val city = settlementPlanCity()
         val before = Gson().toJson(city)
         val plan = planWithDiagnostics { CivsSettlementPlans.prepare(city, settlementPlanTemplates(), settlementPlanSurface(city), CivAutonomousAccess()) }
-        plan.plots.size shouldBe 16
-        plan.plots.count { it.building.type == BuildingType.HOUSE } shouldBe 3
+        plan.plots.size shouldBe 34
+        plan.plots.count { it.building.type == BuildingType.HOUSE } shouldBe 16
+        plan.plots.count { it.building.type == BuildingType.FORESTER } shouldBe 2
+        plan.plots.count { it.building.type == BuildingType.QUARRY } shouldBe 2
+        plan.plots.count { it.building.type == BuildingType.FARM } shouldBe 3
+        plan.plots.count { it.building.type == BuildingType.WAREHOUSE } shouldBe 2
+        plan.plots.takeLast(16).all { it.building.type == BuildingType.HOUSE } shouldBe true
+        plan.halfWidth shouldBe 72
         plan.plots.map { it.building.type }.toSet() shouldBe CivsAutonomy.profile.toSet()
-        (plan.gates.size in 1..CivsSettlementLayout.exteriorTypes.size) shouldBe true
+        (plan.gates.size in 1..8) shouldBe true
         (plan.walls.isNotEmpty()) shouldBe true
         Gson().toJson(city) shouldBe before
         city.buildings.size shouldBe 1
@@ -72,7 +78,7 @@ class CivsSettlementPlanTest : FunSpec({
     }
 
     test("an existing gate keeps its accepted transit grade when its lintel covers the captured surface") {
-        val city = settlementPlanCity()
+        val city = settlementPlanCity().copy(autonomy = CivAutonomy(layoutHalfWidth = 56))
         val surface = settlementPlanSurface(city)
         // Legacy accepted gates and their original frame, before any adopted full-plan state existed.
         val frame = CivsSettlementLayout.frame(city)
@@ -88,18 +94,18 @@ class CivsSettlementPlanTest : FunSpec({
         })
         val refreshed = planWithDiagnostics { CivsSettlementPlans.prepare(built, settlementPlanTemplates(), occupiedSurface,
             CivAutonomousAccess(infrastructure = gates)) }
-        refreshed.plots.size shouldBe 16
+        refreshed.plots.size shouldBe 34
         refreshed.gates shouldBe frame.gates.map { it.passage }
         frame.gates.forEach { gate ->
             refreshed.routes.values.any { it.last() == gate.center.copy(y = 65) } shouldBe true
         }
     }
 
-    test("private real terrain replay adopts all sixteen plots and a closed perimeter") {
+    test("private real terrain replay adopts the complete profile and a closed perimeter") {
         val path = System.getenv("CIVS_PLAN_BOARD_SCENARIO") ?: return@test
         val (_, snapshot) = readPlanBoardScenario(path)
-        snapshot.plan!!.plots.size shouldBe 16
-        (snapshot.plan.gates.size in 1..CivsSettlementLayout.exteriorTypes.size) shouldBe true
+        snapshot.plan!!.plots.size shouldBe 34
+        (snapshot.plan.gates.size in 1..8) shouldBe true
         snapshot.plan.walls.isNotEmpty() shouldBe true
     }
 })

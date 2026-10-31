@@ -12,7 +12,7 @@ internal object CivsSnapshotValidation {
             city.autonomy?.let { autonomy ->
                 snapshot((city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) && city.members.isEmpty() &&
                     autonomy.recruitmentMinutes in 0..CivsAutonomy.RECRUITMENT_MINUTES)
-                snapshot(autonomy.layoutHalfWidth?.let { it in 24..56 } != false)
+                snapshot(autonomy.layoutHalfWidth?.let { it in 24..CivsSettlementLayout.MAXIMUM_HALF_WIDTH } != false)
                 autonomy.storage?.let { stores -> snapshot(stores.size <= CivsRules.MAX_SITES && stores.all { (id, store) ->
                     UUID.fromString(id).toString() == id && store.valid()
                 }) }

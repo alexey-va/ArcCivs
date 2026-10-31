@@ -27,12 +27,15 @@ object CivsAutonomy {
     fun legacyStock(city: Settlement): Boolean = city.autonomy != null && city.inventory == null
 
     const val RECRUITMENT_MINUTES = 2
+    const val HOUSE_COUNT = 16
     val baseProfile = listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY,
         BuildingType.FARM, BuildingType.WAREHOUSE, BuildingType.TOWN_HALL, BuildingType.HOUSE, BuildingType.PLAN_BOARD,
         BuildingType.TAVERN, BuildingType.GUARD_TOWER)
     private val industryProfile = listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH)
+    private val expansionProfile = listOf(BuildingType.WAREHOUSE, BuildingType.FORESTER, BuildingType.QUARRY,
+        BuildingType.FARM, BuildingType.FARM)
     val profile = baseProfile + industryProfile
-    val completeProfile = baseProfile + List(2) { BuildingType.HOUSE } + industryProfile
+    val completeProfile = baseProfile + List(HOUSE_COUNT - 1) { BuildingType.HOUSE } + industryProfile + expansionProfile
     val allowedTypes = profile.toSet() + setOf(BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD, BuildingType.PLAN_BOARD, BuildingType.DECORATION)
     private val upgrades = listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
         BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.BUILDER_HUT, BuildingType.TAVERN, BuildingType.GUARD_TOWER)
@@ -120,9 +123,38 @@ object CivsAutonomy {
                 val building = city.buildings.firstOrNull { it.type == type && it.level < 3 && maximumLevel(it) >= 3 } ?: continue
                 return goal(city, type, 3, building.id)
             }
+            if (hall.level >= 3) {
+                // A constrained legacy perimeter must not hide useful upgrades behind a missing new parcel.
+                for (type in upgrades + industryProfile) {
+                    if (type == BuildingType.BLACKSMITH && !CivsResearch.has(city, CivResearchId.METALLURGY)) continue
+                    val building = city.buildings.firstOrNull { it.type == type && it.phase == BuildingPhase.ACTIVE &&
+                        it.level < minOf(it.type.maxLevel, maximumLevel(it), hall.level) &&
+                        CivsResearch.required(type, it.level + 1)?.let { required -> !CivsResearch.has(city, required) } != true
+                    } ?: continue
+                    return goal(building)
+                }
+                for (type in expansionProfile.distinct()) {
+                    if (city.buildings.count { it.type == type } < completeProfile.count { it == type } &&
+                        CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
+                        return goal(city, type, 1, null)
+                }
+                if (city.buildings.count { it.type == BuildingType.HOUSE } < HOUSE_COUNT &&
+                    CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
+                    return goal(city, BuildingType.HOUSE, 1, null)
+            }
+        }
+        if (hall.level >= 3 && CivsResearch.has(city, CivResearchId.ENGINEERING) &&
+            completeProfile.groupingBy { it }.eachCount().all { (type, count) -> city.buildings.count { it.type == type } >= count }) {
+            pendingFortifications(city).firstOrNull()?.let { plot ->
+                // Exact native materials are priced by the ordinary captured construction owner.
+                return CivAutonomyGoal(BuildingType.DECORATION, 1, city.building(plot.building.id)?.id, Stock(), Stock())
+            }
         }
         return null
     }
+
+    internal fun pendingFortifications(city: Settlement): List<CivSettlementPlot> = CivsSettlementPlans.current(city)?.plots
+        .orEmpty().filter { it.fortification != null && city.building(it.building.id)?.phase != BuildingPhase.ACTIVE }
 
     /** Caller supplies fresh capacity pressure; an accepted site or order keeps its existing priority. */
     internal fun capacityGoal(city: Settlement, maximumLevel: (CivBuilding) -> Int): CivAutonomyGoal? {
@@ -162,7 +194,7 @@ object CivsAutonomy {
 
     internal fun infrastructureDue(city: Settlement, ordinary: CivAutonomyGoal?): Boolean {
         val adopted = CivsSettlementPlans.current(city)
-        return city.buildings.count { it.type.isInfrastructure } < CivsRules.MAX_INFRASTRUCTURE &&
+        return pendingFortifications(city).isEmpty() && city.buildings.count { it.type.isInfrastructure } < CivsRules.MAX_INFRASTRUCTURE &&
             (ordinary == null || ordinary.targetLevel > 1 || adopted != null &&
                 city.buildings.lastOrNull()?.type?.isInfrastructure != true) &&
             (if (adopted == null) baseProfile.filterNot { it == BuildingType.PLAN_BOARD }
@@ -191,9 +223,10 @@ object CivsAutonomy {
         val urgent = builder ?: hungryFarm
         val returningTavernkeeper = builder != null && city.buildings.any { CivsRules.staffedTavern(city, it) }
         val industry = CivsIndustry.desiredBuilding(city)
-        val missingProducer = industry?.let { listOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY).firstNotNullOfOrNull { type ->
+        val noIdleWorkers = city.workers.none { worker -> worker.assignment == null && !CivsResidents.isChild(worker) && worker.cargo == null }
+        val missingProducer = if (!noIdleWorkers) null else listOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY).firstNotNullOfOrNull { type ->
             city.buildings.firstOrNull { it.type == type && CivsRules.productionAvailable(city, it) && unstaffed(it) }
-        } }
+        }
         val warehouse = city.buildings.firstOrNull { it.type == BuildingType.WAREHOUSE &&
             it.phase == BuildingPhase.ACTIVE && it.control != null && unstaffed(it) }?.takeIf {
             city.workers.none { worker -> worker.assignment == null && !CivsResidents.isChild(worker) && worker.cargo == null }
@@ -222,10 +255,9 @@ object CivsAutonomy {
     private fun dispensable(city: Settlement, worker: CivWorker, preserveRaw: Boolean = true): Boolean {
         val assigned = worker.assignment?.let(city::building) ?: return true
         if ((assigned.type == BuildingType.FARM || preserveRaw && assigned.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY)) &&
-            city.workers.firstOrNull { it.assignment?.let(city::building)?.type == assigned.type }?.id == worker.id) return false
+            city.workers.count { it.assignment == assigned.id } <= 1) return false
         if (CivsRules.isBuilder(city, assigned) && (city.construction != null || city.constructionQueue.orEmpty().isNotEmpty())) return false
-        if (assigned.type == BuildingType.WAREHOUSE && city.workers.none { it.id != worker.id &&
-                it.assignment?.let(city::building)?.type == BuildingType.WAREHOUSE }) return false
+        if (assigned.type == BuildingType.WAREHOUSE && city.workers.count { it.assignment == assigned.id } <= 1) return false
         return true
     }
 

@@ -538,7 +538,8 @@ internal fun CivsUi.materialDeficit(required: Map<String, Long>, available: Map<
 
 
 internal fun CivsUi.upgradeBenefit(player: Player, building: CivBuilding): Component = when (building.type) {
-    BuildingType.TOWN_HALL -> tr(player, "upgrades.population", "before" to building.level * 4, "after" to (building.level + 1) * 4)
+    BuildingType.TOWN_HALL -> tr(player, "upgrades.population", "before" to CivsRules.populationLimit(building.level),
+        "after" to CivsRules.populationLimit(building.level + 1))
     BuildingType.HOUSE -> tr(player, "upgrades.beds", "before" to CivsPopulation.houseBeds(building),
         "after" to CivsPopulation.houseBeds(building.copy(level = building.level + 1)))
     BuildingType.TAVERN -> tr(player, "upgrades.tavern")

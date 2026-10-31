@@ -403,7 +403,7 @@ class CivsAutonomousPlacementTest : FunSpec({
             val frame = CivsSettlementLayout.frame(s.city)
             val intent = CivSettlementPlan(version, 0, frame.halfWidth,
                 (s.city.buildings + site).map { CivSettlementPlot(it, it.bounds) },
-                mapOf(site.id.toString() to route), frame.wallObstacles, frame.gates.map { it.passage })
+                mapOf(site.id.toString() to route), frame.wallObstacles, frame.gates.map { it.passage }, frame.gates.map { it.side })
             s.city = s.city.copy(autonomy = CivAutonomy(plan = intent), buildings = s.city.buildings + site)
             val control = requireNotNull(site.control)
             s.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
@@ -440,7 +440,7 @@ class CivsAutonomousPlacementTest : FunSpec({
             val frame = CivsSettlementLayout.frame(s.city)
             val intent = CivSettlementPlan(CivsSettlementPlans.VERSION, 0, frame.halfWidth,
                 (s.city.buildings + occupied).map { CivSettlementPlot(it, it.bounds) },
-                mapOf(site.id.toString() to route), frame.wallObstacles, frame.gates.map { it.passage })
+                mapOf(site.id.toString() to route), frame.wallObstacles, frame.gates.map { it.passage }, frame.gates.map { it.side })
             s.city = s.city.copy(autonomy = CivAutonomy(plan = intent),
                 buildings = s.city.buildings + occupied + site, constructionQueue = listOf(site.id))
             requireNotNull(CivsSettlementPlans.current(s.city))
@@ -480,7 +480,7 @@ class CivsAutonomousPlacementTest : FunSpec({
             val frame = CivsSettlementLayout.frame(s.city)
             val bad = CivSettlementPlan(99, 0, frame.halfWidth, emptyList(),
                 mapOf(UUID.randomUUID().toString() to listOf(CivPosition(9999, 65, 9999))),
-                frame.wallObstacles, frame.gates.map { it.passage })
+                frame.wallObstacles, frame.gates.map { it.passage }, frame.gates.map { it.side })
             s.city = s.city.copy(autonomy = s.city.autonomy!!.copy(plan = bad))
             spatialFailure(s.planner.infrastructure(s.city)) shouldBe "test-selected-infrastructure-draft"
             s.drafts.single().building.type shouldBe BuildingType.GATE
@@ -647,6 +647,50 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
+    test("a reserved fortification rejects a changed source before requesting native terrain") {
+        InfrastructurePlacementScenario().use { s ->
+            val template = civsSyntheticFortification()
+            val plot = spatialFortificationPlot(template)
+            s.city = s.city.copy(style = CivsFortifications.STYLE)
+            every { s.blueprints.fortification(s.city.style) } returns CompletableFuture.completedFuture(template)
+            val changed = plot.copy(fortification = requireNotNull(plot.fortification).copy(sourceSha256 = "0".repeat(64)))
+            spatialFailure(s.planner.reserved(s.city, changed)) shouldBe "autonomy-catalog-changed"
+            verify(exactly = 0) { s.world.autonomousHeightField(any(), any(), any(), any()) }
+            verify(exactly = 0) { s.blueprints.prepareFortification(any(), any(), any(), any(), any()) }
+        }
+    }
+
+    test("a verified fortification reservation uses the composite preparation after guarded terrain and route capture") {
+        InfrastructurePlacementScenario().use { s ->
+            val template = civsSyntheticFortification()
+            val plot = spatialFortificationPlot(template)
+            s.city = s.city.copy(style = CivsFortifications.STYLE, autonomy = CivAutonomy(layoutHalfWidth = 56))
+            val frame = CivsSettlementLayout.frame(s.city)
+            val plan = CivSettlementPlan(CivsSettlementPlans.VERSION, 0, 56,
+                listOf(CivSettlementPlot(s.city.buildings.single(), s.city.buildings.single().bounds), plot),
+                mapOf(plot.building.id.toString() to (0..20).map { CivPosition(it, 65, 0) }),
+                frame.wallObstacles, frame.gates.map { it.passage }, frame.gates.map { it.side })
+            CivsSettlementPlans.validate(s.city, plan)
+            s.city = s.city.copy(autonomy = s.city.autonomy!!.copy(plan = plan))
+            every { s.blueprints.fortification(s.city.style) } returns CompletableFuture.completedFuture(template)
+            every { s.world.captureTerraform(any(), any(), any(), any()) } answers {
+                val draft = arg<CivTerraformDraft>(1)
+                CompletableFuture.completedFuture(CivTerraformPlan(draft.building.bounds, emptyList(), draft.route, draft.groundY, 0, 0))
+            }
+            every { s.world.autonomousRoute(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
+            val placed = plot.building.copy(phase = BuildingPhase.CONSTRUCTING)
+            val blueprint = CivBlueprint(placed, s.city.worldId, mockk(), emptyList(), emptyList(), template.sourceBytes)
+            every { s.blueprints.prepareFortification(template, placed.id, s.city.worldId, placed.anchor, placed.rotation) } returns
+                CompletableFuture.completedFuture(blueprint)
+            val result = s.planner.reserved(s.city, plot).join()
+            result.blueprint shouldBe blueprint
+            result.terrain?.route?.last() shouldBe placed.entrance
+            verify(exactly = 1) { s.blueprints.prepareFortification(template, placed.id, s.city.worldId, placed.anchor, placed.rotation) }
+            verify(exactly = 0) { s.blueprints.prepareEntry(any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { s.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
     test("large terrain validation yields to the next tick and close cancels it") {
         spatialScenario { s ->
             val b = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(18, 64, 10), 0, 1).building.copy(
@@ -659,6 +703,13 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 })
+
+private fun spatialFortificationPlot(template: CivFortificationTemplate): CivSettlementPlot {
+    val anchor = CivPosition(30, 64, 0)
+    val building = CivsSettlementPlans.at(template.building, anchor, 0, UUID(141, 1)).copy(phase = BuildingPhase.SITE)
+    return CivSettlementPlot(building, building.bounds, CivSettlementFortification(
+        template.sourceSha256, template.recipeSha256, template.proofAt(anchor, 0)))
+}
 
 /** Real catalog and terraform draft; stop at the native boundary so selection has no world side effects. */
 private class InfrastructurePlacementScenario : AutoCloseable {

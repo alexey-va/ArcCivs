@@ -39,7 +39,7 @@ class CivsCitizens(
     private val cityProvider: () -> Collection<Settlement>,
     private val delivery: (UUID, UUID, UUID, Long, Long, UUID?, Long) -> CompletableFuture<Settlement>,
     private val interact: (Player, UUID, UUID) -> Unit,
-    private val maxActive: Int = 48,
+    private val maxActive: Int = CivsSettings.MAXIMUM_NPCS,
     private val viewerRange: Int = 96,
     private val hurt: (UUID, UUID, Double) -> CompletableFuture<Settlement> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
@@ -156,7 +156,7 @@ class CivsCitizens(
         checkCitizenMainThread()
         val block = BoundingBox(point.x.toDouble(), point.y.toDouble(), point.z.toDouble(),
             point.x + 1.0, point.y + 1.0, point.z + 1.0)
-        // The resident runtime already caps this collection at 48; no native entity/world scan.
+        // The resident runtime already caps this collection; no native entity/world scan.
         return actors.values.any { actor -> actor.worldId == worldId && actor.npc.isValid &&
             (actor.mealVisit?.seat?.takeIf { actor.npc.isSeated }?.bounds ?: actor.sleepPose?.takeIf { actor.sleeping }?.bounds
                 ?: citizenStandingBounds(actor.npc.location, actor.npc.scale)).overlaps(block) }
@@ -177,7 +177,7 @@ class CivsCitizens(
         return actor.npc.location.clone()
     }
     init {
-        require(maxActive in 1..48 && viewerRange in 1..96)
+        require(maxActive in 1..CivsSettings.MAXIMUM_NPCS && viewerRange in 1..96)
         checkCitizenMainThread()
         skins = loadCitizenSkins()
         packets = packetOwner ?: PaperPacketNpcs(plugin, "civs-residents")

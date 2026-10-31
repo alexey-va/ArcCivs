@@ -136,7 +136,9 @@ class CivsWorkforceTest : FunSpec({
 
     test("builder credit remains bounded and paused or missing-material work earns nothing") {
         var city = workforceOrder(CivsRules.MAX_BUILDER_WORK_CREDIT + 1)
-        repeat(CivsRules.MAX_POPULATION) { city = workforceTrip(city, city.workers.first()) }
+        repeat(CivsRules.MAX_BUILDER_WORK_CREDIT / CivsRules.BUILDER_SESSION_ROWS) {
+            city = workforceTrip(city, city.workers.first())
+        }
         city.construction!!.workCredit shouldBe CivsRules.MAX_BUILDER_WORK_CREDIT
         workforceDenied("construction-credit-full") { workforceTrip(city, city.workers.first()) }
         val order = city.construction!!

@@ -107,7 +107,7 @@ class CivsPlanBoardGeometryTest : FunSpec({
         layout.entries.size shouldBe 28
         layout.patches.count { it.key.startsWith("planned-") } shouldBe 14 * 4
         (layout.displayParts <= 256) shouldBe true
-        CivsRules.MAX_BUILDINGS shouldBe 16
+        CivsRules.MAX_BUILDINGS shouldBe 34
     }
 
     test("legal winding routes use bounded exact bitmap rows instead of merging gaps or truncating") {

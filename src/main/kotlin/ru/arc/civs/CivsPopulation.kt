@@ -7,7 +7,7 @@ object CivsPopulation {
     const val IMMIGRANT_POPULATION = 5
     const val BIRTH_MINUTES = 20
     const val ADULT_MINUTES = 180
-    const val NURSERY_PLACES = 2
+    const val NURSERY_PLACES = 4
 
     fun houseBeds(house: CivBuilding): Int = if (house.type == BuildingType.TAVERN) 4 else maxOf(3, house.level * 2)
 

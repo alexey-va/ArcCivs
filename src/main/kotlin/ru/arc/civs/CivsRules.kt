@@ -4,12 +4,14 @@ import java.util.UUID
 
 /** Pure transitions. The caller persists the returned revision before publishing it or placing blocks. */
 object CivsRules {
-    const val MAX_BUILDINGS = 16
+    const val MAX_BUILDINGS = 34
     const val MAX_DECORATIONS = 8
-    const val MAX_AUTONOMOUS_DECORATIONS = 2
-    const val MAX_INFRASTRUCTURE = 96
+    const val MAX_AUTONOMOUS_FORTIFICATIONS = 4
+    const val MAX_AUTONOMOUS_SCENERY = 2
+    const val MAX_AUTONOMOUS_DECORATIONS = MAX_AUTONOMOUS_FORTIFICATIONS + MAX_AUTONOMOUS_SCENERY
+    const val MAX_INFRASTRUCTURE = 128
     const val MAX_SITES = MAX_BUILDINGS + MAX_INFRASTRUCTURE + MAX_DECORATIONS
-    const val MAX_POPULATION = 12
+    const val MAX_POPULATION = 24
     const val MAX_RESIDENTS = MAX_POPULATION + CivsPopulation.NURSERY_PLACES
     const val MAX_WORK_ROUTE_DISTANCE = 88
     const val RECRUIT_FOOD = 12L
@@ -17,7 +19,7 @@ object CivsRules {
     const val BUILDER_INTERVAL = 10_000L
     const val BUILDER_SESSION_INTERVAL = 2_000L
     const val BUILDER_SESSION_ROWS = 64
-    const val MAX_BUILDER_WORK_CREDIT = MAX_POPULATION * BUILDER_SESSION_ROWS
+    const val MAX_BUILDER_WORK_CREDIT = 768
     const val FIRST_IMMIGRATION_DELAY = 30_000L
     const val IMMIGRATION_INTERVAL = 60_000L
     const val MAX_TERRITORY_GROWTH = 64
@@ -72,7 +74,13 @@ object CivsRules {
         if (it.phase == BuildingPhase.ACTIVE && it.type.isResidence) CivsPopulation.houseBeds(it) else 0
     }
 
-    fun populationLimit(city: Settlement): Int = minOf(MAX_POPULATION, maxOf(CivsPopulation.IMMIGRANT_POPULATION, city.level() * 4))
+    fun populationLimit(city: Settlement): Int = populationLimit(city.level())
+
+    internal fun populationLimit(hallLevel: Int): Int = when (hallLevel) {
+        1 -> CivsPopulation.IMMIGRANT_POPULATION
+        2 -> 12
+        else -> MAX_POPULATION
+    }
     /** The extra places are for children only; they never increase the adult workforce. */
     fun residentLimit(city: Settlement): Int = populationLimit(city) +
         if (populationLimit(city) == MAX_POPULATION) CivsPopulation.NURSERY_PLACES else 0
@@ -91,7 +99,7 @@ object CivsRules {
     }
 
     /** Old full cities have no spare plot for the newly introduced builder hut. New sites reserve that plot. */
-    fun legacyHallBuilder(city: Settlement): Boolean = city.inventory != null && buildingCount(city) == MAX_BUILDINGS &&
+    fun legacyHallBuilder(city: Settlement): Boolean = city.inventory != null && buildingCount(city) >= 16 &&
         city.buildings.none { it.type == BuildingType.BUILDER_HUT } &&
         city.buildings.any { it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.ACTIVE }
 

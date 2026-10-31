@@ -15,6 +15,28 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsLayoutDebugTest : FunSpec({
+    test("compiled fortification export retains exact source bytes and marks a failed load separately") {
+        layoutDebugScenario { h ->
+            val template = civsSyntheticFortification()
+            h.fortification = CompletableFuture.completedFuture(template)
+            val result = h.export()
+            h.finish()
+            val file = h.root.resolve(result.join()["path"].toString())
+            val row = JsonParser.parseString(Files.readString(file)).asJsonObject.getAsJsonObject("fortification_template")
+            row["status"].asString shouldBe "compiled"
+            row["sourceSha256"].asString shouldBe template.sourceSha256
+            CivsFortifications.sha256(java.util.Base64.getDecoder().decode(row["sourceBytesBase64"].asString)) shouldBe template.sourceSha256
+            row.getAsJsonArray("cells").size() shouldBe template.cells.size
+            h.fortification = CompletableFuture.failedFuture(CivsRejection("blueprint-unavailable"))
+            val failed = h.export()
+            h.finish()
+            val failedRow = JsonParser.parseString(Files.readString(h.root.resolve(failed.join()["path"].toString())))
+                .asJsonObject.getAsJsonObject("fortification_template")
+            failedRow["status"].asString shouldBe "unavailable"
+            failedRow["error"].asString shouldBe "blueprint-unavailable"
+        }
+    }
+
     test("detached export writes bounded atomic bytes and its receipt hashes the exact owned file") {
         layoutDebugScenario { h ->
             val transit = mutableListOf(CivPosition(3, 64, 0))
@@ -288,10 +310,11 @@ private class LayoutDebugScenario : AutoCloseable {
     private val tasks = LifecycleTaskScope(scheduler)
     var rejectWork = false
     var loader: (UUID) -> CompletableFuture<CivPlacementPlan?> = { CompletableFuture.completedFuture(null) }
+    var fortification: CompletableFuture<CivFortificationTemplate?> = CompletableFuture.completedFuture(null)
     val debug = CivsLayoutDebug(root, tasks, Executor {
         if (rejectWork) throw java.util.concurrent.RejectedExecutionException("fixture-rejection")
         queued.add(it)
-    }, { loader(it) })
+    }, { loader(it) }, loadFortification = { fortification })
     fun export(city: Settlement = this.city) = debug.export(city, "fixture", "test", emptyMap(), null) { city }
     fun work() {
         var steps = 0

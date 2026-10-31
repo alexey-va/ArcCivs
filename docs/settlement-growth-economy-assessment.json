@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "title": "Larger terrain-adapted Auto settlement: sixteen houses, multiple producers and paid fortifications",
+  "participants": [
+    1,
+    5,
+    10
+  ],
+  "assumptions": [
+    "Before active0.1.137: three HOUSE plots, sixteen ordinary buildings, maximum unpinned half-width56 (113x113). Owner now requests larger towns, duplicate resource worksites and wall towers. Proposed0.1.141 baseline: sixteen HOUSE, two FORESTER, two QUARRY, three FARM, two WAREHOUSE, remaining existing professions, ordinary target34, maximum unpinned half-width72 (145x145), subject to bounded real-terrain proof. Decorative wall towers are separately paid catalog structures; exact count/cap and source-geometry integration must match the final implementation before release. Saved geometry, accepted work and FIFO remain retained.",
+    "Thirteen extra houses and five extra productive/storage buildings (one forester, one quarry, two farms, one warehouse) are ordinary paid construction after critical growth and research. Adult limits byhalllevel change5/8/12to5/12/24, nursery2to4 (only real free beds), active NPC ceiling48to64 so two fully visible28-resident cities fit56actors. Builder accepted-session credit remains768 explicitly, not24*64. Sixteen L3 houses have96beds; no free residents or staff are granted. Recruitment,20active-minute births,180awake-minute childhood, actual meals and7-10active-day adult aging remain unchanged.",
+    "No Vault, premium token or player XP price/award is added: before=after=zero in each separate currency. Current SELL and planned SELL-to-contract are distinct downstream scenarios; no item-to-money conversion or additional contract payout is assumed. The increased building limit is not a monetary award.",
+    "All new physical construction consumes CivsMaterials.required from the exact immutable schematic bill, with usual collection, item journal and native receipts. Style-specific quantities are not inferred from abstract Stock. Each upgrade pays its full target-level plan; no free upgrade, bypass, changed per-action recipe reward or repeated receipt is introduced.",
+    "Legacy abstract Stock house target prices remain24WOOD/12STONE L1,96/48 L2,216/108 L3. Thirteen extra houses across allthree paid orders consume4368WOOD/2184STONE. Low/base/high completed extra-house progress (allL1/allL1+L2/allL1+L2+L3):312/156,1560/780,4368/2184. These are abstractStock, not native items or currencies. Additional resource/depot buildings likewise pay unchanged target-level prices; native buildings pay their exact immutable schematic bill.",
+    "Existing ordinary maximum-level gates now finish valid Auto buildings at their catalog-supported maximum; METALLURGY/ENGINEERING and hall level remain required. Previously L3 tail covered hall/university/smeltery/crusher; extra producer/amenity/house/blacksmith upgrades now become scheduled. No catalog maximum is invented.",
+    "Indirect legacy full-staff upper bound per60-second cycle: oldoneL2forester2*8=16WOOD, newtwoL3foresters2*3*12=72WOOD (4.5x); oldoneL2quarry2*6=12STONE, newtwoL3quarries2*3*9=54STONE (4.5x); oldoneL2farm2*6=12FOOD, newthreeL3farms3*3*9=81FOOD (6.75x). These are per-resource theoretical ceilings with21resource workers and only3 of24 adults left for all other services. They cannot be combined with fully staffed industry/guards/couriers/builders. Same one-worker-per-site baseline gives3xWOOD/STONE and4.5xFOOD. No wall-clock/offline production or duplicated receipts. These formulas are not physical drop forecasts.",
+    "Physical Auto uses actual captured logs/crops/native mining and committed recipes. Added staff/working areas can materially raise item production; per-action yield is unchanged. Native action/search jobs and concurrent receipts remain bounded, forestry family surplus stop512/resume256 remains global across all holders/sites, output-full pauses retain existing items. Two cities at28resident cap fit64activeactors but shared path/native budgets must stay bounded and performance observed. Extra staffing cannot justify item grants, instant progress or skipped container checks.",
+    "House beds remain3/4/6, profession learning caps20/30/40 and per-cycle resident XP1 or aptitude2. More real housed adults can earn more aggregate residentXP; no playerXP is granted. Communal residents retain earned skills and existing communal future cap10. Full family homes still move at most one eligible unpaired adult per active city minute to an existing free communal bed, preserving belongings.",
+    "Legacy abstract capacity with one warehouse remains384/640/1152 atL1/L2/L3; twoL3warehouses have128+2*1024=2176 compared with oldoneL2=640. Native capacity is real slots, not the abstract scalar. Native construction bills and per-recipe inputs remain unchanged. At unchanged meal policy, doubling adults12to24 can double steady adult food demand; nursery2to4 doubles possible child food demand (about15BREAD each180awake-minute childhood atnutrition6, up to60BREAD forfourchildren versus30fortwo). Actual travel/hunger thresholds and daily awake hours determine timing; no coins conversion.",
+    "Low/base/high monetary scenarios use1/5/10 action events perplayerday and1/5/10 participants; each flow remains exactlyzero separately inVault/tokens/playerXP. Native build resource consumption above is a one-time progression scenario, not repeatable income. Unknown physical yield and server performance are acceptance limits rather than invented numerical estimates.",
+    "Live168-hour Spawn ledger context reused from this same authorized task:3596records/3931operations/17players, Vault minted32979314.25750202 and burned34794552.08; tokens minted38/burned36. Mixed-currency aggregate unused, substantial unknown-origin coverage prevents ArcCivs attribution. This contextual observation does not establish a native item sale value.",
+    "Accepted work completes before plan extension; native before-images, permissions, persistent item ownership and quantity remain checked. Root gate repair only permits the existing finite accepted grade pass while a SITE waits; ordinary road wear stays suppressed by the queue. No free building or terrain block credit is added.",
+    "Multi-resource staffing must retain at least one assigned eligible worker per actual producer building when ordinary recovery borrows staff, while urgent accepted builder recovery retains its existing authority. Native forestry cross-building root/cell claims and mining exact before-images prevent shared-site duplication; operating-zone separation must be checked in final layouts rather than assumed from nonoverlapping roofs.",
+    "New founding default radius grows96to128 (within the existing allowed64..128 setting); existing settlement radii and pinned frames remain unchanged. This supplies an exterior buffer for the larger complete profile before the first hall upgrade. Normal hall territory growth remains64total, so a new max-level territory can reach192 rather than160; no native capture/search radius or per-tick operation budget is raised. All layouts must remain inside the existing bounded surface capture. New founding remains paid by existing rules, with no territory-item or currency grant.",
+    "Measured final pre-fortification production forecasts on exact runtime-selected Caledonia frames: flat produced106 paid pieces (4 gates,36 walls,66 roads); gentle slope produced123 (5 gates,34 walls,84 roads), both closed. Infrastructure cap96to128 admits these measured plans, with32additional possible paid pieces at the upper bound. Fortification forecasts must also fit128. No per-piece free credit, currency award, per-action output or native per-tick budget changes. Candidate64, work reach88, route nodes131072, native jobs48 and existing50-million mincut work ceiling remain bounded; only unproductive level-graph work is pruned. Original12-block-cliff refusal and the original18-deep coast bounded-greedy refusal at14/16homes remain recorded; neither proves absence of another global layout.",
+    "Up to4 optional native wall-tower composites and2 ordinary scenery pieces are paid decorations (Auto cap2to6); manual decoration cap8 is unchanged. Fortifications are built after functional development and before joining walls. A new fortified wall has5 total columns with3 clear deck columns at ground+7, plus edge parapets; the old three-column four-high recipe and captured legacy plans remain unchanged. This increases exact native material consumption and build work, not per-action output or money. Final source-derived bills and geometry must be recorded after native Core compilation; no invented item valuation is applied."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_vault",
+          "kind": "mint",
+          "source": "CivsAutonomy / CivsSettlementPlans existing paid construction",
+          "basis": "No direct currency or player-XP award exists before or after the housing and layout policy.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_tokens",
+          "kind": "mint",
+          "source": "CivsAutonomy / CivsSettlementPlans existing paid construction",
+          "basis": "No direct currency or player-XP award exists before or after the housing and layout policy.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_player_xp",
+          "kind": "mint",
+          "source": "CivsAutonomy / CivsSettlementPlans existing paid construction",
+          "basis": "No direct currency or player-XP award exists before or after the housing and layout policy.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

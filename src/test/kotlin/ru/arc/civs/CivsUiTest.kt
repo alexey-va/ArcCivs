@@ -1544,7 +1544,7 @@ class CivsUiTest : FunSpec({
             export("scribe-workers-ru")
             h.click("history")
             h.body() shouldContain "2 → 3"
-            h.body() shouldContain "8 → 12"
+            h.body() shouldContain "12 → 24"
             export("scribe-upgrade-ru")
             val scribe = h.city!!.workers[1]
             h.ui.openWorker(h.player, base.id, scribe.id)
@@ -3240,8 +3240,9 @@ class CivsUiTest : FunSpec({
             h.body().contains("Хлеб") shouldBe false
             h.body().contains("1497") shouldBe false
             h.body() shouldContain "Уровень 2 · Радиус: 64 блоков"
-            h.body() shouldContain "Жители: 4 / 8 · Спальные места: 8"
-            h.body() shouldContain "Постройки: 4 / 16 · Город спит"
+            h.body() shouldContain "Жители: 4 / 12 · Спальные места: 8"
+            h.body() shouldContain "Постройки: 4 / 34 · Город спит"
+            h.body() shouldContain "Предел взрослых: 12 → 24"
             h.body() shouldContain "Стройка: Нет активной стройки"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "overview-clean-ru", h.screen, listOf(588, 380)) }
             h.player.setLocale(Locale.US); h.open()

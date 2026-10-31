@@ -14,6 +14,7 @@ internal data class CivSettlementFrame(
     val gates: List<CivSettlementGate>,
     val wallObstacles: List<CivBox>,
     val streets: List<CivSettlementStreet>,
+    val fortified: Boolean = false,
 )
 
 internal data class CivSettlementGate(val side: Int, val center: CivPosition, val passage: CivBox)
@@ -47,7 +48,8 @@ internal data class CivSettlementBlocker(val buildingId: UUID, val bounds: CivBo
  */
 internal object CivsSettlementLayout {
     const val VERSION = 1
-    const val MAXIMUM_PIECES = 96
+    const val MAXIMUM_HALF_WIDTH = 72
+    const val MAXIMUM_PIECES = CivsRules.MAX_INFRASTRUCTURE
     private const val WALL_HALF_WIDTH = 1
     private const val GATE_HALF_WIDTH = 2
     private const val MAXIMUM_PIECE_LENGTH = 24
@@ -63,19 +65,24 @@ internal object CivsSettlementLayout {
             CivPosition(city.center.x + it.x, it.y, city.center.z + it.z)
         }
         fun box(x0: Int, z0: Int, x1: Int, z1: Int): CivBox = box(listOf(world(x0, z0), world(x1, z1)))
-        require(halfWidth == null || halfWidth in 24..56)
-        val half = halfWidth ?: minOf(56, city.radius - 24).coerceAtLeast(24)
+        require(halfWidth == null || halfWidth in 24..MAXIMUM_HALF_WIDTH)
+        val adopted = CivsSettlementPlans.current(city)
+        // Pre-frame-journal infrastructure used the former 56-block limit. New designs persist their actual width.
+        val maximum = if (city.buildings.any { it.type.isInfrastructure }) 56 else MAXIMUM_HALF_WIDTH
+        val half = halfWidth ?: adopted?.halfWidth ?: minOf(maximum, city.radius - 24).coerceAtLeast(24)
         val entry = local(hall.entrance)
         val plazaX = entry.x.coerceIn(-half + 12, half - 12)
         val plazaZ = (entry.z + 8).coerceIn(-half + 12, half - 12)
         val hallBack = corners(hall.bounds).minOf { local(it).z }
         val backStreet = (hallBack - 5).coerceIn(-half + 16, plazaZ - 12)
         val sideStreet = half - 8
+        val northernFrontage = half > 56 && adopted == null
         val gates = listOf(
             CivSettlementGate(1, world(half, plazaZ), box(half - 2, plazaZ - GATE_HALF_WIDTH, half + 2, plazaZ + GATE_HALF_WIDTH)),
             CivSettlementGate(2, world(plazaX, half), box(plazaX - GATE_HALF_WIDTH, half - 2, plazaX + GATE_HALF_WIDTH, half + 2)),
             CivSettlementGate(3, world(-half, plazaZ), box(-half - 2, plazaZ - GATE_HALF_WIDTH, -half + 2, plazaZ + GATE_HALF_WIDTH)),
-        )
+        ) + if (northernFrontage) listOf(CivSettlementGate(0, world(plazaX, -half),
+            box(plazaX - GATE_HALF_WIDTH, -half - 2, plazaX + GATE_HALF_WIDTH, -half + 2))) else emptyList()
         val walls = mutableListOf<CivBox>()
         fun side(horizontal: Boolean, fixed: Int, gap: Int?) {
             // Horizontal strips own the corners; vertical strips end before them.
@@ -88,7 +95,7 @@ internal object CivsSettlementLayout {
                 else walls += box(fixed - WALL_HALF_WIDTH, range.first, fixed + WALL_HALF_WIDTH, range.last)
             }
         }
-        side(true, -half, null)
+        side(true, -half, plazaX.takeIf { northernFrontage })
         side(true, half, plazaX)
         side(false, -half, plazaZ)
         side(false, half, plazaZ)
@@ -98,10 +105,11 @@ internal object CivsSettlementLayout {
             CivSettlementStreet(world(-sideStreet, backStreet), world(sideStreet, backStreet)),
             CivSettlementStreet(world(-sideStreet, backStreet), world(-sideStreet, plazaZ)),
             CivSettlementStreet(world(sideStreet, backStreet), world(sideStreet, plazaZ)),
-        )
+        ) + if (northernFrontage) listOf(CivSettlementStreet(world(plazaX, backStreet), world(plazaX, -half))) else emptyList()
         val result = CivSettlementFrame(city.center, hall.rotation, half, box(-half, -half, half, half),
-            box(plazaX - 8, entry.z + 1, plazaX + 8, plazaZ + 5), gates, walls, streets)
-        CivsSettlementPlans.current(city)?.takeIf { it.halfWidth == half }?.let { plan ->
+            box(plazaX - 8, entry.z + 1, plazaX + 8, plazaZ + 5), gates, walls, streets,
+            adopted?.plots?.any { it.fortification != null } == true)
+        adopted?.takeIf { it.halfWidth == half }?.let { plan ->
             val sides = plan.gateSides ?: listOf(1, 2, 3)
             return result.copy(wallObstacles = plan.walls, gates = plan.gates.mapIndexed { i, passage ->
                 CivSettlementGate(sides[i], CivPosition((passage.min.x + passage.max.x) / 2, city.center.y,
@@ -126,13 +134,21 @@ internal object CivsSettlementLayout {
         val exterior = current.type in exteriorTypes
         val choices = mutableListOf<Pair<CivPosition, Int>>()
         if (exterior) {
+            val offsets = if (frame.halfWidth > 56) listOf(0) + (1..5).flatMap { step ->
+                val span = (frame.halfWidth - 12) * step / 5
+                listOf(-span, span)
+            } else listOf(0, -8, 8, -16, 16, -24, 24, -32, 32, -36, 36)
             val preferred = when (current.type) { BuildingType.FORESTER -> 3; BuildingType.QUARRY -> 1; else -> 2 }
             for (gate in frame.gates.sortedBy { if (it.side == preferred) 0 else 1 }) {
                 val outward = rotate(CivPosition(0, 0, -1), gate.side)
                 val sideways = CivPosition(-outward.z, 0, outward.x)
-                for (distance in listOf(8, 14, 20)) for (offset in listOf(0, -8, 8, -16, 16, -24, 24)) {
-                    val local = CivPosition(outward.x * distance + sideways.x * offset, 0,
-                        outward.z * distance + sideways.z * offset)
+                val worldSideways = rotate(sideways, frame.rotation / 90)
+                val depot = city.buildings.filter(CivsRules::isDepot).minByOrNull { manhattan(it.entrance, gate.center) }
+                val alignment = depot?.entrance?.let { (it.x - gate.center.x) * worldSideways.x +
+                    (it.z - gate.center.z) * worldSideways.z } ?: 0
+                for (distance in listOf(8, 14, 20)) for (offset in offsets) {
+                    val local = CivPosition(outward.x * distance + sideways.x * (offset + alignment), 0,
+                        outward.z * distance + sideways.z * (offset + alignment))
                     val delta = rotate(local, frame.rotation / 90)
                     choices += gate.center.copy(x = gate.center.x + delta.x, z = gate.center.z + delta.z) to
                         Math.floorMod(gate.side + frame.rotation / 90, 4)
@@ -186,7 +202,7 @@ internal object CivsSettlementLayout {
         eligible: (CivBuilding) -> Boolean = { true }): List<CivsAutonomousCandidate> {
         if (current.type in exteriorTypes || current.type.isInfrastructure)
             return emptyList()
-        // At the largest V1 frame: 53 * 53 * 4 detached placements, with at most 64 results.
+        // At the largest frame: 69 * 69 * 4 detached placements, with at most 64 results.
         val choices = buildList {
             for (x in frame.core.min.x + 4..frame.core.max.x - 4 step 2)
                 for (z in frame.core.min.z + 4..frame.core.max.z - 4 step 2)
@@ -202,7 +218,7 @@ internal object CivsSettlementLayout {
             CivsWorksiteLayouts.field(current) + CivsWorksiteLayouts.irrigation(current) +
             CivsWorksiteLayouts.field(future) + CivsWorksiteLayouts.irrigation(future)).let(::box)
         val occupied = city.buildings.filter { it.id != current.id }.map { CivsAutonomousGeometry.futureBounds(city, it) } +
-            listOfNotNull(city.construction?.plannedBuilding?.takeIf { it.id != current.id }?.bounds)
+            listOfNotNull(city.construction?.plannedBuilding?.takeIf { it.id != current.id }?.bounds) + access.reservedFortificationPorts
         val protected = (city.buildings.filter { it.id != current.id }.flatMap(CivsAutonomousGeometry::approach) +
             access.standing(city, current.id).values).mapTo(hashSetOf(), ::key)
         val frontages = streetFrontages(access, frame)
@@ -218,6 +234,20 @@ internal object CivsSettlementLayout {
             }
         }
         val exterior = current.type in exteriorTypes
+        // Small raw worksites use an available flank while the new quarter still needs wide farm parcels.
+        // This only ranks the existing finite candidates; terrain, spacing and depot reach still admit them.
+        val preserveWideBay = current.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY) && frame.halfWidth > 56 &&
+            CivsSettlementPlans.current(city) == null && city.buildings.count { it.type == BuildingType.FARM } <
+            CivsAutonomy.completeProfile.count { it == BuildingType.FARM }
+        fun wideBayPenalty(b: CivBuilding): Int {
+            if (!preserveWideBay) return 0
+            val gate = frame.gates.minBy { manhattan(it.center, b.entrance) }
+            val outward = rotate(CivPosition(0, 0, -1), gate.side + frame.rotation / 90)
+            val center = city.buildings.filter(CivsRules::isDepot).minByOrNull { manhattan(it.entrance, gate.center) }
+                ?.entrance ?: gate.center
+            val lateral = abs((b.entrance.x - center.x) * -outward.z + (b.entrance.z - center.z) * outward.x)
+            return if (lateral >= frame.halfWidth / 2) 0 else 1
+        }
         fun placed(entry: CivPosition, turns: Int): CivBuilding {
             val entryOffset = rotate(current.entrance, turns)
             val anchor = CivPosition(entry.x - entryOffset.x, city.center.y, entry.z - entryOffset.z)
@@ -226,13 +256,27 @@ internal object CivsSettlementLayout {
                 entrance = point(current.entrance), control = current.control?.let(::point))
         }
         fun nearGate(b: CivBuilding) = frame.gates.minOf { manhattan(it.center, b.entrance) }
+        val depots = city.buildings.filter { it.type in setOf(BuildingType.TOWN_HALL, BuildingType.WAREHOUSE) }
+        val remoteResource = if (current.type == BuildingType.WAREHOUSE && city.buildings.any { it.type == BuildingType.WAREHOUSE })
+            city.buildings.filter { it.type in exteriorTypes }.maxByOrNull { resource ->
+                depots.minOf { manhattan(it.entrance, resource.entrance) }
+            } else null
+        val operating = if (current.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY)) operatingBounds(future) else null
+        val operatingPeers = if (operating == null) emptyList() else city.buildings.filter { it.type == current.type && it.id != current.id }
+            .mapNotNull { b -> operatingBounds(b)?.let { local -> box(corners(local).map { CivsWorksiteLayouts.point(b, it) }) } }
+        fun operatingConflicts(b: CivBuilding): Int {
+            if (operating == null || operatingPeers.isEmpty()) return 0
+            val bounds = box(corners(operating).map { CivsWorksiteLayouts.point(b, it) })
+            return operatingPeers.count { CivsAutonomousGeometry.overlaps(bounds, it, 2) }
+        }
         fun score(b: CivBuilding): Int = when {
             exterior -> {
                 val side = when (current.type) { BuildingType.FORESTER -> 3; BuildingType.QUARRY -> 1; else -> 2 }
-                manhattan(frame.gates.first { it.side == side }.center, b.entrance)
+                frame.gates.firstOrNull { it.side == side }?.let { manhattan(it.center, b.entrance) } ?: nearGate(b)
             }
             current.type == BuildingType.GUARD_TOWER -> nearGate(b) * 4
-            current.type == BuildingType.WAREHOUSE -> nearGate(b) + manhattan(city.buildings.first().entrance, b.entrance)
+            current.type == BuildingType.WAREHOUSE -> remoteResource?.let { manhattan(it.entrance, b.entrance) }
+                ?: (nearGate(b) + manhattan(city.buildings.first().entrance, b.entrance))
             else -> manhattan(center(frame.court), b.entrance)
         }
         return choices.map { (entry, turns) -> placed(entry, turns) }.distinctBy { it.anchor to it.rotation }.filter { b ->
@@ -242,6 +286,7 @@ internal object CivsSettlementLayout {
                 occupied.none { CivsAutonomousGeometry.overlaps(bounds, it, 2) } &&
                 (bounds.min.x..bounds.max.x).none { x -> (bounds.min.z..bounds.max.z).any { z -> key(x, z) in protected } } &&
                 CivsAutonomousGeometry.approach(b).none { p -> occupied.any { contains(it, p) } } &&
+                CivsAutonomousGeometry.approach(b).none { p -> frame.wallObstacles.any { contains(it, p) } } &&
                 frame.wallObstacles.none { CivsAutonomousGeometry.overlaps(bounds, it, 2) } &&
                 (if (exterior) !CivsAutonomousGeometry.overlaps(bounds, frame.core, 3) else
                     corners(bounds).all { insideCore(frame, it, 4) } &&
@@ -251,8 +296,10 @@ internal object CivsSettlementLayout {
                 // connected lane when every existing street plot is unavailable.
                 CivsRules.workRouteWithinReach(city, b.entrance)
         }.sortedWith(compareBy<CivBuilding> { if (exterior || frontages.isEmpty()) 0 else streetDistance(it) ?: 100 }
-            .thenBy(::score).thenBy { it.entrance.x }.thenBy { it.entrance.z }.thenBy { it.rotation })
-            .asSequence().filter(eligible).take(64).map { CivsAutonomousCandidate(it, !exterior && streetDistance(it) != null) }.toList()
+            .thenBy(::operatingConflicts).thenBy(::wideBayPenalty).thenBy(::score)
+            .thenBy { it.entrance.x }.thenBy { it.entrance.z }.thenBy { it.rotation })
+            .asSequence().filter(eligible).take(64).map { CivsAutonomousCandidate(it,
+                !exterior && streetDistance(it) != null, operatingConflicts(it) * 2 + wideBayPenalty(it)) }.toList()
     }
 
     /** A generated route may enter the reserved wall only through one of its explicit gates. */
@@ -278,13 +325,32 @@ internal object CivsSettlementLayout {
     fun infrastructure(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
         routes: List<List<CivPosition>>, accepted: List<CivSettlementPiece> = emptyList(),
         pavingRoutes: List<List<CivPosition>> = routes,
-        retainedRoutes: Collection<List<CivPosition>> = emptyList()): CivSettlementInfrastructure {
+        retainedRoutes: Collection<List<CivPosition>> = emptyList(),
+        acceptedFortifications: Set<UUID> = emptySet(),
+        forecastFortifications: Set<UUID> = emptySet()): CivSettlementInfrastructure {
         val rejected = sortedMapOf<String, Int>()
         val samples = linkedMapOf<String, MutableList<CivPosition>>()
         fun reject(reason: String, at: CivPosition? = null) {
             rejected.merge(reason, 1, Int::plus)
             if (at != null) samples.getOrPut(reason) { mutableListOf() }.let { if (it.size < 4) it += at }
         }
+        val fortifications = CivsSettlementPlans.current(city)?.plots.orEmpty().filter { it.fortification != null }
+        if (frame.fortified && (fortifications.isEmpty() || fortifications.any { plot ->
+                plot.building.id !in forecastFortifications && (plot.building.id !in acceptedFortifications ||
+                    city.building(plot.building.id)?.let { it.phase == BuildingPhase.ACTIVE &&
+                        CivsSettlementPlans.sameFortificationGeometry(it, plot.building) } != true)
+            })) {
+            reject("fortification-not-active")
+            return CivSettlementInfrastructure(emptyList(), rejected, false)
+        }
+        val fortificationGround = if (!frame.fortified) emptyMap() else fortifications.flatMap {
+            requireNotNull(it.fortification).proof.groundBarrier }.associateBy(::key)
+        val wallDomain = fortificationGround.keys.toMutableSet().apply {
+            for (edge in frame.wallObstacles + frame.gates.map { it.passage })
+                for (x in edge.min.x..edge.max.x) for (z in edge.min.z..edge.max.z) add(key(x, z))
+        }
+        fun parapet(x: Int, z: Int): Boolean = listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)
+            .any { (dx, dz) -> key(x + dx, z + dz) !in wallDomain }
         require(accepted.map { it.id }.distinct().size == accepted.size)
         require(accepted.all { piece -> city.building(piece.id)?.let {
             it.type == piece.type && it.type.isInfrastructure && it.bounds == piece.bounds
@@ -320,7 +386,8 @@ internal object CivsSettlementLayout {
         }
         val retainedFloors = accepted.flatMap { it.blocks }.groupBy { key(it.position) }
             .mapValues { (_, cells) -> cells.minOf { it.position.y } } +
-            accepted.flatMap { it.waterFoundations }.associate { key(it.x, it.z) to it.floorY }
+            accepted.flatMap { it.waterFoundations }.associate { key(it.x, it.z) to it.floorY } +
+            fortificationGround.mapValues { it.value.y }
         val wood = wood(city.style)
         val stone = if (city.style == "nordic") "minecraft:cobblestone" else "minecraft:stone_bricks"
         val path = "minecraft:cobblestone"
@@ -428,6 +495,13 @@ internal object CivsSettlementLayout {
                 for (x in gate.passage.min.x..gate.passage.max.x) for (z in gate.passage.min.z..gate.passage.max.z) {
                     if (if (horizontal) z == gate.center.z else x == gate.center.x)
                         cells += CivSettlementBlock(CivPosition(x, level + 5, z), stone)
+                    else if (frame.fortified) cells += CivSettlementBlock(CivPosition(x, level + 5, z), "minecraft:air")
+                    if (frame.fortified) {
+                        cells += CivSettlementBlock(CivPosition(x, level + 6, z), "minecraft:air")
+                        cells += CivSettlementBlock(CivPosition(x, level + 7, z), stone)
+                        cells += CivSettlementBlock(CivPosition(x, level + 8, z), if (parapet(x, z)) stone else "minecraft:air")
+                        cells += CivSettlementBlock(CivPosition(x, level + 9, z), "minecraft:air")
+                    }
                 }
                 // Open leaves preserve the complete public transit rectangle and are usable
                 // by both citizens and players. The surrounding wall owns the side supports.
@@ -482,9 +556,12 @@ internal object CivsSettlementLayout {
                         if (water != null) for (fillY in requireNotNull(water.waterBottomY) + 1 until y)
                             cells += CivSettlementBlock(CivPosition(x, fillY, z), stone)
                         val middle = if (alongX) (wall.min.z + wall.max.z) / 2 else (wall.min.x + wall.max.x) / 2
-                        for (dy in 0..3) cells += CivSettlementBlock(CivPosition(x, y + dy, z),
+                        for (dy in 0..(if (frame.fortified) 7 else 3)) cells += CivSettlementBlock(CivPosition(x, y + dy, z),
                             if (cross == middle && Math.floorMod(axis, 6) == 0) "minecraft:${wood}_log[axis=y]" else stone)
-                        if (cross == middle || Math.floorMod(axis, 3) == 0)
+                        if (frame.fortified) {
+                            cells += CivSettlementBlock(CivPosition(x, y + 8, z), if (parapet(x, z)) stone else "minecraft:air")
+                            cells += CivSettlementBlock(CivPosition(x, y + 9, z), "minecraft:air")
+                        } else if (cross == middle || Math.floorMod(axis, 3) == 0)
                             cells += CivSettlementBlock(CivPosition(x, y + 4, z), if (cross == middle)
                                 "minecraft:${wood}_fence[east=false,north=false,south=false,waterlogged=false,west=false]" else stone)
                     }
@@ -550,12 +627,24 @@ internal object CivsSettlementLayout {
             if (cells.any { it.after != "minecraft:barrier" }) add(BuildingType.ROAD, cells, p.copy(y = p.y + 1), transit)
         }
         if (pieces.size > MAXIMUM_PIECES) reject("infrastructure-budget")
+        val all = pieces.flatMap { it.blocks }.associate { it.position to it.after }
+        if (frame.fortified) for (plot in fortifications) for (port in requireNotNull(plot.fortification).proof.wallEndPorts) {
+            for (base in port.ground) {
+                val outside = base.copy(x = base.x + port.outward.x, z = base.z + port.outward.z)
+                val floor = outside.copy(y = outside.y + 7)
+                if (all[floor]?.substringBefore('[') !in setOf(stone, "minecraft:${wood}_log", path) ||
+                    all[outside.copy(y = outside.y + 8)] != "minecraft:air" ||
+                    all[outside.copy(y = outside.y + 9)] != "minecraft:air") reject("fortification-port-unjoined", floor)
+            }
+        }
+        if (frame.fortified && !fortificationWalkConnected(pieces, fortifications.map { requireNotNull(it.fortification).proof }))
+            reject("fortification-walk-disconnected")
         val perimeter = pieces.filter { it.type == BuildingType.WALL || it.type == BuildingType.GATE }
-            .flatMapTo(hashSetOf()) { piece -> piece.blocks.map { key(it.position) } }
+            .flatMapTo(hashSetOf()) { piece -> piece.blocks.map { key(it.position) } }.apply { addAll(fortificationGround.keys) }
         val closed = (frame.wallObstacles + frame.gates.map { it.passage }).all { edge ->
             (edge.min.x..edge.max.x).all { x -> (edge.min.z..edge.max.z).all { z -> key(x, z) in perimeter } }
-        }
-        val all = pieces.flatMap { it.blocks }.associate { it.position to it.after }
+        } && fortificationGround.keys.all { it in perimeter } && "fortification-port-unjoined" !in rejected &&
+            "fortification-walk-disconnected" !in rejected
         val repaired = pieces.map { piece -> if (piece in accepted) piece else piece.copy(blocks = piece.blocks.map { cell ->
             if (!cell.after.substringBefore('[').endsWith("_fence")) cell else {
                 fun connects(dx: Int, dz: Int): Boolean = all[cell.position.copy(x = cell.position.x + dx, z = cell.position.z + dz)]
@@ -568,6 +657,33 @@ internal object CivsSettlementLayout {
     }
 
     internal fun wood(style: String): String = when (style) { "nordic" -> "spruce"; "caledonia" -> "dark_oak"; else -> "oak" }
+
+    /** Native vertices are compiler-proven, including ordinary openable doors; generated decks require two explicit air cells. */
+    internal fun fortificationWalkConnected(pieces: List<CivSettlementPiece>, proofs: List<CivFortificationProof>): Boolean {
+        if (proofs.isEmpty() || proofs.any { it.wallWalkFloors.isEmpty() }) return false
+        val walks = proofs.flatMapTo(hashSetOf()) { it.wallWalkFloors }
+        val cells = pieces.filter { it.type in setOf(BuildingType.WALL, BuildingType.GATE) }.flatMap { it.blocks }
+        val states = cells.associate { it.position to it.after }
+        val full = setOf("minecraft:stone", "minecraft:cobblestone", "minecraft:stone_bricks", "minecraft:oak_log",
+            "minecraft:spruce_log", "minecraft:dark_oak_log")
+        cells.groupBy { key(it.position) }.values.forEach { column ->
+            val top = column.filter { it.after.substringBefore('[') in full }.maxByOrNull { it.position.y }?.position
+            if (top != null && states[top.copy(y = top.y + 1)] == "minecraft:air" &&
+                states[top.copy(y = top.y + 2)] == "minecraft:air") walks += top
+        }
+        val start = proofs.first().wallEndPorts.first().floor.first()
+        if (start !in walks) return false
+        val visited = hashSetOf(start)
+        val queue = ArrayDeque<CivPosition>().apply { addLast(start) }
+        while (queue.isNotEmpty()) {
+            val p = queue.removeFirst()
+            for ((dx, dz) in listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)) for (dy in -1..1) {
+                val next = p.copy(x = p.x + dx, y = p.y + dy, z = p.z + dz)
+                if (next in walks && visited.add(next)) queue.addLast(next)
+            }
+        }
+        return visited.size == walks.size && proofs.all { proof -> proof.wallEndPorts.all { port -> port.floor.all { it in visited } } }
+    }
 
     internal fun turnFloors(route: List<CivPosition>): Set<CivPosition> = route.windowed(3)
         .filter { (before, _, after) -> before.x != after.x && before.z != after.z }
@@ -612,6 +728,19 @@ internal object CivsSettlementLayout {
         if (next !in floor.y..floor.y + 1) return "minecraft:cobblestone"
         val facing = when { dx == 1 -> "west"; dx == -1 -> "east"; dz == 1 -> "north"; else -> "south" }
         return "minecraft:cobblestone_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]"
+    }
+
+    /** Authored search volume only; this ranks new plots and never authorizes a native mutation. */
+    private fun operatingBounds(building: CivBuilding): CivBox? {
+        if (building.type == BuildingType.FORESTER) {
+            val bounds = CivsWorksiteLayouts.site(building)?.getAsJsonObject("forester")?.getAsJsonObject("searchBounds") ?: return null
+            return CivBox(CivsWorksiteLayouts.vector(bounds["min"]), CivsWorksiteLayouts.vector(bounds["max"]))
+        }
+        if (building.type != BuildingType.QUARRY || CivsMinePlan.forBuilding(building) == null) return null
+        val positions = CivsMinePlan.sealPositions(building)
+        if (positions.isEmpty()) return null
+        return CivBox(CivPosition(positions.minOf { it.x }, positions.minOf { it.y }, positions.minOf { it.z }),
+            CivPosition(positions.maxOf { it.x }, positions.maxOf { it.y }, positions.maxOf { it.z }))
     }
 
     private fun insideCore(frame: CivSettlementFrame, p: CivPosition, inset: Int): Boolean =

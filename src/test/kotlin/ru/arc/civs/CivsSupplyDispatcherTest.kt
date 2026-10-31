@@ -303,6 +303,101 @@ class CivsSupplyDispatcherTest : FunSpec({
         }
     }
 
+    test("focused supply diagnostics expose accepted tool stock capacity shipments and target craft without recapture") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SupplyDiagnostics")))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0L })
+            var tick = 0L
+            var now = 1_000L
+            var captures = 0
+            work.drainAvailable { tick }
+            val miner = UUID(0, 900)
+            val upgrade = UUID(0, 901)
+            val base = supplyFixture()
+            val warehouse = base.stores.getValue(SUPPLY_WAREHOUSE).copy(type = BuildingType.WAREHOUSE,
+                stock = mapOf("IRON_PICKAXE" to 1L))
+            val quarry = base.stores.getValue(SUPPLY_TARGET).copy(type = BuildingType.QUARRY,
+                stock = mapOf("COBBLESTONE" to 32L), desiredStock = mapOf("IRON_PICKAXE" to 1L),
+                outputMaterial = "COBBLESTONE", capacity = CivSupplyCapacity(1, emptyMap(), outputEmptySlots = 0))
+            val sources = (0..7).map { n -> warehouse.copy(id = UUID(0, 200L + n), type = BuildingType.SMELTERY,
+                control = CivPosition(20 + n, 64, 0), outputMaterial = "IRON_INGOT") }
+            fun observed(value: CivSupplySnapshot, startedAt: Long): CivSupplySnapshot {
+                val captured = value.stores.mapValues { (id, store) -> CivSupplyCapturedStore(store.stock, store.capacity,
+                    CivSupplyStorageKey(SUPPLY_CITY, UUID(0, 2), UUID(0, 3), CivStorageMode.PHYSICAL, id,
+                        requireNotNull(store.type), BuildingPhase.ACTIVE, 1, CivBox(store.control, store.control.copy(y = 68)),
+                        store.control, mapOf(store.control to "BARREL"), emptyMap(), 1,
+                        upgrade.takeIf { id == warehouse.id }), containers = 1) }
+                return value.copy(inputKey = CivSupplyObservation(Unit, CivSupplyCaptureResult(SUPPLY_CITY, captured,
+                    startedAtMillis = startedAt, complete = true)))
+            }
+            val requests = (listOf(warehouse) + sources).map { CivSupplyRequest(it.id, "DIRT", 1, 0) } +
+                CivSupplyRequest(quarry.id, "IRON_PICKAXE", 1, 0)
+            var input = observed(base.copy(stores = (listOf(warehouse) + sources + quarry).associateBy { it.id },
+                requests = requests, couriers = base.couriers.take(1).map { it.copy(bagRoom = mapOf("IRON_PICKAXE" to 1L)) },
+                stackSizes = base.stackSizes + mapOf("IRON_PICKAXE" to 1, "DIRT" to 64)), 100)
+            val dispatcher = CivsSupplyDispatcher(tasks, work, { _, _ ->
+                captures++
+                val captured = input
+                val step: () -> CivSupplySnapshot? = { captured }
+                step
+            }, { _, _ -> true }, Executor(Runnable::run), { now })
+            fun entry(focused: Boolean = true): Map<*, *> {
+                val result = if (focused) dispatcher.debug(SUPPLY_CITY, miner, quarry.id) else dispatcher.debug(SUPPLY_CITY)
+                return (result["entries"] as List<*>).single() as Map<*, *>
+            }
+            fun pulse() { tick++; paper.performTicks(1); dispatcher.pulse() }
+            try {
+                dispatcher.request(SUPPLY_CITY)
+                entry()["acceptedStores"] shouldBe null
+                captures shouldBe 0
+                pulse()
+                val first = entry()
+                val stores = first["acceptedStores"] as Map<*, *>
+                stores["source"] shouldBe "accepted-observation-cache"
+                stores["freshNativeRead"] shouldBe false
+                stores["total"] shouldBe 10
+                stores["truncated"] shouldBe true
+                stores["ageMillis"] shouldBe 900L
+                stores["generationStale"] shouldBe false
+                val rows = stores["entries"] as List<*>
+                rows.size shouldBe 8
+                val focus = rows.first() as Map<*, *>
+                focus["building"] shouldBe quarry.id.toString()
+                focus["plainStock"] shouldBe mapOf("IRON_PICKAXE" to 0L)
+                focus["desiredStock"] shouldBe mapOf("IRON_PICKAXE" to 1L)
+                focus["capacity"] shouldBe mapOf("emptySlots" to 1, "partialRoom" to mapOf("IRON_PICKAXE" to 0L),
+                    "outputEmptySlots" to 0, "virtualRoom" to null)
+                val relay = rows.map { it as Map<*, *> }.single { it["building"] == warehouse.id.toString() }
+                relay["plainStock"] shouldBe mapOf("IRON_PICKAXE" to 1L)
+                relay["upgradingOrder"] shouldBe upgrade.toString()
+                (first["acceptedRequests"] as Map<*, *>)["total"] shouldBe 1
+                (first["assignments"] as Map<*, *>)["total"] shouldBe 1 // Physical-container cargo has no source worker ID.
+                val unfiltered = entry(false)
+                (unfiltered["acceptedRequests"] as Map<*, *>)["total"] shouldBe 10
+                val smith = sources.first().copy(type = BuildingType.BLACKSMITH, stock = emptyMap())
+                input = observed(input.copy(stores = input.stores.mapValues { (_, store) ->
+                    if (store.id == smith.id) smith else store.copy(stock = store.stock - "IRON_PICKAXE" +
+                        if (store.id == warehouse.id) mapOf("IRON_INGOT" to 3L, "STICK" to 2L) else emptyMap())
+                }, craftWorkers = listOf(CivCraftWorker(UUID(0, 902), smith.id, 0, 1, emptyMap(), false, BuildingType.BLACKSMITH))), 1_100)
+                dispatcher.request(SUPPLY_CITY)
+                now = 1_300
+                pulse()
+                val crafts = entry()["crafts"] as Map<*, *>
+                crafts["total"] shouldBe 1
+                ((crafts["entries"] as List<*>).single() as Map<*, *>)["target"] shouldBe quarry.id.toString()
+                (entry(false)["crafts"] as Map<*, *>)["total"] shouldBe 1
+                (entry()["acceptedStores"] as Map<*, *>)["ageMillis"] shouldBe 200L
+                repeat(3) { entry() }
+                captures shouldBe 2
+                entry()["requested"] shouldBe false
+                val job = dispatcher.craftJobs(SUPPLY_CITY).values.single()
+                dispatcher.releaseCraft(SUPPLY_CITY, job.workerId, job.id)
+                (entry()["acceptedStores"] as Map<*, *>)["generationStale"] shouldBe true
+                captures shouldBe 2
+            } finally { dispatcher.close(); work.close(); tasks.close() }
+        }
+    }
+
     test("the forty-ninth city is admitted when an earlier job completes rather than held by cached plans") {
         MockBukkitTestRuntime.open().use { paper ->
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SupplyAdmission")))

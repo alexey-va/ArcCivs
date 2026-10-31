@@ -156,7 +156,10 @@ internal class CivsAutonomousDevelopment(
             developmentFinished(city.id)
             return
         }
-        if (adopted == null && existing == null && now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
+        val extendPlan = adopted != null && existing == null && !infrastructure &&
+            CivsSettlementPlans.next(city, goal.type) == null && CivsSettlementPlans.needsExtension(city)
+        if (extendPlan && now() < (autonomyPlanRetryAt[city.id] ?: 0L)) return
+        if ((adopted == null || extendPlan) && existing == null && now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
             val request = UUID.randomUUID()
             val key = civsPlanBoardLayoutKey(city)
             autonomyRequests[city.id] = request
@@ -170,7 +173,8 @@ internal class CivsAutonomousDevelopment(
                         setOf("world-busy", "chunks-unloaded", "stale-development")) 30_000 else 300_000
                     autonomyFailed(city.id, goal, failure)
                 } else mutateWhenAvailable(city.id) { current ->
-                    rejectIf(autonomyRequests[city.id] != request || civsPlanBoardLayoutKey(current) != key,
+                    rejectIf(autonomyRequests[city.id] != request || civsPlanBoardLayoutKey(current) != key ||
+                        current.construction != null || current.constructionQueue.orEmpty().isNotEmpty(),
                         "stale-development")
                     CivsRules.validate(current.copy(revision = current.revision + 1,
                         autonomy = requireNotNull(current.autonomy).copy(layoutHalfWidth = requireNotNull(plan).halfWidth,
@@ -272,6 +276,8 @@ internal class CivsAutonomousDevelopment(
         if (city.autonomy?.paused != false || city.construction != null || city.constructionQueue.orEmpty().isNotEmpty() ||
             city.id in autonomyRequests || city.id in busy || city.id in unhealthy ||
             city.buildings.count { it.type == BuildingType.DECORATION } >= CivsRules.decorationLimit(city) ||
+            city.buildings.count { it.type == BuildingType.DECORATION &&
+                !it.schematicId.startsWith("civs/fortifications/v1/") } >= CivsRules.MAX_AUTONOMOUS_SCENERY ||
             CivsAutonomy.nextGoal(city, blueprints::maximumLevel) != null) return
         val choices = blueprints.smallDecorations(city.style).filter { choice -> city.buildings.none { it.schematicId == choice.id } }
         if (choices.isEmpty()) return

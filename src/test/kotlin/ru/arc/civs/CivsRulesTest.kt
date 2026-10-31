@@ -30,7 +30,7 @@ class CivsRulesTest : FunSpec({
         CivsRules.beds(built) shouldBe CivsRules.beds(city)
         CivsRules.validate(Gson().fromJson(Gson().toJson(built), Settlement::class.java)) shouldBe built
         CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java)) shouldBe city
-        val full = city.copy(buildings = city.buildings + (1..15).map {
+        val full = city.copy(buildings = city.buildings + (1 until CivsRules.MAX_BUILDINGS).map {
             building(200 + it, BuildingType.PLAN_BOARD, x = (it % 5) * 6 + 10, z = (it / 5) * 6,
                 phase = BuildingPhase.ACTIVE)
         })
@@ -336,7 +336,7 @@ class CivsRulesTest : FunSpec({
         rejects("population-natural") { CivsRules.recruit(city, owner, uuid(104), "Fifth") }
         city = fund(city, CivsRules.cost(BuildingType.TOWN_HALL, 2))
         city = construct(city, city.building(hallId)!!.copy(level = 2, schematicId = "hall-2"))
-        CivsRules.populationLimit(city) shouldBe 8
+        CivsRules.populationLimit(city) shouldBe 12
         CivsRules.beds(city) shouldBe 5
         val house = building(6, BuildingType.HOUSE, x = 50)
         city = fund(city, CivsRules.cost(house.type, 1))
@@ -346,7 +346,7 @@ class CivsRulesTest : FunSpec({
         city.stock shouldBe beforeArrival
         city = fund(city, CivsRules.cost(BuildingType.TOWN_HALL, 3))
         city = construct(city, city.building(hallId)!!.copy(level = 3, schematicId = "hall-3"))
-        CivsRules.populationLimit(city) shouldBe 12
+        CivsRules.populationLimit(city) shouldBe 24
         for (buildingId in listOf(2, 3, 4, 5, 6)) {
             for (level in 2..3) {
                 val upgrade = city.building(uuid(buildingId))!!.copy(level = level, schematicId = "building-$buildingId-$level")
@@ -372,6 +372,14 @@ class CivsRulesTest : FunSpec({
             val upgrade = city.building(secondHouse.id)!!.copy(level = level, schematicId = "house-$level")
             city = construct(fund(city, CivsRules.cost(upgrade.type, level)), upgrade)
         }
+        for (index in 0..2) {
+            val home = building(8 + index, BuildingType.HOUSE, x = -30 + index * 12, z = 20)
+            city = construct(fund(city, CivsRules.cost(home.type, 1)), home)
+            for (level in 2..3) {
+                val upgrade = city.building(home.id)!!.copy(level = level)
+                city = construct(fund(city, CivsRules.cost(upgrade.type, level)), upgrade)
+            }
+        }
         var nextResident = 105
         fun activeMinute() {
             city = CivsPopulation.advance(city, city.workers.mapTo(hashSetOf()) { it.id }, { _, id, _ -> "Resident ${id.leastSignificantBits}" },
@@ -380,14 +388,14 @@ class CivsRulesTest : FunSpec({
         // The nursery stays visible throughout the longer childhood; it cannot fill
         // the adult workforce during the former eighty-minute growth window.
         repeat(CivsPopulation.BIRTH_MINUTES * 4 + 1) { activeMinute() }
-        city.workers.size shouldBe 7
-        city.workers.count(CivsResidents::isChild) shouldBe 2
+        city.workers.size shouldBe 9
+        city.workers.count(CivsResidents::isChild) shouldBe 4
         repeat(CivsPopulation.ADULT_MINUTES * 5) { activeMinute() }
-        city.workers.count { !CivsResidents.isChild(it) } shouldBe 12
-        city.workers.count(CivsResidents::isChild) shouldBe 2
+        city.workers.count { !CivsResidents.isChild(it) } shouldBe 24
+        city.workers.count(CivsResidents::isChild) shouldBe 4
         city.workers.size shouldBe CivsRules.residentLimit(city)
-        CivsRules.immigrate(city, owner, uuid(112), "Thirteenth", 1_000_000) shouldBe city
-        rejects("population-natural") { CivsRules.recruit(city, owner, uuid(112), "Thirteenth") }
+        CivsRules.immigrate(city, owner, uuid(200), "Twenty ninth", 1_000_000) shouldBe city
+        rejects("population-natural") { CivsRules.recruit(city, owner, uuid(200), "Twenty ninth") }
         city = CivsRules.assign(city, owner, uuid(104), uuid(3), 1_000)
         city = CivsRules.assign(city, owner, uuid(105), uuid(3), 1_000)
         rejects("workplace-full") { CivsRules.assign(city, owner, uuid(106), uuid(3), 1_000) }
@@ -410,9 +418,11 @@ class CivsRulesTest : FunSpec({
         rejects("construction-busy") { CivsRules.reserveBuild(reserved, owner, farm, orderFor(farm)) }
         rejects("invalid-assignment") { CivsRules.assign(reserved, owner, uuid(102), house.id, 1_000) }
         rejects("invalid-construction") { CivsRules.reserveBuild(reserved, owner, house.copy(schematicId = "changed"), houseOrder) }
-        val capped = city.copy(buildings = city.buildings + (4..17).map { building(it, BuildingType.HOUSE, x = (it - 3) * 5, z = 20, phase = BuildingPhase.ACTIVE) })
+        val capped = city.copy(buildings = city.buildings + (4..CivsRules.MAX_BUILDINGS + 1).map {
+            building(it, BuildingType.HOUSE, x = 10 + (it - 4) % 10 * 7, z = 20 + (it - 4) / 10 * 7, phase = BuildingPhase.ACTIVE)
+        })
         CivsRules.validate(capped)
-        val excess = building(30, BuildingType.FARM, x = 30, z = 40)
+        val excess = building(50, BuildingType.FARM, x = 30, z = 60)
         rejects("building-limit") { CivsRules.reserveBuild(capped, owner, excess, orderFor(excess)) }
     }
 
@@ -460,23 +470,24 @@ class CivsRulesTest : FunSpec({
         var city = activeCity().let { base -> base.copy(buildings = base.buildings +
             building(3, BuildingType.FORESTER, x = 10, phase = BuildingPhase.ACTIVE) +
             building(4, BuildingType.QUARRY, x = 20, phase = BuildingPhase.ACTIVE) +
-            (10..20).map { building(it, BuildingType.HOUSE, x = (it - 9) * 5, z = 20, phase = BuildingPhase.ACTIVE) }) }
+            (10 until 10 + CivsRules.MAX_BUILDINGS - 5).map { building(it, BuildingType.HOUSE,
+                x = 10 + (it - 10) % 10 * 5, z = 20 + (it - 10) / 10 * 6, phase = BuildingPhase.ACTIVE) }) }
         CivsRules.validate(city)
-        city.buildings.size shouldBe 14
-        val duplicateHouse = building(30, BuildingType.HOUSE, x = 70, z = 20)
+        city.buildings.size shouldBe CivsRules.MAX_BUILDINGS - 2
+        val duplicateHouse = building(60, BuildingType.HOUSE, x = 70, z = 20)
         rejects("resources.bootstrap-slots") { CivsRules.reserveBuild(city, owner, duplicateHouse, orderFor(duplicateHouse)) }
-        city = construct(city, building(31, BuildingType.WAREHOUSE, x = 70, z = 40))
-        city.buildings.size shouldBe 15
+        city = construct(city, building(61, BuildingType.WAREHOUSE, x = 70, z = 40))
+        city.buildings.size shouldBe CivsRules.MAX_BUILDINGS - 1
         rejects("resources.bootstrap-slots") { CivsRules.reserveBuild(city, owner, duplicateHouse, orderFor(duplicateHouse)) }
-        city = construct(city, building(32, BuildingType.FARM, x = 70, z = 60))
-        city.buildings.size shouldBe 16
+        city = construct(city, building(62, BuildingType.FARM, x = 70, z = 60))
+        city.buildings.size shouldBe CivsRules.MAX_BUILDINGS
         rejects("building-limit") { CivsRules.reserveBuild(city, owner, duplicateHouse, orderFor(duplicateHouse)) }
         city = CivsRules.assign(city, owner, uuid(101), uuid(3), 1_000)
         city = CivsRules.assign(city, owner, uuid(102), uuid(4), 1_000)
         city = construct(fund(city, CivsRules.cost(BuildingType.TOWN_HALL, 2)), city.building(hallId)!!.copy(level = 2))
         val houseUpgrade = city.building(uuid(10))!!.copy(level = 2)
         city = construct(fund(city, CivsRules.cost(houseUpgrade.type, 2)), houseUpgrade)
-        city.buildings.size shouldBe 16
+        city.buildings.size shouldBe CivsRules.MAX_BUILDINGS
         city.building(uuid(10))!!.level shouldBe 2
     }
 

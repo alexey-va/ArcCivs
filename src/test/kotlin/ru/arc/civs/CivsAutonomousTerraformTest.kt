@@ -13,6 +13,97 @@ import org.bukkit.Bukkit
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a new north branch beyond remote preferred roads fits the unchanged search budget") {
+        val original = terraceCity()
+        val east = original.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
+            anchor = CivPosition(80, 64, 0), entrance = CivPosition(80, 65, 0), rotation = 90,
+            bounds = CivBox(CivPosition(81, 64, -5), CivPosition(96, 74, 9)), control = null)
+        val south = east.copy(id = UUID.randomUUID(), type = BuildingType.QUARRY,
+            anchor = CivPosition(0, 64, 80), entrance = CivPosition(0, 65, 80), rotation = 180,
+            bounds = CivBox(CivPosition(-10, 58, 81), CivPosition(10, 81, 102)))
+        val sides = listOf(-11, 11).map { x -> east.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+            anchor = CivPosition(x, 64, -4), entrance = CivPosition(x, 65, -4), rotation = 0,
+            bounds = CivBox(CivPosition(x - 4, 64, -13), CivPosition(x + 4, 76, -5))) }
+        val city = original.copy(radius = 128, buildings = original.buildings + east + south + sides)
+        val routes = mapOf(east.id to (0..80).map { CivPosition(it, 65, 0) },
+            south.id to (0..80).map { CivPosition(0, 65, it) })
+        val access = CivAutonomousAccess(routes)
+        val building = east.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+            anchor = CivPosition(0, 64, -80), entrance = CivPosition(0, 65, -80), rotation = 0,
+            bounds = CivBox(CivPosition(-4, 64, -89), CivPosition(4, 76, -81)))
+        val surface = CivTerrainSurface(-64, 320, buildMap {
+            for (x in -127..127) for (z in -127..127)
+                put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(64, true))
+        })
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface, access,
+            preferredRoads = routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }, inspectRoute = searches::add)
+        draft.route.last() shouldBe building.entrance
+        searches.single().outcome shouldBe "found"
+        (searches.single().expanded < CivsAutonomousTerraform.MAXIMUM_ROUTE_NODES) shouldBe true
+        val protected = access.standing(city, building.id)
+        draft.route.filter { civsTerrainKey(it.x, it.z) in protected }.all {
+            it == protected.getValue(civsTerrainKey(it.x, it.z))
+        } shouldBe true
+        city.buildings shouldBe original.buildings + east + south + sides
+    }
+
+    test("grading rechecks three dimensional depot reach before reserving a terrain height") {
+        val city = terraceCity().copy(radius = 128)
+        val entry = CivPosition(80, 65, 36)
+        val building = CivBuilding(UUID.randomUUID(), BuildingType.FORESTER, 1, entry.copy(y = 64), 90, "fixture",
+            CivBox(CivPosition(81, 64, 31), CivPosition(85, 72, 40)), entry, BuildingPhase.CONSTRUCTING)
+        CivsRules.workRouteWithinReach(city, building.entrance) shouldBe true
+        fun hill(ground: Int) = CivTerrainSurface(-64, 320, buildMap {
+            for (x in building.bounds.min.x..building.bounds.max.x) for (z in building.bounds.min.z..building.bounds.max.z)
+                put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(ground, true))
+        })
+        val rejected = mutableListOf<String>()
+        CivsAutonomousTerraform.options(city, listOf(CivsAutonomousCandidate(building)), hill(76),
+            rejected = { reason, _ -> rejected += reason }) shouldBe emptyList()
+        rejected shouldBe List(3) { "work-route-too-long" }
+        val choices = CivsAutonomousTerraform.options(city, listOf(CivsAutonomousCandidate(building)), hill(74))
+        choices.map { it.building.anchor.y } shouldBe listOf(70)
+        choices.all { CivsRules.workRouteWithinReach(city, it.building.entrance) } shouldBe true
+        city.buildings.size shouldBe 1
+        building.anchor.y shouldBe 64
+    }
+
+    test("a parcel four blocks from a two block higher street can use a guarded side approach") {
+        val original = terraceCity()
+        val forester = original.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
+            anchor = CivPosition(20, 66, 0), entrance = CivPosition(20, 67, 0), rotation = 90,
+            bounds = CivBox(CivPosition(21, 66, -3), CivPosition(30, 74, 3)), control = CivPosition(22, 67, 0))
+        val city = original.copy(buildings = original.buildings + forester)
+        val street = listOf(CivPosition(0, 65, 0), CivPosition(1, 65, 0), CivPosition(2, 66, 0)) +
+            (3..20).map { CivPosition(it, 67, 0) }
+        val access = CivAutonomousAccess(mapOf(forester.id to street))
+        val originalBuilding = terraceBuilder(city)
+        fun shift(p: CivPosition) = p.copy(x = p.x + 12, z = p.z - 14)
+        val building = originalBuilding.copy(anchor = shift(originalBuilding.anchor), entrance = shift(originalBuilding.entrance),
+            bounds = CivBox(shift(originalBuilding.bounds.min), shift(originalBuilding.bounds.max)),
+            control = originalBuilding.control?.let(::shift))
+        val protected = access.standing(city, building.id)
+        val surface = terraceSurface { x, z -> protected[civsTerrainKey(x, z)]?.y?.minus(1) ?: 64 }
+        val before = Gson().toJson(city to access)
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0, streetFrontage = true), surface, access,
+            preferredRoads = street.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }, inspectRoute = searches::add)
+        draft.route.last() shouldBe building.entrance
+        draft.route.zipWithNext().all { (a, b) -> abs(a.x - b.x) + abs(a.z - b.z) == 1 && abs(a.y - b.y) <= 1 } shouldBe true
+        val apron = CivsAutonomousGeometry.approach(building).mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        draft.route.filter { civsTerrainKey(it.x, it.z) in apron }.all { it.y == building.entrance.y } shouldBe true
+        draft.route.filter { civsTerrainKey(it.x, it.z) in protected }.all {
+            it == protected.getValue(civsTerrainKey(it.x, it.z))
+        } shouldBe true
+        searches.all { it.expanded <= CivsAutonomousTerraform.MAXIMUM_ROUTE_NODES } shouldBe true
+        val cells = terraceCapture(draft, surface)
+        val plan = CivsAutonomousTerraform.materialize(draft, cells)
+        plan.blocks.none { civsTerrainKey(it.position.x, it.position.z) in protected } shouldBe true
+        checkTerrace(plan, draft, cells)
+        Gson().toJson(city to access) shouldBe before
+    }
+
     test("a new hillside route reserves a flat turn between flights that walk in both directions") {
         val city = terraceCity()
         val original = terraceBuilder(city, 70)
