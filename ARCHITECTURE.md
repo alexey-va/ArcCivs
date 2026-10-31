@@ -1031,6 +1031,13 @@ For new parcels, a uniform retained road height intersecting the entrance apron
 can supply one additional terrace level alongside the three ordinary levels.
 Conflicting grades add no level; fixed placements and the existing terrain,
 cut/fill, route-reach and 64-option limits remain authoritative.
+Automatic founding validates the entire native schematic volume after the manual
+foundation journal, before complete-layout proof. The journal covers changed
+terrain and cannot authorize replacing preserved non-natural support blocks.
+A read-only terrain refusal may try one hall terrace four blocks higher with
+the same identity and horizontal position; foundation, volume and full-plan
+proofs run again. Failed final founding never retries a different height, and
+its fresh native capture remains authoritative for placement.
 When a wider core puts the ordinary exterior flank beyond the unchanged work
 reach, a closer frontage is considered under the same wall, apron and envelope
 guards. A small worksite must leave a feasible broad farm bay available.

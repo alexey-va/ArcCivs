@@ -3,6 +3,7 @@ package ru.arc.civs
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.clearAllMocks
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
@@ -26,6 +27,7 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 import java.util.logging.Logger
@@ -284,6 +286,267 @@ class CivsVillageSitesTest : FunSpec({
             s.admissions shouldBe emptyList()
             s.registry.activeLeaseCount shouldBe 0
             s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("an ownership volume refusal skips layout and founding then admits the next site with the same ordinal") {
+        villageScenario { s ->
+            val planned = mutableListOf<CivPosition>()
+            s.layout = { city -> planned += city.center; villageLayout(city) }
+            var rejected: Map<String, String>? = null
+            s.siteProof = { proof ->
+                if (s.siteProofs.size == 1) {
+                    val point = proof.building.bounds.min
+                    val details = mapOf("block" to "STONE", "x" to point.x.toString(),
+                        "y" to point.y.toString(), "z" to point.z.toString())
+                    rejected = details
+                    CompletableFuture.failedFuture(CivsRejection("lands-denied", details +
+                        mapOf("world" to proof.worldId.toString(), "world_name" to "arc_civs_test")))
+                } else CompletableFuture.completedFuture(proof.plan())
+            }
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { result.isDone }
+            s.siteProofs.size shouldBe 2
+            val (refused, accepted) = s.siteProofs
+            (refused.building.control != accepted.building.control) shouldBe true
+            refused.cityId shouldBe accepted.cityId
+            accepted.cityId shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
+            result.join().rejected["lands-denied"] shouldBe 1
+            result.join().rejectedSites.single().details shouldBe requireNotNull(rejected)
+            result.join().rejectedSites.single().point shouldBe refused.building.control
+            planned shouldBe listOf(accepted.building.control)
+            s.admissions.single().city.center shouldBe accepted.building.control
+            result.join().created.single().city shouldBe accepted.cityId
+            result.join().complete shouldBe true
+            s.cities.size shouldBe 2
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("a held volume proof cannot found and cancellation fences a late successful proof while releasing leases") {
+        villageScenario { s ->
+            var cancellations = 0
+            val held = object : CompletableFuture<CivPlacementPlan>() {
+                override fun cancel(mayInterruptIfRunning: Boolean): Boolean { cancellations++; return false }
+            }
+            val planned = mutableListOf<CivPosition>()
+            s.layout = { city -> planned += city.center; villageLayout(city) }
+            s.siteProof = { held }
+            try {
+                val result = s.subject.search(s.reference, 1, "Auto-")
+                s.until { s.siteProofs.isNotEmpty() || result.isDone }
+                s.siteProofs.size shouldBe 1
+                result.isDone shouldBe false
+                s.admissions shouldBe emptyList()
+                planned shouldBe emptyList()
+                (s.registry.activeLeaseCount > 0) shouldBe true
+                val loads = s.loads.size
+                s.subject.cancel("held-volume-proof-test")
+                s.until { result.isDone }
+                cancellations shouldBe 1
+                result.join().reason shouldBe "held-volume-proof-test"
+                result.join().created shouldBe emptyList()
+                s.registry.activeLeaseCount shouldBe 0
+                s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+                held.complete(s.siteProofs.single().plan()) shouldBe true
+                s.tick(10)
+                s.loads.size shouldBe loads
+                s.admissions shouldBe emptyList()
+                planned shouldBe emptyList()
+                s.cities shouldBe listOf(s.reference)
+                s.registry.activeLeaseCount shouldBe 0
+            } finally {
+                s.subject.cancel("volume-proof-fixture-cleanup")
+                held.completeExceptionally(CancellationException("Controlled proof fixture cleanup"))
+                s.tick(64)
+            }
+        }
+    }
+
+    test("volume proof uses the exact foundation blueprint tuple and still enters ordinary founding after success") {
+        villageScenario { s ->
+            var foundation: CivTerraformPlan? = null
+            s.foundationTerrain = { building ->
+                val point = building.bounds.min
+                CivTerraformPlan(CivBox(point, point), listOf(CivPlanBlock(point, "minecraft:air", "minecraft:dirt")),
+                    emptyList(), building.anchor.y, 0, 1).also { foundation = it }
+            }
+            val held = CompletableFuture<CivPlacementPlan>()
+            s.siteProof = { held }
+            try {
+                val result = s.subject.search(s.reference, 1, "Auto-")
+                s.until { s.siteProofs.isNotEmpty() || result.isDone }
+                s.siteProofs.size shouldBe 1
+                val proof = s.siteProofs.single()
+                proof.cityId shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
+                proof.owner shouldBe s.reference.owner
+                proof.worldId shouldBe s.reference.worldId
+                proof.previous shouldBe null
+                proof.terrain shouldBe requireNotNull(foundation)
+                s.admissions shouldBe emptyList()
+                result.isDone shouldBe false
+                val discarded = proof.plan()
+                (discarded.id != proof.building.id) shouldBe true
+                held.complete(discarded) shouldBe true
+                s.until { result.isDone }
+                val admitted = s.admissions.single()
+                admitted.city.id shouldBe proof.cityId
+                admitted.blueprint.worldId shouldBe proof.worldId
+                admitted.blueprint.building shouldBe proof.building
+                admitted.blueprint.cells shouldBe proof.cells
+                admitted.terrain shouldBe proof.terrain
+                result.join().created.single().city shouldBe admitted.city.id
+                result.join().complete shouldBe true
+                s.cities.last() shouldBe admitted.city
+                s.registry.activeLeaseCount shouldBe 0
+                s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+            } finally {
+                s.subject.cancel("volume-proof-fixture-cleanup")
+                held.completeExceptionally(CancellationException("Controlled proof fixture cleanup"))
+                s.tick(64)
+            }
+        }
+    }
+
+    test("one raised hall retries protected ore with fresh foundation exact geometry and the same founding identity") {
+        villageScenario { s ->
+            val foundations = mutableListOf<Pair<CivBuilding, CivTerraformPlan>>()
+            s.foundationTerrain = { building ->
+                val point = building.bounds.min
+                CivTerraformPlan(CivBox(point, point), listOf(CivPlanBlock(point, "minecraft:air", "minecraft:dirt")),
+                    emptyList(), building.anchor.y, 0, 1).also { foundations += building to it }
+            }
+            val prepared = mutableListOf<Pair<Settlement, CivTerrainSurface>>()
+            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
+                val city = firstArg<Settlement>()
+                prepared += city to arg<CivTerrainSurface>(2)
+                villageLayout(city)
+            }
+            var loadsAtOriginal = 0
+            var ticketsAtOriginal = 0
+            s.siteProof = { proof ->
+                if (s.siteProofs.size == 1) {
+                    loadsAtOriginal = s.loads.size
+                    ticketsAtOriginal = s.added.size
+                    proof.refusedOre()
+                } else CompletableFuture.completedFuture(proof.plan())
+            }
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { result.isDone }
+            s.siteProofs.size shouldBe 2
+            val (original, raised) = s.siteProofs
+            raised.building shouldBe CivsAutonomousGeometry.atHeight(original.building, original.building.anchor.y + 4)
+            raised.cells.map { it.position } shouldBe original.cells.map {
+                ArcSchematicPoint(it.position.x, it.position.y + 4, it.position.z)
+            }
+            raised.cells.map { it.blockData } shouldBe original.cells.map { it.blockData }
+            raised.cityId shouldBe original.cityId
+            raised.owner shouldBe original.owner
+            raised.worldId shouldBe original.worldId
+            raised.building.schematicId shouldBe original.building.schematicId
+            raised.previous shouldBe null
+            foundations.map { it.first } shouldBe listOf(original.building, raised.building)
+            original.terrain shouldBe foundations[0].second
+            raised.terrain shouldBe foundations[1].second
+            (raised.terrain != original.terrain) shouldBe true
+            s.fullCities.size shouldBe 1
+            s.loads.size shouldBe loadsAtOriginal
+            s.added.size shouldBe ticketsAtOriginal
+            val (planned, surface) = prepared.single()
+            planned.center shouldBe raised.building.control
+            surface.at(raised.building.anchor.x, raised.building.anchor.z)!!.groundY shouldBe raised.building.anchor.y
+            val admission = s.admissions.single()
+            admission.city.id shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
+            admission.city.owner shouldBe s.reference.owner
+            admission.city.style shouldBe s.fullCities.single().style
+            admission.city.center shouldBe raised.building.control
+            admission.blueprint.building shouldBe raised.building
+            admission.blueprint.cells shouldBe raised.cells
+            admission.terrain shouldBe raised.terrain
+            admission.city.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
+            result.join().complete shouldBe true
+            result.join().created.single().city shouldBe original.cityId
+            s.cities.size shouldBe 2
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("two refused hall heights stop at plus four and move to the next site without another founding identity") {
+        villageScenario { s ->
+            val planned = mutableListOf<CivPosition>()
+            s.layout = { city -> planned += city.center; villageLayout(city) }
+            s.siteProof = { proof ->
+                val original = s.siteProofs.first().building.anchor
+                if (proof.building.anchor.x == original.x && proof.building.anchor.z == original.z) proof.refusedOre()
+                else CompletableFuture.completedFuture(proof.plan())
+            }
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { result.isDone }
+            s.siteProofs.size shouldBe 3
+            val (original, raised, accepted) = s.siteProofs
+            raised.building shouldBe CivsAutonomousGeometry.atHeight(original.building, original.building.anchor.y + 4)
+            (accepted.building.anchor.x != original.building.anchor.x ||
+                accepted.building.anchor.z != original.building.anchor.z) shouldBe true
+            s.siteProofs.map { it.cityId }.distinct() shouldBe listOf(original.cityId)
+            s.siteProofs.map { it.owner }.distinct() shouldBe listOf(s.reference.owner)
+            s.siteProofs.map { it.building.schematicId }.distinct().size shouldBe 1
+            (requireNotNull(result.join().rejected["autonomy-terrain"]) >= 1) shouldBe true
+            result.join().rejectedSites.any { it.reason == "autonomy-terrain" &&
+                it.details["y"] == raised.building.bounds.min.y.toString() } shouldBe true
+            planned shouldBe listOf(accepted.building.control)
+            s.admissions.single().city.center shouldBe accepted.building.control
+            result.join().created.single().city shouldBe original.cityId
+            result.join().complete shouldBe true
+            s.cities.size shouldBe 2
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("cancellation fences a late raised hall proof without another load layout or founding") {
+        villageScenario { s ->
+            var cancellations = 0
+            val held = object : CompletableFuture<CivPlacementPlan>() {
+                override fun cancel(mayInterruptIfRunning: Boolean): Boolean { cancellations++; return false }
+            }
+            val planned = mutableListOf<CivPosition>()
+            s.layout = { city -> planned += city.center; villageLayout(city) }
+            var loadsAtOriginal = 0
+            s.siteProof = { proof ->
+                if (s.siteProofs.size == 1) { loadsAtOriginal = s.loads.size; proof.refusedOre() } else held
+            }
+            try {
+                val result = s.subject.search(s.reference, 1, "Auto-")
+                s.until { s.siteProofs.size >= 2 || result.isDone }
+                s.siteProofs.size shouldBe 2
+                val (original, raised) = s.siteProofs
+                raised.building shouldBe CivsAutonomousGeometry.atHeight(original.building, original.building.anchor.y + 4)
+                s.loads.size shouldBe loadsAtOriginal
+                s.admissions shouldBe emptyList()
+                planned shouldBe emptyList()
+                result.isDone shouldBe false
+                s.subject.cancel("raised-volume-proof-test")
+                s.until { result.isDone }
+                cancellations shouldBe 1
+                result.join().reason shouldBe "raised-volume-proof-test"
+                result.join().created shouldBe emptyList()
+                s.registry.activeLeaseCount shouldBe 0
+                s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+                held.complete(raised.plan()) shouldBe true
+                s.tick(10)
+                s.loads.size shouldBe loadsAtOriginal
+                s.siteProofs.size shouldBe 2
+                s.admissions shouldBe emptyList()
+                planned shouldBe emptyList()
+                s.cities shouldBe listOf(s.reference)
+                s.registry.activeLeaseCount shouldBe 0
+            } finally {
+                s.subject.cancel("volume-proof-fixture-cleanup")
+                held.completeExceptionally(CancellationException("Controlled proof fixture cleanup"))
+                s.tick(64)
+            }
         }
     }
 
@@ -711,14 +974,16 @@ class CivsVillageSitesTest : FunSpec({
         }
     }
 
-    test("storage rejection stops founding and a retry retains the exact requested city identity") {
+    for (reason in listOf("storage-unavailable", "autonomy-terrain"))
+    test("$reason stops final founding without a height retry and a new search retains the exact requested city identity") {
         villageScenario { s ->
-            s.founding = { CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) }
+            s.founding = { CompletableFuture.failedFuture(CivsRejection(reason)) }
             val failed = s.subject.search(s.reference, 1, "Auto-")
             s.until { failed.isDone }
-            failed.join().reason shouldBe "storage-unavailable"
+            failed.join().reason shouldBe reason
             failed.join().created shouldBe emptyList()
             val first = s.admissions.single().city
+            s.siteProofs.size shouldBe 1
             s.registry.activeLeaseCount shouldBe 0
             s.founding = { admission -> s.cities += admission.city; CompletableFuture.completedFuture(admission.city) }
             val retry = s.subject.search(s.reference, 1, "Auto-")
@@ -854,6 +1119,15 @@ private fun villageLayout(city: Settlement): CivSettlementPlan {
         listOf(CivBox(city.center.copy(x = city.center.x + 72), city.center.copy(x = city.center.x + 72))), listOf(1))
 }
 
+private data class VillageSiteProof(val cityId: UUID, val owner: UUID, val worldId: UUID,
+    val building: CivBuilding, val cells: List<ArcSchematicBlock>, val terrain: CivTerraformPlan?, val previous: CivBuilding?) {
+    fun plan() = CivPlacementPlan(UUID.randomUUID(), cityId, worldId, building,
+        listOf(CivPlanBlock(building.bounds.min, "minecraft:air", "minecraft:stone")), terrain = terrain)
+    fun refusedOre(): CompletableFuture<CivPlacementPlan> = CompletableFuture.failedFuture(CivsRejection("autonomy-terrain",
+        mapOf("block" to "COPPER_ORE", "x" to building.bounds.min.x.toString(),
+            "y" to building.bounds.min.y.toString(), "z" to building.bounds.min.z.toString())))
+}
+
 private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     private val loaded = hashSetOf<Pair<Int, Int>>()
     private val server = mockk<Server>()
@@ -882,6 +1156,8 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     val added = mutableListOf<PaperChunkKey>()
     val removed = mutableListOf<PaperChunkKey>()
     private val nativeTickets = hashSetOf<PaperChunkKey>()
+    // Admission reads only a non-null completion; the separate world/key own readiness and tickets.
+    private val immediateChunk by lazy { mockk<Chunk>() }
     var holdLoads = false
     var requireLeasedSurvey = false
     var chunksReady = true
@@ -889,6 +1165,9 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     var surveys = 0
     var retainFailure: Throwable? = null
     var foundationFailure: Throwable? = null
+    var foundationTerrain: (CivBuilding) -> CivTerraformPlan? = { null }
+    val siteProofs = mutableListOf<VillageSiteProof>()
+    var siteProof: (VillageSiteProof) -> CompletableFuture<CivPlacementPlan> = { CompletableFuture.completedFuture(it.plan()) }
     val coarseCities = mutableListOf<Settlement>()
     val fullCities = mutableListOf<Settlement>()
     var peakRequests = 0
@@ -946,7 +1225,12 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
         }
         every { access.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
             foundationFailure?.let { CompletableFuture.failedFuture<CivTerraformPlan?>(it) }
-                ?: CompletableFuture.completedFuture<CivTerraformPlan?>(null)
+                ?: CompletableFuture.completedFuture(foundationTerrain(arg(3)))
+        }
+        every { access.captureAutonomousSite(any(), any(), any(), any(), any(), any(), any()) } answers {
+            val proof = VillageSiteProof(firstArg(), arg(1), arg(2), arg(3), arg(4), arg(5), arg(6))
+            siteProofs += proof
+            siteProof(proof)
         }
         every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
             layout(firstArg())
@@ -968,7 +1252,7 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
                 loads += PaperChunkKey(target.uid, x, z) to future
                 if (!holdLoads) {
                     target.loadChunk(x, z)
-                    future.complete(mockk<Chunk>())
+                    future.complete(immediateChunk)
                 }
                 future
             }, nanoTime = { 0 }, clock = { 1_000 }, chunksReady = {
@@ -1003,5 +1287,8 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
 private fun villageScenario(action: (VillageScenario) -> Unit) = failOnUnsupportedMockBukkitOperation {
     mockkObject(CivsSettlementPlans)
     try { MockBukkitTestRuntime.open().use { paper -> VillageScenario(paper).use(action) } }
-    finally { unmockkObject(CivsSettlementPlans) }
+    finally {
+        try { unmockkObject(CivsSettlementPlans) }
+        finally { clearAllMocks(currentThreadOnly = true) }
+    }
 }

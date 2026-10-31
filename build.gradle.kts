@@ -3,7 +3,7 @@ plugins {
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.159"
+version = "0.1.160"
 description = "Persistent player settlements and working citizens for RusCrafting"
 val arcCorePluginVersion = "0.1.27"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
@@ -48,6 +48,8 @@ val requestedTestForks = providers.gradleProperty("civsTestForks").orElse("1").g
 require(requestedTestForks in 1..2) { "civsTestForks must be 1 or 2" }
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // Each submitted class starts a JVM with forkEvery=1; fixtures are not suites.
+    include("**/*Test.class")
     maxHeapSize = "2g"
     jvmArgs("-Djdk.attach.allowAttachSelf=true", "-XX:+EnableDynamicAgentLoading")
     maxParallelForks = requestedTestForks

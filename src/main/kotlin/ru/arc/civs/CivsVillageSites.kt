@@ -434,7 +434,8 @@ internal class CivsVillageSites(
         } else finish(search, "autonomy-no-site")
     }
 
-    private fun prove(search: Search, ordinal: Int, city: Settlement, surface: CivTerrainSurface) {
+    private fun prove(search: Search, ordinal: Int, city: Settlement, surface: CivTerrainSurface,
+        allowRaised: Boolean = true) {
         search.phase = "growth-area-ranking"
         await(search, CompletableFuture.supplyAsync({ CivsVillageSiteScoring.coreScore(surface, city.center) to
             surface.columns.values.count { it.loaded && it.natural && it.topY.toLong() - it.groundY >= 2 } }, executor), failed = {
@@ -446,6 +447,12 @@ internal class CivsVillageSites(
                 release(search) { full(search) }
                 return@await
             }
+            fun rejectCandidate(error: Throwable) {
+                val observed = CivsDiagnostics.rejection(error)
+                reject(search, rejection(error), score, provinceTrees,
+                    observed?.values?.get("usable-tree-columns")?.toIntOrNull(), observed?.values.orEmpty())
+                release(search) { full(search) }
+            }
             val hall = city.buildings.single()
             val prepared = if (hall.schematicId.startsWith("civs/v2/")) blueprints.prepareEntry(hall.schematicId,
                 hall.id, city.worldId, hall.anchor, hall.rotation / 90, hall.rotation)
@@ -456,36 +463,39 @@ internal class CivsVillageSites(
                 if (blueprint.worldId != city.worldId || blueprint.building.copy(phase = hall.phase) != hall)
                     throw CivsRejection("blueprint-changed")
                 await(search, world.captureManualFoundation(city.id, city.owner, city.worldId, blueprint.building,
-                    blueprint.cells, executor, autonomous = true, adminPlacement = false), failed = { error ->
-                    reject(search, rejection(error), score, provinceTrees,
-                        values = CivsDiagnostics.rejection(error)?.values.orEmpty())
-                    release(search) { full(search) }
-                }) { terrain ->
-                    search.phase = "complete-layout-proof"
-                    val templates = search.templates.getValue(ordinal)
-                    val proof = blueprints.fortification(city.style).thenApplyAsync({ fortification ->
-                        val preparedSurface = CivsVillageSiteScoring.preparedSurface(surface, blueprint.building)
-                        fun prepare(inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? = null): Pair<CivSettlementPlan, Int> {
-                            val plan = CivsSettlementPlans.prepare(city, templates, preparedSurface, CivAutonomousAccess(),
-                                fortification = fortification, inspect = inspect)
-                            if (!CivsVillageSiteScoring.completeProfile(plan)) throw CivsRejection("autonomy-no-site")
-                            val trees = CivsVillageSiteScoring.usableTreeColumns(city, plan, surface)
-                            if (trees < 8) throw CivsRejection("village-no-trees", mapOf("usable-tree-columns" to trees.toString()))
-                            return plan to trees
-                        }
-                        capture?.prove(search.id, search.reference.id, city, preparedSurface, templates) { inspect -> prepare(inspect) }
-                            ?: prepare()
-                    }, executor)
-                    await(search, proof, failed = { error ->
+                    blueprint.cells, executor, autonomous = true, adminPlacement = false), failed = ::rejectCandidate) { terrain ->
+                    search.phase = "town-hall-capture"
+                    await(search, world.captureAutonomousSite(city.id, city.owner, city.worldId,
+                        blueprint.building, blueprint.cells, terrain), failed = { error ->
                         val observed = CivsDiagnostics.rejection(error)
-                        reject(search, rejection(error), score, provinceTrees,
-                            observed?.values?.get("usable-tree-columns")?.toIntOrNull(), observed?.values.orEmpty())
-                        release(search) { full(search) }
-                    }) { (plan, trees) ->
-                        search.phase = "founding"
-                        val planned = CivsRules.validate(city.copy(autonomy = city.autonomy!!.copy(plan = plan,
-                            layoutHalfWidth = plan.halfWidth)))
-                        found(search, ordinal, planned, blueprint, terrain, score.copy(treeColumns = trees))
+                        if (allowRaised && observed?.reason == "autonomy-terrain") {
+                            reject(search, observed.reason, score, provinceTrees, values = observed.values)
+                            val raised = draft(search, ordinal, hall.anchor.copy(y = Math.addExact(hall.anchor.y, 4)))
+                            search.point = raised.center
+                            prove(search, ordinal, raised, surface, allowRaised = false)
+                        } else rejectCandidate(error)
+                    }) { _ ->
+                        search.phase = "complete-layout-proof"
+                        val templates = search.templates.getValue(ordinal)
+                        val proof = blueprints.fortification(city.style).thenApplyAsync({ fortification ->
+                            val preparedSurface = CivsVillageSiteScoring.preparedSurface(surface, blueprint.building)
+                            fun prepare(inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? = null): Pair<CivSettlementPlan, Int> {
+                                val plan = CivsSettlementPlans.prepare(city, templates, preparedSurface, CivAutonomousAccess(),
+                                    fortification = fortification, inspect = inspect)
+                                if (!CivsVillageSiteScoring.completeProfile(plan)) throw CivsRejection("autonomy-no-site")
+                                val trees = CivsVillageSiteScoring.usableTreeColumns(city, plan, surface)
+                                if (trees < 8) throw CivsRejection("village-no-trees", mapOf("usable-tree-columns" to trees.toString()))
+                                return plan to trees
+                            }
+                            capture?.prove(search.id, search.reference.id, city, preparedSurface, templates) { inspect -> prepare(inspect) }
+                                ?: prepare()
+                        }, executor)
+                        await(search, proof, failed = ::rejectCandidate) { (plan, trees) ->
+                            search.phase = "founding"
+                            val planned = CivsRules.validate(city.copy(autonomy = city.autonomy!!.copy(plan = plan,
+                                layoutHalfWidth = plan.halfWidth)))
+                            found(search, ordinal, planned, blueprint, terrain, score.copy(treeColumns = trees))
+                        }
                     }
                 }
             }
