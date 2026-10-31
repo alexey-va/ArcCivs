@@ -45,9 +45,10 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 val requestedTestForks = providers.gradleProperty("civsTestForks").orElse("1").get().toInt()
-require(requestedTestForks in 1..2) { "civsTestForks must be 1 or 2" }
+require(requestedTestForks in 1..4) { "civsTestForks must be between 1 and 4" }
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    inputs.property("civsTestForks", requestedTestForks)
     // Each submitted class starts a JVM with forkEvery=1; fixtures are not suites.
     include("**/*Test.class")
     maxHeapSize = "2g"
