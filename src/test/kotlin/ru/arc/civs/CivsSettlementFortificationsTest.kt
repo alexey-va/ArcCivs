@@ -128,9 +128,10 @@ class CivsSettlementFortificationsTest : FunSpec({
     }
 
     test("unusable bastion corners fall back to the functional plan and a retained legacy plan never gains new bastions") {
+        // Each column blocks every inset of its bastion while leaving ordinary parcels and a dry perimeter usable.
         val blocked = surface.copy(columns = surface.columns.mapValues { (key, value) ->
             val x = (key shr 32).toInt(); val z = key.toInt()
-            if (kotlin.math.abs(x) in 38..72 && kotlin.math.abs(z) in 38..72) value.copy(natural = false) else value
+            if (kotlin.math.abs(x) == 57 && kotlin.math.abs(z) == 57) value.copy(natural = false) else value
         })
         val plan = fortificationPlanDiagnostics { CivsSettlementPlans.prepare(base, templates, blocked, CivAutonomousAccess(), fortification = template,
             inspect = layoutFixtureDiagnostics("fortified-blocked", base, templates, blocked)) }

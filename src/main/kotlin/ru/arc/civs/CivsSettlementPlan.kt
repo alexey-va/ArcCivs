@@ -252,6 +252,7 @@ internal object CivsSettlementPlans {
                 if (building.type == BuildingType.WAREHOUSE && !actual && !forecast) building.copy(phase = BuildingPhase.SITE) else building
             })
             val reachable: (CivTerraformOption) -> Boolean = { !bootstrap || CivsRules.workRouteWithinReach(city, it.building.entrance) }
+            val standing = access.standing(navigable, id)
             var chosen: CivTerraformDraft? = null
             var firstAttempted: CivBuilding? = null
             for (infill in listOf(false, true)) {
@@ -259,7 +260,7 @@ internal object CivsSettlementPlans {
                 // Keep the same finite 64-option budget, after rejecting unusable native footprints.
                 // Otherwise the closest wet parcels can hide every dry plot farther from the square.
                 val eligible: (CivBuilding) -> Boolean = { candidate ->
-                    CivsAutonomousTerraform.options(navigable, listOf(CivsAutonomousCandidate(candidate)), surface,
+                    CivsAutonomousTerraform.options(navigable, listOf(CivsAutonomousCandidate(candidate)), surface, standing = standing,
                         rejected = { reason, at ->
                             rejected.merge("${stage}_filter_$reason", 1, Int::plus)
                             if (samples.size < 4) samples += "$stage:$reason:${at.x},${at.y},${at.z}"
@@ -268,7 +269,7 @@ internal object CivsSettlementPlans {
                 val candidates = if (infill) CivsSettlementLayout.infill(projected, current, future, access, frame, eligible)
                     else CivsSettlementLayout.candidates(projected, current, future, access, frame, eligible)
                 stages["${stage}_candidates"] = candidates.size.toString()
-                val options = CivsAutonomousTerraform.options(navigable, candidates, surface, rejected = { reason, at ->
+                val options = CivsAutonomousTerraform.options(navigable, candidates, surface, standing = standing, rejected = { reason, at ->
                     rejected.merge(reason, 1, Int::plus)
                     rejected.merge("${stage}_footprint_$reason", 1, Int::plus)
                     if (samples.size < 4) samples += "$stage:$reason:${at.x},${at.y},${at.z}"

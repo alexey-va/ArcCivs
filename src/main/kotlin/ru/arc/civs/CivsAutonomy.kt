@@ -222,20 +222,21 @@ object CivsAutonomy {
         // A staffed tavern returns its keeper before builder recovery borrows the last raw producer.
         val urgent = builder ?: hungryFarm
         val returningTavernkeeper = builder != null && city.buildings.any { CivsRules.staffedTavern(city, it) }
-        val industry = CivsIndustry.desiredBuilding(city)
+        val industry = CivsIndustry.desiredBuilding(city)?.takeIf(::unstaffed)
         val noIdleWorkers = city.workers.none { worker -> worker.assignment == null && !CivsResidents.isChild(worker) && worker.cargo == null }
         val missingProducer = if (!noIdleWorkers) null else listOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY).firstNotNullOfOrNull { type ->
             city.buildings.firstOrNull { it.type == type && CivsRules.productionAvailable(city, it) && unstaffed(it) }
         }
         val warehouse = city.buildings.firstOrNull { it.type == BuildingType.WAREHOUSE &&
             it.phase == BuildingPhase.ACTIVE && it.control != null && unstaffed(it) }?.takeIf {
-            city.workers.none { worker -> worker.assignment == null && !CivsResidents.isChild(worker) && worker.cargo == null }
+            // Industry recovery bypasses bulk idle assignment; keep its courier prerequisite first.
+            noIdleWorkers || industry != null
         }
         val tavern = city.buildings.firstOrNull { it.type == BuildingType.TAVERN &&
             it.phase == BuildingPhase.ACTIVE && it.control != null && unstaffed(it) }?.takeIf {
             city.workers.none { worker -> worker.assignment == null && !CivsResidents.isChild(worker) && worker.cargo == null }
         }
-        val target = urgent ?: warehouse ?: missingProducer ?: industry?.takeIf(::unstaffed) ?: tavern
+        val target = urgent ?: warehouse ?: missingProducer ?: industry ?: tavern
         target ?: return null
         val returningQuarryStaff = CivsRules.excessQuarryWorkers(city).mapTo(hashSetOf()) { it.id }
         val worker = city.workers.sortedBy { worker -> when {

@@ -210,11 +210,12 @@ class CivsResearchIndustryTest : FunSpec({
         reselected.workers.single().skills shouldBe assigned.workers.single().skills
     }
 
-    test("busy extra quarry finishes once then staffs the missing warehouse before research while sole producers remain") {
+    test("busy legacy extra quarry finishes its return then retires and staffs the missing warehouse before research while sole producers remain") {
         val base = industryCity().copy(workers = emptyList())
         fun assigned(type: BuildingType) = CivWorker(UUID.randomUUID(), type.name, base.buildings.first { it.type == type }.id, nextDeliveryAt = 1_000)
         val food = assigned(BuildingType.FARM); val wood = assigned(BuildingType.FORESTER); val stone = assigned(BuildingType.QUARRY)
         val extra = assigned(BuildingType.QUARRY)
+        // A saved level-two assignment may contain two miners; this is an accepted legacy cycle, not new staffing.
         val before = CivsRules.validate(base.copy(workers = listOf(food, wood, stone, extra)))
         before.workers.count { it.assignment == stone.assignment } shouldBe 2
         val previous = requireNotNull(citizenPlan(before, extra))
@@ -234,13 +235,28 @@ class CivsResearchIndustryTest : FunSpec({
         cycle.arrive(60_001); cycle.beginDelivery(60_001)
         val completed = CivsRules.deliver(city, city.owner, extra.id, extra.assignment!!, 0, 1_000, 60_001)
         val nextWorker = completed.workers.first { it.id == extra.id }
+        // With no staffed courier, the observed depot return settles all six earned stone before retirement.
+        completed.stock shouldBe city.stock.copy(stone = city.stock.stone + 6)
+        nextWorker.pendingStock shouldBe null
+        nextWorker.completedCycles shouldBe 1L
+        researchDenied("stale-delivery") {
+            CivsRules.deliver(completed, completed.owner, extra.id, extra.assignment, 0, 1_000, 60_002)
+        }
         val next = requireNotNull(citizenPlan(completed, nextWorker))
         citizenCurrentPlan(previous, CitizenPhase.DELIVERING) { next } shouldBe next
         next.cycle().phase shouldBe CitizenPhase.IDLE
         next.autonomousWork shouldBe null
-        val reassigned = CivsRules.autoAssign(completed, completed.owner, 60_002) { it == extra.id }
+        CivsRules.autoAssign(completed, completed.owner, 60_002) { it == extra.id } shouldBe completed
+        CivsRules.reconcileQuarryStaffing(completed, 60_002) { false } shouldBe completed
+        val retired = CivsRules.reconcileQuarryStaffing(completed, 60_002) { it == extra.id }
+        retired.workers.first { it.id == extra.id } shouldBe nextWorker.copy(assignment = null,
+            nextDeliveryAt = nextWorker.nextDeliveryAt + 1)
+        retired.stock shouldBe completed.stock
+        listOf(food, wood, stone).forEach { expected -> retired.workers.first { it.id == expected.id } shouldBe expected }
+        val reassigned = CivsRules.autoAssign(retired, retired.owner, 60_003) { it == extra.id }
         reassigned.workers.first { it.id == extra.id }.assignment shouldBe reassigned.buildings.first { it.type == BuildingType.WAREHOUSE }.id
         reassigned.workers.first { it.id == extra.id }.completedCycles shouldBe 1L
+        reassigned.stock shouldBe completed.stock
         listOf(food, wood, stone).forEach { expected -> reassigned.workers.first { it.id == expected.id }.assignment shouldBe expected.assignment }
         listOf(food, wood, stone).forEach { CivsAutonomy.waitingReassignment(reassigned, it) shouldBe false }
         val paused = deferred.copy(idleReason = "autonomy-paused")

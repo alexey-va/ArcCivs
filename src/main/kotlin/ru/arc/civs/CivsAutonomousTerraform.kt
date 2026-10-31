@@ -85,7 +85,8 @@ internal object CivsAutonomousTerraform {
 
     /** A median terrace minimises excavation; nearby levels allow a less costly graded connection. */
     fun options(city: Settlement, candidates: List<CivsAutonomousCandidate>, surface: CivTerrainSurface,
-        fixed: Boolean = false, rejected: (String, CivPosition) -> Unit = { _, _ -> }): List<CivTerraformOption> = candidates.flatMap { candidate ->
+        fixed: Boolean = false, standing: Map<Long, CivPosition> = emptyMap(),
+        rejected: (String, CivPosition) -> Unit = { _, _ -> }): List<CivTerraformOption> = candidates.flatMap { candidate ->
         val b = candidate.building
         val heights = ArrayList<Int>()
         for (x in b.bounds.min.x..b.bounds.max.x) for (z in b.bounds.min.z..b.bounds.max.z) {
@@ -104,7 +105,10 @@ internal object CivsAutonomousTerraform {
         if (heights.isEmpty()) return@flatMap emptyList()
         heights.sort()
         val median = heights[heights.size / 2]
-        val levels = if (fixed) listOf(b.anchor.y) else listOf(median, median - 4, median + 4).distinct()
+        val retainedFeet = if (fixed || standing.isEmpty()) null else CivsAutonomousGeometry.approach(b)
+            .mapNotNull { standing[civsTerrainKey(it.x, it.z)]?.y }.distinct().singleOrNull()
+        val levels = if (fixed) listOf(b.anchor.y) else (listOf(median, median - 4, median + 4) +
+            listOfNotNull(retainedFeet?.let { it - (b.entrance.y - b.anchor.y) })).distinct()
         levels.mapNotNull { y ->
             val building = CivsAutonomousGeometry.atHeight(b, y)
             if (heights.any { abs(it - y) > MAXIMUM_CHANGE }) {

@@ -37,7 +37,7 @@ The maximum profile contains 34 ordinary buildings: 16 houses, two foresters,
 two quarries, three farms, two warehouses and the remaining civic/industry types.
 Town hall adult limits are 5/12/24; four nursery places at the highest level
 still require real beds. New founding defaults to radius 128 and an unaccepted
-layout may use a 72-block half-width. Saved territory, adopted parcels, captured
+layout may use a 74-block half-width. Saved territory, adopted parcels, captured
 work and paid infrastructure keep their geometry. A failed bounded extension
 does not invalidate the older town or prevent a legal existing upgrade.
 
@@ -1012,8 +1012,9 @@ Its gates coincide with real exterior-road
 crossings. The result is packed into the existing wall/gate rectangles; water,
 occupied footprints and unsafe grades are not made buildable. An accepted legacy
 infrastructure frame remains pinned. Adoption requires a complete perimeter, no
-rejected infrastructure pieces and
-at most 96 infrastructure pieces alongside the existing 16 ordinary sites.
+rejected infrastructure pieces and at most 192 infrastructure pieces alongside
+the 34 ordinary sites. The unchanged city codec also admits a measured native
+171-piece plan and a padded 192-piece mature town with 28 residents.
 
 New civic plots first face straight segments of retained streets inside the core,
 with the entire upgrade envelope and three-block street corridor reserved. The
@@ -1026,6 +1027,10 @@ infill faces a nearby real street when one is available. Resource workplaces sta
 outside the core. Accepted buildings, routes and adopted plans never move as a
 side effect of this preference; an old city with no adopted plan has no full-plan
 infrastructure bill.
+For new parcels, a uniform retained road height intersecting the entrance apron
+can supply one additional terrace level alongside the three ordinary levels.
+Conflicting grades add no level; fixed placements and the existing terrain,
+cut/fill, route-reach and 64-option limits remain authoritative.
 When a wider core puts the ordinary exterior flank beyond the unchanged work
 reach, a closer frontage is considered under the same wall, apron and envelope
 guards. A small worksite must leave a feasible broad farm bay available.

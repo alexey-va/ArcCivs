@@ -219,16 +219,31 @@ private fun storageApproachFixture(h: ResidentRuntime, cached: Boolean, neighbou
     for (x in -1..2) for (z in -2..1) h.world.loadChunk(x, z)
     val quarry = h.assignQuarry().copy(level = 2)
     val control = requireNotNull(quarry.control)
+    // A world-work search holds its resident in place; unassigned residents legitimately wander and turn.
+    // Give every blocker its own legal farm outside the captured barrel and route geometry.
+    val neighbourFarms = List(neighbours) { index ->
+        val at = control.copy(x = control.x + 20, z = control.z + index * 8)
+        CivBuilding(UUID(145, 150 + index.toLong()), BuildingType.FARM, 1, at, 0, "farm1",
+            CivBox(at.copy(x = at.x - 2, y = at.y - 1, z = at.z - 2), at.copy(x = at.x + 2, y = at.y + 4, z = at.z + 2)),
+            at, BuildingPhase.ACTIVE, control = at, production = "WHEAT")
+    }
+    neighbourFarms.forEach { farm ->
+        val chunks = CitizenChunks.between(farm.anchor.x, farm.anchor.z, farm.anchor.x, farm.anchor.z)
+        for (x in chunks.minX..chunks.maxX) for (z in chunks.minZ..chunks.maxZ) h.world.loadChunk(x, z)
+        chunks.ready(h.world) shouldBe true
+        h.world.getBlockAt(farm.anchor.x, farm.anchor.y, farm.anchor.z).type = Material.BARREL
+    }
     // Translate the observed 679/150 pair to the fixture barrel. Rotate the uncached case to its first (+X) side.
     fun point(x: Double, z: Double) = if (cached) Location(h.world, control.x + x, 64.0, control.z + z)
         else Location(h.world, control.x + 1 - z, 64.0, control.z + x)
     val preferred = if (cached) control.copy(z = control.z - 1) else control.copy(x = control.x + 1)
     h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
         if (it.id == quarry.id) quarry else if (it.type == BuildingType.TOWN_HALL) it.copy(level = 2) else it
-    }, workers = h.city.workers.map { it.copy(completedCycles = 10_234,
+    } + neighbourFarms, workers = h.city.workers.map { it.copy(completedCycles = 10_234,
         items = List(CivsEquipment.SLOTS) { null }) } + (0 until neighbours).map { index ->
-        CivWorker(UUID(144, 150 + index.toLong()), "Storage neighbour", if (neighbours == 1) quarry.id else null, nextDeliveryAt = 1)
+        CivWorker(UUID(144, 150 + index.toLong()), "Storage neighbour", neighbourFarms[index].id, nextDeliveryAt = 1)
     }))
+    h.city.workers.count { it.assignment == quarry.id } shouldBe 1
     val worker = h.city.workers.first { it.id == h.workerId }
     val equipment = CivsEquipment.slots(worker).toMutableList().also { it[4] = CivResidentItem("IRON_PICKAXE", 1) }
     val work = CivWorldWork(worker.id, worker.completedCycles, quarry.id, preferred, emptyList(),
@@ -243,12 +258,20 @@ private fun storageApproachFixture(h: ResidentRuntime, cached: Boolean, neighbou
         if (h.owner.activeCount() == h.city.workers.size) break
     }
     val actors = storageActors(h)
-    actors.keys shouldBe h.city.workers.mapTo(hashSetOf()) { it.id }
+    withClue(h.owner.debug(h.city.id, null)) {
+        actors.keys shouldBe h.city.workers.mapTo(hashSetOf()) { it.id }
+    }
     val actor = actors.getValue(h.workerId)
     val routes = h.owner.javaClass.getDeclaredField("routes").run { isAccessible = true; get(h.owner) as CivsCitizenRoutes }
     actors.values.forEach { routes.cancelRoute(it); it.targets.clear(); it.yieldProgress = 0.0 }
     val others = actors.values.filter { it !== actor }
     others.size shouldBe neighbours
+    others.forEach { other ->
+        other.plan.type shouldBe BuildingType.FARM
+        other.plan.idleReason shouldBe "searching-work"
+        other.plan.worldWork shouldBe null
+        other.route shouldBe null
+    }
     if (neighbours == 1) others.single().npc.teleport(point(1.0613, -.9592))
     else others.zip(listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)).forEach { (other, offset) ->
         other.npc.teleport(control.copy(x = control.x + offset.first, z = control.z + offset.second).location(h.world))

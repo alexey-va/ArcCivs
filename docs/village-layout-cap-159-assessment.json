@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "title": "ArcCivs159 bounded infrastructure admission for a complete native village",
+  "participants": [
+    1,
+    5,
+    16
+  ],
+  "assumptions": [
+    "Canonical economy inventory reviewed at ruscrafting-ops04c551cfd: active SELL remains distinct from future or SHADOW contracts; no invented conversion rate is used.",
+    "Proposed before/after infrastructure record bound160 to192; ordinary34-building profile,16houses, population24adults+4children, mine staffing1 and production6000ms remain unchanged. This is a finite capacity change, not a payout or passive earning multiplier.",
+    "Native failed witness89043ce2 at262,69,-3593 already has all34 ordinary plots and33 routes with171 infrastructure pieces:113 ROAD,52 WALL,6 GATE. Existing rules refuse the whole city at160. A record cap192 admits this existing plan without reducing road geometry or material obligations.",
+    "Piece count is not item quantity. More accepted pieces can require extra ordinary building materials through the existing builder receipt path; no free placement, inventory write, item mint or test construction grant is introduced.",
+    "One-time initial founding reserve remains96logs,96cobblestone,24bread per settlement: for the explicitly requested5 settlements480logs,480cobblestone,120bread, direct0Vault and0tokens. This is the pre-existing founding policy, not a repeating daily faucet or a new159 reward. Stableprefix/IDs reuse existing cities rather than repeatedly granting the reserve.",
+    "All direct money and player XP before/after deltas are separately0Vault,0tokens,0playerXP; no prices, tax, sale rate, reward probability, item count per work event or supply recipe changes. Item monetization and realized town adoption remain unknown.",
+    "Current SELL realization and the future SELL-to-contract transition remain separate scenarios. Construction capacity alone has no assigned monetary value in this assessment.",
+    "Admission is conditional on exact native171piece codec sizing, a maximum192piece+34ordinary+6decoration+28resident store roundtrip within existing262144byte limit, unchanged piece geometry limits, and focused planning/runtime tests. No snapshot byte cap, reach88, terrain ownership or native/chunk execution budget increase is proposed.",
+    "Legacy extra-miner retirement exposes an idle worker. Restore the existing warehouse-before-funded-research priority while retaining accepted receipt, cargo, canReassign and sole-producer guards. This corrects dispatch order, not item recipes or economic work rates."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "validation": [
+    "Exact native160 admission refusal reproduced; all171Sponge pieces independently encoded/decoded. Maxpiecevolume264, transit24; unchanged native piece budgets.",
+    "Cap192 exact native171 mature town195578bytes and padded192+6decoration+28resident town204404bytes roundtrip through Rules and CivsStore; unchanged262144byte cap.",
+    "Synthetic192piece full town persistence and literal192accepted/193refused boundary passed.",
+    "Four blocked bastion intersection columns retain the original no-bastions/full34/retainedplan oracles; no dry-perimeter search budget was increased.",
+    "Final full unit/integration tests, grade-fix witness, independent review and runtime5-village acceptance remain required."
+  ],
+  "conclusion": "Bounded infrastructure capacity can be raised160 to192 after persistence sizing passes. There is no direct currency or recurring reward-rate change; finite additional construction demand and unchanged one-time founding reserves are recorded separately."
+}

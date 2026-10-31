@@ -7,9 +7,10 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsWorkforceTest : FunSpec({
-    test("completed workplaces grow with level while an unfinished hut starts with one builder") {
+    test("scalable workplaces grow with level while fixed jobs keep one worker and an unfinished hut starts with one builder") {
         val city = workforceCity()
-        val singleWorkers = setOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.TAVERN)
+        val singleWorkers = setOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.TAVERN,
+            BuildingType.QUARRY)
         for (type in BuildingType.entries.filterNot { it.isResidence || it.isInfrastructure ||
                 it == BuildingType.GUARD_TOWER || it == BuildingType.PLAN_BOARD || it == BuildingType.DECORATION || it in singleWorkers }) {
             for (level in 1..3) {

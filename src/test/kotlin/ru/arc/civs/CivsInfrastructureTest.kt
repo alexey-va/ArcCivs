@@ -13,31 +13,31 @@ import java.util.concurrent.Executor
 import java.util.zip.GZIPInputStream
 
 class CivsInfrastructureTest : FunSpec({
-    test("the measured infrastructure bound admits piece 160 preserves retained walls and refuses piece 161") {
+    test("the measured infrastructure bound admits piece 192 preserves retained walls and refuses piece 193") {
         val base = settlementPlanCity().copy(radius = 128, research = CivResearchState(CivResearchId.entries.toSet()))
         fun wall(index: Int): CivBuilding {
             val point = CivPosition(index % 16 * 4 - 30, 64, index / 16 * 4 + 24)
             return CivBuilding(UUID(141, index.toLong()), BuildingType.WALL, 1, point, 0, "fixture/wall/$index",
                 CivBox(point, point.copy(y = 67)), point.copy(y = 65, z = point.z - 1), BuildingPhase.ACTIVE)
         }
-        for (oldCount in listOf(96, 128)) {
+        for (oldCount in listOf(96, 128, 160)) {
             val old = base.copy(buildings = base.buildings + (0 until oldCount).map(::wall))
             CivsRules.validate(Gson().fromJson(Gson().toJson(old), Settlement::class.java)) shouldBe old
         }
-        val before = base.copy(buildings = base.buildings + (0 until 159).map(::wall))
+        val before = base.copy(buildings = base.buildings + (0 until 191).map(::wall))
         CivsRules.validate(before) shouldBe before
-        val admitted = CivsRules.placeSite(before, before.owner, wall(159))
-        admitted.buildings.count { it.type.isInfrastructure } shouldBe 160
+        val admitted = CivsRules.placeSite(before, before.owner, wall(191))
+        admitted.buildings.count { it.type.isInfrastructure } shouldBe 192
         admitted.buildings.take(before.buildings.size) shouldBe before.buildings
         admitted.workers shouldBe before.workers
         admitted.stock shouldBe before.stock
         CivsRules.buildingCount(admitted) shouldBe 1
         CivsRules.validate(admitted) shouldBe admitted
-        shouldThrow<CivsRejection> { CivsRules.placeSite(admitted, admitted.owner, wall(160)) }.reason shouldBe "building-limit"
+        shouldThrow<CivsRejection> { CivsRules.placeSite(admitted, admitted.owner, wall(192)) }.reason shouldBe "building-limit"
         CivsSettlementLayout.MAXIMUM_PIECES shouldBe CivsRules.MAX_INFRASTRUCTURE
     }
 
-    test("a complete planned town with 160 infrastructure pieces and 28 residents roundtrips within the existing city codec") {
+    test("a complete planned town with 192 infrastructure pieces and 28 residents roundtrips within the existing city codec") {
         val base = settlementPlanCity().copy(radius = 128)
         var captured: CivSettlementInfrastructure? = null
         val plan = CivsSettlementPlans.prepare(base, settlementPlanTemplates(), settlementPlanSurface(base.copy(radius = 127)),
@@ -49,7 +49,7 @@ class CivsInfrastructureTest : FunSpec({
         val ordinary = plan.plots.map { plot -> plot.building.copy(phase = BuildingPhase.ACTIVE,
             bounds = plot.envelope, level = if (plot.building.type == BuildingType.TOWN_HALL) 3 else plot.building.level) }
         val existing = ordinary + infrastructure.pieces.map { CivsInfrastructure.building(it).copy(phase = BuildingPhase.ACTIVE) }
-        val missingInfrastructure = 160 - infrastructure.pieces.size
+        val missingInfrastructure = 192 - infrastructure.pieces.size
         (missingInfrastructure >= 0) shouldBe true
         val reach = base.copy(buildings = existing)
         // Flat free columns represent additional paid pieces without overlapping the complete generated town.
@@ -86,7 +86,7 @@ class CivsInfrastructureTest : FunSpec({
         val city = CivsRules.validate(base.copy(buildings = buildings, workers = adults + children, families = families,
             inventory = CivInventory(CivStorageMode.PHYSICAL),
             autonomy = base.autonomy!!.copy(plan = plan, layoutHalfWidth = plan.halfWidth)))
-        city.buildings.count { it.type.isInfrastructure } shouldBe 160
+        city.buildings.count { it.type.isInfrastructure } shouldBe 192
         city.buildings.count { it.type == BuildingType.DECORATION } shouldBe CivsRules.MAX_AUTONOMOUS_DECORATIONS
         CivsRules.buildingCount(city) shouldBe 34
         city.workers.size shouldBe CivsRules.MAX_RESIDENTS
@@ -98,7 +98,7 @@ class CivsInfrastructureTest : FunSpec({
             val bytes = Files.size(root.resolve("cities/${city.id}.json"))
             (bytes in 1..CivsStore.MAX_CITY_BYTES) shouldBe true
             println("ARCCIVS_INFRASTRUCTURE_CAP_BYTES bytes=$bytes limit=${CivsStore.MAX_CITY_BYTES} " +
-                "ordinary=34 infrastructure=160 decorations=${CivsRules.MAX_AUTONOMOUS_DECORATIONS} residents=${city.workers.size}")
+                "ordinary=34 infrastructure=192 decorations=${CivsRules.MAX_AUTONOMOUS_DECORATIONS} residents=${city.workers.size}")
             CivsStore(root, direct).use { store -> store.load().join() shouldBe listOf(city) }
         } finally {
             root.toFile().deleteRecursively()
