@@ -21,6 +21,69 @@ import java.util.concurrent.CompletableFuture
 import java.net.URLClassLoader
 
 class CivsChunkPermissionsTest : FunSpec({
+    test("handoff distinguishes initial and expired hydration from observed denial and provider failure without new reads") {
+        val owner = UUID.randomUUID()
+        var now = 1L
+        val reads = mutableListOf<CompletableFuture<Boolean>>()
+        val permissions = CivsChunkPermissions({ true }, { _, _ -> CompletableFuture<Boolean>().also(reads::add) }, { now })
+        val subjects = listOf(owner to "vanilla")
+        permissions.handoffFailure(owner, "vanilla") shouldBe null
+        permissions.pulse(subjects)
+        permissions.allowed(owner, "vanilla") shouldBe false
+        repeat(3) { permissions.handoffFailure(owner, "vanilla") shouldBe null }
+        reads.size shouldBe 1
+        reads[0].complete(true)
+        permissions.pulse(subjects)
+        permissions.allowed(owner, "vanilla") shouldBe true
+        now = 30_001
+        permissions.pulse(subjects)
+        permissions.allowed(owner, "vanilla") shouldBe false
+        permissions.handoffFailure(owner, "vanilla") shouldBe null
+        reads.size shouldBe 2
+        reads[1].complete(false)
+        permissions.pulse(subjects)
+        permissions.handoffFailure(owner, "vanilla") shouldBe "not-authorized"
+        now = 45_001
+        permissions.pulse(subjects)
+        reads[2].complete(true)
+        permissions.pulse(subjects)
+        permissions.handoffFailure(owner, "vanilla") shouldBe null
+        now = 60_001
+        permissions.pulse(subjects)
+        reads[3].completeExceptionally(IllegalStateException("provider unavailable"))
+        permissions.pulse(subjects)
+        permissions.allowed(owner, "vanilla") shouldBe false
+        permissions.handoffFailure(owner, "vanilla") shouldBe "chunk-permission-unavailable"
+        reads.size shouldBe 4
+        permissions.reset()
+        permissions.handoffFailure(owner, "vanilla") shouldBe null
+        permissions.close()
+    }
+
+    test("late revoked or reset permission replies cannot manufacture a handoff failure for a new pending owner") {
+        val owner = UUID.randomUUID()
+        var available = true
+        val reads = mutableListOf<CompletableFuture<Boolean>>()
+        val permissions = CivsChunkPermissions({ available }, { _, _ -> CompletableFuture<Boolean>().also(reads::add) }, { 1L })
+        val subjects = listOf(owner to "vanilla")
+        permissions.pulse(subjects)
+        permissions.reset()
+        reads[0].complete(false)
+        permissions.pulse(subjects)
+        permissions.handoffFailure(owner, "vanilla") shouldBe null
+        reads.size shouldBe 2
+        permissions.pulse(emptyList())
+        reads[1].completeExceptionally(IllegalStateException("retired request"))
+        permissions.pulse(subjects)
+        permissions.handoffFailure(owner, "vanilla") shouldBe null
+        reads.size shouldBe 3
+        available = false
+        permissions.handoffFailure(owner, "vanilla") shouldBe "chunk-permission-unavailable"
+        permissions.close()
+        reads[2].complete(false)
+        permissions.handoffFailure(owner, "vanilla") shouldBe "chunk-permission-unavailable"
+    }
+
     test("optional provider absence is safe during cache and listener method discovery") {
         val names = listOf(CivsChunkPermissions::class.java.name, CivsChunkLoading::class.java.name)
         val location = CivsChunkPermissions::class.java.protectionDomain.codeSource.location

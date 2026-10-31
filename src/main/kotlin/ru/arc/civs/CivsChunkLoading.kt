@@ -47,7 +47,7 @@ internal class CivsChunkLoading(
     private class City(val owner: UUID, val worldName: String, val area: CivsChunkArea, val chunks: Set<PaperChunkKey>) {
         var ready = false
     }
-    private data class Load(val key: PaperChunkKey, val generation: Long, val present: Boolean, val failure: Throwable?)
+    private data class Load(val key: PaperChunkKey, val generation: Long, val retained: Boolean, val failure: Throwable?)
     private var registry = registryFactory()
     private val cities = linkedMapOf<UUID, City>()
     private val wanted = linkedMapOf<PaperChunkKey, Int>()
@@ -87,6 +87,34 @@ internal class CivsChunkLoading(
     fun active(cityId: UUID): Boolean = !closed && !failed && cities[cityId]?.let {
         it.ready && permissions.allowed(it.owner, it.worldName)
     } == true
+
+    /** Distinguishes ordinary readiness hydration from a known reason to retire temporary founding leases. */
+    internal fun handoffReady(city: Settlement): Boolean {
+        check(org.bukkit.Bukkit.isPrimaryThread())
+        if (closed || failed) throw CivsRejection("chunk-loading-failed")
+        if (city.worldId in unloading) throw CivsRejection("world-unavailable")
+        val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+        permissions.handoffFailure(city.owner, world.name)?.let { throw CivsRejection(it) }
+        if (statuses[city.id] == "capacity") throw CivsRejection("chunk-capacity")
+        if (statuses[city.id] == "chunk-unavailable") throw CivsRejection("chunk-unavailable")
+        val state = cities[city.id] ?: return false
+        return state.owner == city.owner && state.area == CivsChunkArea.of(city) &&
+            state.worldName == world.name && active(city.id)
+    }
+
+    private fun loaded(key: PaperChunkKey, epoch: Long, chunk: Chunk?, error: Throwable?) {
+        val retained = runCatching {
+            check(org.bukkit.Bukkit.isPrimaryThread()) { "Settlement chunk completion must run on the primary thread" }
+            if (closed || failed || epoch != generation || pending[key] != epoch || key !in wanted ||
+                key.worldId in unloading) return@runCatching false
+            if (error != null) throw error
+            if (chunk == null || plugin.server.getWorld(key.worldId)?.isChunkLoaded(key.x, key.z) != true)
+                return@runCatching false
+            // Paper's load callback is the handoff: keep the chunk before native temporary ownership ends.
+            acquire(key)
+        }
+        if (!closed) replies += Load(key, epoch, retained.getOrDefault(false), retained.exceptionOrNull())
+    }
 
     /** Last observed lifecycle state; no readiness/world reads, provider checks or new tickets. */
     internal fun debug(cityId: UUID?, ownerIds: Set<UUID>? = null): Map<String, Any?> {
@@ -177,31 +205,30 @@ internal class CivsChunkLoading(
             if (pending[reply.key] != reply.generation) continue
             pending.remove(reply.key)
             if (reply.generation != generation || reply.key !in wanted) continue
-            if (!reply.present || reply.failure != null) {
+            acquisitions++
+            if (!reply.retained || reply.failure != null) {
                 retryAt[reply.key] = clock() + 30_000
-                cities.filterValues { reply.key in it.chunks }.keys.forEach { status(it, "chunk-unavailable") }
+                cities.filterValues { reply.key in it.chunks }.keys.forEach {
+                    if (statuses[it] != "capacity") status(it, "chunk-unavailable")
+                }
                 continue
-            }
-            if (plugin.server.getWorld(reply.key.worldId)?.isChunkLoaded(reply.key.x, reply.key.z) == true) {
-                acquisitions++
-                acquire(reply.key)
             }
         }
         retryAt.keys.retainAll(wanted.keys)
-        for (key in wanted.keys) {
+        // Two native completions can pin in the same tick. Drain that cohort before reserving more admissions.
+        if (pending.isEmpty()) for (key in wanted.keys) {
             if (acquisitions >= 2 || nanoTime() >= deadline) break
             if (key in leases || key in pending || clock() < (retryAt[key] ?: 0)) continue
             val world = plugin.server.getWorld(key.worldId) ?: continue
             if (world.isChunkLoaded(key.x, key.z)) {
                 acquisitions++
                 acquire(key)
-            } else if (pending.size < 4) {
+            } else if (pending.size < 2) {
+                acquisitions++
                 val epoch = generation
                 pending[key] = epoch
                 runCatching { load(world, key.x, key.z) }.getOrElse { CompletableFuture.failedFuture(it) }
-                    .whenComplete { chunk, error ->
-                        if (!closed) replies += Load(key, epoch, chunk != null, error)
-                    }
+                    .whenComplete { chunk, error -> loaded(key, epoch, chunk, error) }
             }
         }
         val retained = leases.keys.toList()
@@ -220,14 +247,20 @@ internal class CivsChunkLoading(
         }
     }
 
-    private fun acquire(key: PaperChunkKey) {
-        if (key in leases || registry.activeChunkCount >= maximumChunks) return
-        when (val result = registry.acquire(key)) {
-            is PaperChunkTicketAcquireResult.Acquired -> leases[key] = result.lease
+    private fun acquire(key: PaperChunkKey): Boolean {
+        if (key in leases) return true
+        if (registry.activeChunkCount >= maximumChunks) {
+            cities.filterValues { key in it.chunks }.keys.forEach { status(it, "capacity") }
+            return false
+        }
+        return when (val result = registry.acquire(key)) {
+            is PaperChunkTicketAcquireResult.Acquired -> { leases[key] = result.lease; true }
             else -> {
                 retryAt[key] = clock() + 30_000
+                cities.filterValues { key in it.chunks }.keys.forEach { status(it, "chunk-unavailable") }
                 if (result is PaperChunkTicketAcquireResult.Failed)
                     plugin.logger.log(Level.WARNING, "ArcCivs could not retain settlement chunk $key", result.failure)
+                false
             }
         }
     }

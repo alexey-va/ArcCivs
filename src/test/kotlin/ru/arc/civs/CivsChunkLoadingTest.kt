@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
@@ -9,8 +10,10 @@ import org.bukkit.Server
 import org.bukkit.World
 import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.event.world.ChunkUnloadEvent
+import org.bukkit.event.world.WorldUnloadEvent
 import org.bukkit.plugin.Plugin
 import ru.arc.paper.chunk.PaperChunkKey
+import ru.arc.paper.chunk.PaperChunkTicketAcquireResult
 import ru.arc.paper.chunk.PaperChunkTicketAddResult
 import ru.arc.paper.chunk.PaperChunkTicketBackend
 import ru.arc.paper.chunk.PaperChunkTicketRegistry
@@ -19,6 +22,235 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsChunkLoadingTest : FunSpec({
+    test("handoff waits for initial and expired permission hydration but terminates on an observed denial") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            val initial = CompletableFuture<Boolean>()
+            h.permissionRead = { initial }
+            h.cities = listOf(city)
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            h.runtime.handoffReady(city) shouldBe false
+            h.pulse()
+            h.runtime.handoffReady(city) shouldBe false
+            initial.complete(true)
+            repeat(25) { h.pulse() }
+            h.runtime.handoffReady(city) shouldBe true
+            val refresh = CompletableFuture<Boolean>()
+            h.permissionRead = { refresh }
+            h.now += 30_000
+            h.pulse()
+            h.runtime.active(city.id) shouldBe false
+            h.runtime.handoffReady(city) shouldBe false
+            refresh.complete(false)
+            h.pulse()
+            shouldThrow<CivsRejection> { h.runtime.handoffReady(city) }.reason shouldBe "not-authorized"
+            h.runtime.retainedChunks shouldBe 0
+        }
+    }
+
+    test("handoff reports observed provider failure instead of treating an ungranted initial request as denial") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            val request = CompletableFuture<Boolean>()
+            h.permissionRead = { request }
+            h.cities = listOf(city)
+            h.pulse()
+            h.runtime.handoffReady(city) shouldBe false
+            request.completeExceptionally(IllegalStateException("provider unavailable"))
+            h.pulse()
+            shouldThrow<CivsRejection> { h.runtime.handoffReady(city) }.reason shouldBe "chunk-permission-unavailable"
+            h.added shouldBe emptyList()
+        }
+    }
+
+    for (failure in listOf("async-null", "async-registry", "synchronous-registry"))
+    test("handoff terminates on an observed $failure chunk failure") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            h.cities = listOf(city)
+            if (failure == "synchronous-registry") {
+                h.loaded = true
+                h.failAcquire = CivsChunkArea.of(city).keys().first()
+            } else h.perChunkLoads = true
+            h.pulse(); h.pulse()
+            if (failure == "async-null") h.loads.values.first().complete(null)
+            else if (failure == "async-registry") {
+                val key = h.loads.keys.first()
+                h.failAcquire = key
+                h.completeLoad(key, evictUnticketed = true)
+            }
+            h.pulse()
+            shouldThrow<CivsRejection> { h.runtime.handoffReady(city) }.reason shouldBe "chunk-unavailable"
+            h.runtime.active(city.id) shouldBe false
+        }
+    }
+
+    for (failure in listOf("capacity", "close", "failed", "world-unload"))
+    test("handoff reports known $failure instead of waiting for native readiness forever") {
+        chunkRuntime(limit = 16) { h ->
+            val city = chunkCity(h.world.uid, radius = if (failure == "capacity") 96 else 1)
+            h.cities = listOf(city)
+            if (failure == "failed") h.loaded = true
+            h.pulse(); h.pulse()
+            if (failure == "close") h.runtime.close()
+            else if (failure == "failed") {
+                h.failRelease = h.added.first()
+                h.runtime.reset()
+            }
+            else if (failure == "world-unload") {
+                val event = mockk<WorldUnloadEvent>()
+                every { event.world } returns h.world
+                h.runtime.worldUnloading(event)
+            }
+            try {
+                shouldThrow<CivsRejection> { h.runtime.handoffReady(city) }.reason shouldBe when (failure) {
+                    "capacity" -> "chunk-capacity"
+                    "close", "failed" -> "chunk-loading-failed"
+                    else -> "world-unavailable"
+                }
+            } finally { h.failRelease = null }
+        }
+    }
+
+    test("async completion pins unviewed chunks before returning and reaches ordinary ticking readiness") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            h.cities = listOf(city)
+            h.perChunkLoads = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            for (pulse in 1..40) {
+                val before = h.added.size
+                h.pulse()
+                h.completeLoads(evictUnticketed = true)
+                (h.added.size - before <= 2) shouldBe true
+                (h.loads.values.count { !it.isDone } <= 2) shouldBe true
+                if (h.runtime.active(city.id)) break
+            }
+            h.runtime.active(city.id) shouldBe true
+            h.added.size shouldBe 16
+            h.loads.size shouldBe 16
+            h.cities = emptyList()
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 0
+            h.removed.groupingBy { it }.eachCount() shouldBe h.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("permanent acquisition waits for the late member of its two-load cohort") {
+        chunkRuntime { h ->
+            h.perChunkLoads = true
+            h.recoveryChunks = listOf((0..3).mapTo(linkedSetOf()) { PaperChunkKey(h.world.uid, it, 20) })
+            h.pulse()
+            h.loads.size shouldBe 2
+            h.completeLoad(h.loads.keys.first(), evictUnticketed = true)
+            h.runtime.retainedChunks shouldBe 1
+            h.pulse()
+            h.loads.size shouldBe 2
+            h.completeLoad(h.loads.keys.last(), evictUnticketed = true)
+            h.runtime.retainedChunks shouldBe 2
+            h.pulse()
+            h.loads.size shouldBe 3
+            h.recoveryChunks = emptyList()
+            h.pulse()
+            h.completeLoads(evictUnticketed = true)
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 0
+            h.added.size shouldBe 2
+            h.removed.groupingBy { it }.eachCount() shouldBe h.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    for (stop in listOf("retire", "reset", "close", "world-unload"))
+    test("$stop releases a callback-owned permanent ticket once before its reply and rejects a stale sibling") {
+        chunkRuntime { h ->
+            h.perChunkLoads = true
+            h.recoveryChunks = listOf((0..1).mapTo(linkedSetOf()) { PaperChunkKey(h.world.uid, it, 20) })
+            h.pulse()
+            val keys = h.loads.keys.toList()
+            h.completeLoad(keys.first(), evictUnticketed = true)
+            h.runtime.retainedChunks shouldBe 1
+            when (stop) {
+                "retire" -> { h.recoveryChunks = emptyList(); h.pulse() }
+                "reset" -> { h.runtime.reset(); h.recoveryChunks = emptyList() }
+                "close" -> h.runtime.close()
+                else -> {
+                    val event = mockk<WorldUnloadEvent>()
+                    every { event.world } returns h.world
+                    h.runtime.worldUnloading(event)
+                }
+            }
+            h.completeLoad(keys.last(), evictUnticketed = true)
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 0
+            h.added shouldBe listOf(keys.first())
+            h.removed shouldBe h.added
+        }
+    }
+
+    test("an off-thread injected permanent load completion cannot acquire a ticket") {
+        chunkRuntime { h ->
+            h.perChunkLoads = true
+            val key = PaperChunkKey(h.world.uid, 2, 20)
+            h.recoveryChunks = listOf(setOf(key))
+            h.pulse()
+            h.loadedKeys += key
+            CompletableFuture.runAsync { h.loads.getValue(key).complete(h.chunk) }.join()
+            h.pulse()
+            h.added shouldBe emptyList()
+            h.runtime.retainedChunks shouldBe 0
+            h.runtime.debug(null)["pendingChunks"] shouldBe 0
+        }
+    }
+
+    test("a failed callback acquisition preserves its sibling until demand retires without retrying a grant") {
+        chunkRuntime { h ->
+            h.perChunkLoads = true
+            val keys = (0..1).mapTo(linkedSetOf()) { PaperChunkKey(h.world.uid, it, 20) }
+            h.recoveryChunks = listOf(keys)
+            h.pulse()
+            h.failAcquire = keys.last()
+            h.completeLoads(evictUnticketed = true)
+            h.runtime.retainedChunks shouldBe 1
+            h.added shouldBe listOf(keys.first())
+            h.pulse()
+            h.recoveryChunks = emptyList()
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 0
+            h.removed shouldBe h.added
+        }
+    }
+
+    test("shared temporary tickets keep the whole town while the ordinary owner acquires every lease before release") {
+        chunkRuntime(limit = 32) { h ->
+            h.perChunkLoads = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            val city = chunkCity(h.world.uid, radius = 1)
+            val keys = CivsChunkArea.of(city).keys()
+            h.loadedKeys += keys
+            val temporary = keys.map { (h.registry.acquire(it) as PaperChunkTicketAcquireResult.Acquired).lease }
+            h.registry.activeLeaseCount shouldBe 16
+            h.cities = listOf(city)
+            h.runtime.active(city.id) shouldBe false
+            repeat(25) {
+                h.pulse()
+                keys.all { h.world.isChunkLoaded(it.x, it.z) } shouldBe true
+                h.removed shouldBe emptyList()
+            }
+            h.runtime.active(city.id) shouldBe true
+            h.registry.activeLeaseCount shouldBe 32
+            temporary.forEach { it.close() }
+            h.registry.activeLeaseCount shouldBe 16
+            h.runtime.active(city.id) shouldBe true
+            h.removed shouldBe emptyList()
+            h.cities = emptyList()
+            h.pulse()
+            h.registry.activeLeaseCount shouldBe 0
+            h.removed.toSet() shouldBe keys
+            h.removed.size shouldBe 16
+        }
+    }
+
     test("city switch releases tickets while permission remains granted and can admit again") {
         chunkRuntime { h ->
             val city = chunkCity(h.world.uid, radius = 1)
@@ -106,7 +338,7 @@ class CivsChunkLoadingTest : FunSpec({
         chunkRuntime { h ->
             h.cities = listOf(chunkCity(h.world.uid, radius = 1))
             repeat(15) { h.pulse() }
-            h.loads.size shouldBe 4
+            h.loads.size shouldBe 2
             h.added shouldBe emptyList()
             h.cities = emptyList()
             h.pulse()
@@ -118,7 +350,7 @@ class CivsChunkLoadingTest : FunSpec({
             h.cities = listOf(chunkCity(h.world.uid, radius = 1))
             repeat(4) { h.pulse() }
             val old = h.loads.values.filterNot { it.isDone }
-            old.size shouldBe 4
+            old.size shouldBe 2
             h.runtime.reset()
             h.loaded = true
             old.forEach { it.complete(h.chunk) }
@@ -229,13 +461,13 @@ class CivsChunkLoadingTest : FunSpec({
         }
     }
 
-    test("receipt bundles share the global cap and existing four loads and two acquisitions per pulse") {
+    test("receipt bundles share the global cap and two loads and acquisitions per pulse") {
         chunkRuntime(limit = 6) { h ->
             val first = (0..4).mapTo(linkedSetOf()) { PaperChunkKey(h.world.uid, it, 20) }
             val second = (10..11).mapTo(linkedSetOf()) { PaperChunkKey(h.world.uid, it, 20) }
             h.recoveryChunks = listOf(first, second)
             repeat(10) { h.pulse() }
-            h.loads.size shouldBe 4
+            h.loads.size shouldBe 2
             h.runtime.debug(null)["wantedChunks"] shouldBe 5 // No partial admission of the second receipt.
             h.loaded = true
             h.level = Chunk.LoadLevel.ENTITY_TICKING
@@ -304,6 +536,7 @@ class CivsChunkLoadingTest : FunSpec({
             val waiting = h.loads.getValue(key)
             h.runtime.retainedChunks shouldBe 0
             h.recoveryChunks = emptyList()
+            h.pulse() // Withdraw accepted demand before the native callback handoff.
             h.loaded = true
             waiting.complete(h.chunk)
             h.pulse()
@@ -331,21 +564,31 @@ private class ChunkRuntime(paper: MockBukkitTestRuntime, limit: Int) {
     val chunk = mockk<Chunk>()
     var now = 100L
     var allowed = true
+    var permissionRead: (() -> CompletableFuture<Boolean>)? = null
     var loaded = false
+    var perChunkLoads = false
+    val loadedKeys = hashSetOf<PaperChunkKey>()
+    private val nativeTickets = hashSetOf<PaperChunkKey>()
     var level = Chunk.LoadLevel.TICKING
     var cities = emptyList<Settlement>()
     var recoveryChunks = emptyList<Set<PaperChunkKey>>()
     val added = mutableListOf<PaperChunkKey>()
     val removed = mutableListOf<PaperChunkKey>()
     var failRelease: PaperChunkKey? = null
+    var failAcquire: PaperChunkKey? = null
     val loads = linkedMapOf<PaperChunkKey, CompletableFuture<Chunk?>>()
     val runtime: CivsChunkLoading
+    lateinit var registry: PaperChunkTicketRegistry
+        private set
 
     init {
         val id = UUID.randomUUID()
         every { world.uid } returns id
         every { world.name } returns "vanilla"
-        every { world.isChunkLoaded(any<Int>(), any<Int>()) } answers { loaded }
+        every { world.isChunkLoaded(any<Int>(), any<Int>()) } answers {
+            val key = PaperChunkKey(id, firstArg(), arg(1))
+            if (perChunkLoads) key in loadedKeys || key in nativeTickets else loaded
+        }
         every { world.getChunkAt(any<Int>(), any<Int>(), false) } returns chunk
         every { chunk.loadLevel } answers { level }
         every { plugin.server } returns server
@@ -353,21 +596,36 @@ private class ChunkRuntime(paper: MockBukkitTestRuntime, limit: Int) {
         every { plugin.logger } returns host.logger
         every { server.getWorld(id) } returns world
         every { server.pluginManager } returns paper.server.pluginManager
-        val permissions = CivsChunkPermissions({ true }, { _, _ -> CompletableFuture.completedFuture(allowed) }, { now })
+        val permissions = CivsChunkPermissions({ true }, { _, _ ->
+            permissionRead?.invoke() ?: CompletableFuture.completedFuture(allowed)
+        }, { now })
         val backend = object : PaperChunkTicketBackend {
             override fun add(key: PaperChunkKey): PaperChunkTicketAddResult {
+                check(org.bukkit.Bukkit.isPrimaryThread())
+                check(world.isChunkLoaded(key.x, key.z))
+                check(key != failAcquire) { "Fixture ticket acquisition failure" }
                 added += key
+                nativeTickets += key
                 return PaperChunkTicketAddResult.ADDED
             }
             override fun remove(key: PaperChunkKey): Boolean {
                 removed += key
                 check(key != failRelease) { "Fixture ticket release failure" }
+                nativeTickets -= key
                 return true
             }
         }
-        runtime = CivsChunkLoading(plugin, limit, permissions, { PaperChunkTicketRegistry(backend) },
+        runtime = CivsChunkLoading(plugin, limit, permissions, { PaperChunkTicketRegistry(backend).also { registry = it } },
             { w, x, z -> CompletableFuture<Chunk?>().also { loads[PaperChunkKey(w.uid, x, z)] = it } }, { now }, { 0L })
     }
 
+    fun completeLoad(key: PaperChunkKey, evictUnticketed: Boolean) {
+        loadedKeys += key
+        loads.getValue(key).complete(chunk) shouldBe true
+        if (evictUnticketed && key !in nativeTickets) loadedKeys -= key
+    }
+    fun completeLoads(evictUnticketed: Boolean) {
+        loads.filterValues { !it.isDone }.keys.toList().forEach { completeLoad(it, evictUnticketed) }
+    }
     fun pulse() { runtime.pulse(cities, recoveryChunks) }
 }

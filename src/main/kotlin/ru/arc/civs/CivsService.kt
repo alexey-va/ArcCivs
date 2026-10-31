@@ -331,7 +331,8 @@ class CivsService(
         villageSites = CivsVillageSites(plugin, tasks, settings, blueprints, world, executor,
             cities = { cities.values.toList() }, ready = ::ready,
             checkSpace = { worldId, center -> buildingRequests.checkSettlementSpace(worldId, center) },
-            retainLoaded = chunkLoading::retainLoaded, found = buildingRequests::foundAutomatic)
+            retainLoaded = chunkLoading::retainLoaded, found = buildingRequests::foundAutomatic,
+            chunksReady = chunkLoading::handoffReady)
         storage.residentFoods = residentFoods
         storage.forestryLeafCurrentCity = { cities[it] }
         storage.relocationCurrentCity = { cities[it] }

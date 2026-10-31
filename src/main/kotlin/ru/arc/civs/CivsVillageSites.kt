@@ -150,10 +150,11 @@ internal class CivsVillageSites(
     private val load: (World, Int, Int) -> CompletableFuture<Chunk?> = { target, x, z -> target.getChunkAtAsync(x, z, true) },
     private val nanoTime: () -> Long = System::nanoTime,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val chunksReady: (Settlement) -> Boolean = { true },
 ) : AutoCloseable {
     private data class Candidate(val point: CivPosition, val score: CivVillageTerrainScore)
     private data class LoadReply(val operation: UUID, val group: UUID, val key: PaperChunkKey,
-        val present: Boolean, val failure: Throwable?)
+        val retained: Boolean, val failure: Throwable?)
     private class LoadGroup(val keys: List<PaperChunkKey>, val done: () -> Unit, val failed: (Throwable) -> Unit) {
         val id = UUID.randomUUID()
         var next = 0
@@ -183,6 +184,7 @@ internal class CivsVillageSites(
         var afterRelease: (() -> Unit)? = null
         var finishing = false
         var founding = false
+        var handoff: UUID? = null
         var stopReason: String? = null
         var unexpectedLogged = false
         var releaseFailed = false
@@ -430,7 +432,10 @@ internal class CivsVillageSites(
                 if (search.finishing) release(search) { complete(search, search.stopReason) }
                 else if (failure != null) finish(search, rejection(failure))
                 else if (!context(search)) finish(search, "not-ready")
-                else release(search) { full(search) }
+                else {
+                    search.handoff = city.id
+                    search.phase = "handing-off-chunks"
+                }
             }
         }
     }
@@ -438,6 +443,20 @@ internal class CivsVillageSites(
     private fun load(search: Search, keys: List<PaperChunkKey>, failed: (Throwable) -> Unit, done: () -> Unit) {
         check(search.group == null && search.leases.isEmpty())
         search.group = LoadGroup(keys, done, failed)
+    }
+
+    private fun loaded(search: Search, group: LoadGroup, key: PaperChunkKey, chunk: Chunk?, error: Throwable?) {
+        val failure = runCatching {
+            // Paper completes on the main thread; availability is guaranteed here, not on our next timer pulse.
+            // Own the shared lease before returning; a queued boolean cannot retain unviewed terrain.
+            check(Bukkit.isPrimaryThread()) { "Village chunk completion must run on the primary thread" }
+            if (!context(search) || search.group !== group || key !in group.pending) return
+            group.failure?.let { throw it }
+            if (error != null) throw error
+            if (chunk == null) throw CivsRejection("chunk-unavailable")
+            search.leases[key] = retainLoaded(key)
+        }.exceptionOrNull()
+        if (!closed) replies += LoadReply(search.id, group.id, key, failure == null, failure)
     }
 
     private fun pulse() {
@@ -461,6 +480,19 @@ internal class CivsVillageSites(
             return
         }
         if (!context(search)) return finish(search, "not-ready")
+        search.handoff?.let { cityId ->
+            val city = cities().firstOrNull { it.id == cityId }
+            if (city == null || city.owner != search.reference.owner || city.worldId != search.reference.worldId ||
+                city.autonomy == null || city.pendingDeletion != null || city.settings?.chunkLoading == false)
+                return finish(search, "village-handoff-invalidated")
+            // A committed town must keep these leases until its ordinary owner has every required chunk.
+            // Search/generation deadlines cannot retire this already accepted handoff.
+            runCatching { chunksReady(city) }.onSuccess { retained -> if (retained) {
+                search.handoff = null
+                release(search) { full(search) }
+            } }.onFailure { finish(search, rejection(it)) }
+            return
+        }
         if (++search.ticks > MAXIMUM_TICKS) return finish(search, "village-search-timeout")
         val group = search.group ?: return
         val target = plugin.server.getWorld(search.reference.worldId) ?: return finish(search, "world-unavailable")
@@ -469,14 +501,13 @@ internal class CivsVillageSites(
         while (admissions < 2 && nanoTime() - started < 1_000_000L) {
             val reply = replies.poll() ?: break
             if (reply.operation != search.id || reply.group != group.id || !group.pending.remove(reply.key)) continue
-            if (!reply.present || reply.failure != null) group.failure = reply.failure ?: CivsRejection("chunk-unavailable")
+            admissions++
+            if (!reply.retained || reply.failure != null) group.failure = reply.failure ?: CivsRejection("chunk-unavailable")
+            else if (reply.key !in search.leases) group.failure = CivsRejection("chunk-unavailable")
             else if (!target.isChunkLoaded(reply.key.x, reply.key.z)) group.failure = CivsRejection("chunks-unloaded")
-            else runCatching { retainLoaded(reply.key) }.onSuccess {
-                search.leases[reply.key] = it
-                admissions++
-            }.onFailure { group.failure = it }
         }
-        while (group.failure == null && group.next < group.keys.size && group.pending.size < 2 && admissions < 2 &&
+        // Finish the current cohort before issuing another: a late callback already consumes its reserved admission.
+        if (group.pending.isEmpty()) while (group.failure == null && group.next < group.keys.size && group.pending.size < 2 && admissions < 2 &&
             nanoTime() - started < 1_000_000L) {
             if (search.requests >= MAXIMUM_CHUNK_REQUESTS) { group.failure = CivsRejection("village-chunk-budget"); break }
             val key = group.keys[group.next++]
@@ -487,9 +518,7 @@ internal class CivsVillageSites(
             else {
                 group.pending += key
                 runCatching { load(target, key.x, key.z) }.getOrElse { CompletableFuture.failedFuture(it) }
-                    .whenComplete { chunk, failure ->
-                        if (!closed) replies += LoadReply(search.id, group.id, key, chunk != null, failure)
-                    }
+                    .whenComplete { chunk, failure -> loaded(search, group, key, chunk, failure) }
             }
         }
         if (group.pending.isEmpty() && (group.failure != null || group.next == group.keys.size)) {
@@ -559,7 +588,8 @@ internal class CivsVillageSites(
         }
         val result = CivVillageSitesResult(search.id, search.reference.id, search.reference.worldId, search.count,
             search.created.values.toList(), search.rejected.toMap(), search.examined,
-            search.created.size == search.count, if (search.releaseFailed) "chunk-release-failed" else reason)
+            search.created.size == search.count && search.handoff == null,
+            if (search.releaseFailed) "chunk-release-failed" else reason)
         last = result
         if (active === search) active = null
         replies.clear()

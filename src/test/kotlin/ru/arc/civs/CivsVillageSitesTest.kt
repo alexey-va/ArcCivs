@@ -82,6 +82,192 @@ class CivsVillageSiteScoringTest : FunSpec({
 })
 
 class CivsVillageSitesTest : FunSpec({
+    for (change in listOf("removed", "owner", "world", "autonomy", "deletion", "chunk-loading-disabled"))
+    test("a committed handoff releases temporary leases and preserves its receipt when the target is $change") {
+        villageScenario { s ->
+            s.chunksReady = false
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { s.subject.status()["phase"] == "handing-off-chunks" }
+            val saved = s.cities.last()
+            val receipt = (s.subject.status()["created"] as List<*>).single()
+            if (change == "removed") s.cities.remove(saved) else {
+                val changed = when (change) {
+                    "owner" -> saved.copy(owner = UUID.randomUUID())
+                    "world" -> saved.copy(worldId = UUID.randomUUID())
+                    "autonomy" -> saved.copy(autonomy = null)
+                    "deletion" -> saved.copy(pendingDeletion = CivDeletion(null))
+                    else -> saved.copy(settings = saved.settings!!.copy(chunkLoading = false))
+                }
+                s.cities[s.cities.indexOf(saved)] = changed
+            }
+            val canonical = s.cities.toList()
+            s.until { result.isDone }
+            result.join().reason shouldBe "village-handoff-invalidated"
+            result.join().complete shouldBe false
+            result.join().created.single() shouldBe receipt
+            s.cities shouldBe canonical
+            s.admissions.size shouldBe 1
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    for (failure in listOf("not-authorized", "chunk-unavailable"))
+    test("an observed $failure during committed chunk handoff returns a partial receipt and releases temporary leases") {
+        villageScenario { s ->
+            s.chunksReady = false
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { s.subject.status()["phase"] == "handing-off-chunks" }
+            val saved = s.cities.last()
+            val receipt = (s.subject.status()["created"] as List<*>).single()
+            s.handoffFailure = failure
+            s.until { result.isDone }
+            result.join().reason shouldBe failure
+            result.join().complete shouldBe false
+            result.join().created.single() shouldBe receipt
+            s.cities.last() shouldBe saved
+            s.admissions.size shouldBe 1
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("a committed town keeps temporary leases beyond the search deadline until permanent chunks are ready") {
+        villageScenario { s ->
+            s.chunksReady = false
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { s.subject.status()["phase"] == "handing-off-chunks" }
+            val saved = s.cities.last()
+            val retained = s.registry.activeLeaseCount
+            (retained > 0) shouldBe true
+            val removed = s.removed.toList()
+            s.tick(CivsVillageSites.MAXIMUM_TICKS + 1)
+            result.isDone shouldBe false
+            s.registry.activeLeaseCount shouldBe retained
+            s.removed shouldBe removed
+            s.admissions.size shouldBe 1
+            s.cities.last() shouldBe saved
+            s.chunksReady = true
+            s.until { result.isDone }
+            result.join().created.single().city shouldBe saved.id
+            result.join().complete shouldBe true
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("native load completion owns its ticket before unviewed terrain can unload and keeps it through survey") {
+        villageScenario { s ->
+            s.holdLoads = true
+            s.requireLeasedSurvey = true
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until {
+                s.completeLoads(evictUnticketed = true)
+                result.isDone
+            }
+            result.join().complete shouldBe true
+            result.join().created.size shouldBe 1
+            result.join().rejected["chunks-unloaded"] shouldBe null
+            result.join().examined shouldBe CivsVillageSiteScoring.MAXIMUM_CANDIDATES
+            s.surveys shouldBe CivsVillageSiteScoring.MAXIMUM_CANDIDATES + 1
+            s.admissions.size shouldBe 1
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("a partially completed load cohort cannot admit new work ahead of its late callback") {
+        villageScenario { s ->
+            s.holdLoads = true
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.tick(30)
+            s.loads.size shouldBe 2
+            s.completeLoad(0, evictUnticketed = true)
+            s.registry.activeLeaseCount shouldBe 1 // The callback owns this before any timer bookkeeping.
+            s.tick(1)
+            s.loads.size shouldBe 2
+            s.subject.status()["pending_loads"] shouldBe 1
+            s.completeLoad(1, evictUnticketed = true)
+            s.registry.activeLeaseCount shouldBe 2
+            s.tick(1)
+            s.loads.size shouldBe 3 // One reply plus one new request consumes this pulse's two admissions.
+            s.subject.status()["pending_loads"] shouldBe 1
+            s.subject.cancel("test-cancel")
+            s.tick(3)
+            s.completeLoads(evictUnticketed = true)
+            result.join().reason shouldBe "test-cancel"
+            s.registry.activeLeaseCount shouldBe 0
+            s.added.size shouldBe 2
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    for (stop in listOf("cancel", "close"))
+    test("$stop releases a callback-owned lease with an unread reply once and rejects the other stale callback") {
+        villageScenario { s ->
+            s.holdLoads = true
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.tick(30)
+            s.loads.size shouldBe 2
+            s.completeLoad(0, evictUnticketed = true)
+            s.registry.activeLeaseCount shouldBe 1
+            if (stop == "close") s.subject.close() else s.subject.cancel("test-cancel")
+            s.tick(3)
+            s.completeLoad(1, evictUnticketed = true)
+            s.tick(10)
+            result.join().reason shouldBe if (stop == "close") "closed" else "test-cancel"
+            s.registry.activeLeaseCount shouldBe 0
+            s.added.size shouldBe 1
+            s.removed shouldBe s.added
+            s.admissions shouldBe emptyList()
+        }
+    }
+
+    test("a callback retention failure releases its successful sibling without admitting a survey") {
+        villageScenario { s ->
+            s.holdLoads = true
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.tick(30)
+            s.completeLoad(0, evictUnticketed = true)
+            s.retainFailure = CivsRejection("storage-unavailable")
+            s.completeLoad(1, evictUnticketed = true)
+            s.registry.activeLeaseCount shouldBe 1
+            s.tick(1)
+            (s.subject.status()["rejected"] as Map<*, *>)["storage-unavailable"] shouldBe 1
+            s.surveys shouldBe 0
+            s.subject.cancel("test-cancel")
+            s.tick(3)
+            result.join().reason shouldBe "test-cancel"
+            s.registry.activeLeaseCount shouldBe 0
+            s.added.size shouldBe 1
+            s.removed shouldBe s.added
+            s.admissions shouldBe emptyList()
+        }
+    }
+
+    test("an injected off-thread completion never acquires a native ticket") {
+        villageScenario { s ->
+            s.holdLoads = true
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.tick(30)
+            val (key, future) = s.loads.first()
+            s.world.loadChunk(key.x, key.z)
+            CompletableFuture.runAsync { future.complete(mockk<Chunk>()) }.join()
+            s.tick(1)
+            s.registry.activeLeaseCount shouldBe 0
+            s.added shouldBe emptyList()
+            s.completeLoad(1, evictUnticketed = true)
+            s.tick(1)
+            (s.subject.status()["rejected"] as Map<*, *>)["village-search-failed"] shouldBe 1
+            s.subject.cancel("test-cancel")
+            s.tick(3)
+            result.join().reason shouldBe "test-cancel"
+            s.registry.activeLeaseCount shouldBe 0
+            s.added shouldBe emptyList()
+            s.admissions shouldBe emptyList()
+        }
+    }
+
     test("explicit preparation has two outstanding loads and cancellation admits no stale lease") {
         villageScenario { s ->
             s.holdLoads = true
@@ -288,14 +474,24 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     val loads = mutableListOf<Pair<PaperChunkKey, CompletableFuture<Chunk?>>>()
     val added = mutableListOf<PaperChunkKey>()
     val removed = mutableListOf<PaperChunkKey>()
+    private val nativeTickets = hashSetOf<PaperChunkKey>()
     var holdLoads = false
+    var requireLeasedSurvey = false
+    var chunksReady = true
+    var handoffFailure: String? = null
+    var surveys = 0
+    var retainFailure: Throwable? = null
     var founding: (CivVillageSiteAdmission) -> CompletableFuture<Settlement> = { admission ->
         cities += admission.city
         CompletableFuture.completedFuture(admission.city)
     }
     val registry = PaperChunkTicketRegistry(object : PaperChunkTicketBackend {
-        override fun add(key: PaperChunkKey): PaperChunkTicketAddResult { added += key; return PaperChunkTicketAddResult.ADDED }
-        override fun remove(key: PaperChunkKey): Boolean { removed += key; return true }
+        override fun add(key: PaperChunkKey): PaperChunkTicketAddResult {
+            added += key
+            nativeTickets += key
+            return PaperChunkTicketAddResult.ADDED
+        }
+        override fun remove(key: PaperChunkKey): Boolean { removed += key; return nativeTickets.remove(key) }
     })
     val settings = CivsSettings(Path.of("/tmp/village-test"), setOf(world.name), 128, 500, 50_000, 4,
         120, 64, 96, 6144)
@@ -322,6 +518,12 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
         every { access.prospectiveHeightField(any(), any(), any()) } answers {
             val city = firstArg<Settlement>()
             val samples = arg<List<CivPosition>?>(2)
+            surveys++
+            if (requireLeasedSurvey) {
+                val keys = samples?.mapTo(hashSetOf()) { PaperChunkKey(city.worldId, it.x shr 4, it.z shr 4) }
+                    ?: CivsChunkArea.of(city).keys()
+                keys.all { it in nativeTickets && world.isChunkLoaded(it.x, it.z) } shouldBe true
+            }
             val surface = if (samples == null) villageSurface(city.center, 80) else CivTerrainSurface(-64, 320,
                 samples.associate { civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(63, true) })
             CompletableFuture.completedFuture(surface)
@@ -335,7 +537,12 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
             { true }, { worldId, center ->
                 if (cities.any { it.worldId == worldId && CivsService.areasOverlap(center, 192, it.center,
                         it.radius + (3 - it.level()) * 32) }) throw CivsRejection("city-overlap")
-            }, { key -> (registry.acquire(key) as PaperChunkTicketAcquireResult.Acquired).lease }, { admission ->
+            }, { key ->
+                check(org.bukkit.Bukkit.isPrimaryThread())
+                check(world.isChunkLoaded(key.x, key.z))
+                retainFailure?.let { throw it }
+                (registry.acquire(key) as PaperChunkTicketAcquireResult.Acquired).lease
+            }, { admission ->
                 admissions += admission
                 founding(admission)
             }, load = { target, x, z ->
@@ -346,9 +553,22 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
                     future.complete(mockk<Chunk>())
                 }
                 future
-            }, nanoTime = { 0 }, clock = { 1_000 })
+            }, nanoTime = { 0 }, clock = { 1_000 }, chunksReady = {
+                handoffFailure?.let { throw CivsRejection(it) }
+                chunksReady
+            })
     }
 
+    fun completeLoad(index: Int, evictUnticketed: Boolean) {
+        val (key, future) = loads[index]
+        world.loadChunk(key.x, key.z)
+        future.complete(mockk<Chunk>()) shouldBe true
+        // Paper may discard unviewed terrain as soon as its callback returns; a future value is not a ticket.
+        if (evictUnticketed && key !in nativeTickets) loaded -= key.x to key.z
+    }
+    fun completeLoads(evictUnticketed: Boolean) {
+        loads.indices.filter { !loads[it].second.isDone }.forEach { completeLoad(it, evictUnticketed) }
+    }
     fun tick(count: Int) { scheduler.tick(count.toLong()) }
     fun until(done: () -> Boolean) {
         repeat(12_000) { if (done()) return; scheduler.tick() }

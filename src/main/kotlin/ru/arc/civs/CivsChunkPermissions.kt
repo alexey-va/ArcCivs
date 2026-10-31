@@ -22,8 +22,8 @@ internal class CivsChunkPermissions(
         { owner, world -> checkCivsChunkPermission(plugin, owner, world, permission) }, clock, permission)
 
     private data class Subject(val owner: UUID, val world: String)
-    private class State(var nextCheck: Long = 0, var allowedUntil: Long = 0)
-    private data class Reply(val subject: Subject, val state: State, val started: Long, val allowed: Boolean)
+    private class State(var nextCheck: Long = 0, var allowedUntil: Long = 0, var failure: String? = null)
+    private data class Reply(val subject: Subject, val state: State, val started: Long, val allowed: Boolean, val failed: Boolean)
     private val states = linkedMapOf<Subject, State>()
     private val pending = mutableSetOf<State>()
     private val replies = ConcurrentLinkedQueue<Reply>()
@@ -43,6 +43,7 @@ internal class CivsChunkPermissions(
             "entries" to selected.take(8).map { (subject, state) -> mapOf("owner" to subject.owner.toString(),
                 "world" to subject.world, "pending" to (state in pending),
                 "cachedAllowanceUnexpired" to (!closed && now < state.allowedUntil),
+                "observedFailure" to state.failure,
                 "allowanceRemainingMillis" to (state.allowedUntil - now).coerceAtLeast(0),
                 "nextCheckInMillis" to (state.nextCheck - now).coerceAtLeast(0)) })
     }
@@ -52,8 +53,14 @@ internal class CivsChunkPermissions(
         while (true) {
             val reply = replies.poll() ?: break
             pending -= reply.state
-            if (states[reply.subject] === reply.state)
+            if (states[reply.subject] === reply.state) {
                 reply.state.allowedUntil = if (reply.allowed) reply.started + 30_000 else 0
+                reply.state.failure = when {
+                    reply.failed -> "chunk-permission-unavailable"
+                    !reply.allowed -> "not-authorized"
+                    else -> null
+                }
+            }
         }
         if (!available()) { states.clear(); return }
         val wanted = subjects.mapTo(linkedSetOf()) { Subject(it.first, it.second) }
@@ -68,13 +75,20 @@ internal class CivsChunkPermissions(
             val future = runCatching { check(subject.owner, subject.world) }
                 .getOrElse { CompletableFuture.failedFuture(it) }
             future.copy().orTimeout(10, TimeUnit.SECONDS).whenComplete { allowed, failure ->
-                if (!closed) replies += Reply(subject, state, now, failure == null && allowed == true)
+                if (!closed) replies += Reply(subject, state, now, failure == null && allowed == true, failure != null)
             }
         }
     }
 
     fun allowed(owner: UUID, world: String): Boolean = !closed && available() &&
         clock() < (states[Subject(owner, world)]?.allowedUntil ?: 0)
+
+    /** A missing/expired grant may still be hydrating; only an observed denial or provider failure is terminal. */
+    internal fun handoffFailure(owner: UUID, world: String): String? {
+        check(Thread.currentThread() === this.owner) { "Chunk permission handoff requires its owning thread" }
+        if (closed || !available()) return "chunk-permission-unavailable"
+        return states[Subject(owner, world)]?.failure
+    }
 
     fun reset() { states.clear() }
     override fun close() { closed = true; states.clear(); replies.clear() }
