@@ -13,9 +13,34 @@ internal object CivsSettlementPerimeter {
         routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>,
         fortifications: Map<UUID, CivFortificationProof> = emptyMap()): CivSettlementFrame {
         val box = frame.core
+        val maximumSize = CivsSettlementLayout.MAXIMUM_HALF_WIDTH * 2 + 1
+        require(box.max.x - box.min.x + 1 in 1..maximumSize && box.max.z - box.min.z + 1 in 1..maximumSize)
+        val budget = CutBudget()
+        return try { separate(city, frame, surface, routes, retainedRoutes, fortifications, box, maximumSize, budget) }
+        catch (original: CivsRejection) {
+            if (frame.fortified || original.reason != "autonomy-layout-obstructed" ||
+                original.values["stage"] != "no-dry-perimeter" || original.values["inner_boundary_seeds"] != "0" ||
+                surface.columns.isEmpty()) throw original
+            val radius = city.radius.coerceIn(0, 127)
+            val expanded = CivBox(box.min.copy(
+                x = maxOf(box.min.x - 8, city.center.x - radius, surface.columns.keys.minOf { (it shr 32).toInt() }),
+                z = maxOf(box.min.z - 8, city.center.z - radius, surface.columns.keys.minOf { it.toInt() })),
+                box.max.copy(
+                    x = minOf(box.max.x + 8, city.center.x + radius, surface.columns.keys.maxOf { (it shr 32).toInt() }),
+                    z = minOf(box.max.z + 8, city.center.z + radius, surface.columns.keys.maxOf { it.toInt() })))
+            // The retry must preserve every original seed and add actual captured room.
+            if (expanded.min.x > box.min.x || expanded.min.z > box.min.z || expanded.max.x < box.max.x ||
+                expanded.max.z < box.max.z || expanded == box) throw original
+            separate(city, frame, surface, routes, retainedRoutes, fortifications, expanded, 165, budget)
+        }
+    }
+
+    private fun separate(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
+        routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>,
+        fortifications: Map<UUID, CivFortificationProof>, box: CivBox, maximumSize: Int,
+        budget: CutBudget): CivSettlementFrame {
         val width = box.max.x - box.min.x + 1
         val height = box.max.z - box.min.z + 1
-        val maximumSize = CivsSettlementLayout.MAXIMUM_HALF_WIDTH * 2 + 1
         require(width in 1..maximumSize && height in 1..maximumSize)
         val area = width * height
         fun index(x: Int, z: Int): Int? = if (x in box.min.x..box.max.x && z in box.min.z..box.max.z)
@@ -75,7 +100,7 @@ internal object CivsSettlementPerimeter {
         } }
         val source = area * 2
         val sink = source + 1
-        val cut = Cut(sink + 1)
+        val cut = Cut(sink + 1, budget)
         var firstSteepSeed: CivPosition? = null
         for (i in 0 until area) {
             val p = point(i)
@@ -174,11 +199,18 @@ internal object CivsSettlementPerimeter {
         return frame.copy(wallObstacles = walls, gates = gates)
     }
 
+    /** Both canvases share the original finite work allowance. */
+    private class CutBudget {
+        private var work = 0
+        fun spend() {
+            if (++work > 50_000_000) throw CivsRejection("autonomy-search-budget", mapOf("stage" to "dry-perimeter"))
+        }
+    }
+
     /** Bounded integral node cut; iterative augmenting paths avoid recursion on a long shoreline. */
-    private class Cut(size: Int) {
+    private class Cut(size: Int, private val budget: CutBudget) {
         data class Edge(val to: Int, var capacity: Int, val reverse: Int)
         private val graph = Array(size) { mutableListOf<Edge>() }
-        private var work = 0
         fun edge(from: Int, to: Int, capacity: Int) {
             val forward = Edge(to, capacity, graph[to].size)
             graph[to] += Edge(from, 0, graph[from].size)
@@ -190,9 +222,7 @@ internal object CivsSettlementPerimeter {
             val path = IntArray(graph.size)
             val selected = IntArray(graph.size)
             val flow = IntArray(graph.size)
-            fun spend() {
-                if (++work > 50_000_000) throw CivsRejection("autonomy-search-budget", mapOf("stage" to "dry-perimeter"))
-            }
+            fun spend() = budget.spend()
             var total = 0
             while (true) {
                 level.fill(-1); level[source] = 0

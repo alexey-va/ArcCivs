@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "version": "0.1.163",
+  "status": "candidate_not_delivered",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "change": {
+    "separator": "old149 core first; one bounded165 graph retry only for unfortified no-dry-perimeter with zero boundary seeds; same50M work total",
+    "ordinary_sites": 34,
+    "ordinary_half_width": 74,
+    "maximum_infrastructure": 192,
+    "road_approach": "use exact transit height from already accepted generated pieces, after retained acceptedTransit; native/collision/height guards unchanged"
+  },
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "initial_once_per_city": {
+    "before": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "after": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "five_city_total": {
+      "logs": 480,
+      "cobblestone": 480,
+      "bread": 120
+    },
+    "existing_ids_regranted": false
+  },
+  "indirect_effect": "Previously rejected complete layouts may become admissible; actual infrastructure construction still consumes ordinary materials and work. Number of active settlements and ordinary item throughput can rise toward the already authorized five-city target. No claim of zero item-production effect or stock self-sufficiency. Existing normal autonomous supply grants remain possible.",
+  "unchanged": [
+    "mine/forestry/farm drops and work durations",
+    "prices, recipes, hunger, XP and profession limits",
+    "native ore/holder/ownership/collision/support guards",
+    "city codec262144, route reach and chunk/NPC budgets",
+    "paid receipts, pinned plans and exact storage contents"
+  ],
+  "income_model": {
+    "active_SELL": "unchanged; no item value conversion assumed",
+    "planned_SELL_to_contract": "future/SHADOW flow kept separate; not counted as active income"
+  },
+  "detached_evidence": {
+    "capture_sha256": "6187c67a7caeb199670a8848c02c1257659238b000f78729bef70adca52f39c6",
+    "single82_with_approach_fix": {
+      "ordinary_plots": 34,
+      "routes": 33,
+      "infrastructure": 176,
+      "perimeter_closed": true,
+      "city_store_bytes": 83880,
+      "round_trip_equal": true
+    },
+    "boundary": "Detached calculation; production old-first wrapper, native founding and client acceptance remain separate checks",
+    "production_old_first_wrapper": {
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "full_prepare_feasible": true,
+      "ordinary_plots_unchanged": true,
+      "routes_unchanged": true,
+      "infrastructure": 176,
+      "city_store_bytes": 83880,
+      "result_sha256": "007a07f8dd993d1273ac156a8dae65290bafbeb7909f09845efc6d71e0534136"
+    }
+  }
+}

@@ -446,7 +446,10 @@ internal object CivsSettlementLayout {
                     !native.natural && key(p) !in acceptedTransit && key(p) !in preservedRoads ||
                     occupied.any { contains(it, p) } || frame.wallObstacles.any { contains(it, p) } ||
                     pieces.any { contains(it.bounds, p) && it.transit.none { feet -> key(feet) == key(p) } }) return@mapNotNull null
-                val y = acceptedTransit[key(p)]?.y ?: preservedRoads[key(p)]?.plus(1) ?: native.groundY + 1
+                // Earlier generated transit owns its proven grade, just like an accepted road.
+                val y = acceptedTransit[key(p)]?.y ?: pieces.firstNotNullOfOrNull { piece ->
+                    piece.transit.firstOrNull { key(it) == key(p) }?.y
+                } ?: preservedRoads[key(p)]?.plus(1) ?: native.groundY + 1
                 val edge = key(p.x.coerceIn(bounds.min.x, bounds.max.x), p.z.coerceIn(bounds.min.z, bounds.max.z))
                 if (abs(y - 1 - requireNotNull(floors[edge])) > 1) return@mapNotNull null
                 p.copy(y = y)

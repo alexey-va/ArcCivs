@@ -1036,6 +1036,21 @@ rejected infrastructure pieces and at most 192 infrastructure pieces alongside
 the 34 ordinary sites. The unchanged city codec also admits a measured native
 171-piece plan and a padded 192-piece mature town with 28 residents.
 
+The separator first tries the unchanged ordinary core. An unfortified frame with
+no inner boundary seeds may retry once after an exact `no-dry-perimeter` refusal,
+using eight extra columns on each side, clamped to the captured surface and the
+city/province bounds. This changes only the separator canvas: ordinary plots,
+routes and frame width stay pinned. Both attempts share the same 50-million-work
+cut budget. Fortified frames, boundary-seeded routes and other failures retain
+their original refusal; all terrain, gate and infrastructure limits still apply.
+
+Infrastructure approach height prefers retained accepted transit, then exact
+transit in generated pieces that have already passed admission, then the preserved
+road/native floor. A proposed route alone cannot supply that proof. Loaded,
+natural/protected, occupied, wall and one-step height checks still run, and a
+planned neighbouring road does not prove that its blocks have been built: native
+support, path and commit captures remain authoritative.
+
 New civic plots first face straight segments of retained streets inside the core,
 with the entire upgrade envelope and three-block street corridor reserved. The
 frontage preference survives terrain-option sorting. A facing plot connects with
