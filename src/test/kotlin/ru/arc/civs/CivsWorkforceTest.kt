@@ -85,23 +85,6 @@ class CivsWorkforceTest : FunSpec({
         CivsResidents.damage(experienced, CivsRules.effectiveWorkType(city, hall), 10.0) shouldBe 10.0
     }
 
-    test("old paid and full cities keep one real hall builder without changing normal scribe slots") {
-        val base = workforceCity()
-        val hall = base.buildings.first()
-        val old = base.copy(inventory = null, workers = emptyList())
-        CivsRules.isBuilder(old, hall) shouldBe true
-        CivsRules.slots(old, hall) shouldBe 1
-        val full = CivsRules.validate(base.copy(buildings = listOf(hall) + (2..16).map {
-            workforceBuilding(it, BuildingType.HOUSE)
-        }, workers = emptyList()))
-        CivsRules.legacyHallBuilder(full) shouldBe true
-        CivsRules.effectiveWorkType(full, hall) shouldBe BuildingType.BUILDER_HUT
-        CivsRules.slots(full, hall) shouldBe 1
-        CivsRules.productionAvailable(full, hall) shouldBe false
-        CivsRules.profession(full, hall) shouldBe "builder"
-        CivsRules.slots(full.copy(buildings = full.buildings.dropLast(1)), hall) shouldBe 3
-    }
-
     test("builders add observed credit while one row places without replacing each others work") {
         var city = workforceOrder(188)
         val (first, second, third) = city.workers

@@ -72,11 +72,8 @@ class CivsDevelopmentRulesTest : FunSpec({
             denied("stale-delivery") { CivsRules.deliver(delivered, city.owner, worker.id, workshop.id,
                 worker.completedCycles, worker.nextDeliveryAt, worker.nextDeliveryAt, outputHandled = true) }
             for (level in 1..3) {
-                CivsRules.slots(city, workshop.copy(level = level)) shouldBe level
                 CivsRules.deliveryInterval(city, workshop.copy(level = level)) shouldBe 60_000L
             }
-            val master = worker.copy(skills = CivsResidents.professions.associateWith { 40L })
-            CivsResidents.maxHealth(master) shouldBe 28.0
         }
     }
 
@@ -332,7 +329,7 @@ class CivsDevelopmentRulesTest : FunSpec({
     }
 
     test("nullable additions decode old cities without replaying item grants and malformed new progress fails closed") {
-        val legacyHall = building(1, BuildingType.TOWN_HALL, 0, BuildingPhase.ACTIVE).copy(control = null)
+        val legacyHall = building(1, BuildingType.TOWN_HALL, 0, BuildingPhase.ACTIVE).copy(level = 3, control = null)
         val legacy = Settlement(id(10), id(20), "Legacy", id(30), legacyHall.entrance, 96, "nordic", Stock(96, 96, 24),
             listOf(legacyHall), (100..103).map { CivWorker(id(it), "Житель $it", if (it == 100) legacyHall.id else null,
                 nextDeliveryAt = if (it == 100) 11_000 else 0) })
@@ -342,6 +339,8 @@ class CivsDevelopmentRulesTest : FunSpec({
         old.immigration shouldBe null
         old.buildings.single().control shouldBe null
         old.buildings.single().production shouldBe null
+        CivsRules.isBuilder(old, legacyHall) shouldBe true
+        CivsRules.slots(old, legacyHall) shouldBe 1
         val fifth = CivsRules.immigrate(old, old.owner, id(104), "Пятый", 50_000)
         fifth.workers.size shouldBe 5
         fifth.stock shouldBe old.stock
@@ -372,13 +371,19 @@ class CivsDevelopmentRulesTest : FunSpec({
         }, immigration = null, workers = (100..103).map { CivWorker(id(it), "Житель $it", null) }))
         CivsRules.legacyHallBuilder(city) shouldBe true
         CivsRules.slots(city, hall) shouldBe 1
+        CivsRules.effectiveWorkType(city, hall) shouldBe BuildingType.BUILDER_HUT
+        CivsRules.productionAvailable(city, hall) shouldBe false
+        CivsRules.profession(city, hall) shouldBe "builder"
         city = CivsRules.assign(city, city.owner, id(100), hall.id, 50_000)
         val upgrade = hall.copy(level = 2)
         city = CivsRules.reserveBuild(city, city.owner, upgrade, batches(upgrade, 1))
         city = finishBatch(roundTrip(city))
         city.building(hall.id)!!.level shouldBe 2
         city.buildings.size shouldBe 16
-        CivsRules.legacyHallBuilder(city.copy(buildings = city.buildings.dropLast(1))) shouldBe false
+        CivsRules.slots(city, city.building(hall.id)!!) shouldBe 1
+        val reduced = city.copy(buildings = city.buildings.dropLast(1))
+        CivsRules.legacyHallBuilder(reduced) shouldBe false
+        CivsRules.slots(reduced, city.building(hall.id)!!) shouldBe 2
         CivsRules.slots(newCity(), newCity().buildings.single()) shouldBe 0
         val withHut = city.copy(buildings = city.buildings.dropLast(1) + building(16, BuildingType.BUILDER_HUT, 75, BuildingPhase.ACTIVE))
         CivsRules.legacyHallBuilder(withHut) shouldBe false

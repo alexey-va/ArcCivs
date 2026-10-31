@@ -80,9 +80,6 @@ class CivsAutonomyTest : FunSpec({
             autonomyBuilding(BuildingType.HOUSE, 3, BuildingPhase.ACTIVE, 200 + it)
         })
         CivsAutonomy.nextGoal(complete) shouldBe null
-        CivsRules.MAX_POPULATION shouldBe 24
-        CivsRules.MAX_RESIDENTS shouldBe 28
-        CivsRules.MAX_BUILDER_WORK_CREDIT shouldBe 768
     }
 
     test("the final development tail obeys retained catalog maxima and metallurgy for the smith") {

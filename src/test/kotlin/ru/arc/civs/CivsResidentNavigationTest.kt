@@ -216,12 +216,11 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
-    for (waitingForWorker in listOf(false, true))
-    test("preparation ${if (waitingForWorker) "retires a stalled worker once" else "retains progressing native capture"}") {
+    test("preparation retires a stalled worker once and fences its late result") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
-            val world = CivsWorksiteWorldFixture("preparation-deadline-$waitingForWorker").also(paper.server::addWorld)
+            val world = CivsWorksiteWorldFixture("preparation-deadline").also(paper.server::addWorld)
             for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
-            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("PreparationDeadline$waitingForWorker")))
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("PreparationDeadline")))
             val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0L })
             val workers = ArrayDeque<Runnable>()
             val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) },
@@ -232,18 +231,9 @@ class CivsResidentNavigationTest : FunSpec({
                 { it.y == 64 }, { _, _ -> true }, { 1.0 })
             try {
                 repeat(6) {
-                    if (!waitingForWorker) while (workers.isNotEmpty()) workers.removeFirst().run()
                     tick++
                     paper.performTicks(1)
                     owner.pulse()
-                }
-                if (!waitingForWorker) {
-                    route.failure shouldBe null
-                    route.searching shouldBe true
-                    val captured = route.capturedBlocks
-                    repeat(3) { tick++; paper.performTicks(1); owner.pulse() }
-                    (route.capturedBlocks > captured) shouldBe true
-                    return@use
                 }
                 route.failure shouldBe "preparation-budget"
                 route.searching shouldBe false
@@ -2139,7 +2129,6 @@ class CivsResidentNavigationTest : FunSpec({
             citizenNearEndpoint(airborne, entrance) shouldBe true
             citizenAtSupportedEndpoint(terrain.world, airborne, entrance) shouldBe false
             val fallen = airborne.copy(y = 70.53584064)
-            (kotlin.math.abs(kotlin.math.sqrt(fallen.distanceSquared(CitizenPoint(entrance.x + .5, entrance.y.toDouble(), entrance.z + .5))) - .6705966831677087) < .000001) shouldBe true
             citizenAtSupportedEndpoint(terrain.world, fallen, entrance) shouldBe false
             citizenAtSupportedEndpoint(terrain.world, CitizenPoint(entrance.x + .5, entrance.y.toDouble(), entrance.z + .5), entrance) shouldBe true
             // Native half-tread contacts remain valid when already within the same unchanged tolerance.

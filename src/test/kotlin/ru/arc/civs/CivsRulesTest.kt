@@ -248,6 +248,7 @@ class CivsRulesTest : FunSpec({
         repeat(100) { worker = CivsResidents.trained(worker, BuildingType.FORESTER) }
         worker.skills?.get("FORESTER") shouldBe 40L
         CivsResidents.maxHealth(worker) shouldBe 28.0
+        CivsResidents.maxHealth(worker.copy(skills = CivsResidents.professions.associateWith { 40L })) shouldBe 28.0
         CivsResidents.damage(worker, BuildingType.FORESTER, 10.0) shouldBe 10.0
         CivsResidents.damage(worker.copy(inventory = mapOf("IRON_AXE" to 1)), BuildingType.FORESTER, 10.0) shouldBe 9.0
         CivsResidents.damage(worker.copy(inventory = mapOf("IRON_AXE" to 1)), BuildingType.QUARRY, 10.0) shouldBe 10.0

@@ -78,7 +78,7 @@ class CivsSettlementPlanTest : FunSpec({
         Gson().toJson(city) shouldBe before
     }
 
-    test("the full planner extends shared street choices with every new reserved plot") {
+    test("the full planner extends shared streets and obsolete unpaid intent cannot block development") {
         val city = settlementPlanCity()
         val searches = mutableListOf<CivRouteSearchStats>()
         val plan = planWithDiagnostics { CivsSettlementPlans.prepare(city, settlementPlanTemplates(), settlementPlanSurface(city),
@@ -92,11 +92,6 @@ class CivsSettlementPlanTest : FunSpec({
         } shouldBe true
         city.autonomy?.plan shouldBe null
         city.stock shouldBe Stock()
-    }
-
-    test("obsolete unpaid intent is ignored without rejecting existing city production or accepted work") {
-        val city = settlementPlanCity()
-        val plan = planWithDiagnostics { CivsSettlementPlans.prepare(city, settlementPlanTemplates(), settlementPlanSurface(city), CivAutonomousAccess()) }
         val old = city.copy(autonomy = city.autonomy!!.copy(plan = plan.copy(version = 99)))
         CivsSettlementPlans.current(old) shouldBe null
         CivsRules.validate(old) shouldBe old
@@ -127,8 +122,9 @@ class CivsSettlementPlanTest : FunSpec({
         }
     }
 
-    test("private real terrain replay adopts the complete profile and a closed perimeter") {
-        val path = System.getenv("CIVS_PLAN_BOARD_SCENARIO") ?: return@test
+    test("private real terrain replay adopts the complete profile and a closed perimeter")
+        .config(enabled = System.getenv("CIVS_PLAN_BOARD_SCENARIO") != null) {
+        val path = requireNotNull(System.getenv("CIVS_PLAN_BOARD_SCENARIO"))
         val (_, snapshot) = readPlanBoardScenario(path)
         snapshot.plan!!.plots.size shouldBe 34
         (snapshot.plan.gates.size in 1..8) shouldBe true

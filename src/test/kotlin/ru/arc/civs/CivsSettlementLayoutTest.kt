@@ -585,8 +585,10 @@ class CivsSettlementLayoutTest : FunSpec({
         CivsSettlementLayout.infrastructure(city, frame, raised, raisedRoutes).pieces.map { it.id } shouldBe first.pieces.map { it.id }
     }
 
-    test("export production planner and real family headers on flat hill cliff water and existing-town fixtures") {
-        val source = System.getenv("CIVS_LAYOUT_FRAMES") ?: return@test
+    test("export production planner and real family headers on flat hill cliff water and existing-town fixtures").config(
+        enabled = System.getenv("CIVS_LAYOUT_FRAMES") != null,
+    ) {
+        val source = requireNotNull(System.getenv("CIVS_LAYOUT_FRAMES"))
         val output = Path.of(System.getenv("CIVS_LAYOUT_OUTPUT") ?: "build/settlement-layout-preview")
         Files.createDirectories(output)
         val frames = JsonParser.parseString(Files.readString(Path.of(source))).asJsonObject.getAsJsonArray("families")

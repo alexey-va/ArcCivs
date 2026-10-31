@@ -10,8 +10,8 @@ SPEC.loader.exec_module(alignment)
 
 class WarehouseAlignmentTest(unittest.TestCase):
     def test_mismatched_side_by_side_chests_share_the_clear_aisle_in_all_directions(self):
-        for facing in alignment.SIDES:
-            direction = alignment.VECTORS[alignment.SIDES[(alignment.SIDES.index(facing) + 1) % 4]]
+        for facing, direction in (("south", (-1, 0, 0)), ("west", (0, 0, -1)),
+                                  ("north", (1, 0, 0)), ("east", (0, 0, 1))):
             first, second = (0, 0, 0), direction
             source = {first: ("west", "single"), second: ("east", "single")}
             result, pairs = alignment.aligned_rows(source, lambda _: {facing})

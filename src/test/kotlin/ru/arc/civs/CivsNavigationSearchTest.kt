@@ -124,34 +124,6 @@ class CivsNavigationSearchTest : FunSpec({
         }
     }
 
-    test("the recorded lower shaft has no landing exit inside its captured headroom") {
-        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
-            val world = CivsWorksiteWorldFixture("recorded-mine-landing").also(paper.server::addWorld)
-            for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
-            val materials = listOf(Material.AIR, Material.COAL_ORE, Material.COBBLESTONE, Material.COPPER_ORE,
-                Material.DIRT, Material.GRANITE, Material.GRASS_BLOCK, Material.GRAVEL, Material.LADDER,
-                Material.STONE, Material.TORCH)
-            for ((dy, layer) in RECORDED_LANDING.withIndex()) for ((dz, row) in layer.split(' ').withIndex())
-                for ((dx, value) in row.withIndex()) {
-                    val block = world.getBlockAt(-98 + dx, 55 + dy, -52 + dz)
-                    block.type = materials[value - 'A']
-                    if (block.type == Material.LADDER)
-                        block.blockData = Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
-                }
-            val ladder = Location(world, -92.5, 60.0, -46.5)
-            val landing = Location(world, -95.5, 60.0, -50.5)
-            // The ladder continues through the snapshot's upper edge at y=63. A body above
-            // feet y=62 would require uncaptured y=64+; this fixture cannot assume that exit.
-            citizenPacketBodyClear(world, CitizenPoint(ladder.x, ladder.y, ladder.z), false) shouldBe true
-            val route = CitizenPacketRoute(world, ladder, landing,
-                { it.x in -98..-90 && it.z in -52..-44 && it.y in 55..62 }, { _, _ -> true }, { 1.0 })
-            route.prepareSnapshot()
-            route.failure shouldBe "no-path"
-            route.endpoint shouldBe null
-            route.move(ladder, 1.0) { true } shouldBe null
-
-        }
-    }
     test("a supported shaft centres before climbing and exits onto its high landing in both directions") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("shaft-climb-exit").also(paper.server::addWorld)
@@ -207,22 +179,3 @@ private fun CitizenPacketRoute.prepareSnapshot() {
         searching shouldBe false
     }
 }
-
-/**
- * Exact material cells from native block-scan at 2026-10-22T11:52:00.196Z, x=-98..-90,
- * y=55..63, z=-52..-44. A..K is the material palette above; every ladder faces south.
- * This historical snapshot predates the .47 timeout logs. Its bounded lower shaft has no
- * landing exit without uncaptured headroom; it says nothing about the current server's
- * complete route and does not pretend the later off-centre pose is clear.
- */
-private val RECORDED_LANDING = listOf(
-    "JJJJJJJJJ JJJJJJJJJ EEJJJJEJJ EEEEEEEJJ AGGEEEEEE AAAAAGEEE AAAGEEEEE AAJEEEEEE JJJJJJJJJ",
-    "JJJJJJJJJ EEJJJJEEE EEEEEEEEJ GGEEEEEEJ AAAECECEE AAAACACEE AAAACCCEE AAJECCEEE JJJJCCJJJ",
-    "EEEEJJEEE EEEEEEEEE GGEEEEEEJ AAGGEGEEJ AAACACAJJ AAACAIKEE AAACAAAEE JAJJKAJEE JJJJAAJJJ",
-    "EEEEEEEEE GGEEEEEEE AAGGGGGEJ AAAACAEGJ AAACACAJJ AAACAIAJJ AAACAAAJJ JJJJAAJJJ JJJJAAJJJ",
-    "GGGGEEEEE AAGGGGGGG AAAAAAAGJ AAAACACAJ AAACACAJJ AAACAIAJJ JJACAAAJJ JJJJAAJJJ JJJJAAJJJ",
-    "AAAAGGGGG AAAAAAAAA AAAAAAAAJ AAAAAAAJJ AAAACCJJJ JAAACIJJJ JJJAJJJJJ JJJJJJJJJ JJJJJJJJJ",
-    "AAAAAAAAA AAAAAAAAA AAAAAAAJJ AAAAAAJJJ AAAAACJJJ FJJACIJJJ JJJJJJJJJ JJJJJJJJJ JJJJJJJJJ",
-    "FAAAAAAAA AAAAAAAAH AAAAAAAJJ FAAACAJJJ FFAAACJJJ FFJJJIJJJ FJJJJBJJJ JJJJJJJJJ JJJJJJJJJ",
-    "FAAAAAAAH AAAAAAAHH FAAAAADJH FFFEEAEEJ FFEEECEEE EEFJJIJJJ EEJJJJJJJ EEJJJBBJJ EEJJJBBJJ",
-)

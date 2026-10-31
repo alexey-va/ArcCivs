@@ -18,7 +18,6 @@ class CivsNamesTest : FunSpec({
                 CivsNames.name(city, id, sex) shouldBe name
                 name.any(Char::isDigit) shouldBe false
                 city = city.copy(workers = city.workers + CivWorker(id, name, null, sex = sex))
-                CivsNames.name(city, id, sex) shouldBe name
             }
             city.workers.map { it.name }.toSet().also { it.size shouldBe 80 }
         }

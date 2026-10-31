@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
@@ -880,20 +881,21 @@ class CivsLostToolReceiptServiceTest : FunSpec({
 })
 
 class CivsNativeProductionParityTest : FunSpec({
-    for (type in listOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.FORESTER))
-    test("native workers can drain existing items while another migration reserve waits type=$type") {
+    test("native workers can drain existing items while another migration reserve waits") {
         serviceScenario { h ->
-            val building = h.city.buildings.last().copy(type = type)
-            val worker = h.city.workers.first().copy(assignment = building.id, nextDeliveryAt = 1)
-            val physical = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
-                buildings = listOf(h.city.buildings.first(), building), workers = listOf(worker))
-            val automatic = CivsRules.validate(physical.copy(autonomy = CivAutonomy(),
-                inventory = physical.inventory!!.copy(materials = mapOf("OAK_LOG" to 64L))))
-            CivsAutoStorageMigration.ready(automatic) shouldBe false
-            h.service.productionReady(automatic, worker) shouldBe h.service.productionReady(physical, worker)
-            h.service.workInputsReady(automatic, worker) shouldBe h.service.workInputsReady(physical, worker)
-            h.service.productionReady(automatic, worker) shouldBe true
-            h.service.workInputsReady(automatic, worker) shouldBe true
+            for (type in listOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.FORESTER)) withClue(type) {
+                val building = h.city.buildings.last().copy(type = type)
+                val worker = h.city.workers.first().copy(assignment = building.id, nextDeliveryAt = 1)
+                val physical = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                    buildings = listOf(h.city.buildings.first(), building), workers = listOf(worker))
+                val automatic = CivsRules.validate(physical.copy(autonomy = CivAutonomy(),
+                    inventory = physical.inventory!!.copy(materials = mapOf("OAK_LOG" to 64L))))
+                CivsAutoStorageMigration.ready(automatic) shouldBe false
+                for (city in listOf(physical, automatic)) {
+                    h.service.productionReady(city, worker) shouldBe true
+                    h.service.workInputsReady(city, worker) shouldBe true
+                }
+            }
         }
     }
 })

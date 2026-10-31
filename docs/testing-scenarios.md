@@ -218,6 +218,59 @@ chunk unload/reload and the top-slab-to-bottom-slab-to-stair/deck transition.
 Component recreation now covers walking, arrival and duplicate receipt recovery;
 the remaining boundary is a full process crash on native Paper.
 
+## Manual catalog and terrain diagnostics
+
+The root `:test` task excludes the following complete classes from discovery
+until their primary input variable is set. Their source and shared helpers
+still compile. Each class is in `ru.arc.civs`; setting its input preserves the
+usual `:test --tests` route. An explicit filter without the required input
+matches no test instead of reporting a successful empty replay.
+
+| Class | Primary input variable | Other required variables |
+| --- | --- | --- |
+| `CivsActualCatalogSelectionTest` | `CIVS_ACTUAL_CATALOG_ROOT` | None; `CIVS_ACTUAL_CATALOG_OUT` enables the catalog export |
+| `CivsActualGeneratorPreviewTest` | `CIVS_ACTUAL_LAYOUT_FIXTURE` | `CIVS_ACTUAL_LAYOUT_OUT` |
+| `CivsActualTerrainConnectorReplayTest` | `CIVS_CONNECTOR_FIXTURE` | `CIVS_CONNECTOR_PARTIAL`, `CIVS_CONNECTOR_OUT` |
+| `CivsGateTerrainReplayTest` | `CIVS_GATE_REPLAY_INPUT` | `CIVS_GATE_REPLAY_OUT` |
+| `CivsRoadPassagePreviewTest` | `CIVS_ROAD_NATIVE_INPUT` | `CIVS_ROAD_LAYOUT_INPUT`, `CIVS_ROAD_PREVIEW_OUT` |
+| `CivsRoadJunctionNativeReplayTest` | `CIVS_JUNCTION_NATIVE_INPUT` | `CIVS_JUNCTION_LAYOUT_INPUT`, `CIVS_ROAD_PREVIEW_OUT` |
+
+Supply the local inputs before invoking Gradle and use task-scoped `--rerun`
+because external file contents and output paths are not test-task inputs:
+
+```sh
+CIVS_ACTUAL_CATALOG_ROOT=/private/tmp/private-schematics \
+CIVS_ACTUAL_CATALOG_OUT=/private/tmp/catalog-selection.json \
+  ./gradlew :test --rerun --tests 'ru.arc.civs.CivsActualCatalogSelectionTest'
+```
+
+The catalog export also accepts `CIVS_ACTUAL_CATALOG_STYLE` (default
+`caledonia`) and `CIVS_ACTUAL_CATALOG_TERRAIN_ROOT`. Terrain conversion requires
+`CIVS_ACTUAL_CATALOG_OUT` and writes beside that file. These are detached
+diagnostics and replays; they do not establish live-server or client behavior.
+
+The optional real-family case inside `CivsSettlementLayoutTest` is disabled
+unless `CIVS_LAYOUT_FRAMES` is supplied. Its output remains
+`build/settlement-layout-preview`, or the explicit `CIVS_LAYOUT_OUTPUT` path.
+The ordinary layout cases still run without those inputs.
+
+## Optional mine preview exports
+
+The export-only cases in `CivsMineV3Test` and `CivsMineV4Test` run only with
+`CIVS_EXPORT_MINE_PREVIEWS=1`. Their ordinary regression cases remain enabled.
+Export both versions with:
+
+```sh
+CIVS_EXPORT_MINE_PREVIEWS=1 ./gradlew :test --rerun \
+  --tests 'ru.arc.civs.CivsMineV3Test' \
+  --tests 'ru.arc.civs.CivsMineV4Test'
+```
+
+V3 writes `build/mine-plan-preview`; V4 writes `build/mine-plan-v4-preview`.
+The [V4 preview workflow](mine-v4-frontier-design.md) consumes the V4 files at
+their existing paths.
+The V5 material-accounting assertions continue to run in ordinary tests.
+
 ## Opt-in local replays with private inputs
 
 The environment-variable names below are read directly by the scenario test
@@ -236,7 +289,8 @@ CI.
 
 Enable only the replay whose local inputs are available. For example:
 Gradle does not track these runtime environment variables or external files as
-test-task inputs, so each opt-in invocation uses `--rerun-tasks`. Keep it when
+test-task inputs, so each opt-in invocation uses `:test --rerun`. This reruns
+the selected test task while preserving normal compilation checks. Keep it when
 replaying after a disabled run or whenever the supplied state, map, native
 facts, schematic, or atelier root changes; otherwise the filtered task may be
 considered up-to-date.
@@ -281,18 +335,18 @@ and hashes: combining these inputs does not make an atomic world snapshot.
 
 ```sh
 CIVS_SCENARIO_SCHEMATICS_ROOT=/private/tmp/private-schematics \
-  ./gradlew test --rerun-tasks --tests 'ru.arc.civs.scenarios.PrivateBlueprintScenarioTest'
+  ./gradlew :test --rerun --tests 'ru.arc.civs.scenarios.PrivateBlueprintScenarioTest'
 
 CIVS_SCENARIO_MINE_STATE=/private/tmp/auto2-mine-state.json \
 CIVS_SCENARIO_PUBLIC_MAP=/private/tmp/public-map \
 CIVS_SCENARIO_NATIVE_FACTS=/private/tmp/native-facts.json \
 CIVS_SCENARIO_SCHEMATICS_ROOT=/private/tmp/private-schematics \
-  ./gradlew test --rerun-tasks --tests 'ru.arc.civs.scenarios.Auto2MineCoverScenarioTest'
+  ./gradlew :test --rerun --tests 'ru.arc.civs.scenarios.Auto2MineCoverScenarioTest'
 
 CIVS_SCENARIO_CITY_STATE=/private/tmp/auto2-city-state.json \
 CIVS_SCENARIO_CITY_MAP=/private/tmp/public-map \
 CIVS_SCENARIO_NATIVE_FACTS=/private/tmp/native-facts.json \
-  ./gradlew test --rerun-tasks --tests 'ru.arc.civs.scenarios.Auto2ResidentForestryScenarioTest'
+  ./gradlew :test --rerun --tests 'ru.arc.civs.scenarios.Auto2ResidentForestryScenarioTest'
 ```
 
 The mine replay's public capture does not observe the subsurface below public

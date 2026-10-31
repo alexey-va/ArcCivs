@@ -15,7 +15,6 @@ class CivsBlueprintCatalogTest : FunSpec({
         val catalog = parseCatalog(accepted + rejected)
         catalog.sourceCount shouldBe 4
         catalog.rejectedCount shouldBe 1
-        catalog.choices(BuildingType.HOUSE).size shouldBe 1
         catalog.choices(BuildingType.HOUSE).single().size shouldBe listOf(7, 8, 9)
         shouldThrowAny { parseCatalog(accepted.dropLast(1)) }
         shouldThrowAny { parseCatalog(accepted + accepted.first()) }
@@ -26,7 +25,7 @@ class CivsBlueprintCatalogTest : FunSpec({
         val catalog = parseCatalog(local + fallback)
         catalog.default("shire", BuildingType.HOUSE, 1)?.style shouldBe "shire"
         catalog.autonomous("shire", BuildingType.HOUSE)?.style shouldBe "caledonia"
-        catalog.autonomous("sandstone", BuildingType.HOUSE)?.id shouldBe catalog.autonomous("sandstone", BuildingType.HOUSE)?.id
+        catalog.autonomous("sandstone", BuildingType.HOUSE)?.id shouldBe fallback.first()["schematicId"].asString
         catalog.choices(BuildingType.HOUSE, "shire").single().maxLevel shouldBe 1
     }
     test("accepted upgrade keeps its exact family and revision even when a new default sorts first") {

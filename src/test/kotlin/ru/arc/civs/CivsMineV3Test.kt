@@ -386,7 +386,9 @@ class CivsMineV3Test : FunSpec({
         }
     }
 
-    test("export the actual V3 plan for the private block-model preview") {
+    test("export the actual V3 plan for the private block-model preview").config(
+        enabled = System.getenv("CIVS_EXPORT_MINE_PREVIEWS") == "1",
+    ) {
         val directory = Path.of("build", "mine-plan-preview")
         Files.createDirectories(directory)
         val summaries = mutableListOf<Map<String, Any>>()

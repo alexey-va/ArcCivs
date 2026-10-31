@@ -57,6 +57,22 @@ tasks.withType<Test>().configureEach {
     // MockBukkit/MockK retain JVM state; isolate suites without increasing the heap.
     forkEvery = 1
 }
+tasks.test {
+    // Private-input tools stay compiled, but do not start empty test JVMs in CI.
+    val optionalReplayInputs = mapOf(
+        "CivsActualCatalogSelectionTest" to "CIVS_ACTUAL_CATALOG_ROOT",
+        "CivsActualGeneratorPreviewTest" to "CIVS_ACTUAL_LAYOUT_FIXTURE",
+        "CivsActualTerrainConnectorReplayTest" to "CIVS_CONNECTOR_FIXTURE",
+        "CivsGateTerrainReplayTest" to "CIVS_GATE_REPLAY_INPUT",
+        "CivsRoadPassagePreviewTest" to "CIVS_ROAD_NATIVE_INPUT",
+        "CivsRoadJunctionNativeReplayTest" to "CIVS_JUNCTION_NATIVE_INPUT",
+    )
+    for ((testClass, inputVariable) in optionalReplayInputs) {
+        if (!providers.environmentVariable(inputVariable).isPresent) {
+            exclude("ru/arc/civs/$testClass.class")
+        }
+    }
+}
 tasks.register<Test>("integrationTest") {
     description = "Runs disposable MySQL network-authority tests."
     group = "verification"

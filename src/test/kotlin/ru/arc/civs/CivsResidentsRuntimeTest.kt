@@ -241,6 +241,8 @@ class CivsResidentsRuntimeTest : FunSpec({
                 shouldThrow<CivsRejection> { h.owner.validateResidentMeal(h.city.id, accepted) }.reason shouldBe "stale-meal"
                 h.city.stock.food shouldBe 2L
                 h.city.workers.firstOrNull { it.id == h.workerId }?.hunger?.shouldBe(14)
+                h.city.workers.firstOrNull { it.id == h.workerId }?.completedCycles?.shouldBe(0L)
+                if (interruption == "night") (h.workerId in h.owner.awakeResidentIds(h.city.id)) shouldBe false
                 h.deliveries shouldBe 0
                 pending.completeExceptionally(CivsRejection("stale-meal"))
             } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
@@ -411,34 +413,6 @@ class CivsResidentsRuntimeTest : FunSpec({
             CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
             h.city.workers.single().completedCycles shouldBe 0L
             h.deliveries shouldBe 0
-        }
-    }
-
-    test("night cancels an uncommitted meal and cannot consume food through an old arrival proof") {
-        residentRuntime { h ->
-            h.navigationNow = 2_000
-            h.owner.residentLifeEnabled = true
-            h.city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(food = 2),
-                workers = h.city.workers.map { it.copy(hunger = 14, inventory = mapOf("BREAD" to 2L),
-                    life = CivResidentLife(awakeMinutes = 6)) })
-            var captured: CivResidentMeal? = null
-            val pending = CompletableFuture<Settlement>()
-            h.owner.finishResidentMeal = { cityId, plan -> h.owner.validateResidentMeal(cityId, plan); captured = plan; pending }
-            h.owner.pulse(2_000)
-            for (tick in 1..300) {
-                h.navigate()
-                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                if (captured != null) break
-            }
-            val plan = requireNotNull(captured)
-            h.world.time = 13_000
-            h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
-            h.owner.awakeResidentIds(h.city.id) shouldBe emptySet()
-            shouldThrow<CivsRejection> { h.owner.validateResidentMeal(h.city.id, plan) }.reason shouldBe "stale-meal"
-            h.city.stock.food shouldBe 2L
-            h.city.workers.single().hunger shouldBe 14
-            h.city.workers.single().completedCycles shouldBe 0L
-            pending.completeExceptionally(CivsRejection("stale-meal"))
         }
     }
 

@@ -124,11 +124,14 @@ class CivsTextTest : FunSpec({
             CivsResidents.hunger(legacy))) shouldBe "\uE600 20/20   \uE603 20/20"
     }
 
-    test("a wrapped shared-protection rejection gives a localized action without leaking diagnostics") {
+    test("wrapped protection and unknown failures give localized actions without leaking diagnostics") {
         val text = CivsText.fromYaml(civsLocaleSource())
         val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag("ru-RU") }
         val failure = CompletionException(ArcSchematicException(ArcSchematicFailure.PROTECTED_AREA, "private/owner/detail"))
         plainText(text.failure(player, failure)) shouldBe "Эта область защищена. Выберите другое место."
+        every { player.locale() } returns Locale.ENGLISH
+        plainText(text.failure(player, IllegalStateException("private/internal/path"))) shouldBe
+            "The action did not complete. Reopen this menu and try again."
     }
 
     test("wrapped world rejection preserves configured names as literal text") {
@@ -151,7 +154,6 @@ class CivsTextTest : FunSpec({
             listOfNotNull((component as? TranslatableComponent)?.key()) + component.children().flatMap(::translations)
         translations(failure) shouldBe emptyList()
         plainText(failure) shouldContain "Дубовое бревно × 7"
-        plainText(failure) shouldContain "× 7"
         plainText(text.material(player, "COBBLESTONE_STAIRS")) shouldBe "Булыжные ступеньки"
         every { player.locale() } returns Locale.ENGLISH
         plainText(text.material(player, "COBBLESTONE_STAIRS")) shouldBe "Cobblestone Stairs"

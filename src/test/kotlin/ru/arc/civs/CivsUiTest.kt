@@ -1680,7 +1680,10 @@ class CivsUiTest : FunSpec({
                     materials = emptyMap(), buildingMaterials = emptyMap()))
             var physical = mapOf("PAPER" to 47L, "LEATHER" to 12L, "STONE" to 128L, "OAK_LOG" to 4L)
             var stockSnapshots = 0
-            every { h.host.availableMaterials(h.player) } answers { stockSnapshots++; physical }
+            every { h.host.availableMaterials(h.player) } answers {
+                stockSnapshots++
+                throw CivsRejection("storage-unavailable")
+            }
             every { h.host.localMaterials(h.player, hall.id) } returns mapOf("PAPER" to 1L)
             every { h.host.supplyRequests(h.player) } returns listOf(
                 CivSupplyRequest(hall.id, "PAPER", 3, 2), CivSupplyRequest(hall.id, "LEATHER", 1, 0),
@@ -1697,10 +1700,14 @@ class CivsUiTest : FunSpec({
             logisticsTableCells(h.screen).first { it.first() == "Кожа" } shouldBe listOf("Кожа", "1")
             logisticsTableCells(h.screen).first { it.first() == "Камень" } shouldBe listOf("Камень", "8")
             stockSnapshots shouldBe beforeRequests
+            h.body().contains("Нет данных") shouldBe false
+            h.body().contains("Неизвестно") shouldBe false
             h.screen.body.size shouldBe 1 // One card for all four requests from this hall.
             h.screen.buttons shouldBe emptyList()
             logisticsTableCells(h.screen).first { it.first() == "Дубовое бревно" } shouldBe listOf("Дубовое бревно", "4")
             export("logistics-requests-ru")
+            export("logistics-stock-unavailable-ru")
+            every { h.host.availableMaterials(h.player) } answers { stockSnapshots++; physical }
             physical = physical + ("OAK_LOG" to 6L)
             h.click("history")
             val beforeRefresh = stockSnapshots
@@ -1812,26 +1819,6 @@ class CivsUiTest : FunSpec({
             export("logistics-grouped-last")
             h.click("history")
             h.screen.id shouldBe "civs.building"
-        }
-    }
-
-    test("warehouse request board renders deficits without a shared stock snapshot") {
-        withUi { h ->
-            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
-            val base = settlement(h.player)
-            val hall = base.buildings.first()
-            val warehouse = base.buildings.last().copy(type = BuildingType.WAREHOUSE)
-            h.city = base.copy(buildings = listOf(hall, warehouse))
-            every { h.host.supplyRequests(h.player) } returns listOf(CivSupplyRequest(hall.id, "PAPER", 3, 0))
-            every { h.host.availableMaterials(h.player) } throws CivsRejection("storage-unavailable")
-            h.ui.openBuilding(h.player, base.id, warehouse.id)
-            h.click("logistics")
-            logisticsTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "3")
-            h.body().contains("Нет данных") shouldBe false
-            h.body().contains("Неизвестно") shouldBe false
-            h.body().contains("3 / 0") shouldBe false
-            h.screen.buttons shouldBe emptyList()
-            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-stock-unavailable-ru", h.screen, listOf(588, 380)) }
         }
     }
 
@@ -3544,18 +3531,6 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("known worker pauses and safe failures are translated without exposing raw diagnostics") {
-        withUi { h ->
-            h.city = settlement(h.player)
-            every { h.host.workerStatus(any()) } returns "workers.status.route-unreachable"
-            h.ui.openWorker(h.player, h.city!!.id, h.city!!.workers.first().id)
-            h.body() shouldContain "No accessible route"
-            val text = CivsText.fromYaml(civsLocaleSource())
-            plainText(text.failure(h.player, IllegalStateException("private/internal/path"))) shouldBe
-                "The action did not complete. Reopen this menu and try again."
-        }
-    }
-
     test("building details show the resolved work reason rather than the saved building phase") {
         withUi { h ->
             val base = settlement(h.player)
@@ -3578,9 +3553,11 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Status unavailable"
             h.body().contains("future-internal-key") shouldBe false
 
-            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val worker = base.workers.first()
             every { h.host.workerStatus(worker.id) } returns "workers.status.route-unreachable"
+            h.ui.openWorker(h.player, base.id, worker.id)
+            h.body() shouldContain "No accessible route"
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             h.ui.openWorker(h.player, base.id, worker.id)
             h.body() shouldContain "Нет доступного пути"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "worker-route-ru", h.screen, listOf(588, 380)) }
@@ -3735,8 +3712,9 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("export representative building and warehouse screens from actual presenter components") {
-        val directory = System.getenv("CIVS_UI_PREVIEW_OUT") ?: return@test
+    test("export representative building and warehouse screens from actual presenter components")
+        .config(enabled = System.getenv("CIVS_UI_PREVIEW_OUT") != null) {
+        val directory = requireNotNull(System.getenv("CIVS_UI_PREVIEW_OUT"))
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             h.open(); h.click("found"); h.click("style_0")

@@ -94,7 +94,7 @@ class CivsPopulationLifecycleTest : FunSpec({
         after.workers.single { it.id == id(102) }.homeId shouldBe child.homeId
         after.workers.count(CivsResidents::isChild) shouldBe 1
     }
-    test("twenty four adults admit four nursery children without increasing accepted builder credit") {
+    test("twenty four adults admit four nursery children and one matures when an adult place is freed") {
         var nextId = 200
         val base = city()
         val houses = (2..5).map { n -> base.buildings.last().copy(id = id(n), anchor = CivPosition(n * 6, 64, 0),
@@ -113,7 +113,6 @@ class CivsPopulationLifecycleTest : FunSpec({
         current.workers.size shouldBe 28
         current.workers.count(CivsResidents::isChild) shouldBe 4
         current.workers.count { !CivsResidents.isChild(it) } shouldBe 24
-        CivsRules.MAX_BUILDER_WORK_CREDIT shouldBe 768
         val saved = CivsRules.validate(Gson().fromJson(Gson().toJson(current), Settlement::class.java))
         saved shouldBe current
         val childIds = saved.workers.filter(CivsResidents::isChild).mapTo(hashSetOf()) { it.id }

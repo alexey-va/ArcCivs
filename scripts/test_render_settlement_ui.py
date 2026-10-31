@@ -1,3 +1,4 @@
+from copy import deepcopy
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -18,6 +19,7 @@ class ExportedFontTest(unittest.TestCase):
 
     def test_component_font_inheritance_overrides_legacy_registry_assumptions(self):
         content = {"body-0": self.panel + self.spacer + self.icon, "back": chr(0xF9050)}
+        original_content = deepcopy(content)
         exported = {"content": content, "components": {"body": [{"text": {
             "font": "arc:dialog_ui_preview", "text": self.panel,
             "extra": [{"text": self.spacer}, {"font": "minecraft:default", "text": self.icon}],
@@ -26,7 +28,7 @@ class ExportedFontTest(unittest.TestCase):
             self.panel: "arc:dialog_ui_preview", self.spacer: "arc:dialog_ui_preview",
             self.icon: "minecraft:default", chr(0xF9050): "arc:dialog_ui",
         })
-        self.assertEqual(exported["content"], content)
+        self.assertEqual(exported["content"], original_content)
 
     def test_panel_spacing_aliases_preserve_width_without_accepting_bitmap_conflicts(self):
         spacer = chr(0xFA201)

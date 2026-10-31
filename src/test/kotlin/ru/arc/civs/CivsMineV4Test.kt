@@ -134,7 +134,9 @@ class CivsMineV4Test : FunSpec({
         old.builtStanding(old.bottom, old.steps.size + 1L) shouldBe false
     }
 
-    test("export the actual V4 geometry and approaches for offline spatial review") {
+    test("export the actual V4 geometry and approaches for offline spatial review").config(
+        enabled = System.getenv("CIVS_EXPORT_MINE_PREVIEWS") == "1",
+    ) {
         val directory = Path.of("build", "mine-plan-v4-preview")
         Files.createDirectories(directory)
         val summaries = mutableListOf<Map<String, Any>>()

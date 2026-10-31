@@ -31,7 +31,6 @@ class CatalogRecipeInputsTest(unittest.TestCase):
             first_hash = curate.digest(curate.canonical(first))
 
             self.assertEqual(first, repeated)
-            self.assertEqual(first_hash, curate.digest(curate.canonical(repeated)))
 
             scene_path.write_bytes(b"scene geometry v2")
             changed_scene = curate.code_inputs(script_path)

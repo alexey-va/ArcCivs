@@ -73,10 +73,13 @@ open central slices, aligned tiers, branch junctions, predecessor ordering and
 the real V3 escape coordinates. V2/V3 sequence hashes were captured by invoking
 the constructor in the published 0.1.52 JAR, not a duplicate generator.
 
-The test writes actual plans to `build/mine-plan-v4-preview/`, including counts
-for the separate economy assessment. Example preview:
+The opt-in export case writes actual plans to `build/mine-plan-v4-preview/`,
+including counts for the separate economy assessment. Set
+`CIVS_EXPORT_MINE_PREVIEWS=1` to generate them; ordinary V4 regressions run
+without this variable. Example preview:
 
 ```sh
+CIVS_EXPORT_MINE_PREVIEWS=1 ./gradlew :test --rerun --tests 'ru.arc.civs.CivsMineV4Test'
 python3 -B scripts/export-mine-preview.py build/mine-plan-v4-preview/medievaloak-l3-v4.json --out /private/tmp/arccivs-mine-v4/medievaloak-l3.atelier.json
 node ../ruscrafting-ops/scripts/location-atelier/cli.mjs /private/tmp/arccivs-mine-v4/medievaloak-l3.atelier.json --out /private/tmp/arccivs-mine-v4/medievaloak-l3 --client-jar ../artifacts/.location-atelier-cache/minecraft-1.21.11-ba2df812c2d12e0219c489c4cd9a5e1f0760f5bd.jar
 ```
