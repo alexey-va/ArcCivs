@@ -56,6 +56,8 @@ internal class CivsCitizenRoutes(
         if (!shelter.wake(actor)) return false
         val from = actor.npc.location
         val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
+        val waitingMine = waitingMine(actor, city, idleAnchor)
+        if (waitingMine != null && !outside(waitingMine, target.x, target.z)) return false
         val visit = actor.mineVisit?.takeIf { idleAnchor == null && it.owns(target) && !actor.sheltering &&
             actor.attacker == null && actor.foodSource == null && actor.mealVisit == null }
         // A valid hand reach does not depend on the availability of the preferred standing
@@ -104,8 +106,11 @@ internal class CivsCitizenRoutes(
                     target.takeIf { waypoint == null })
             return false
         }
-        val allowed = citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
-            listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id }, visit?.key?.building?.id)
+        val outsideWaitingMine = waitingMine != null && outside(waitingMine, from.blockX, from.blockZ)
+        val allowed = (citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
+            listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id }, visit?.key?.building?.id)).let {
+                if (outsideWaitingMine) it - requireNotNull(waitingMine).id else it
+            }
         val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
         val mealTarget = actor.mealVisit?.target?.takeIf { it == target }
         val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
@@ -131,9 +136,12 @@ internal class CivsCitizenRoutes(
             ?.let { hint?.corridor(city, it.cargo, from.point(), to.point()) }
         val motion = navigation.request(world, from, to, { point ->
             citizenRoutePointAllowed(city, allowed, point, routeMine) && citizenControlClear(city, point) &&
+                (!outsideWaitingMine || outside(requireNotNull(waitingMine), point.x, point.z)) &&
                 (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, from.point(), point, mealTarget) &&
                     citizenIdleTerrain(world, point, city.buildings))
         }, { first, second -> citizenControlStepClear(city, first, second) &&
+            (waitingMine == null || !outside(waitingMine, kotlin.math.floor(first.x).toInt(), kotlin.math.floor(first.z).toInt()) ||
+                outside(waitingMine, kotlin.math.floor(second.x).toInt(), kotlin.math.floor(second.z).toInt())) &&
             (entrance != null || minePassage == null || minePassage.allows(second)) },
             { ground -> routeCosts.cost(ground, surfaceSpeed) }, corridor)
         val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
@@ -513,6 +521,7 @@ internal class CivsCitizenRoutes(
         if (!entity.isValid || entity.world.uid != city.worldId || target.world?.uid != city.worldId) return false
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
         val home = if (actor.sheltering) citizenHomeBuilding(city, worker) ?: return false else null
+        val waitingMine = waitingMine(actor, city, recoveryAnchor)
         val authored = when {
             timedOut -> failed.authored // A work cycle may currently be visiting food, supplies or leisure.
             actor.sheltering -> actor.shelter ?: return false
@@ -527,10 +536,11 @@ internal class CivsCitizenRoutes(
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
         val safe: (CivPosition) -> Boolean = { candidate ->
             collisions.recoveryPointSafe(actor, city, candidate, failed.allowedBuildings, routeMine(actor, city).takeIf { recoveryAnchor == null }) &&
+                (waitingMine == null || outside(waitingMine, candidate.x, candidate.z)) &&
                 (home == null || home.bounds.contains(candidate.x, candidate.y, candidate.z)) &&
                 (recoveryAnchor == null || citizenWithinIdleArea(recoveryAnchor, candidate.point()) && citizenIdleTerrain(entity.world, candidate, city.buildings))
         }
-        val storage = storageForTarget(actor, city, authored)
+        val storage = if (waitingMine == null) storageForTarget(actor, city, authored) else null
         val point = (when {
             actor.sheltering -> authored.takeIf(safe)?.takeIf { point ->
                 shelter.shelterPose(actor, city, worker, point.location(entity.world), collisions.shelterOccupied(actor))
@@ -594,6 +604,16 @@ internal class CivsCitizenRoutes(
         actor.lookYaw = yaw
         actor.lookPitch = pitch
     }
+
+    private fun waitingMine(actor: CitizenActor, city: Settlement, idleAnchor: CivPosition?): CivBuilding? {
+        if (idleAnchor == null || actor.sheltering || actor.foodSource != null || actor.mealVisit != null ||
+            actor.social.visit != null) return null
+        val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return null
+        return worker.assignment?.let(city::building)?.takeIf { workRuntime.waitingForMineAccess(actor, city, worker) }
+    }
+
+    private fun outside(building: CivBuilding, x: Int, z: Int): Boolean =
+        x !in building.bounds.min.x..building.bounds.max.x || z !in building.bounds.min.z..building.bounds.max.z
 
     private companion object {
         val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED", maxFields = 48)

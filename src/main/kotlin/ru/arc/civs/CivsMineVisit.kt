@@ -37,6 +37,28 @@ internal class CivsMineVisits(private val runtime: CitizenRuntime, private val m
     }
     fun clear() = attempted.clear()
 
+    fun waitingForAccess(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World): Boolean =
+        pending(actor, city, worker, world)?.let { occupied(actor, it, world) } == true
+
+    private fun occupied(actor: CitizenActor, key: CivMineVisitKey, world: World): Boolean = runtime.actors.values.any { other ->
+        other !== actor && other.cityId == key.cityId && other.worldId == world.uid && other.npc.isValid &&
+            other.mineVisit?.key?.let { it.cityId == key.cityId && it.building.id == key.building.id } == true
+    }
+
+    private fun pending(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World): CivMineVisitKey? {
+        if (actor.mineVisit != null || actor.cycle.phase != CitizenPhase.IDLE || actor.cycle.observedWorkMillis != 0L ||
+            actor.plan.idleReason != null || actor.plan.courier != null || !citizenHasCapacity(city, actor.plan)) return null
+        val work = actor.plan.worldWork?.takeIf { CivsMineFallback.matches(it) &&
+            it.workerId == worker.id && it.cycle == worker.completedCycles } ?: return null
+        val mine = city.building(work.buildingId)?.takeIf { CivsMineFallback.eligible(city, it, worker) } ?: return null
+        val control = mine.control ?: return null
+        if (!citizenStorageReady(world, control)) return null
+        val cause = CivsMineFallback.cause(work) ?: return null
+        val key = CivMineVisitKey(city.id, worker.id, mine, proof(city, mine), cause)
+        val identity = city.id to worker.id
+        return key.takeUnless { attempted[identity] == it || identity !in attempted && attempted.size >= maximumAttempts }
+    }
+
     fun reconcile(actor: CitizenActor, city: Settlement) {
         val visit = actor.mineVisit ?: return
         val mine = city.building(visit.key.building.id)
@@ -59,18 +81,27 @@ internal class CivsMineVisits(private val runtime: CitizenRuntime, private val m
 
     fun update(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
         if (actor.mineVisit == null) {
-            if (actor.cycle.phase != CitizenPhase.IDLE || actor.cycle.observedWorkMillis != 0L ||
-                actor.plan.idleReason != null || actor.plan.courier != null || !citizenHasCapacity(city, actor.plan)) return false
-            val work = actor.plan.worldWork?.takeIf { CivsMineFallback.matches(it) &&
-                it.workerId == worker.id && it.cycle == worker.completedCycles } ?: return false
-            val mine = city.building(work.buildingId)?.takeIf { CivsMineFallback.eligible(city, it, worker) } ?: return false
-            val control = mine.control ?: return false
-            if (!citizenStorageReady(world, control)) return false
-            val cause = CivsMineFallback.cause(work) ?: return false
-            val key = CivMineVisitKey(city.id, worker.id, mine, proof(city, mine), cause)
-            val identity = city.id to worker.id
-            if (attempted[identity] == key || identity !in attempted && attempted.size >= maximumAttempts) return false
-            attempted[identity] = key
+            val key = pending(actor, city, worker, world) ?: return false
+            if (occupied(actor, key, world)) {
+                actor.cycle.deferWork(now)
+                runtime.statuses[worker.id] = "mine-waiting"
+                return true
+            }
+            val work = requireNotNull(actor.plan.worldWork)
+            val mine = key.building
+            // A waiting miner returns from leisure before its first physical visit, without starting work.
+            if (actor.route?.idleAnchor != null) routes.cancelRoute(actor)
+            if (!routes.arrivedAt(actor, city, world, work.standing)) {
+                actor.cycle.deferWork(now)
+                actor.route?.takeIf { it.motion.failure != null || it.completion != null || it.timedOut(now) }?.let { route ->
+                    val retryAt = route.preparationRetryAt ?: (now + 5_000).also { route.preparationRetryAt = it }
+                    if (now >= retryAt) routes.cancelRoute(actor)
+                }
+                if (actor.route == null) routes.startRoute(actor, world, work.standing, now)
+                runtime.statuses[worker.id] = if (actor.route?.motion?.failure != null) "route-unreachable" else "moving-to-storage"
+                return true
+            }
+            attempted[city.id to worker.id] = key
             val allowed = passage(mine, key.proof)
             val candidates = candidates(mine, key.proof).filter {
                 it.y <= work.standing.y - 2 && it.y <= actor.npc.location.y - 2 && allowed.completed(it.point())
@@ -78,7 +109,7 @@ internal class CivsMineVisits(private val runtime: CitizenRuntime, private val m
             val visit = CitizenMineVisit(key, work.standing, candidates, allowed, now)
             actor.mineVisit = visit
             routes.cancelRoute(actor)
-            report(actor, visit, "admitted", cause.reason, now)
+            report(actor, visit, "admitted", key.cause.reason, now)
         }
         val visit = requireNotNull(actor.mineVisit)
         actor.cycle.deferWork(now)

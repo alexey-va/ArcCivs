@@ -235,10 +235,13 @@ internal class CivsCitizenLeisure(
         return true
     }
 
-    fun wander(actor: CitizenActor, city: Settlement, world: World, now: Long) {
+    fun wander(actor: CitizenActor, city: Settlement, world: World, now: Long, outsideHome: Boolean = false) {
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
         val home = citizenIdleBuilding(city, worker) ?: return
         val anchor = citizenIdleAnchor(city, home)
+        val outside: (CivPosition) -> Boolean = { point ->
+            point.x !in home.bounds.min.x..home.bounds.max.x || point.z !in home.bounds.min.z..home.bounds.max.z
+        }
         val route = actor.route
         if (route != null) {
             val outcome = if (!route.chunks.ready(world)) CitizenNavigationOutcome.STOPPED
@@ -262,14 +265,17 @@ internal class CivsCitizenLeisure(
                 "path_nodes" to route.motion.nodeCount, "elapsed_ms" to now - route.startedAt)
             return
         }
-        val returning = !citizenWithinIdleArea(anchor, actor.npc.location.point())
+        val returning = !citizenWithinIdleArea(anchor, actor.npc.location.point()) || outsideHome &&
+            !outside(CivPosition(actor.npc.location.blockX, actor.npc.location.blockY, actor.npc.location.blockZ))
         if (!returning && !actor.wander.ready(now) || runtime.wanderBudget == 0) return
         runtime.wanderBudget--
         // Keep short invalid-target retries fair within the shared eight-check budget.
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
-        val target = if (returning) anchor
-            else citizenWanderTarget(city, anchor, actor.workerId, actor.wander.step, setOf(home.id),
-                actor.npc.location.point(), actor.npc.bodyYaw)
+        val returnTarget = anchor.takeIf { returning && (!outsideHome || outside(it) &&
+            citizenStandable(world, it) && citizenIdleTerrain(world, it, city.buildings)) }
+        val target = if (returnTarget != null) returnTarget
+            else citizenWanderTarget(city, anchor, actor.workerId, actor.wander.step, if (outsideHome) emptySet() else setOf(home.id),
+                actor.npc.location.point(), actor.npc.bodyYaw)?.takeIf { !outsideHome || outside(it) }
         // startRoute owns the single loaded-chunk, support and headroom check.
         if (target != null && actor.npc.location.point().distanceSquared(target.point()) >= 1.0 &&
             routes.startRoute(actor, world, target, now, idleAnchor = anchor)) {

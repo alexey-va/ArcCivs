@@ -171,6 +171,255 @@ class CivsMineVisitTest : FunSpec({
         }
     }
 
+    test("one quarry retains its visitor through route cancellation blocked return and retired proof") {
+        mineVisitFixture { h ->
+            val waiting = h.addMiner()
+            val before = h.city
+            val cycle = waiting.actor.cycle
+            val owner = h.selectTarget()
+            h.routes.cancelRoute(h.actor)
+            h.manager.update(waiting.actor, h.city, waiting.worker, h.world, h.now) shouldBe true
+            waiting.actor.mineVisit shouldBe null
+            h.manager.retainedAttempts shouldBe 1
+            h.runtime.statuses[waiting.worker.id] shouldBe "mine-waiting"
+
+            h.at = requireNotNull(owner.target).location(h.world)
+            h.city = h.city.copy(minePlans = mapOf(h.mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, 0)))
+            h.manager.reconcile(h.actor, h.city)
+            h.actor.plan = h.actor.plan.copy(idleReason = "searching-work", worldWork = null)
+            h.manager.reconcile(h.actor, h.city)
+            owner.returning shouldBe true
+            owner.planRetired shouldBe true
+            every { h.routes.startRoute(h.actor, any(), any(), any(), any()) } returns false
+            h.update()
+            (owner.retryAt > h.now) shouldBe true
+            repeat(20) {
+                h.manager.update(waiting.actor, h.city, waiting.worker, h.world, h.now + it * 500) shouldBe true
+                waiting.actor.mineVisit shouldBe null
+                (waiting.actor.cycle === cycle) shouldBe true
+                cycle.phase shouldBe CitizenPhase.IDLE
+                cycle.observedWorkMillis shouldBe 0L
+                cycle.beginDelivery(h.now) shouldBe null
+                h.manager.retainedAttempts shouldBe 1
+            }
+            h.city.workers shouldBe before.workers
+            h.city.stock shouldBe before.stock
+            h.city.inventory shouldBe before.inventory
+            h.actor.mineVisit shouldBe owner
+
+            h.at = h.standing.location(h.world)
+            h.update()
+            h.actor.mineVisit shouldBe null
+            // Restore the paid proof; waiting did not consume this miner's first attempt.
+            h.city = h.city.copy(minePlans = before.minePlans)
+            h.manager.update(waiting.actor, h.city, waiting.worker, h.world, h.now) shouldBe true
+            waiting.actor.mineVisit?.key?.workerId shouldBe waiting.worker.id
+            h.manager.retainedAttempts shouldBe 2
+            cycle.phase shouldBe CitizenPhase.IDLE
+            cycle.observedWorkMillis shouldBe 0L
+            h.city shouldBe before
+        }
+    }
+
+    test("waiting happens before ordinary storage travel and preserves the same safe idle route") {
+        mineVisitFixture { h ->
+            // The storage stance is inside the real quarry footprint; its idle entrance is outside.
+            val mine = h.mine.copy(entrance = h.standing.copy(x = h.mine.bounds.min.x - 1))
+            for (x in mine.entrance.x - 10..mine.entrance.x + 10)
+                for (z in mine.entrance.z - 10..mine.entrance.z + 10)
+                    if (x != h.standing.x || z != h.standing.z)
+                        h.world.getBlockAt(x, h.standing.y - 1, z).type = Material.STONE
+            val waiting = h.addMiner(mine, mine.entrance.copy(x = mine.entrance.x - 4).location(h.world))
+            val before = h.city
+            val cycle = waiting.actor.cycle
+            h.selectTarget()
+            val work = h.workOwner()
+            repeat(40) {
+                h.now += 50
+                h.runtime.wanderBudget = 8
+                work.update(waiting.actor, h.city, h.world, h.now)
+                h.runtime.statuses[waiting.worker.id] shouldBe "mine-waiting"
+                waiting.actor.mineVisit shouldBe null
+                (waiting.actor.cycle === cycle) shouldBe true
+                cycle.phase shouldBe CitizenPhase.IDLE
+                cycle.observedWorkMillis shouldBe 0L
+            }
+            val idle = requireNotNull(waiting.actor.route)
+            idle.idleAnchor shouldBe mine.entrance
+            citizenIdleTerrain(h.world, idle.authored, h.city.buildings) shouldBe true
+            citizenWithinIdleArea(mine.entrance, idle.authored.point()) shouldBe true
+            repeat(20) {
+                h.now += 50
+                work.update(waiting.actor, h.city, h.world, h.now)
+                (waiting.actor.route === idle) shouldBe true
+                waiting.actor.mineVisit shouldBe null
+                cycle.phase shouldBe CitizenPhase.IDLE
+                cycle.observedWorkMillis shouldBe 0L
+            }
+            h.city shouldBe before
+            val visits = mineVisitField(work, "mineVisits") as CivsMineVisits
+            visits.retainedAttempts shouldBe 0
+
+            h.runtime.actors.remove(h.worker.id)
+            work.update(waiting.actor, h.city, h.world, ++h.now)
+            waiting.actor.mineVisit shouldBe null
+            val storage = requireNotNull(waiting.actor.route)
+            (storage === idle) shouldBe false
+            storage.idleAnchor shouldBe null
+            storage.authored shouldBe h.standing
+            cycle.phase shouldBe CitizenPhase.IDLE
+            cycle.observedWorkMillis shouldBe 0L
+            visits.retainedAttempts shouldBe 0
+            waiting.at = h.standing.location(h.world)
+            work.update(waiting.actor, h.city, h.world, ++h.now)
+            waiting.actor.mineVisit?.key?.workerId shouldBe waiting.worker.id
+            visits.retainedAttempts shouldBe 1
+            h.city shouldBe before
+            cycle.phase shouldBe CitizenPhase.IDLE
+            cycle.observedWorkMillis shouldBe 0L
+        }
+    }
+
+    test("another quarry admits independently while a retired native actor no longer holds access") {
+        mineVisitFixture { h ->
+            h.selectTarget()
+            val secondMine = spatialBuilding("caledonia", "miner", 1, CivPosition(32, 69, 0))
+            val independent = h.addMiner(secondMine)
+            h.manager.update(independent.actor, h.city, independent.worker, h.world, h.now) shouldBe true
+            independent.actor.mineVisit?.key?.building?.id shouldBe secondMine.id
+            h.actor.mineVisit?.key?.building?.id shouldBe h.mine.id
+            val waiting = h.addMiner()
+            h.manager.update(waiting.actor, h.city, waiting.worker, h.world, h.now) shouldBe true
+            waiting.actor.mineVisit shouldBe null
+            every { h.npc.isValid } returns false
+            h.manager.update(waiting.actor, h.city, waiting.worker, h.world, h.now) shouldBe true
+            waiting.actor.mineVisit?.key?.building?.id shouldBe h.mine.id
+            h.manager.retainedAttempts shouldBe 3
+            waiting.actor.cycle.observedWorkMillis shouldBe 0L
+            waiting.worker.completedCycles shouldBe 0L
+        }
+    }
+
+    test("mine waiting status respects life cargo and its own visit and clears with the owner") {
+        mineVisitFixture { h ->
+            val waiting = h.addMiner()
+            val owner = h.selectTarget()
+            val observations = h.observations(h.workOwner())
+            h.runtime.statuses[waiting.worker.id] = "mine-waiting"
+            observations.status(waiting.worker.id) shouldBe "workers.status.mine-waiting"
+            waiting.actor.combatStatus = "fighting"
+            observations.status(waiting.worker.id) shouldBe "workers.status.fighting"
+            waiting.actor.combatStatus = null
+            waiting.actor.sheltering = true
+            observations.status(waiting.worker.id) shouldBe "workers.status.sheltering"
+            waiting.actor.sheltering = false
+            waiting.actor.tavernService = mockk(relaxed = true)
+            observations.status(waiting.worker.id) shouldBe "workers.status.serving-guests"
+            waiting.actor.tavernService = null
+            waiting.actor.mealVisit = mockk {
+                every { seatedFrom } returns null
+                every { arrivedAt } returns null
+            }
+            observations.status(waiting.worker.id) shouldBe "workers.status.moving-to-tavern"
+            waiting.actor.mealVisit = null
+            waiting.actor.supplyPickup = CitizenSupplyPickup(UUID.randomUUID(), h.mine.id, false)
+            observations.status(waiting.worker.id) shouldBe "workers.status.loading-cargo"
+            waiting.actor.supplyPickup = null
+            waiting.actor.mineVisit = CitizenMineVisit(owner.key.copy(workerId = waiting.worker.id), h.standing,
+                owner.candidates, owner.passage, h.now).also { it.returning = true }
+            observations.status(waiting.worker.id) shouldBe "workers.status.mine-returning"
+            waiting.actor.mineVisit = null
+            h.runtime.actors.remove(h.worker.id)
+            observations.status(waiting.worker.id) shouldBe "workers.status.waiting"
+            waiting.actor.cycle.phase shouldBe CitizenPhase.IDLE
+            waiting.actor.cycle.observedWorkMillis shouldBe 0L
+        }
+    }
+
+    test("a mine waiter returning to its idle area stays outside the supported upper staircase") {
+        mineVisitFixture { h ->
+            val owner = h.selectTarget()
+            h.at = requireNotNull(owner.target).location(h.world)
+            val mine = h.staircaseMine(entranceOutside = false)
+            val waiting = h.addMiner(mine, h.standing.copy(x = h.standing.x + 12).location(h.world))
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            h.runtime.wanderBudget = 8
+            work.update(waiting.actor, h.city, h.world, ++h.now)
+            val idle = requireNotNull(waiting.actor.route)
+            withClue("target=${idle.authored} bounds=${mine.bounds}") {
+                mine.bounds.contains(idle.authored.x, idle.authored.y, idle.authored.z) shouldBe false
+            }
+            citizenStandable(h.world, idle.authored) shouldBe true
+            repeat(20) {
+                work.update(waiting.actor, h.city, h.world, ++h.now)
+                (waiting.actor.route === idle) shouldBe true
+            }
+            routes.cancelRoute(waiting.actor)
+            val destination = h.standing.copy(x = h.standing.x - 5)
+            routes.startRoute(waiting.actor, h.world, destination, ++h.now, idleAnchor = mine.entrance) shouldBe true
+            val crossing = requireNotNull(waiting.actor.route)
+            (mine.id in crossing.allowedBuildings) shouldBe false
+            @Suppress("UNCHECKED_CAST")
+            val allowed = mineVisitField(crossing.motion, "allowed") as (CivPosition) -> Boolean
+            allowed(h.standing) shouldBe false
+            for (tick in 1..400) {
+                h.walk(waiting)
+                val at = waiting.at
+                (at.blockX in mine.bounds.min.x..mine.bounds.max.x &&
+                    at.blockZ in mine.bounds.min.z..mine.bounds.max.z) shouldBe false
+                if (crossing.motion.finished) break
+            }
+            citizenAtSupportedEndpoint(h.world, waiting.at.point(), destination) shouldBe true
+            waiting.actor.mineVisit shouldBe null
+            waiting.actor.cycle.phase shouldBe CitizenPhase.IDLE
+            waiting.actor.cycle.observedWorkMillis shouldBe 0L
+            (mineVisitField(work, "mineVisits") as CivsMineVisits).retainedAttempts shouldBe 0
+            h.city shouldBe before
+        }
+    }
+
+    test("a mine waiter inside the upper staircase escapes to the outside entrance before wandering") {
+        mineVisitFixture { h ->
+            val owner = h.selectTarget()
+            h.at = requireNotNull(owner.target).location(h.world)
+            val mine = h.staircaseMine(entranceOutside = true)
+            val waiting = h.addMiner(mine)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            repeat(40) {
+                h.now += 50
+                h.runtime.wanderBudget = 8
+                work.update(waiting.actor, h.city, h.world, h.now)
+            }
+            val escape = requireNotNull(waiting.actor.route)
+            escape.authored shouldBe mine.entrance
+            mine.bounds.contains(escape.authored.x, escape.authored.y, escape.authored.z) shouldBe false
+            var outside = false
+            for (tick in 1..200) {
+                h.walk(waiting)
+                val at = waiting.at
+                val inside = at.blockX in mine.bounds.min.x..mine.bounds.max.x && at.blockZ in mine.bounds.min.z..mine.bounds.max.z
+                if (outside) inside shouldBe false
+                if (!inside) outside = true
+                if (escape.motion.finished) break
+            }
+            outside shouldBe true
+            citizenAtSupportedEndpoint(h.world, waiting.at.point(), mine.entrance) shouldBe true
+            routes.cancelRoute(waiting.actor)
+            val destination = h.standing.copy(x = h.standing.x - 5)
+            routes.startRoute(waiting.actor, h.world, destination, ++h.now, idleAnchor = mine.entrance) shouldBe true
+            val holding = requireNotNull(waiting.actor.route)
+            (mine.id in holding.allowedBuildings) shouldBe false
+            @Suppress("UNCHECKED_CAST")
+            val allowed = mineVisitField(holding.motion, "allowed") as (CivPosition) -> Boolean
+            allowed(h.standing) shouldBe false
+            waiting.actor.cycle.phase shouldBe CitizenPhase.IDLE
+            waiting.actor.cycle.observedWorkMillis shouldBe 0L
+            h.city shouldBe before
+        }
+    }
+
     test("visit attempt memory saturates closed and is pruned by current residents rather than active actors") {
         mineVisitFixture(maximumAttempts = 1) { h ->
             h.selectTarget()
@@ -281,16 +530,100 @@ private class MineVisitFixture(paper: MockBukkitTestRuntime, maximumAttempts: In
         every { routes.startRoute(any(), any(), any(), any(), any()) } answers {
             val actor = firstArg<CitizenActor>()
             val target = arg<CivPosition>(2)
+            val idleAnchor = arg<CivPosition?>(4)
             val motion = CitizenPacketRoute(world, actor.npc.location, target.location(world),
                 { citizenRoutePointAllowed(city, setOf(mine.id), it, mine) },
                 { _, to -> actor.mineVisit?.passage?.allows?.invoke(to) != false }, { 1.0 })
             actor.route = CitizenRoute(actor.npc.location.point(), target.location(world),
                 CitizenChunks.between(at.blockX, at.blockZ, target.x, target.z), now, 90_000,
-                setOf(mine.id), motion, null, target)
+                setOf(mine.id), motion, null, target, idleAnchor = idleAnchor)
             starts++
             true
         }
     }
+
+    fun addMiner(building: CivBuilding = mine, at: Location? = null): MineVisitMiner {
+        runtime.actors.putIfAbsent(worker.id, actor)
+        val geometry = requireNotNull(CivsMinePlan.forBuilding(building))
+        val standing = CivsWorksiteLayouts.point(building, geometry.bottom)
+        val mine = building.copy(control = standing.copy(x = standing.x + 1))
+        for (x in (standing.x shr 4) - 1..(standing.x shr 4) + 1)
+            for (z in (standing.z shr 4) - 1..(standing.z shr 4) + 1) world.loadChunk(x, z)
+        if (building.id != this.mine.id) {
+            for (y in standing.y - 5..standing.y) world.getBlockAt(standing.x, y, standing.z).blockData =
+                Bukkit.createBlockData("minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
+            world.getBlockAt(mine.control!!.x, mine.control.y, mine.control.z).type = Material.BARREL
+        }
+        val worker = spatialWorker(mine, "IRON_PICKAXE")
+        city = city.copy(buildings = city.buildings.filterNot { it.id == mine.id } + mine,
+            workers = city.workers + worker, minePlans = city.minePlans.orEmpty() + (mine.id.toString() to
+                CivMinePlanState(CivsMinePlan.VERSION, 0,
+                    sectionSteps = mapOf("spine" to geometry.sections.getValue("spine").size.toLong()))))
+        val work = CivsMineFallback.withCause(this.work.copy(workerId = worker.id, buildingId = mine.id, standing = standing),
+            need.copy(building = mine))
+        return MineVisitMiner(worker, at ?: standing.location(world)).also { miner ->
+            val npc = mockk<PacketPlayerNpc>(relaxed = true) {
+                every { location } answers { miner.at.clone() }
+                every { world } returns this@MineVisitFixture.world
+                every { isValid } returns true
+                every { eyeHeight } returns 1.62
+            }
+            miner.actor = CitizenActor(city.id, worker.id, world.uid, npc, actor.plan.copy(
+                token = actor.plan.token.copy(assignmentId = mine.id), storage = requireNotNull(mine.control),
+                workplace = standing, worldWork = work))
+            runtime.actors[worker.id] = miner.actor
+        }
+    }
+
+    fun workOwner(routes: CivsCitizenRoutes = this.routes): CivsCitizenWork {
+        val logistics = mockk<CivsCitizenLogistics>(relaxed = true)
+        val life = mockk<CivsCitizenLife>(relaxed = true)
+        val couriers = mockk<CivsCitizenCouriers>(relaxed = true) {
+            every { trackCourierSource(any(), any(), any()) } returns true
+        }
+        val leisure = CivsCitizenLeisure(runtime, { mockk(relaxed = true) }, { routes }, { logistics }, { life },
+            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true))
+        return CivsCitizenWork(runtime, { routes }, { mockk(relaxed = true) }, { couriers }, { leisure },
+            { logistics }, { mockk(relaxed = true) }, { mockk(relaxed = true) }, { life }, mockk(relaxed = true),
+            CivsPaths(), { _, _ -> null }, { _, _ -> true }, { _, _ -> null }, { _, _ -> }, { _, _ -> })
+    }
+
+    fun staircaseMine(entranceOutside: Boolean): CivBuilding {
+        for (x in standing.x - 20..standing.x + 20) for (z in standing.z - 20..standing.z + 20)
+            world.getBlockAt(x, standing.y - 1, z).type = Material.STONE
+        world.getBlockAt(standing.x, standing.y - 1, standing.z).blockData =
+            Bukkit.createBlockData("minecraft:oak_stairs[facing=east,half=top,shape=straight,waterlogged=false]")
+        world.getBlockAt(standing.x, standing.y, standing.z).type = Material.AIR
+        return mine.copy(bounds = CivBox(standing.copy(x = standing.x - 2, y = standing.y - 1, z = standing.z - 2),
+            standing.copy(x = standing.x + 2, y = standing.y + 5, z = standing.z + 2)),
+            entrance = if (entranceOutside) standing.copy(x = standing.x + 3) else standing)
+    }
+
+    fun nativeWorkOwner(): Pair<CivsCitizenWork, CivsCitizenRoutes> {
+        lateinit var work: CivsCitizenWork
+        val navigation = mockk<CivsResidentNavigation> {
+            every { request(any(), any(), any(), any(), any(), any(), any()) } answers {
+                CitizenPacketRoute(arg(0), arg(1), arg(2), arg(3), arg(4), arg(5), corridor = arg(6))
+            }
+        }
+        val shelter = mockk<CivsCitizenShelters>(relaxed = true) {
+            every { wake(any(), any()) } returns true
+        }
+        val collisions = mockk<CivsCitizenCollisions>(relaxed = true) {
+            every { idleDestinationFree(any(), any()) } returns true
+            every { residentMoveAllowed(any(), any(), any()) } returns true
+        }
+        val routes = CivsCitizenRoutes(runtime, { collisions }, { shelter }, { mockk(relaxed = true) },
+            { mockk(relaxed = true) }, { work }, { mockk(relaxed = true) }, { mockk(relaxed = true) },
+            navigation, CivsPaths(), { 1.0 }, { _, _, _ -> false }, { now }, { _, _, _ -> },
+            { _, reason -> error("Unexpected actor removal: $reason") })
+        work = workOwner(routes)
+        return work to routes
+    }
+
+    fun observations(work: CivsCitizenWork) = CivsCitizenObservations(runtime, { work }, { mockk(relaxed = true) },
+        { mockk(relaxed = true) }, { mockk(relaxed = true) }, mockk(relaxed = true), mockk(relaxed = true),
+        113, 64, { now }, { _, _ -> emptyList() })
 
     fun update() {
         now += 50
@@ -316,4 +649,20 @@ private class MineVisitFixture(paper: MockBukkitTestRuntime, maximumAttempts: In
         if (!route.motion.continuation && route.motion.finished && route.motion.failure == null)
             route.completion = CitizenNavigationCompletion(null)
     }
+
+    fun walk(miner: MineVisitMiner) {
+        val route = requireNotNull(miner.actor.route)
+        repeat(2_000) { if (route.motion.searching) route.motion.expand() }
+        route.motion.move(miner.at, 1.0) { true }?.let { next ->
+            (miner.at.distance(next) <= .215001) shouldBe true
+            citizenPacketBodyClear(world, next.point(), false) shouldBe true
+            miner.at = next
+        }
+        if (!route.motion.continuation && route.motion.finished && route.motion.failure == null)
+            route.completion = CitizenNavigationCompletion(null)
+    }
+}
+
+private class MineVisitMiner(val worker: CivWorker, var at: Location) {
+    lateinit var actor: CitizenActor
 }

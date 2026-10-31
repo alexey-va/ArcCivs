@@ -84,6 +84,7 @@ internal class CivsCitizenObservations(
                 if (it.conversationAt == null) "meeting" else "talking"
             } else if (it.arrivedAt == null) "to-campfire" else "campfire"
         }
+        if (workRuntime.waitingForMineAccess(actor, city, worker)) return "mine-waiting"
         val plan = actor.plan
         if (runtime.statuses[actor.workerId] == "workstation-unavailable") return "workstation-unavailable"
         if (actor.cycle.phase == CitizenPhase.PAUSED) return actor.cycle.status()
@@ -96,7 +97,7 @@ internal class CivsCitizenObservations(
         plan.idleReason?.takeUnless { it == "placing" }?.let { return it }
         if (plan.token.assignmentId != worker.assignment || plan.token.completedCycles != worker.completedCycles) return "waiting"
         citizenWorkStatus(plan, actor.cycle.phase, life.servingTavernGuests(actor, city))?.let { return it }
-        return runtime.statuses[actor.workerId] ?: actor.cycle.status()
+        return runtime.statuses[actor.workerId]?.takeUnless { it == "mine-waiting" } ?: actor.cycle.status()
     }
 
     fun activeCount(): Int {

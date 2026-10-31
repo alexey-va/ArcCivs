@@ -45,6 +45,9 @@ internal class CivsCitizenWork(
 
     fun reconcileMineVisit(actor: CitizenActor, city: Settlement) = mineVisits.reconcile(actor, city)
 
+    fun waitingForMineAccess(actor: CitizenActor, city: Settlement, worker: CivWorker): Boolean =
+        mineVisits.waitingForAccess(actor, city, worker, actor.npc.world)
+
     fun retainConstruction(cities: Collection<Settlement>) {
         constructionWorkplaces.keys.retainAll(cities.mapNotNull { it.construction?.id }.toSet())
         mineVisits.retain(cities)
@@ -125,6 +128,13 @@ internal class CivsCitizenWork(
         }
         if (actor.mineVisit != null && mineVisits.update(actor, city, worker, world, now)) return
         if (returnProducerOutputs(actor, city, worker, world, now)) return
+        if (mineVisits.waitingForAccess(actor, city, worker, world)) {
+            actor.cycle.deferWork(now)
+            if (actor.route?.idleAnchor == null) routes.cancelRoute(actor)
+            leisure.wander(actor, city, world, now, outsideHome = true)
+            runtime.statuses[actor.workerId] = "mine-waiting"
+            return
+        }
         actor.plan.workstation?.let { station ->
             if (cycle.phase != CitizenPhase.DELIVERING && worker.assignment?.let(city::building)?.let {
                     CivsWorkstations.valid(city, it, world, station)
