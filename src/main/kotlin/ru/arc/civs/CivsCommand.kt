@@ -51,7 +51,7 @@ class CivsCommand(
                 sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
                 status && args.size != 1 -> "invalid-village-search-arguments"
                 !status && (args.size !in 4..5 || reference == null || count == null || count !in 1..5 ||
-                    prefix == null || prefix.isBlank() || prefix.length > 24 || batch == null || batch !in 0..3) -> "invalid-village-search-arguments"
+                    prefix == null || prefix.isBlank() || prefix.length > 24 || batch == null || batch !in 0..CivsVillageSites.MAXIMUM_BATCH) -> "invalid-village-search-arguments"
                 hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
                 else -> null
             }
@@ -269,7 +269,7 @@ class CivsCommand(
             if (console && admin && args.size == 2 && args[0] == "hotload")
                 return listOf("prepare", "status").filter { it.startsWith(args[1], true) }
             if (console && admin && args.size == 5 && args[0] == "found-villages")
-                return listOf("0", "1", "2", "3").filter { it.startsWith(args[4]) }
+                return (0..CivsVillageSites.MAXIMUM_BATCH).map { it.toString() }.filter { it.startsWith(args[4]) }
             if (admin && args.size == 2 && args[0] == "debug")
                 return (listOf("all") + CivsDebug.systems + "layout").filter { it.startsWith(args[1], true) }
             if (admin && args.size == 4 && args[0] == "debug" && args[1] == "layout")

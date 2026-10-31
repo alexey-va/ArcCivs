@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "title": "ArcCivs162 bounded disjoint continuation pages for five requested autonomous villages",
+  "participants": [
+    1,
+    5,
+    16
+  ],
+  "assumptions": [
+    "Canonical economy inventory includes published158/159 and prepared160/161 evidence. Current SELL and future/SHADOW contract flows remain separate; no conversion rates inferred.",
+    "Before: one finite192-point candidate array, raw batches0..3 start at offsets0/48/96/144 and scan overlapping suffixes under the same8192 request limit. Actual0/1/2 searches exhausted available positions with1/5 created; batch3 adds no novel positions after completed batch2.",
+    "After: four finite pages of192 candidates, raw batches0..15 map page=batch/4 and tier=batch%4. Page0 retains exact legacy coordinates/rotation/ordering; pages1..3 use disjoint outer annuli offset3072blocks per page before existing16-grid rounding. Same stable city IDs/reference/prefix/ordinal and existing partial-receipt resume.",
+    "Each explicit search retains8192chunk-request budget,2pending loads, existing tick/deadline/scan/layout/grade/native volume and source-byte guards; loaded-chunk6144 and NPC196 runtime limits stay. No automatic unbounded retry loop, no new persistent state or config. Added finite space is read-only candidate search; actual founding still requires strict native proof and ordinary durable transactions.",
+    "Target count remains5, profile34, settingschunkLoading/immortaltrue and autoConstructionMaterialsfalse. Each successful city receives existing one-time96logs/96cobble/24bread once; requested5 totals480/480/120. Existing first city retains identity and reserves, remaining4 may ordinarily receive864 founding items total after actual success. No additional test grants or resets.",
+    "Existing normal autonomous supply events are distinct from the216 founding materialization and unchanged by this patch; native evidence does not claim self-sufficient inventory conservation. Ore/drop/work recipes, chance, work timing and prices remain unchanged.",
+    "Direct before/after deltas separately0Vault,0tokens,0playerXP. Expanding finite terrain search neither creates items nor counts as paid work or rewards. Only actual successful ordinary founding/development changes world state; all protection/native beforeimage checks remain."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "validation": [
+    "Newpage batches4and15 accepted; negative/16/IntMAX refused before native requests.",
+    "Defaultpage retains literal prior geometry and stable IDs; four192-point pages disjoint, bounded and deterministic.",
+    "Partial existing city resumes at outer pages without repeating reserves or changing styles/identity.",
+    "World/ore/perimeter/ownership/scan/request/concurrency/loading/NPC guards unchanged; record actual created cities and native growth, not only candidate coordinates."
+  ],
+  "conclusion": "Same requested five-city outcome and per-city economy. Add only finite disjoint candidate pages with unchanged per-search native load and protection budgets; actual success and development remain separately observed."
+}

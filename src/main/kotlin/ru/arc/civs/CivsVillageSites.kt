@@ -59,14 +59,15 @@ internal object CivsVillageSiteScoring {
     fun id(reference: UUID, prefix: String, ordinal: Int): UUID =
         UUID.nameUUIDFromBytes("arccivs-village/$reference/$prefix/$ordinal".toByteArray(Charsets.UTF_8))
 
-    fun candidates(reference: Settlement, prefix: String): List<CivPosition> {
+    fun candidates(reference: Settlement, prefix: String, page: Int = 0): List<CivPosition> {
+        require(page in 0..CivsVillageSites.MAXIMUM_BATCH / 4)
         val seed = id(reference.id, prefix, 0)
         val phase = ((seed.leastSignificantBits ushr 11).toDouble() / (1L shl 53).toDouble()) * PI * 2
         return (0 until MAXIMUM_CANDIDATES).map { index ->
             val tier = index / CANDIDATE_BATCH
             val ring = index % CANDIDATE_BATCH / 8
             val angle = phase + (index % 8) * PI / 4 + (ring % 2) * PI / 8 + (tier % 2) * PI / 8
-            val distance = 768 + ring * 512 + (tier / 2) * 256
+            val distance = 768 + ring * 512 + (tier / 2) * 256 + page * 3_072
             CivPosition(Math.addExact(reference.center.x, (cos(angle) * distance / 16).roundToInt() * 16),
                 reference.center.y, Math.addExact(reference.center.z, (sin(angle) * distance / 16).roundToInt() * 16))
         }
@@ -211,11 +212,11 @@ internal class CivsVillageSites(
         val templates = mutableMapOf<Int, Map<BuildingType, Pair<CivBuilding, CivBuilding>>>()
         val invalidStyles = mutableSetOf<String>()
         val shortlist = mutableListOf<Candidate>()
-        val candidates = CivsVillageSiteScoring.candidates(reference, prefix)
+        val candidates = CivsVillageSiteScoring.candidates(reference, prefix, page = batch / 4)
         val leases = linkedMapOf<PaperChunkKey, PaperChunkTicketLease>()
         var phase = "templates"
         var examined = 0
-        var nextCandidate = batch * CivsVillageSiteScoring.CANDIDATE_BATCH
+        var nextCandidate = (batch % 4) * CivsVillageSiteScoring.CANDIDATE_BATCH
         var batchEnd = nextCandidate + CivsVillageSiteScoring.CANDIDATE_BATCH
         var coarseBudgetStopped = false
         var nextShortlist = 0
@@ -251,7 +252,7 @@ internal class CivsVillageSites(
 
     fun search(reference: Settlement, count: Int, prefix: String, style: String? = null, batch: Int = 0): CompletableFuture<CivVillageSitesResult> {
         check(Bukkit.isPrimaryThread())
-        if (batch !in 0..3) return CompletableFuture.failedFuture(CivsRejection("invalid-village-search-arguments"))
+        if (batch !in 0..MAXIMUM_BATCH) return CompletableFuture.failedFuture(CivsRejection("invalid-village-search-arguments"))
         val cleanPrefix = prefix.trim()
         active?.let {
             if (!it.finishing && it.reference.id == reference.id && it.count == count && it.prefix == cleanPrefix &&
@@ -711,6 +712,7 @@ internal class CivsVillageSites(
     }
 
     companion object {
+        const val MAXIMUM_BATCH = 15
         const val MAXIMUM_CHUNK_REQUESTS = 8_192
         const val MAXIMUM_TICKS = 36_000
         internal fun rejectionDetails(values: Map<String, String>): Map<String, String> {

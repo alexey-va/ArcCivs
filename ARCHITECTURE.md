@@ -146,6 +146,15 @@ and aggregate wood/stone/food production rates are unchanged. Source tests cover
 uneven terrain and replay safety, and are separate from native-client visual
 acceptance of a constructed village.
 
+Console village search has four finite, disjoint pages of 192 deterministic
+candidate positions. Continuation batches 0–15 select a page and one of its four
+48-position starting tiers. Page zero retains the original coordinates; later
+pages shift the same rings outward by 3072 blocks per page. Each explicit search
+keeps its existing 8192 chunk-request and two-pending-load limits. Reference,
+prefix and ordinal still determine city identity across every page, so a partial
+result resumes without a second founding reserve. Every selected site still
+requires the complete layout and strict native foundation and volume proofs.
+
 An initial autonomous SITE town hall prepares its exterior entrance through the
 existing `pendingControls.approach` receipt: at most three strictly proved cells
 at the entrance floor, feet and head, using DIRT/AIR. The receipt is durable

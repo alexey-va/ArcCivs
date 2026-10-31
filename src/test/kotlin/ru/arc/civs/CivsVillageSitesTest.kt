@@ -221,9 +221,34 @@ class CivsVillageSiteRejectionDetailsTest : FunSpec({
 })
 
 class CivsVillageSitesTest : FunSpec({
+    test("four finite candidate pages preserve all legacy anchors and occupy disjoint bounded annuli") {
+        val legacy = villageReference(UUID(0, 1)).copy(id = UUID(0, 123), center = CivPosition(-1883, 67, -2760))
+        val original = CivsVillageSiteScoring.candidates(legacy, "Auto-").joinToString(";") { "${it.x},${it.y},${it.z}" }
+        MessageDigest.getInstance("SHA-256").digest(original.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) } shouldBe "437a57a3fb7646ad65ad054d2856094444de05e7ca477f8d9151438699ea547b"
+        val references = listOf(legacy,
+            legacy.copy(id = UUID(7, 13), center = CivPosition(20_000_000, 81, -20_000_000)),
+            legacy.copy(id = UUID(19, 23), center = CivPosition(-20_000_000, 49, 20_000_000)))
+        for (reference in references) for (prefix in listOf("Auto-", "Continuation-")) {
+            val pages = (0..3).map { page -> CivsVillageSiteScoring.candidates(reference, prefix, page) }
+            pages.first() shouldBe CivsVillageSiteScoring.candidates(reference, prefix)
+            pages.map { it.size } shouldBe listOf(192, 192, 192, 192)
+            pages.flatten().distinct().size shouldBe 768
+            pages.flatten().all { point -> point.y == reference.center.y &&
+                (point.x - reference.center.x) % 16 == 0 && (point.z - reference.center.z) % 16 == 0 } shouldBe true
+            fun distance(point: CivPosition) = kotlin.math.hypot((point.x - reference.center.x).toDouble(),
+                (point.z - reference.center.z).toDouble())
+            val annuli = pages.map { points -> points.minOf(::distance) to points.maxOf(::distance) }
+            annuli.zipWithNext().all { (inner, outer) -> inner.second < outer.first } shouldBe true
+        }
+        for (page in listOf(-1, 4, Int.MAX_VALUE)) shouldThrow<IllegalArgumentException> {
+            CivsVillageSiteScoring.candidates(legacy, "Auto-", page)
+        }
+    }
+
     test("invalid continuation batches are rejected before native loads surveys or founding") {
         villageScenario { s ->
-            for (batch in listOf(-1, 4, Int.MIN_VALUE, Int.MAX_VALUE)) {
+            for (batch in listOf(-1, 16, Int.MIN_VALUE, Int.MAX_VALUE)) {
                 val failure = shouldThrow<java.util.concurrent.CompletionException> {
                     s.subject.search(s.reference, 5, "Auto-", batch = batch).join()
                 }
@@ -234,6 +259,73 @@ class CivsVillageSitesTest : FunSpec({
             s.loads shouldBe emptyList()
             s.surveys shouldBe 0
             s.admissions shouldBe emptyList()
+            s.registry.activeLeaseCount shouldBe 0
+        }
+    }
+
+    for (batch in listOf(4, 15)) test("continuation batch $batch searches a new bounded outer page instead of replaying the first 192 anchors") {
+        villageScenario { s ->
+            val original = CivsVillageSiteScoring.candidates(s.reference, "Auto-").mapTo(hashSetOf()) { it.x to it.z }
+            val result = s.subject.search(s.reference, 1, "Auto-", batch = batch)
+            result.isCompletedExceptionally shouldBe false
+            s.until { result.isDone }
+            val receipt = result.join()
+            receipt.complete shouldBe true
+            receipt.batch shouldBe batch
+            receipt.created.single().city shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
+            (receipt.examined in 1..192) shouldBe true
+            s.coarseCities.isNotEmpty() shouldBe true
+            s.coarseCities.all { city -> city.buildings.single().anchor.let { (it.x to it.z) !in original } } shouldBe true
+            s.admissions.size shouldBe 1
+            (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
+            (s.peakPending <= 2) shouldBe true
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("a new outer page resumes a canonical first village and replays completed IDs without another founding grant") {
+        villageScenario { s ->
+            val first = s.subject.search(s.reference, 1, "Auto-")
+            s.until { first.isDone }
+            first.join().complete shouldBe true
+            val saved = s.cities.last()
+            val savedReceipt = first.join().created.single()
+            val oldAnchors = CivsVillageSiteScoring.candidates(s.reference, "Auto-").mapTo(hashSetOf()) { it.x to it.z }
+            val previousCoarse = s.coarseCities.size
+            val continued = s.subject.search(s.reference, 2, "Auto-", batch = 4)
+            continued.isCompletedExceptionally shouldBe false
+            s.until { continued.isDone }
+            continued.join().let { result ->
+                result.complete shouldBe true
+                result.batch shouldBe 4
+                result.created.single { it.city == saved.id }.let { existing ->
+                    existing.existing shouldBe true
+                    existing.name shouldBe savedReceipt.name
+                    existing.style shouldBe savedReceipt.style
+                    existing.center shouldBe savedReceipt.center
+                }
+                result.created.map { it.city }.toSet() shouldBe (1..2).mapTo(hashSetOf()) {
+                    CivsVillageSiteScoring.id(s.reference.id, "Auto-", it)
+                }
+            }
+            s.cities.single { it.id == saved.id } shouldBe saved
+            s.coarseCities.drop(previousCoarse).isNotEmpty() shouldBe true
+            s.coarseCities.drop(previousCoarse).all { city ->
+                city.buildings.single().anchor.let { (it.x to it.z) !in oldAnchors }
+            } shouldBe true
+            s.admissions.size shouldBe 2
+            s.admissions.count { it.city.id == saved.id } shouldBe 1
+            val canonical = s.cities.toList()
+            val loads = s.loads.size
+            val replay = s.subject.search(s.reference, 2, "Auto-", batch = 15)
+            s.until { replay.isDone }
+            replay.join().complete shouldBe true
+            replay.join().batch shouldBe 15
+            replay.join().created.all { it.existing } shouldBe true
+            s.cities shouldBe canonical
+            s.loads.size shouldBe loads
+            s.admissions.size shouldBe 2
             s.registry.activeLeaseCount shouldBe 0
         }
     }
