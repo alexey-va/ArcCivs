@@ -84,7 +84,7 @@ internal class CivsCitizenObservations(
                 if (it.conversationAt == null) "meeting" else "talking"
             } else if (it.arrivedAt == null) "to-campfire" else "campfire"
         }
-        if (workRuntime.waitingForMineAccess(actor, city, worker)) return "mine-waiting"
+        if (workRuntime.waitingForMineAccess(actor, city, worker, register = false)) return "mine-waiting"
         val plan = actor.plan
         if (runtime.statuses[actor.workerId] == "workstation-unavailable") return "workstation-unavailable"
         if (actor.cycle.phase == CitizenPhase.PAUSED) return actor.cycle.status()

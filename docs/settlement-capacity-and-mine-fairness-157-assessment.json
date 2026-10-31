@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "title": "ArcCivs 157: complete settlement capacity and contended mine admission",
+  "participants": [1, 5, 16],
+  "assumptions": [
+    "Low/base/high are 1/5/16 active settlements and 0.25/1/4 active hours per settlement-day; these are scenarios, not measured production or player sessions.",
+    "The new unpinned core half-width changes from 72 to 74 and the infrastructure record limit from 128 to 160. The ordinary profile remains 34 buildings, including 16 houses, 2 quarries, 2 foresters and 3 farms. Existing accepted 72/56-width plans retain their saved geometry.",
+    "No recipe, accepted receipt, per-action yield, work interval, profession multiplier, worker limit or physical inventory capacity changes. At most one actor owns a given mine's physical access. Contention grants the current holder 30 seconds of additional work, then requires ordinary safe egress between accepted receipts; travel and completion can extend the wait. This redistributes access rather than multiplying simultaneous quarry throughput.",
+    "Infrastructure capacity permits up to 32 additional paid pieces, but does not issue materials or create construction orders by itself. Actual item demand depends on style, terrain, native schematic rows and selected wall/road/gate pieces. The captured valid site requires 134 pieces, 6 above the old cap and 26 below the new cap; exact total item demand is not inferred from record count.",
+    "The unchanged initial reserve is 96 raw-wood units, 96 cobblestone units and 24 bread per newly founded settlement. The authorized five new villages therefore receive a one-time 480/480/120 reserve, in separate item units. Repeated search uses the same Village- prefix and existing city identity checks, rather than minting duplicate reserves.",
+    "The requested new villages retain chunkLoading=true, immortalResidents=true and testing.autoConstructionMaterials=false. Existing ordinary autonomous supply uses its own gated native input path; it is not evidence that testing grants are enabled. Immortality is an existing settlement option and changes no direct payment or work yield.",
+    "Direct flows before and after are separately 0 Vault, 0 premium tokens and 0 player XP. Resources, internal resident skill, materials consumed and saved inventory are not currencies and are not added to those totals.",
+    "Successful founding and fairer utilization can increase realized item production relative to a blocked village, but realized active time, travel, input supply, demand and sale conversion are unknown. Current EconomyShopGUI SELL and AutoSellChests remain current alternatives; the owner's planned SELL-to-contract transition remains a separate future scenario. No item-to-currency rate or guaranteed earnings are invented.",
+    "No new price, premium entitlement, money reward, exchange, buyback or account-level repeatable claim is introduced. Accepted work and inventory receipts must complete once, including across restart. Total time and material cost for a completed settlement remain workload-dependent and are not claimed from a solver-only test."
+  ],
+  "currencies": {
+    "vault": {"minor_per_unit": 100, "flows": []},
+    "tokens": {"minor_per_unit": 1, "flows": []}
+  },
+  "prices": [],
+  "before_after": {
+    "new_core_half_width": {"before": 72, "after": 74},
+    "infrastructure_records": {"before": 128, "after": 160},
+    "ordinary_buildings": {"before": 34, "after": 34},
+    "adults": {"before": 24, "after": 24},
+    "initial_items_per_new_city": {
+      "before": {"raw_wood": 96, "cobblestone": 96, "bread": 24},
+      "after": {"raw_wood": 96, "cobblestone": 96, "bread": 24}
+    },
+    "direct_player_xp": {"before": 0, "after": 0}
+  },
+  "validation": [
+    "Run the economy evaluator; keep currencies and items separate.",
+    "Verify the maximum city through the real store codec, retained legacy plans, complete 34-building layouts and exact current private catalog.",
+    "After activation observe all three Auto2 miners performing native work, not only descending; verify pending receipts and cargo settle.",
+    "Read back five canonical village IDs, styles and saved settings, and compare durable resident/building/work progress without forced arrival, test grants or direct currency issuance."
+  ],
+  "conclusion": "Accept the bounded geometry and infrastructure increase and FIFO safe-egress correction. Preserve production terms, accepted assets, existing plans and the SELL-to-contract distinction; report any unmeasured realized income separately."
+}

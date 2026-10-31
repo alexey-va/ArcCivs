@@ -309,7 +309,8 @@ class CivsMineVisitTest : FunSpec({
                 for (z in mine.entrance.z - 10..mine.entrance.z + 10)
                     if (x != h.standing.x || z != h.standing.z)
                         h.world.getBlockAt(x, h.standing.y - 1, z).type = Material.STONE
-            val waiting = h.addMiner(mine, mine.entrance.copy(x = mine.entrance.x - 4).location(h.world))
+            // Start outside the idle radius so returning to its entrance is deterministic, without a random wander target.
+            val waiting = h.addMiner(mine, mine.entrance.copy(x = mine.entrance.x - 9).location(h.world))
             val before = h.city
             val cycle = waiting.actor.cycle
             h.selectTarget()
@@ -590,6 +591,299 @@ class CivsMineVisitTest : FunSpec({
             second.actor.cycle.phase shouldBe CitizenPhase.TO_WORK
             first.actor.cycle.observedWorkMillis shouldBe 0L
             second.actor.cycle.observedWorkMillis shouldBe 0L
+            h.city shouldBe before
+        }
+    }
+
+    test("three same-mine workers admit the oldest waiter after release despite actor order idle cancellation and proof churn") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val oldest = h.addMiner()
+            val newcomer = h.addMiner()
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val ownerWork = h.physical(owner, started = false)
+            val oldestWork = h.physical(oldest, started = false)
+            val newcomerWork = h.physical(newcomer, started = false)
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, ownerWork.standing, h.now) shouldBe true
+            owner.at = ownerWork.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            h.runtime.residentObservedAt = h.now
+            work.waitingForMineAccess(oldest.actor, h.city, oldest.worker) shouldBe true
+            h.runtime.residentObservedAt = ++h.now
+            work.waitingForMineAccess(newcomer.actor, h.city, newcomer.worker) shouldBe true
+            routes.cancelRoute(oldest.actor)
+            val previous = h.city.minePlans!!.getValue(h.mine.id.toString())
+            h.city = h.city.copy(minePlans = mapOf(h.mine.id.toString() to previous.copy(nextStep = previous.nextStep + 1)))
+            work.retainConstruction(listOf(h.city))
+            work.waitingForMineAccess(owner.actor, h.city, owner.worker) shouldBe false
+
+            owner.at = h.standing.location(h.world)
+            work.retainConstruction(listOf(h.city))
+            // Process the newer actor first: iteration order must not choose the next owner.
+            routes.startRoute(newcomer.actor, h.world, newcomerWork.standing, ++h.now) shouldBe false
+            routes.startRoute(oldest.actor, h.world, oldestWork.standing, ++h.now) shouldBe true
+            routes.startRoute(owner.actor, h.world, ownerWork.standing, ++h.now) shouldBe false
+            oldest.actor.mineAccess?.id shouldBe h.mine.id
+            newcomer.actor.mineAccess shouldBe null
+            h.city.workers.forEach { it.completedCycles shouldBe 0L }
+        }
+    }
+
+    test("a contended underground owner takes ordinary safe egress after thirty seconds before starting another receipt") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val waiting = h.addMiner()
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val action = h.physical(owner, started = false)
+            val next = h.physical(waiting, started = false)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, action.standing, h.now) shouldBe true
+            owner.at = action.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            h.runtime.residentObservedAt = h.now
+            work.waitingForMineAccess(waiting.actor, h.city, waiting.worker) shouldBe true
+            work.update(owner.actor, h.city, h.world, h.now + 30_001)
+            requireNotNull(owner.actor.route).authored shouldBe owner.actor.plan.storage
+            owner.actor.mineAccess?.id shouldBe h.mine.id
+            owner.actor.cycle.phase shouldBe CitizenPhase.IDLE
+            owner.actor.cycle.observedWorkMillis shouldBe 0L
+            work.waitingForMineAccess(waiting.actor, h.city, waiting.worker) shouldBe true
+            h.city shouldBe before
+
+            owner.at = h.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            work.retainConstruction(listOf(h.city))
+            // The former owner joins behind the existing waiter rather than reclaiming its turn.
+            routes.startRoute(owner.actor, h.world, action.standing, h.now + 30_002) shouldBe false
+            routes.startRoute(waiting.actor, h.world, next.standing, h.now + 30_003) shouldBe true
+            h.city shouldBe before
+        }
+    }
+
+    test("a fairness egress retains its same-cycle plan and real return route across a changed cached target") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val waiting = h.addMiner()
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val action = h.physical(owner, started = false)
+            h.physical(waiting, started = false)
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, action.standing, h.now) shouldBe true
+            owner.at = action.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            h.runtime.residentObservedAt = h.now
+            work.waitingForMineAccess(waiting.actor, h.city, waiting.worker) shouldBe true
+            work.update(owner.actor, h.city, h.world, h.now + 30_001)
+            val returning = requireNotNull(owner.actor.route)
+            val before = owner.actor.plan
+            var replans = 0
+            val planning = CivsCitizenPlanning(h.runtime, { routes }, { mockk(relaxed = true) },
+                { mockk(relaxed = true) }, { work }, { mockk(relaxed = true) }, { mockk(relaxed = true) },
+                { mockk(relaxed = true) }, courierPlan = { _, _ -> null },
+                workPlan = { _, _ -> replans++; action.copy(standing = action.standing.copy(x = action.standing.x + 1)) },
+                workIdleReason = { _, _ -> "searching-work" }, productionReady = { _, _ -> true },
+                workInputsReady = { _, _ -> true }, craftPlan = { _, _ -> null }, workstation = null,
+                remove = { _, reason -> error("Unexpected actor removal: $reason") })
+            val retained = requireNotNull(planning.currentPlan(owner.actor, h.city, owner.worker))
+            (retained === before) shouldBe true
+            replans shouldBe 0
+            planning.reconcilePlan(owner.actor, retained, h.city) shouldBe true
+            (owner.actor.route === returning) shouldBe true
+            owner.actor.workDetour shouldBe before.token
+            owner.actor.cycle.observedWorkMillis shouldBe 0L
+        }
+    }
+
+    for (cancel in listOf("assignment", "actor", "world", "searching", "missing-work", "pending-harm"))
+    test("a cancelled $cancel mine request cannot strand the next waiter") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val cancelled = h.addMiner()
+            val waiting = h.addMiner()
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val action = h.physical(owner, started = false)
+            h.physical(cancelled, started = false)
+            val next = h.physical(waiting, started = false)
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, action.standing, h.now) shouldBe true
+            owner.at = action.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            h.runtime.residentObservedAt = h.now
+            work.waitingForMineAccess(cancelled.actor, h.city, cancelled.worker) shouldBe true
+            work.waitingForMineAccess(waiting.actor, h.city, waiting.worker) shouldBe true
+            when (cancel) {
+                "assignment" -> h.city = h.city.copy(workers = h.city.workers.map {
+                    if (it.id == cancelled.worker.id) it.copy(assignment = null) else it
+                })
+                "actor" -> every { cancelled.actor.npc.isValid } returns false
+                "world" -> every { cancelled.actor.npc.world } returns CivsWorksiteWorldFixture("retired-mine-request-world")
+                "searching" -> cancelled.actor.plan = cancelled.actor.plan.copy(idleReason = "searching-work")
+                "missing-work" -> cancelled.actor.plan = cancelled.actor.plan.copy(worldWork = null)
+                else -> h.runtime.pendingHarm += cancelled.worker.id
+            }
+            owner.at = h.standing.location(h.world)
+            work.retainConstruction(listOf(h.city))
+            routes.startRoute(waiting.actor, h.world, next.standing, ++h.now) shouldBe true
+            waiting.actor.mineAccess?.id shouldBe h.mine.id
+        }
+    }
+
+    test("a cancelled underground holder clears its turn deadline without releasing physical access") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val waiting = h.addMiner()
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val action = h.physical(owner, started = false)
+            h.physical(waiting, started = false)
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, action.standing, h.now) shouldBe true
+            owner.at = action.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            h.runtime.residentObservedAt = h.now
+            work.waitingForMineAccess(waiting.actor, h.city, waiting.worker) shouldBe true
+            owner.actor.mineContendedAt shouldBe h.now
+            owner.actor.mineYieldPin shouldBe null
+            val cycle = owner.actor.cycle
+            h.city = h.city.copy(workers = h.city.workers.map {
+                if (it.id == owner.worker.id) it.copy(assignment = null) else it
+            })
+            work.retainConstruction(listOf(h.city))
+            owner.actor.mineContendedAt shouldBe null
+            owner.actor.mineAccess?.id shouldBe h.mine.id
+            (owner.actor.cycle === cycle) shouldBe true
+            owner.actor.cycle.phase shouldBe CitizenPhase.IDLE
+            owner.actor.cycle.observedWorkMillis shouldBe 0L
+            owner.actor.route shouldBe null
+            work.waitingForMineAccess(waiting.actor, h.city, waiting.worker) shouldBe true
+            owner.actor.mineContendedAt shouldBe null
+        }
+    }
+
+    for (phase in listOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING))
+    test("a mine contention deadline preserves an accepted $phase receipt until its publication") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val waiting = h.addMiner()
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val action = h.physical(owner)
+            h.physical(waiting, started = false)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, action.standing, h.now) shouldBe true
+            owner.at = action.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            owner.actor.cycle.arrive(h.now)
+            if (phase != CitizenPhase.WORKING)
+                for (elapsed in 1_000L..6_000L step 1_000) owner.actor.cycle.work(h.now + elapsed)
+            val ticket = if (phase == CitizenPhase.DELIVERING) requireNotNull(owner.actor.cycle.beginDelivery(h.now + 6_000)) else null
+            val cycle = owner.actor.cycle
+            val observed = cycle.observedWorkMillis
+            h.runtime.residentObservedAt = h.now
+            work.waitingForMineAccess(waiting.actor, h.city, waiting.worker) shouldBe true
+            work.update(owner.actor, h.city, h.world, h.now + 30_001)
+            (owner.actor.cycle === cycle) shouldBe true
+            cycle.phase shouldBe phase
+            cycle.observedWorkMillis shouldBe observed
+            if (ticket != null) cycle.acceptsCompletion(ticket) shouldBe true
+            owner.actor.route shouldBe null
+            owner.at shouldBe action.standing.location(h.world)
+            h.city shouldBe before
+
+            // Model the normal completed receipt publication; inventory remains owned by that receipt.
+            val completed = owner.worker.copy(completedCycles = owner.worker.completedCycles + 1)
+            h.city = h.city.copy(workers = h.city.workers.map { if (it.id == completed.id) completed else it })
+            owner.actor.plan = owner.actor.plan.copy(token = owner.actor.plan.token.copy(completedCycles = completed.completedCycles),
+                worldWork = action.copy(cycle = completed.completedCycles))
+            owner.actor.cycle = owner.actor.plan.cycle()
+            work.update(owner.actor, h.city, h.world, h.now + 30_002)
+            requireNotNull(owner.actor.route).authored shouldBe owner.actor.plan.storage
+            owner.actor.cycle.phase shouldBe CitizenPhase.IDLE
+            CivsEquipment.slots(completed) shouldBe CivsEquipment.slots(owner.worker)
+        }
+    }
+
+    test("a mine turn deadline cannot move an owner while its accepted native item pickup is pending") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val waiting = h.addMiner()
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val action = h.physical(owner, started = false)
+            h.physical(waiting, started = false)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, action.standing, h.now) shouldBe true
+            owner.at = action.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            h.runtime.residentObservedAt = h.now
+            work.waitingForMineAccess(waiting.actor, h.city, waiting.worker) shouldBe true
+            val pickup = CitizenSupplyPickup(UUID.randomUUID(), h.mine.id, false)
+            owner.actor.supplyPickup = pickup
+            work.update(owner.actor, h.city, h.world, h.now + 30_001)
+            owner.actor.supplyPickup shouldBe pickup
+            owner.actor.route shouldBe null
+            owner.actor.mineAccess?.id shouldBe h.mine.id
+            h.city shouldBe before
+            owner.actor.supplyPickup = null
+            work.update(owner.actor, h.city, h.world, h.now + 30_002)
+            requireNotNull(owner.actor.route).authored shouldBe owner.actor.plan.storage
+            h.city shouldBe before
+        }
+    }
+
+    test("observational mine status cannot enqueue a waiter or start a holder turn deadline") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val waiting = h.addMiner()
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val action = h.physical(owner, started = false)
+            h.physical(waiting, started = false)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, action.standing, h.now) shouldBe true
+            owner.at = action.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            val observations = h.observations(work)
+            repeat(3) { index ->
+                h.runtime.residentObservedAt = h.now + index * 30_000
+                observations.status(waiting.worker.id) shouldBe "workers.status.mine-waiting"
+                waiting.actor.mineAccessRequest shouldBe null
+                owner.actor.mineContendedAt shouldBe null
+            }
+            work.update(owner.actor, h.city, h.world, h.now + 90_001)
+            owner.actor.cycle.phase shouldBe CitizenPhase.WORKING
+            owner.actor.route shouldBe null
+            h.city shouldBe before
+        }
+    }
+
+    test("an uncontended mine owner has no time quota and another quarry remains independent") {
+        mineVisitFixture { h ->
+            val owner = h.addMiner()
+            val independent = h.addMiner(spatialBuilding("caledonia", "miner", 1, CivPosition(32, 69, 0)))
+            h.runtime.actors.remove(h.worker.id)
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.worker.id })
+            val action = h.physical(owner, started = false)
+            val other = h.physical(independent, started = false)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(owner.actor, h.world, action.standing, h.now) shouldBe true
+            owner.at = action.standing.location(h.world)
+            routes.cancelRoute(owner.actor)
+            routes.startRoute(independent.actor, h.world, other.standing, ++h.now) shouldBe true
+            work.update(owner.actor, h.city, h.world, h.now + 300_000)
+            owner.actor.cycle.phase shouldBe CitizenPhase.WORKING
+            owner.actor.route shouldBe null
+            owner.actor.mineAccess?.id shouldBe h.mine.id
             h.city shouldBe before
         }
     }

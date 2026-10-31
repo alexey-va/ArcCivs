@@ -8,7 +8,7 @@ import java.util.UUID
 class CivsSettlementPerimeterLimitsTest : FunSpec({
     test("fortified plots reserve enough edge room for a complete five-wide perimeter") {
         val base = settlementPlanCity().copy(radius = 128)
-        val frame = CivsSettlementLayout.frame(base).copy(fortified = true)
+        val frame = CivsSettlementLayout.frame(base, 72).copy(fortified = true)
         val template = CivBuilding(UUID(143, 1), BuildingType.HOUSE, 1, CivPosition(0, 0, 0), 0, "fixture/edge-house",
             CivBox(CivPosition(-9, 0, -16), CivPosition(8, 18, -1)), CivPosition(0, 1, 0), BuildingPhase.ACTIVE)
         // The native replay's rejected house had exactly this four-column gap to the core edge.
@@ -45,12 +45,13 @@ class CivsSettlementPerimeterLimitsTest : FunSpec({
     }
 
     test("the terrain separator accepts the shared maximum core and rejects either oversized dimension") {
-        val base = settlementPlanCity()
+        val base = settlementPlanCity().copy(radius = 128)
         val farm = CivBuilding(UUID(138, 10), BuildingType.FORESTER, 1, CivPosition(75, 64, 0), 0, "fixture/forest",
             CivBox(CivPosition(75, 64, -7), CivPosition(81, 71, -1)), CivPosition(75, 65, 0), BuildingPhase.ACTIVE)
         val city = base.copy(buildings = base.buildings + farm)
-        val frame = CivsSettlementLayout.frame(city)
-        frame.halfWidth shouldBe 72
+        // Full planning selects its new-town frame before reserving exterior plots.
+        val frame = CivsSettlementLayout.frame(base)
+        frame.halfWidth shouldBe 74
         val routes = mapOf(farm.id to (0..75).map { CivPosition(it, 65, 0) })
         val surface = settlementPlanSurface(city)
         val adapted = CivsSettlementPerimeter.adapt(city, frame, surface, routes, emptyList())

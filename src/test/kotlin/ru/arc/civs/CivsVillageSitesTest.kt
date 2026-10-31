@@ -44,8 +44,9 @@ class CivsVillageSiteScoringTest : FunSpec({
         (distance(candidates[96]) - distance(candidates[0]) in 232.0..280.0) shouldBe true
         CivsVillageSiteScoring.samples(reference.center).let { samples ->
             samples.size shouldBe 25
-            samples.minOf { it.x } shouldBe reference.center.x - 88
-            samples.maxOf { it.z } shouldBe reference.center.z + 88
+            samples.minOf { it.x } shouldBe reference.center.x - 90
+            samples.maxOf { it.z } shouldBe reference.center.z + 90
+            samples.map { it.x }.distinct().sorted().zipWithNext().all { (a, b) -> b - a == 45 } shouldBe true
         }
     }
 
@@ -54,12 +55,12 @@ class CivsVillageSiteScoringTest : FunSpec({
         val flat = villageSurface(center, 127)
         for (fringe in listOf("wet", "hill")) {
             val surface = flat.copy(columns = flat.columns.mapValues { (key, column) ->
-                val outer = kotlin.math.abs((key shr 32).toInt()) > 88 || kotlin.math.abs(key.toInt()) > 88
+                val outer = kotlin.math.abs((key shr 32).toInt()) > 90 || kotlin.math.abs(key.toInt()) > 90
                 if (!outer) column else column.copy(natural = fringe != "wet", groundY = 95, topY = 95)
             })
             (CivsVillageSiteScoring.score(surface).rejection(full = true) != null) shouldBe true
             CivsVillageSiteScoring.coreScore(surface, center).let { score ->
-                score.columns shouldBe 177 * 177
+                score.columns shouldBe 181 * 181
                 score.rejection(full = true) shouldBe null
             }
         }
@@ -303,7 +304,7 @@ class CivsVillageSitesTest : FunSpec({
             evidence.phase shouldBe "complete-layout-proof"
             evidence.reason shouldBe "village-no-trees"
             evidence.provinceTreeColumns shouldBe 8
-            evidence.terrain?.columns shouldBe 177 * 177
+            evidence.terrain?.columns shouldBe 181 * 181
             evidence.point shouldBe s.fullCities.single().center
             s.admissions shouldBe emptyList()
             s.subject.cancel("timber-evidence-test")
@@ -691,7 +692,7 @@ class CivsVillageSitesTest : FunSpec({
             (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
             result.join().rejectedSites.size shouldBe 8
             result.join().rejectedSites.all { it.phase == "complete-layout-proof" && it.reason == "autonomy-no-site" &&
-                it.terrain?.columns == 177 * 177 && (it.provinceTreeColumns ?: 0) >= 8 } shouldBe true
+                it.terrain?.columns == 181 * 181 && (it.provinceTreeColumns ?: 0) >= 8 } shouldBe true
             result.join().rejectedSites.last().point shouldBe s.fullCities.last().center
             val observations = result.join().rejectedSites
             observations.all { it.details["type"] == "HOUSE" && it.details["frontage_candidates"] == "64" &&

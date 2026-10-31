@@ -11,9 +11,10 @@ import java.util.UUID
 
 class CivsSettlementPlanTest : FunSpec({
     test("adopted plan reserves the complete profile and real closed infrastructure without granting anything") {
-        val city = settlementPlanCity()
+        val city = settlementPlanCity().copy(radius = 128)
         val before = Gson().toJson(city)
-        val plan = planWithDiagnostics { CivsSettlementPlans.prepare(city, settlementPlanTemplates(), settlementPlanSurface(city), CivAutonomousAccess()) }
+        val surface = settlementPlanSurface(city.copy(radius = 127)) // Native surveys retain a bounded 255-square province.
+        val plan = planWithDiagnostics { CivsSettlementPlans.prepare(city, settlementPlanTemplates(), surface, CivAutonomousAccess()) }
         plan.plots.size shouldBe 34
         plan.plots.count { it.building.type == BuildingType.HOUSE } shouldBe 16
         plan.plots.count { it.building.type == BuildingType.FORESTER } shouldBe 2
@@ -21,7 +22,7 @@ class CivsSettlementPlanTest : FunSpec({
         plan.plots.count { it.building.type == BuildingType.FARM } shouldBe 3
         plan.plots.count { it.building.type == BuildingType.WAREHOUSE } shouldBe 2
         plan.plots.takeLast(16).all { it.building.type == BuildingType.HOUSE } shouldBe true
-        plan.halfWidth shouldBe 72
+        plan.halfWidth shouldBe 74
         plan.plots.map { it.building.type }.toSet() shouldBe CivsAutonomy.profile.toSet()
         (plan.gates.size in 1..8) shouldBe true
         (plan.walls.isNotEmpty()) shouldBe true
@@ -36,7 +37,6 @@ class CivsSettlementPlanTest : FunSpec({
         runtimeFrame.gates.map { it.passage } shouldBe plan.gates
         plan.routes.values.all { CivsSettlementLayout.acceptsRoute(runtimeFrame, it) } shouldBe true
         plan.walls.all { wall -> plan.plots.none { CivsAutonomousGeometry.overlaps(wall, it.envelope) } } shouldBe true
-        val surface = settlementPlanSurface(city)
         plan.walls.forEach { wall ->
             for (x in wall.min.x..wall.max.x) for (z in wall.min.z..wall.max.z) surface.at(x, z)!!.natural shouldBe true
         }
@@ -50,6 +50,32 @@ class CivsSettlementPlanTest : FunSpec({
         val complete = adopted.copy(buildings = adopted.buildings + next.building.copy(phase = BuildingPhase.ACTIVE))
         CivsSettlementPlans.next(complete, BuildingType.BUILDER_HUT) shouldBe null
         complete.autonomy?.plan shouldBe plan
+    }
+
+    test("an accepted seventy two block plan retains its width plots routes and perimeter under the larger new town bound") {
+        val city = settlementPlanCity().copy(radius = 128, autonomy = CivAutonomy(layoutHalfWidth = 72))
+        val before = Gson().toJson(city)
+        val plan = planWithDiagnostics {
+            CivsSettlementPlans.prepare(city, settlementPlanTemplates(), settlementPlanSurface(city.copy(radius = 127)), CivAutonomousAccess())
+        }
+        plan.halfWidth shouldBe 72
+        plan.plots.size shouldBe 34
+        for (journalWidth in listOf(72, null)) {
+            val adopted = city.copy(autonomy = city.autonomy!!.copy(plan = plan, layoutHalfWidth = journalWidth))
+            val restored = CivsRules.validate(Gson().fromJson(Gson().toJson(adopted), Settlement::class.java))
+            val restoredPlan = requireNotNull(CivsSettlementPlans.current(restored))
+            restoredPlan shouldBe plan
+            val frame = CivsSettlementLayout.frame(restored)
+            frame.halfWidth shouldBe 72
+            frame.wallObstacles shouldBe plan.walls
+            frame.gates.map { it.passage } shouldBe plan.gates
+            restoredPlan.plots shouldBe plan.plots
+            restoredPlan.routes shouldBe plan.routes
+            restored.buildings shouldBe city.buildings
+            restored.workers shouldBe city.workers
+            restored.stock shouldBe city.stock
+        }
+        Gson().toJson(city) shouldBe before
     }
 
     test("the full planner extends shared street choices with every new reserved plot") {

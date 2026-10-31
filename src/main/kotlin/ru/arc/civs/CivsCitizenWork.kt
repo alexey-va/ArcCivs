@@ -45,8 +45,8 @@ internal class CivsCitizenWork(
 
     fun reconcileMineVisit(actor: CitizenActor, city: Settlement) = mineVisits.reconcile(actor, city)
 
-    fun waitingForMineAccess(actor: CitizenActor, city: Settlement, worker: CivWorker): Boolean =
-        mineVisits.waitingForAccess(actor, city, worker, actor.npc.world)
+    fun waitingForMineAccess(actor: CitizenActor, city: Settlement, worker: CivWorker, register: Boolean = true): Boolean =
+        mineVisits.waitingForAccess(actor, city, worker, actor.npc.world, register)
 
     fun inboundMineAccess(actor: CitizenActor, city: Settlement, target: CivPosition, idleAnchor: CivPosition?): CivBuilding? =
         mineVisits.inbound(actor, city, target, idleAnchor)
@@ -133,6 +133,7 @@ internal class CivsCitizenWork(
             return
         }
         if (actor.mineVisit != null && mineVisits.update(actor, city, worker, world, now)) return
+        if (mineVisits.yieldForAccess(actor, city, worker, world, now)) return
         if (returnProducerOutputs(actor, city, worker, world, now)) return
         if (mineVisits.waitingForAccess(actor, city, worker, world)) {
             actor.cycle.deferWork(now)

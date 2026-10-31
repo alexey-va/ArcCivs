@@ -48,7 +48,7 @@ internal data class CivSettlementBlocker(val buildingId: UUID, val bounds: CivBo
  */
 internal object CivsSettlementLayout {
     const val VERSION = 1
-    const val MAXIMUM_HALF_WIDTH = 72
+    const val MAXIMUM_HALF_WIDTH = 74
     const val MAXIMUM_PIECES = CivsRules.MAX_INFRASTRUCTURE
     private const val WALL_HALF_WIDTH = 1
     private const val GATE_HALF_WIDTH = 2
@@ -202,7 +202,7 @@ internal object CivsSettlementLayout {
         eligible: (CivBuilding) -> Boolean = { true }): List<CivsAutonomousCandidate> {
         if (current.type in exteriorTypes || current.type.isInfrastructure)
             return emptyList()
-        // At the largest frame: 69 * 69 * 4 detached placements, with at most 64 results.
+        // At the largest frame: 71 * 71 * 4 = 20,164 detached placements, with at most 64 results.
         val choices = buildList {
             for (x in frame.core.min.x + 4..frame.core.max.x - 4 step 2)
                 for (z in frame.core.min.z + 4..frame.core.max.z - 4 step 2)
