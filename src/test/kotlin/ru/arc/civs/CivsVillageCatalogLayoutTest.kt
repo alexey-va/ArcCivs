@@ -8,11 +8,14 @@ import io.kotest.matchers.shouldBe
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** Optional private metadata preflight; no source voxels or captured world state are exported. */
 class CivsVillageCatalogLayoutTest : FunSpec({
     val source = System.getenv("CIVS_VILLAGE_CATALOG")
-    test("requested styles fit the complete profile from a SITE hall using CIVS_VILLAGE_CATALOG")
+    test("requested styles fit complete profiles on flat and mild hill terrain using CIVS_VILLAGE_CATALOG")
         .config(enabled = source != null) {
             val path = Path.of(checkNotNull(source)).toAbsolutePath().normalize()
             check(Files.isRegularFile(path) && Files.size(path) in 1..64_000_000L) { "Invalid private catalog path or size" }
@@ -26,9 +29,12 @@ class CivsVillageCatalogLayoutTest : FunSpec({
             val gson = Gson()
             CivsWorksiteLayouts.installCatalog(catalog.worksiteLayouts)
             try {
-                for (style in styles) {
+                for (terrainMode in listOf("flat", "mild-hills")) for (style in styles) {
                     val started = System.nanoTime()
-                    val result = linkedMapOf<String, Any?>("style" to style)
+                    val result = linkedMapOf<String, Any?>("style" to style, "terrain" to terrainMode)
+                    val routeOutcomes = sortedMapOf<String, Int>()
+                    var expanded = 0L
+                    var maximumExpanded = 0
                     try {
                         val templates = CivsAutonomy.profile.distinct().associateWith { type ->
                             val id = UUID.nameUUIDFromBytes("village-catalog-preflight/$style/$type".toByteArray(Charsets.UTF_8))
@@ -48,19 +54,28 @@ class CivsVillageCatalogLayoutTest : FunSpec({
                         }) { "A required theme building fell back from $style" }
                         result["fallback_styles"] = templates.values.mapNotNull { CivsBlueprints.styleOf(it.first) }
                             .filter { it != style }.groupingBy { it }.eachCount()
+                        val baseGround = if (terrainMode == "flat") 63 else 67
                         val hall = CivsSettlementPlans.at(templates.getValue(BuildingType.TOWN_HALL).first,
-                            CivPosition(0, 63, 0), 0).copy(phase = BuildingPhase.SITE)
-                        val city = CivsAutonomy.found(UUID.randomUUID(), UUID.randomUUID(), "Preflight $style", UUID.randomUUID(),
+                            CivPosition(0, baseGround, 0), 0).copy(phase = BuildingPhase.SITE)
+                        fun id(role: String) = UUID.nameUUIDFromBytes("village-catalog-preflight/$style/$terrainMode/$role".toByteArray(Charsets.UTF_8))
+                        val city = CivsAutonomy.found(id("city"), id("owner"), "Preflight $style", id("world"),
                             checkNotNull(hall.control), 128, style, hall, 1_000)
                             .copy(settings = CivSettlementSettings(immortalResidents = true))
                         val before = gson.toJson(city)
                         val surface = CivTerrainSurface(-64, 320, buildMap {
                             for (x in city.center.x - 127..city.center.x + 127)
-                                for (z in city.center.z - 127..city.center.z + 127)
-                                    put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(63, true))
+                                for (z in city.center.z - 127..city.center.z + 127) {
+                                    val ground = baseGround + if (terrainMode == "flat") 0
+                                        else (3.0 * sin(x / 24.0) * cos(z / 31.0)).roundToInt()
+                                    put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(ground, true))
+                                }
                         })
                         val plan = CivsSettlementPlans.prepare(city, templates,
-                            CivsVillageSiteScoring.preparedSurface(surface, hall), CivAutonomousAccess(), inspect = { partial, _ ->
+                            CivsVillageSiteScoring.preparedSurface(surface, hall), CivAutonomousAccess(), inspectRoute = { stats ->
+                                routeOutcomes.merge(stats.outcome, 1, Int::plus)
+                                expanded += stats.expanded
+                                maximumExpanded = maxOf(maximumExpanded, stats.expanded)
+                            }, inspect = { partial, _ ->
                                 result["last_attempt_half_width"] = partial.halfWidth
                                 result["last_attempt_counts"] = partial.plots.groupingBy { it.building.type }.eachCount()
                             })
@@ -76,7 +91,7 @@ class CivsVillageCatalogLayoutTest : FunSpec({
                         })
                         val usableTrees = CivsVillageSiteScoring.usableTreeColumns(city, plan, wooded)
                         result["usable_forester_tree_columns"] = usableTrees
-                        withClue("Authored forester work area for $style") { (usableTrees >= 8) shouldBe true }
+                        withClue("Authored forester work area for $style/$terrainMode") { (usableTrees >= 8) shouldBe true }
                         gson.toJson(city) shouldBe before
                         result["success"] = true
                     } catch (failure: Exception) {
@@ -88,6 +103,9 @@ class CivsVillageCatalogLayoutTest : FunSpec({
                         result["failure"] = "incomplete-profile"
                         result["details"] = failure.message?.take(256)
                     }
+                    result["route_outcomes"] = routeOutcomes
+                    result["expanded_route_states"] = expanded
+                    result["maximum_route_states"] = maximumExpanded
                     result["elapsed_ms"] = (System.nanoTime() - started) / 1_000_000
                     results += result
                 }
@@ -95,7 +113,8 @@ class CivsVillageCatalogLayoutTest : FunSpec({
                 CivsWorksiteLayouts.installCatalog(emptyMap())
             }
             val report = linkedMapOf("selector" to "CivBlueprintCatalog.autonomous + maximum family frame",
-                "terrain" to "synthetic-flat-natural-255x255", "radius" to 128, "initial_hall" to "SITE",
+                "terrain" to "synthetic flat and mild hills, natural+loaded 255x255",
+                "mild_hills" to "ground=67+round(3*sin(x/24)*cos(z/31))", "radius" to 128, "initial_hall" to "SITE",
                 "resource_probe" to "synthetic woods in the authored forester area excluding planned roads and envelopes",
                 "expected_ordinary_plots" to 34, "results" to results)
             val json = gson.toJson(report)

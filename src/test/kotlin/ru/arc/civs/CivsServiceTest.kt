@@ -55,14 +55,19 @@ class CivsVillagePlanningExecutorServiceTest : FunSpec({
     }
     fun storageExecutor(service: CivsService): Executor =
         CivsService::class.java.getDeclaredField("executor").apply { isAccessible = true }.get(service) as Executor
+    fun placementExecutor(service: CivsService): Executor {
+        val placement = CivsService::class.java.getDeclaredField("autonomousPlacement").apply { isAccessible = true }.get(service)
+        return CivsAutonomousPlacement::class.java.getDeclaredField("executor").apply { isAccessible = true }.get(placement) as Executor
+    }
 
     test("existing service callers retain the storage executor as their compatible planning default") {
         serviceScenario { h ->
             (villageExecutor(h.service) === storageExecutor(h.service)) shouldBe true
+            (placementExecutor(h.service) === storageExecutor(h.service)) shouldBe true
         }
     }
 
-    test("an explicit planning executor changes village proof wiring while preserving the service IO lane") {
+    test("village proof and existing town placement share the planning lane without occupying service IO") {
         serviceScenario { h ->
             h.service.close()
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(h.plugin))
@@ -76,6 +81,7 @@ class CivsVillagePlanningExecutorServiceTest : FunSpec({
                 planningExecutor = planning)
             try {
                 (villageExecutor(service) === planning) shouldBe true
+                (placementExecutor(service) === planning) shouldBe true
                 (storageExecutor(service) === storage) shouldBe true
                 (villageExecutor(service) === storageExecutor(service)) shouldBe false
             } finally {

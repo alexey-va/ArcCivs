@@ -69,7 +69,7 @@ class CivsService(
             if (failure != null) plugin.logger.log(Level.WARNING, "ArcCivs layout export could not read plan=$id", failure)
         }
     }, clock, blueprints::fortification)
-    private val autonomousPlacement = CivsAutonomousPlacement(blueprints, world, executor, { city -> cityPlans.loadAutonomousAccess(city) },
+    private val autonomousPlacement = CivsAutonomousPlacement(blueprints, world, planningExecutor, { city -> cityPlans.loadAutonomousAccess(city) },
         store::saveSchematic, store::deleteSchematic, plugin.server.unsafe.dataVersion)
     private val autonomousDevelopment = CivsAutonomousDevelopment(plugin, tasks, world, blueprints,
         autonomousPlacement, executor, { cities }, busy, unhealthy, { construction.isPlacing(it) }, ::ready, { closed },

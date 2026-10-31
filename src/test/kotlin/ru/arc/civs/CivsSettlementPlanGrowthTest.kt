@@ -40,14 +40,24 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         before.workers shouldBe emptyList()
     }
 
-    test("a bounded greedy refusal of a compact retained subset keeps the old town and its accepted work usable") {
-        // These parcels came from a feasible full plan. Refusal is this finite replan's limit, not proof of no physical space.
+    test("a compact retained subset extends to the full profile without moving the old town or invalidating its accepted work") {
+        // These parcels came from a feasible full plan; finding its extension must preserve all previously reserved intent.
         val before = legacyGrowthCity(roomy = false)
         val old = requireNotNull(CivsSettlementPlans.current(before))
         val serialized = Gson().toJson(before)
-        shouldThrow<CivsRejection> {
-            CivsSettlementPlans.prepare(before, settlementPlanTemplates(), settlementPlanSurface(before), CivAutonomousAccess())
-        }.reason shouldBe "autonomy-no-site"
+        val next = CivsSettlementPlans.prepare(before, settlementPlanTemplates(), settlementPlanSurface(before), CivAutonomousAccess())
+        next.plots.size shouldBe 34
+        next.plots.groupingBy { it.building.type }.eachCount() shouldBe CivsAutonomy.completeProfile.groupingBy { it }.eachCount()
+        next.plots.take(old.plots.size) shouldBe old.plots
+        old.routes.forEach { (id, route) -> next.routes[id] shouldBe route }
+        next.walls shouldBe old.walls
+        next.gates shouldBe old.gates
+        next.gateSides shouldBe old.gateSides
+        next.halfWidth shouldBe old.halfWidth
+        CivsSettlementPlans.validate(before, next)
+        val adopted = before.copy(autonomy = before.autonomy!!.copy(plan = next))
+        CivsSettlementPlans.needsExtension(adopted) shouldBe false
+        CivsRules.validate(adopted) shouldBe adopted
         Gson().toJson(before) shouldBe serialized
         CivsSettlementPlans.current(before) shouldBe old
         before.revision shouldBe 0L

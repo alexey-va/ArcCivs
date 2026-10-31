@@ -3007,7 +3007,8 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.idleReason = "searching-work"
             h.owner.collisionActors().single().teleport(Location(h.world, .5, 64.0, if (supportHole) .8 else .5))
             h.navigationNow = 2_000
-            h.owner.residentStepAllowed = { _, _, _ -> false }
+            // Hold movement without rejecting the clear initial storage arrival probe.
+            h.owner.residentStepAllowed = { _, from, to -> from.x == to.x && from.y == to.y && from.z == to.z }
             repeat(2) { h.owner.pulse(2_000) }
             val actors = h.owner.collisionActors().associateBy { it.uniqueId }
             actors.getValue(blocker).teleport(Location(h.world, 10.5, 64.0, 10.5))

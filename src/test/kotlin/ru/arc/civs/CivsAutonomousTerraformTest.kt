@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import com.google.gson.Gson
+import io.kotest.assertions.withClue
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -13,6 +14,38 @@ import org.bukkit.Bukkit
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a mild graded detour around a long barrier stays within a small expanded-state budget") {
+        val fixture = mildBarrierFixture()
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val route = CivsAutonomousTerraform.connection(fixture.city, fixture.target, fixture.surface,
+            CivAutonomousAccess(), listOf(fixture.barrier), searches::add)
+        checkMildBarrierRoute(fixture, route)
+        searches.single().outcome shouldBe "found"
+        withClue(searches.single()) { (searches.single().expanded <= 4_096) shouldBe true }
+    }
+
+    test("an oversized height field retains the original bounded search instead of truncating its route domain") {
+        val fixture = mildBarrierFixture()
+        val smallSearches = mutableListOf<CivRouteSearchStats>()
+        val small = CivsAutonomousTerraform.connection(fixture.city, fixture.target, fixture.surface,
+            CivAutonomousAccess(), listOf(fixture.barrier), smallSearches::add)
+        checkMildBarrierRoute(fixture, small)
+        val large = fixture.surface.copy(columns = buildMap {
+            for (x in -128..128) for (z in -128..128)
+                put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(64 + (x.coerceAtLeast(0) / 4).coerceAtMost(2), true))
+        })
+        large.columns.size shouldBe 66_049 // Outside-city padding must trigger the bounded-precomputation fallback.
+        val largeSearches = mutableListOf<CivRouteSearchStats>()
+        val route = CivsAutonomousTerraform.connection(fixture.city, fixture.target, large,
+            CivAutonomousAccess(), listOf(fixture.barrier), largeSearches::add)
+        checkMildBarrierRoute(fixture.copy(surface = large), route)
+        largeSearches.single().outcome shouldBe "found"
+        withClue("small=${smallSearches.single()} large=${largeSearches.single()}") {
+            (largeSearches.single().expanded > smallSearches.single().expanded) shouldBe true
+            (largeSearches.single().expanded <= CivsAutonomousTerraform.MAXIMUM_ROUTE_NODES) shouldBe true
+        }
+    }
+
     test("a permanently blocked connection target is rejected without expanding the route search") {
         val city = terraceCity()
         val building = terraceBuilder(city)
@@ -621,6 +654,32 @@ internal fun exportRoadSection(name: String, surface: CivTerrainSurface, route: 
     }
     Files.writeString(output.resolve("$name.json"), Gson().toJson(mapOf("name" to name,
         "sourceSha256" to hashes, "route" to route, "before" to rows(before), "after" to rows(after))))
+}
+
+private data class MildBarrierFixture(val city: Settlement, val target: CivBuilding,
+    val surface: CivTerrainSurface, val barrier: CivBox)
+
+private fun mildBarrierFixture(): MildBarrierFixture {
+    val city = terraceCity()
+    val target = CivBuilding(UUID(0, 900), BuildingType.BUILDER_HUT, 1, CivPosition(25, 66, 0), 90, "fixture",
+        CivBox(CivPosition(25, 66, -2), CivPosition(29, 72, 2)), CivPosition(24, 67, 0), BuildingPhase.CONSTRUCTING)
+    return MildBarrierFixture(city, target,
+        terraceSurface { x, _ -> 64 + (x.coerceAtLeast(0) / 4).coerceAtMost(2) },
+        CivBox(CivPosition(12, 60, -20), CivPosition(12, 80, 20)))
+}
+
+private fun checkMildBarrierRoute(fixture: MildBarrierFixture, route: List<CivPosition>) {
+    route.first() shouldBe fixture.city.buildings.single().entrance
+    route.last() shouldBe fixture.target.entrance
+    route.map { civsTerrainKey(it.x, it.z) }.distinct().size shouldBe route.size
+    (route.size <= CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH) shouldBe true
+    route.any { abs(it.z) >= 21 } shouldBe true
+    (route.maxOf { it.y } - route.minOf { it.y } >= 2) shouldBe true
+    route.all { point -> fixture.city.contains(point.x, point.z) &&
+        !CivsAutonomousGeometry.horizontalContains(fixture.barrier, point) &&
+        abs(requireNotNull(fixture.surface.at(point.x, point.z)).groundY - (point.y - 1)) <= CivsAutonomousTerraform.MAXIMUM_CHANGE
+    } shouldBe true
+    route.zipWithNext().all { (a, b) -> abs(a.x - b.x) + abs(a.z - b.z) == 1 && abs(a.y - b.y) <= 1 } shouldBe true
 }
 
 private fun terraceCity(): Settlement {

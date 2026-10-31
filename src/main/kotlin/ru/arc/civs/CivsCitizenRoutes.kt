@@ -524,11 +524,11 @@ internal class CivsCitizenRoutes(
             resolvedTarget(actor, target) == storage.entrance
     }
 
-    /** A hand/container reach during contact transit is not a safe stationary work or transfer endpoint. */
+    /** A fresh arrival must have a clear body even when contact occurred before its first movement sweep. */
     fun arrivalBodyClear(actor: CitizenActor): Boolean {
-        if (actor.bodyContactToken != actor.plan.token) return true
         // arriveForWork retires its route before accepting work/transfer. Later player occupancy cannot revoke that receipt.
-        if (actor.route == null && actor.cycle.phase !in
+        val supplyArrival = actor.supplyPickup == null && (actor.foodSource != null || actor.outputReturn != null)
+        if (actor.route == null && !supplyArrival && actor.cycle.phase !in
             setOf(CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING)) return true
         val feet = actor.npc.location
         return collisions.residentMoveAllowed(actor, feet, feet)
