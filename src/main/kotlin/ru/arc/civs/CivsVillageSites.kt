@@ -2,12 +2,14 @@ package ru.arc.civs
 
 import org.bukkit.Bukkit
 import org.bukkit.Chunk
+import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.chunk.PaperChunkKey
 import ru.arc.paper.chunk.PaperChunkTicketLease
 import java.util.ArrayDeque
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -27,7 +29,8 @@ internal data class CivVillageSiteReceipt(val city: UUID, val name: String, val 
     val treeColumns: Int, val existing: Boolean, val fallbackStyles: Map<String, Int> = emptyMap())
 
 internal data class CivVillageSiteRejection(val phase: String, val point: CivPosition?, val reason: String,
-    val terrain: CivVillageTerrainScore? = null, val provinceTreeColumns: Int? = null, val usableTreeColumns: Int? = null)
+    val terrain: CivVillageTerrainScore? = null, val provinceTreeColumns: Int? = null, val usableTreeColumns: Int? = null,
+    val details: Map<String, String> = emptyMap())
 
 internal data class CivVillageSitesResult(val operation: UUID, val reference: UUID, val world: UUID,
     val requested: Int, val created: List<CivVillageSiteReceipt>, val rejected: Map<String, Int>,
@@ -451,7 +454,9 @@ internal class CivsVillageSites(
                     throw CivsRejection("blueprint-changed")
                 await(search, world.captureManualFoundation(city.id, city.owner, city.worldId, blueprint.building,
                     blueprint.cells, executor, autonomous = true, adminPlacement = false), failed = { error ->
-                    reject(search, rejection(error), score, provinceTrees); release(search) { full(search) }
+                    reject(search, rejection(error), score, provinceTrees,
+                        values = CivsDiagnostics.rejection(error)?.values.orEmpty())
+                    release(search) { full(search) }
                 }) { terrain ->
                     search.phase = "complete-layout-proof"
                     val templates = search.templates.getValue(ordinal)
@@ -465,8 +470,9 @@ internal class CivsVillageSites(
                         plan to trees
                     }, executor)
                     await(search, proof, failed = { error ->
+                        val observed = CivsDiagnostics.rejection(error)
                         reject(search, rejection(error), score, provinceTrees,
-                            CivsDiagnostics.rejection(error)?.values?.get("usable-tree-columns")?.toIntOrNull())
+                            observed?.values?.get("usable-tree-columns")?.toIntOrNull(), observed?.values.orEmpty())
                         release(search) { full(search) }
                     }) { (plan, trees) ->
                         search.phase = "founding"
@@ -613,10 +619,11 @@ internal class CivsVillageSites(
     }
 
     private fun reject(search: Search, reason: String, terrain: CivVillageTerrainScore? = null,
-        provinceTrees: Int? = null, usableTrees: Int? = null) {
+        provinceTrees: Int? = null, usableTrees: Int? = null, values: Map<String, String> = emptyMap()) {
         search.rejected.merge(reason, 1, Int::plus)
         if (search.rejectedSites.size == 8) search.rejectedSites.removeFirst()
-        search.rejectedSites.addLast(CivVillageSiteRejection(search.phase, search.point, reason, terrain, provinceTrees, usableTrees))
+        search.rejectedSites.addLast(CivVillageSiteRejection(search.phase, search.point, reason, terrain, provinceTrees, usableTrees,
+            rejectionDetails(values)))
     }
     private fun rejection(failure: Throwable): String {
         CivsDiagnostics.rejection(failure)?.let { return it.reason }
@@ -689,6 +696,28 @@ internal class CivsVillageSites(
     companion object {
         const val MAXIMUM_CHUNK_REQUESTS = 8_192
         const val MAXIMUM_TICKS = 36_000
+        internal fun rejectionDetails(values: Map<String, String>): Map<String, String> {
+            fun identifier(value: String) = value.length in 1..64 && value.all {
+                it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' || it == '-'
+            }
+            val result = linkedMapOf<String, String>()
+            values["type"]?.takeIf { value -> BuildingType.entries.any { it.name == value } }?.let { result["type"] = it }
+            values["stage"]?.takeIf(::identifier)?.let { result["stage"] = it }
+            values["block"]?.takeIf { value -> Material.entries.any { it.name == value } }?.let { result["block"] = it }
+            val excluded = setOf("type", "stage", "block", "world", "world_name", "samples", "draft_samples")
+            val numbers = values.entries.mapNotNull { (key, value) ->
+                if (!identifier(key) || key in excluded) null
+                else value.toLongOrNull()?.let { key to it }
+            }.toMap()
+            for (key in listOf("frontage_candidates", "frontage_options", "infill_candidates", "infill_options"))
+                numbers[key]?.let { result[key] = it.toString() }
+            // Keep the largest observed counters after the stage totals; no sample strings or mutable input aliases.
+            for ((key, value) in numbers.entries.sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })) {
+                if (result.size == 24) break
+                result.putIfAbsent(key, value.toString())
+            }
+            return Collections.unmodifiableMap(result)
+        }
         private val THEME_TYPES = listOf(BuildingType.TOWN_HALL, BuildingType.HOUSE, BuildingType.BUILDER_HUT,
             BuildingType.FORESTER, BuildingType.FARM)
     }

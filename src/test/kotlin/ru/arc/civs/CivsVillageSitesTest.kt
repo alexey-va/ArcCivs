@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
@@ -172,7 +173,76 @@ class CivsVillageSiteScoringTest : FunSpec({
     }
 })
 
+class CivsVillageSiteRejectionDetailsTest : FunSpec({
+    test("validated type stage block and numeric counters survive while arbitrary strings and sample payloads are excluded") {
+        val values = linkedMapOf("type" to "HOUSE", "stage" to "route-search", "block" to "OAK_LOG",
+            "frontage_candidates" to "64", "frontage_options" to "0", "infill_candidates" to "32", "infill_options" to "4",
+            "frontage_filter_autonomy-terrain" to "12", "infill_draft_autonomy-no-path" to "4", "route-state-budget" to "131072",
+            "x" to "-1900", "y" to "69", "z" to "-3593", "samples" to "123", "draft_samples" to "456",
+            "world_name" to "arc_civs_test", "note" to "unbounded detail", "invalid key" to "9",
+            "decimal" to "1.5", "overflow" to "9223372036854775808", "a".repeat(65) to "7")
+        val details = CivsVillageSites.rejectionDetails(values)
+        details shouldBe mapOf("type" to "HOUSE", "stage" to "route-search", "block" to "OAK_LOG", "frontage_candidates" to "64",
+            "frontage_options" to "0", "infill_candidates" to "32", "infill_options" to "4",
+            "frontage_filter_autonomy-terrain" to "12", "infill_draft_autonomy-no-path" to "4", "route-state-budget" to "131072",
+            "x" to "-1900", "y" to "69", "z" to "-3593")
+        values["frontage_options"] = "999"
+        values["stage"] = "changed"
+        details["frontage_options"] shouldBe "0"
+        details["stage"] shouldBe "route-search"
+        shouldThrow<UnsupportedOperationException> { (details as MutableMap<String, String>)["type"] = "FARM" }
+    }
+
+    test("detail cap preserves validated headers and all four stage totals and bounds every retained field") {
+        val values = linkedMapOf("type" to "FARM", "stage" to "fortification-reservation", "block" to "STONE",
+            "frontage_candidates" to "0", "frontage_options" to "0", "infill_candidates" to "0", "infill_options" to "0",
+            "route-expanded" to "131072")
+        repeat(40) { values["reason_$it"] = it.toString() }
+        val details = CivsVillageSites.rejectionDetails(values)
+        details.size shouldBe 24
+        listOf("type", "stage", "block", "frontage_candidates", "frontage_options", "infill_candidates", "infill_options", "route-expanded")
+            .all(details::containsKey) shouldBe true
+        details.entries.all { it.key.length <= 64 && it.value.length <= 64 } shouldBe true
+        CivsVillageSites.rejectionDetails(values.entries.reversed().associate { it.key to it.value }).keys.toList() shouldBe details.keys.toList()
+        CivsVillageSites.rejectionDetails(mapOf("type" to "unknown building", "stage" to "x".repeat(65), "block" to "123",
+            "world" to "456", "world_name" to "789",
+            "samples" to "123", "draft_samples" to "456", "zeros" to "0".repeat(256))) shouldBe mapOf("zeros" to "0")
+    }
+
+    test("block details accept only exact Material enum names and never numeric or arbitrary payloads") {
+        for (block in listOf("123", "oak_log", "minecraft:oak_log", "OAK_LOG[axis=y]", "UNKNOWN_MATERIAL", "x".repeat(256))) {
+            CivsVillageSites.rejectionDetails(mapOf("block" to block, "x" to "262", "samples" to "arbitrary payload")) shouldBe
+                mapOf("x" to "262")
+        }
+    }
+})
+
 class CivsVillageSitesTest : FunSpec({
+    test("foundation rejectAt shape retains validated block and coordinates without world identifiers or accepting a town") {
+        villageScenario { s ->
+            val values = mutableMapOf("block" to "OAK_LOG", "x" to "262", "y" to "69", "z" to "-3593",
+                "world" to s.reference.worldId.toString(), "world_name" to "arc_civs_test", "samples" to "123")
+            s.foundationFailure = CivsRejection("autonomy-terrain", values)
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { (s.subject.status()["rejected_sites"] as? List<*>)?.filterIsInstance<CivVillageSiteRejection>()
+                ?.any { it.phase == "town-hall-foundation" } == true }
+            val evidence = (s.subject.status()["rejected_sites"] as List<*>).filterIsInstance<CivVillageSiteRejection>().last()
+            evidence.reason shouldBe "autonomy-terrain"
+            evidence.details shouldBe mapOf("block" to "OAK_LOG", "x" to "262", "y" to "69", "z" to "-3593")
+            values["x"] = "999"
+            values["block"] = "AIR"
+            evidence.details["x"] shouldBe "262"
+            evidence.details["block"] shouldBe "OAK_LOG"
+            s.subject.cancel("foundation-details-test")
+            s.until { result.isDone }
+            result.join().rejectedSites.last() shouldBe evidence
+            result.join().created shouldBe emptyList()
+            s.admissions shouldBe emptyList()
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
     test("a complete layout with only remote provincial trees is refused with its detached usable timber evidence") {
         villageScenario { s ->
             s.fullSurface = { city ->
@@ -543,8 +613,10 @@ class CivsVillageSitesTest : FunSpec({
 
     test("a failed full growth proof creates no town and returns bounded rejection evidence") {
         villageScenario { s ->
+            val values = mutableMapOf("type" to "HOUSE", "frontage_candidates" to "64", "frontage_options" to "0",
+                "infill_candidates" to "32", "infill_options" to "0", "route-state-budget" to "8", "draft_samples" to "999")
             every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } throws
-                CivsRejection("autonomy-no-site")
+                CivsRejection("autonomy-no-site", values)
             val result = s.subject.search(s.reference, 1, "Auto-")
             s.until { result.isDone }
             result.join().complete shouldBe false
@@ -555,10 +627,20 @@ class CivsVillageSitesTest : FunSpec({
             result.join().rejectedSites.all { it.phase == "complete-layout-proof" && it.reason == "autonomy-no-site" &&
                 it.terrain?.columns == 177 * 177 && (it.provinceTreeColumns ?: 0) >= 8 } shouldBe true
             result.join().rejectedSites.last().point shouldBe s.fullCities.last().center
+            val observations = result.join().rejectedSites
+            observations.all { it.details["type"] == "HOUSE" && it.details["frontage_candidates"] == "64" &&
+                it.details["route-state-budget"] == "8" && "draft_samples" !in it.details } shouldBe true
+            values["route-state-budget"] = "999"
+            observations.all { it.details["route-state-budget"] == "8" } shouldBe true
             result.join().created shouldBe emptyList()
             s.admissions shouldBe emptyList()
             s.cities shouldBe listOf(s.reference)
             s.registry.activeLeaseCount shouldBe 0
+            val replay = s.subject.search(s.reference, 1, "Auto-")
+            s.subject.cancel("details-replay-test")
+            s.until { replay.isDone }
+            result.join().rejectedSites shouldBe observations
+            observations.all { it.details["route-state-budget"] == "8" } shouldBe true
         }
     }
 
@@ -739,6 +821,7 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     var handoffFailure: String? = null
     var surveys = 0
     var retainFailure: Throwable? = null
+    var foundationFailure: Throwable? = null
     val coarseCities = mutableListOf<Settlement>()
     val fullCities = mutableListOf<Settlement>()
     var peakRequests = 0
@@ -794,8 +877,10 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
                 else { coarseCities += city; coarseSurface(city, samples) }
             CompletableFuture.completedFuture(surface)
         }
-        every { access.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
-            CompletableFuture.completedFuture(null)
+        every { access.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+            foundationFailure?.let { CompletableFuture.failedFuture<CivTerraformPlan?>(it) }
+                ?: CompletableFuture.completedFuture<CivTerraformPlan?>(null)
+        }
         every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
             layout(firstArg())
         }

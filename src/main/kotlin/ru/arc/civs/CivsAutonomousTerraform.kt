@@ -479,6 +479,7 @@ internal object CivsAutonomousTerraform {
             return points
         }
         if (start == target) return finish(listOf(from), "found")
+        val ancestorColumns = hashSetOf<Long>()
         while (open.isNotEmpty() && expanded < MAXIMUM_ROUTE_NODES) {
             val current = open.remove()
             if (costs[current.node] != current.cost || !closed.add(current.node)) continue
@@ -494,6 +495,7 @@ internal object CivsAutonomousTerraform {
                 }
                 return finish(reversed.asReversed().map { CivPosition(it.x, it.y + 1, it.z) }, "found")
             }
+            var ancestorsReady = false
             for ((direction, offset) in DIRECTIONS.withIndex()) for (dy in 0..2) {
                 val (dx, dz) = offset
                 val rise = when (dy) { 1 -> -1; 2 -> 1; else -> 0 }
@@ -504,16 +506,6 @@ internal object CivsAutonomousTerraform {
                 val candidate = Node(n.x + dx, n.y + rise, n.z + dz, direction, rise > 0)
                 if (candidate in closed || !allowed(candidate.x, candidate.y, candidate.z) ||
                     candidate.x == start.x && candidate.z == start.z) continue
-                // A column has exactly one finished ground height. A cheap 3-D route can otherwise
-                // climb by zigzagging through the same two columns at successively higher levels.
-                // Exclude those ancestors while searching, so the solver finds an actual detour.
-                var ancestor: Node? = n
-                var repeatedColumn = false
-                while (ancestor != null) {
-                    if (ancestor.x == candidate.x && ancestor.z == candidate.z) { repeatedColumn = true; break }
-                    ancestor = parents[ancestor]
-                }
-                if (repeatedColumn) continue
                 val native = requireNotNull(surface.at(candidate.x, candidate.z))
                 // A brief hummock or hollow should be cut/filled instead of adding two gratuitous climbs.
                 val column = civsTerrainKey(candidate.x, candidate.z)
@@ -521,6 +513,19 @@ internal object CivsAutonomousTerraform {
                 val cost = current.cost + (if (shared) 6 else 10) + abs(candidate.y - n.y) * 8 +
                     if (shared) 0 else abs(native.groundY - candidate.y) * 2
                 if (cost >= costs.getOrDefault(candidate, Int.MAX_VALUE)) continue
+                // A column has exactly one finished ground height. A cheap 3-D route can otherwise
+                // climb by zigzagging through the same two columns at successively higher levels.
+                // Closed ancestors cannot be reparented; refresh once per expansion, reusing only the allocation.
+                if (!ancestorsReady) {
+                    ancestorColumns.clear()
+                    var ancestor: Node? = n
+                    while (ancestor != null) {
+                        ancestorColumns += civsTerrainKey(ancestor.x, ancestor.z)
+                        ancestor = parents[ancestor]
+                    }
+                    ancestorsReady = true
+                }
+                if (column in ancestorColumns) continue
                 costs[candidate] = cost; parents[candidate] = n
                 open += Open(candidate, cost, cost + distance(candidate), ordinal++)
                 peakQueue = maxOf(peakQueue, open.size)

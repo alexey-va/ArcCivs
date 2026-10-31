@@ -13,6 +13,33 @@ import org.bukkit.Bukkit
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a graded junction retains its viable later arrival without reusing columns") {
+        val original = terraceCity()
+        val start = original.buildings.single().entrance
+        val junction = CivPosition(2, 66, 4)
+        val shortcut = listOf(start, CivPosition(0, 65, 1), CivPosition(0, 65, 2),
+            CivPosition(1, 65, 2), CivPosition(2, 65, 2), CivPosition(2, 65, 3), junction)
+        val detour = listOf(CivPosition(-1, 65, 0), CivPosition(-2, 65, 0), CivPosition(-2, 65, 1),
+            CivPosition(-2, 66, 2), CivPosition(-2, 66, 3), CivPosition(-2, 66, 4),
+            CivPosition(-1, 66, 4), CivPosition(0, 66, 4), CivPosition(1, 66, 4))
+        val finish = listOf(CivPosition(3, 67, 4), CivPosition(4, 67, 4))
+        val feet = (shortcut + detour + finish).distinct()
+        val roads = feet.map { point -> original.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.ROAD,
+            anchor = point.copy(y = point.y - 1), entrance = point,
+            bounds = CivBox(point.copy(y = point.y - 1), point.copy(y = point.y - 1)),
+            phase = BuildingPhase.ACTIVE, control = null, transit = listOf(point)) }
+        val city = original.copy(buildings = original.buildings + roads)
+        val target = roads.last().copy(id = UUID.randomUUID(), type = BuildingType.GATE, phase = BuildingPhase.CONSTRUCTING)
+        val surface = CivTerrainSurface(-64, 320, feet.associate {
+            civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(it.y - 1, true)
+        })
+        // The shorter arrival climbs north into the junction and has no straight landing there.
+        // The longer western arrival stays level before the final eastward climb.
+        val route = CivsAutonomousTerraform.connection(city, target, surface, CivAutonomousAccess(), emptyList())
+        route shouldBe listOf(start) + detour + junction + finish
+        route.map { civsTerrainKey(it.x, it.z) }.distinct().size shouldBe route.size
+    }
+
     test("a new north branch beyond remote preferred roads fits the unchanged search budget") {
         val original = terraceCity()
         val east = original.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
