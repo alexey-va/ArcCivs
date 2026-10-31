@@ -1032,7 +1032,7 @@ class CivsService(
             inventoryJournal.recover()
             pulseCorpses()
             deletion.pulseDeletions()
-            controlInstallations.pulse()
+            controlInstallations.pulse(::now, ::initialAutonomousApproachAllowed, buildingRequests::repairInitialAutonomousApproach)
             controlRelocations.pulse()
             residentLife.pulseImmigration()
             cityResearch.pulseResearch()
@@ -1083,6 +1083,15 @@ class CivsService(
             revision = current.revision + 1) }.whenComplete { _, error ->
             if (error != null) log("expire resident corpses ${city.id}", error, city.id)
         }
+    }
+
+    /** The repair owner already holds the city reservation during proof; inventory and native locks remain independent fences. */
+    internal fun initialAutonomousApproachAllowed(city: Settlement): Boolean {
+        if (!ready() || city.id in unhealthy || inventoryJournal.pending(city.id) || construction.isPlacing(city.id) ||
+            !settlementActive(city)) return false
+        val hall = controlInstallations.initialAutonomousHall(city) ?: return false
+        val points = listOfNotNull(hall.control) + (-1..1).map { dy -> hall.entrance.copy(y = Math.addExact(hall.entrance.y, dy)) }
+        return points.none { storage.isWorldLocked(city.worldId, it) }
     }
 
     internal fun settlementActive(city: Settlement): Boolean = chunkLoading.active(city.id) ||

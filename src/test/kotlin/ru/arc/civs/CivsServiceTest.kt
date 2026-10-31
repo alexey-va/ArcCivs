@@ -7768,7 +7768,7 @@ private fun deliverCraftTest(h: ServiceScenario, city: Settlement, worker: CivWo
             worker.nextDeliveryAt, jobId, h.time) as CompletableFuture<Settlement>
     }
 
-private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
+internal fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
     allowedWorlds: Set<String> = setOf("vanilla"), storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)? = null,
     nativeGeometry: Boolean = false, serverFixture: ServerMock? = null,
     action: (ServiceScenario) -> Unit) =
@@ -7777,7 +7777,7 @@ private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, wo
         runtime.use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory, nativeGeometry).use(action) }
     }
 
-private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int,
+internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int,
     worldName: String, allowedWorlds: Set<String>, storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)?, nativeGeometry: Boolean) : AutoCloseable {
     val plugin = paper.createSimplePlugin("CivsServiceTest")
     val world = if (nativeGeometry) CivsWorksiteWorldFixture(worldName).also(paper.server::addWorld) else paper.addSimpleWorld(worldName)
@@ -8125,10 +8125,10 @@ private class ServiceRoutedTerraform(private val h: ServiceScenario,
     }
 }
 
-private data class ServiceQueuedUpgrade(val city: Settlement, val building: CivBuilding, val design: CivPlacementPlan,
+internal data class ServiceQueuedUpgrade(val city: Settlement, val building: CivBuilding, val design: CivPlacementPlan,
     val fresh: CivPlacementPlan, val capture: CompletableFuture<CivPlacementPlan>)
 
-private class ServicePlacement(val city: Settlement) {
+internal class ServicePlacement(val city: Settlement) {
     val validation = CompletableFuture<Unit>()
     val pasted = CompletableFuture<ArcSchematicMutationResult>()
     val repaired = CompletableFuture<ArcSchematicMutationResult>()

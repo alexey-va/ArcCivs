@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "title": "ArcCivs161 initial autonomous entrance preparation with existing durable control receipt",
+  "participants": [
+    1,
+    5,
+    16
+  ],
+  "assumptions": [
+    "Canonical economy inventory includes published158/159 and prepared160 note. Current EconomyShopGUI SELL and future/SHADOW contract paths stay separate; no conversion rate inferred.",
+    "Before: automatic founding with nonnull foundation suppresses approach preparation, while full layout assumes a usable entrance. Native first village floor is oak_leaves, rejected by strict Terraform route-support. Initial native reserve216 already materialized once; repair must preserve the existing barrel and its contents.",
+    "After: only the initial autonomous sole L1 SITE town hall may prepare up to3 proven entrance cells at y-1/y/y+1 using existing DIRT/AIR pendingControls.approach receipt. Fresh strict foundation+native capture, exact geometry/identity/native beforeimages and normal ownership/container/ore guards precede persistence and native apply. No finished building or arbitrary platform rewrite.",
+    "New founding prepares that existing entry receipt from its strictly captured foundation. Existing blocked founding recovers through the same durable before/after receipt, reused BARREL, no repeated reserve/materialization. Pending receipts and unknown SQL outcomes use existing busy/quarantine/recovery rules.",
+    "Bounded one-time immediate native world changes are0..3 cells per town (up to15 for requested5 including the already founded first); floor DIRT and head/feet AIR are world setup, not item grants, drops, inventory credits or recurring rewards. Full foundation is still built through ordinary paid construction and fresh beforeimages.",
+    "Before/after direct deltas separately0Vault,0tokens,0playerXP. Reserve96logs/96cobblestone/24bread once per city remains;5totals480/480/120 items. No extra test resources, no reset of accepted work/cargo/life/skills.",
+    "Work rates, drops, sales, prices, taxes, crafting recipes, recruitment, full34 profile, 24adult+4child targets, one miner/quarry and scan/chunk/changed-block limits are unchanged. Intended ordinary development is unblocked; realized income rate still requires native observation."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "validation": [
+    "Observed native leaves floor becomes one strictly captured/persisted/replayed entry support; no native write before durable receipt and all cells revalidated before first write.",
+    "Already installed barrel, its inventory and materialization receipt are preserved; restart/late callbacks cannot repeat the initial216 reserve.",
+    "Protected ore/container/foreign claim/stale geometry or changed beforeimage refuses repair; finished and noninitial cities remain ineligible.",
+    "Record actual native growth and byte counts independently of source/build/activation and monetary units."
+  ],
+  "conclusion": "No direct monetary or recurring production change; bounded initial world approach setup uses the existing durable control receipt, preserving resource, ownership and native beforeimage guards."
+}

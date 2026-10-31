@@ -272,18 +272,20 @@ internal class CivsBuildingRequests(
             finish(it)
             return result
         }
-        capture.whenCompleteSync(tasks) { captured, captureFailure ->
+        val capturedApproach = capture.thenApplyAsync({ plan -> plan to controlInstallations.provedInitialApproach(hall, plan.terrain) }, executor)
+        capturedApproach.whenCompleteSync(tasks) { prepared, captureFailure ->
             if (captureFailure != null) { finish(captureFailure); return@whenCompleteSync }
             runCatching {
+                val (captured, approach) = requireNotNull(prepared)
                 current()
                 rejectIf(records.cities.containsKey(proposed.id) || records.cities.values.any {
                     it.name.equals(proposed.name, ignoreCase = true)
                 }, "city-name-conflict")
                 checkSettlementSpace(proposed.worldId, proposed.center, proposed.owner)
-                val control = controlInstallations.prepare(proposed.id, proposed.worldId, proposed.owner, hall,
-                    prepareApproach = admission.terrain == null)
+                val control = controlInstallations.prepareProvedInitialApproach(proposed.id, proposed.worldId, proposed.owner,
+                    proposed.buildings.single(), approach)
                 val next = CivsRules.validate(proposed.copy(pendingControls = listOf(control)))
-                val plan = requireNotNull(captured).copy(id = hall.id, capturedSha256 = blueprint.snapshot.fileSha256,
+                val plan = captured.copy(id = hall.id, capturedSha256 = blueprint.snapshot.fileSha256,
                     adminPlacement = false)
                 store.saveSchematic(plan.id, blueprint.sourceBytes).thenCompose { store.savePlan(plan) }.thenCompose {
                     tasks.callSync {
@@ -324,6 +326,78 @@ internal class CivsBuildingRequests(
                     }
                 }
             }.onFailure { finish(it) }
+        }
+        return result
+    }
+
+    /** Recover only a founding SITE's missing entrance, preserving its immutable design and existing control inventory. */
+    fun repairInitialAutonomousApproach(city: Settlement): CompletableFuture<Unit> {
+        authority.checkMain()
+        val hall = controlInstallations.initialAutonomousHall(city) ?: throw CivsRejection("stale-building")
+        rejectIf(city.id in records.busy || city.id in records.unhealthy, "city-busy")
+        fun current(): Settlement {
+            val latest = records.cities[city.id] ?: throw CivsRejection("no-city")
+            rejectIf(!authority.ready() || !authority.initialAutonomousApproachAllowed(latest), "city-busy")
+            rejectIf(latest.revision != city.revision || latest.owner != city.owner || latest.worldId != city.worldId ||
+                latest.center != city.center || latest.style != city.style || latest.settings != city.settings ||
+                controlInstallations.initialAutonomousHall(latest) != hall, "stale-building")
+            return latest
+        }
+        current()
+        controlInstallations.requirePresent(city.worldId, hall) // Recovery never installs a second free barrel.
+        authority.reserveCity(city.id)
+        var ownsReservation = true
+        val result = authority.tracked<Unit>()
+        fun release() {
+            if (ownsReservation) { ownsReservation = false; authority.releaseCity(city.id) }
+        }
+        fun finish(failure: Throwable?) {
+            release()
+            if (failure == null) result.complete(Unit) else result.completeExceptionally(failure)
+            authority.updateHealth()
+        }
+        val proof = runCatching {
+            store.loadPlan(hall.id).thenCompose { saved ->
+                val plan = requireNotNull(saved) { "Missing founding design ${hall.id}" }
+                requireQueuedDesign(plan, city, hall)
+                rejectIf(plan.adminPlacement || plan.terrain?.route?.isNotEmpty() == true, "invalid-plan")
+                blueprints.recover(plan).thenApplyAsync({ snapshot -> CivsBlueprints.worldCells(snapshot, hall.anchor) }, executor)
+            }.thenCompose { cells ->
+                tasks.callSync {
+                    current()
+                    controlInstallations.requirePresent(city.worldId, hall)
+                    world.captureManualFoundation(city.id, city.owner, city.worldId, hall, cells, executor,
+                        previous = hall, autonomous = true, adminPlacement = false)
+                }.thenCompose { it }.thenCompose { terrain ->
+                    tasks.callSync {
+                        current()
+                        controlInstallations.requirePresent(city.worldId, hall)
+                        world.captureAutonomousSite(city.id, city.owner, city.worldId, hall, cells, terrain, previous = hall)
+                    }.thenCompose { it }
+                }
+            }.thenApplyAsync({ captured -> controlInstallations.provedInitialApproach(hall, captured.terrain) }, executor)
+        }.getOrElse { CompletableFuture.failedFuture(it) }
+        proof.whenCompleteSync(tasks) approachReady@ { changes, failure ->
+            if (failure != null) { finish(failure); return@approachReady }
+            runCatching {
+                current()
+                controlInstallations.requirePresent(city.worldId, hall)
+                val receipt = controlInstallations.prepareProvedInitialApproach(city.id, city.worldId, city.owner, hall,
+                    requireNotNull(changes))
+                if (receipt.approach.isNullOrEmpty()) { finish(null); return@approachReady }
+                // No asynchronous gap: mutate takes its own reservation immediately on the same Main callback.
+                release()
+                authority.mutate(city.id) {
+                    val latest = current()
+                    CivsRules.validate(latest.copy(pendingControls = latest.pendingControls.orEmpty() + receipt,
+                        revision = Math.addExact(latest.revision, 1)))
+                }.whenCompleteSync(tasks) { _, saveFailure ->
+                    if (saveFailure != null) finish(saveFailure)
+                    else runCatching { controlInstallations.install(city.id, hall.id) }
+                        .onSuccess { installed -> installed.whenCompleteSync(tasks) { _, installFailure -> finish(installFailure) } }
+                        .onFailure(::finish)
+                }
+            }.onFailure(::finish)
         }
         return result
     }

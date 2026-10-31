@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.Tag
 import org.bukkit.plugin.Plugin
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -23,10 +24,19 @@ internal class CivsControlInstallations(
     private val controlFailures = mutableSetOf<UUID>()
     private val installing = mutableMapOf<UUID, CompletableFuture<Settlement>>()
     private var controlCursor = 0
+    private var initialApproachCursor = 0
+    private var nextInitialApproachAt = 0L
+    private val initialApproachRequests = mutableSetOf<UUID>()
+    private val initialApproachRetryAt = mutableMapOf<UUID, Long>()
+    private val initialApproachFailures = mutableSetOf<UUID>()
     internal var controlOccupied: (UUID, CivPosition) -> Boolean = { _, _ -> false }
 
     fun forgetFailure(buildingId: UUID) { controlFailures.remove(buildingId) }
-    fun clear() { controlFailures.clear(); controlCursor = 0 }
+    fun clear() {
+        controlFailures.clear(); controlCursor = 0
+        initialApproachRequests.clear(); initialApproachRetryAt.clear(); initialApproachFailures.clear()
+        initialApproachCursor = 0; nextInitialApproachAt = 0L
+    }
 
     /** Missing controls after their one-time grant require repair, never a repeating free grant. */
     fun requirePresent(worldId: UUID, building: CivBuilding) {
@@ -64,6 +74,74 @@ internal class CivsControlInstallations(
             "world" to worldId, "count" to approach.size, "positions" to approach.map { it.position })
         return CivControlPlacement(building.id, point, block.blockData.asString, approach)
     }
+
+    /** Only the unbuilt founding hall can need an entrance before its first builder exists. */
+    fun initialAutonomousHall(city: Settlement): CivBuilding? {
+        if (city.autonomy?.paused != false || city.pendingDeletion != null || city.construction != null ||
+            city.constructionQueue.orEmpty().isNotEmpty() || city.pendingControls.orEmpty().isNotEmpty() ||
+            !CivsAutoStorageMigration.ready(city)) return null
+        val hall = city.buildings.singleOrNull()?.takeIf { it.type == BuildingType.TOWN_HALL && it.level == 1 &&
+            it.phase == BuildingPhase.SITE && it.control != null && city.center == it.control &&
+            !CivsAutonomousGeometry.horizontalContains(it.bounds, it.entrance) } ?: return null
+        return hall.takeIf { CivsSettlementPlans.current(city)?.plots?.any { it.building == hall } == true }
+    }
+
+    fun initialApproachNeeded(city: Settlement, hall: CivBuilding): Boolean {
+        val target = plugin.server.getWorld(city.worldId) ?: return false
+        val entry = hall.entrance
+        if (entry.y.toLong() - 1 < target.minHeight || entry.y.toLong() + 1 >= target.maxHeight ||
+            !target.isChunkLoaded(entry.x shr 4, entry.z shr 4)) return false
+        val floor = target.getBlockAt(entry.x, entry.y - 1, entry.z)
+        return !standingFloor(floor) || !CivsTerrainPolicy.passableTerraform(target.getBlockAt(entry.x, entry.y, entry.z)) ||
+            !CivsTerrainPolicy.passableTerraform(target.getBlockAt(entry.x, entry.y + 1, entry.z))
+    }
+
+    /** Pure selection runs with the detached proof; the durable receipt retains its existing three-cell contract. */
+    fun provedInitialApproach(building: CivBuilding, terrain: CivTerraformPlan?): List<CivPlanBlock> {
+        rejectIf(terrain?.route?.isNotEmpty() == true, "invalid-plan")
+        val entry = building.entrance
+        val changes = terrain?.blocks.orEmpty().filter { cell ->
+            cell.position.x == entry.x && cell.position.z == entry.z &&
+                cell.position.y.toLong() in (entry.y.toLong() - 1)..(entry.y.toLong() + 1) && cell.before != cell.after
+        }
+        rejectIf(changes.size > 3 || changes.map { it.position }.distinct().size != changes.size || changes.any {
+            it.after != if (it.position.y < entry.y) "minecraft:dirt" else "minecraft:air"
+        }, "invalid-plan")
+        return changes
+    }
+
+    /** A strict native foundation/body proof, rather than creator permission, owns every proposed change here. */
+    fun prepareProvedInitialApproach(cityId: UUID, worldId: UUID, owner: UUID, building: CivBuilding,
+        changes: List<CivPlanBlock>): CivControlPlacement {
+        rejectIf(building.type != BuildingType.TOWN_HALL || building.level != 1 || building.phase != BuildingPhase.SITE ||
+            CivsAutonomousGeometry.horizontalContains(building.bounds, building.entrance), "invalid-building")
+        val receipt = prepare(cityId, worldId, owner, building, prepareApproach = false)
+        val target = plugin.server.getWorld(worldId) ?: throw CivsRejection("world-unavailable")
+        val entry = building.entrance
+        rejectIf(changes.size > 3 || changes.map { it.position }.distinct().size != changes.size, "invalid-plan")
+        for (dy in -1..1) {
+            val point = entry.copy(y = Math.addExact(entry.y, dy))
+            rejectIf(point.y !in target.minHeight until target.maxHeight, "outside-world")
+            rejectIf(!target.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
+            val native = target.getBlockAt(point.x, point.y, point.z)
+            val proved = changes.firstOrNull { it.position == point }
+            if (proved == null) {
+                rejectIf(if (dy == -1) !standingFloor(native) else !CivsTerrainPolicy.passableTerraform(native), "autonomy-no-path")
+            } else {
+                val after = if (dy == -1) "minecraft:dirt" else "minecraft:air"
+                rejectIf(proved.after != after || proved.before == proved.after || point == building.control, "invalid-plan")
+                rejectIf(native.blockData.asString != proved.before && native.blockData.asString != proved.after, "world-changed")
+                checkApproachCell(cityId, owner, building, native, if (dy == -1) Material.DIRT else Material.AIR)
+            }
+        }
+        rejectIf(changes.any { it.position.x != entry.x || it.position.z != entry.z ||
+            it.position.y.toLong() !in (entry.y.toLong() - 1)..(entry.y.toLong() + 1) }, "invalid-plan")
+        return receipt.copy(approach = changes.takeIf { it.isNotEmpty() })
+    }
+
+    private fun standingFloor(block: org.bukkit.block.Block): Boolean =
+        !Tag.LOGS.isTagged(block.type) && !CivsTerrainPolicy.naturalLeaves(block.blockData) &&
+            CivsTerrainPolicy.routeTerraformSupport(block)
 
     private fun checkApproachCell(cityId: UUID, owner: UUID, building: CivBuilding, block: org.bukkit.block.Block, after: Material) {
         val point = CivPosition(block.x, block.y, block.z)
@@ -180,7 +258,9 @@ internal class CivsControlInstallations(
         }
     }
 
-    fun pulse() {
+    fun pulse(clock: () -> Long = System::currentTimeMillis,
+        initialApproachAllowed: (Settlement) -> Boolean = { false },
+        repairInitialApproach: (Settlement) -> CompletableFuture<Unit> = { CompletableFuture.completedFuture(Unit) }) {
         val nearby = cities.values.filter { city -> chunks.active(city.id) ||
             plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) } &&
                 (city.autonomy != null || plugin.server.onlinePlayers.any { city.canManage(it.uniqueId) }) }
@@ -195,6 +275,30 @@ internal class CivsControlInstallations(
                 CivsRules.validate(city.copy(stock = Stock(), inventory = CivInventory.starting(city.stock),
                     buildings = buildings, pendingControls = city.pendingControls.orEmpty() + controls, revision = city.revision + 1))
             } }.onFailure { log("migrate city materials ${old.id}", it, old.id) }
+        }
+        val now = clock()
+        if (now >= nextInitialApproachAt) {
+            nextInitialApproachAt = now + 5_000
+            initialApproachRetryAt.keys.retainAll(cities.keys)
+            initialApproachFailures.retainAll(cities.keys)
+            val initial = nearby.filter { it.id !in busy && it.id !in unhealthy && it.id !in initialApproachRequests &&
+                now >= (initialApproachRetryAt[it.id] ?: 0L) && initialApproachAllowed(it) &&
+                initialAutonomousHall(it)?.let { hall -> initialApproachNeeded(it, hall) } == true }
+            if (initial.isNotEmpty()) {
+                val city = initial[Math.floorMod(initialApproachCursor++, initial.size)]
+                initialApproachRequests += city.id
+                runCatching { repairInitialApproach(city) }.getOrElse { CompletableFuture.failedFuture(it) }
+                    .whenComplete { _, failure ->
+                        initialApproachRequests -= city.id
+                        if (failure == null) {
+                            initialApproachRetryAt.remove(city.id)
+                            initialApproachFailures.remove(city.id)
+                        } else {
+                            initialApproachRetryAt[city.id] = clock() + 30_000
+                            if (initialApproachFailures.add(city.id)) log("prepare initial hall approach ${city.id}", failure, city.id)
+                        }
+                    }
+            }
         }
         // The relocation owner retries its item transfer/retirement as one bounded operation every five seconds.
         val controls = nearby.filter { it.id !in busy && it.id !in unhealthy }.flatMap { city ->

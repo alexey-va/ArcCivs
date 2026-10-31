@@ -146,6 +146,17 @@ and aggregate wood/stone/food production rates are unchanged. Source tests cover
 uneven terrain and replay safety, and are separate from native-client visual
 acceptance of a constructed village.
 
+An initial autonomous SITE town hall prepares its exterior entrance through the
+existing `pendingControls.approach` receipt: at most three strictly proved cells
+at the entrance floor, feet and head, using DIRT/AIR. The receipt is durable
+before native writes and every native before/after image and permission is
+rechecked before any cell is applied. An eligible initial hall with a retained
+ordinary founding plan can recover the same approach after fresh strict
+foundation and volume capture. Recovery retains the existing barrel and its
+contents; it does not repeat the founding reserve. Finished buildings, pending
+construction, inventories and controls retain their existing fences. Later hall
+construction captures fresh terrain rather than reusing the initial before-images.
+
 Completed building captures retain the executed terrain journal, including a SITE
 recaptured before its first payment. Later roads preserve these earlier route
 columns and entrance grades; their shoulders cannot bury them, and new footprints
