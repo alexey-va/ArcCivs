@@ -643,6 +643,85 @@ class CivsForestryLeafLootServiceTest : FunSpec({
 
 
 
+class CivsLostToolReceiptServiceTest : FunSpec({
+    test("a lost local tool invalidates the rejected pickup without advancing its worker or mine") {
+        serviceScenario(nativeGeometry = true) { h ->
+            val quarry = spatialBuilding("caledonia", "miner", 2, CivPosition(30, 63, 0))
+            val workers = h.city.workers.take(2).map { it.copy(assignment = quarry.id, nextDeliveryAt = 1,
+                inventory = null, items = List(CivsEquipment.SLOTS) { null }) }
+            val before = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), quarry),
+                workers = workers, stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+            for (x in -1..4) for (z in -3..1) h.world.loadChunk(x, z)
+            h.world.time = 1_000
+            val control = requireNotNull(quarry.control)
+            h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(control.x, control.y, control.z).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, ItemStack(Material.IRON_PICKAXE))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val runtime = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
+                .get(h.service) as CivsWorksites
+            CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }.set(runtime, { 0L })
+            runtime.pulse(listOf(before))
+            val selected = workers.associate { worker -> worker.id to requireNotNull(runtime.plan(before, worker)) }
+            selected.values.forEach { work ->
+                work.status shouldBe "waiting-tool"
+                work.inputs shouldBe mapOf("IRON_PICKAXE" to 1L)
+                work.changes shouldBe emptyList()
+            }
+            val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+                .also { it.isAccessible = true }
+            fun complete(worker: CivWorker) = deliver.invokeService(h.service, before.id, worker.id, quarry.id,
+                worker.completedCycles, worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            h.await(complete(workers.first()))
+            barrel.getItem(0) shouldBe null
+            val afterFirst = h.service.settlements().single()
+            val winner = afterFirst.workers.first { it.id == workers.first().id }
+            CivsEquipment.slots(winner)[4] shouldBe CivResidentItem("IRON_PICKAXE", 1)
+            winner.completedCycles shouldBe workers.first().completedCycles + 1
+            val waiting = afterFirst.workers.first { it.id == workers.last().id }
+            waiting shouldBe workers.last()
+            runtime.plan(afterFirst, waiting) shouldBe selected.getValue(waiting.id)
+            val invalidated = mutableListOf<UUID>()
+            mockkObject(runtime)
+            try {
+                every { runtime.invalidate(any(), any()) } answers { invalidated += firstArg<UUID>(); callOriginal() }
+                val rejected = shouldThrow<CompletionException> { complete(waiting).join() }
+                CivsDiagnostics.rejection(rejected)?.let { it.reason to it.values } shouldBe
+                    ("materials-missing" to mapOf("material" to "IRON_PICKAXE", "count" to "1"))
+                invalidated shouldBe listOf(waiting.id)
+            } finally { unmockkObject(runtime) }
+            h.service.settlements().single() shouldBe afterFirst
+            runtime.plan(afterFirst, waiting) shouldBe null
+            runtime.pulse(listOf(afterFirst))
+            runtime.plan(afterFirst, waiting) shouldBe null
+            runtime.idleReason(afterFirst, waiting) shouldBe "waiting-tool"
+            afterFirst.minePlans shouldBe before.minePlans
+            afterFirst.mineProgress shouldBe before.mineProgress
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+
+            // A later real local tool can be selected and paid once by the same unchanged worker cycle.
+            barrel.setItem(0, ItemStack(Material.IRON_PICKAXE))
+            runtime.pulse(listOf(afterFirst))
+            val retry = requireNotNull(runtime.plan(afterFirst, waiting))
+            retry.cycle shouldBe waiting.completedCycles
+            retry.inputs shouldBe mapOf("IRON_PICKAXE" to 1L)
+            h.await(complete(waiting))
+            val afterBoth = h.service.settlements().single()
+            barrel.getItem(0) shouldBe null
+            afterBoth.workers.all { CivsEquipment.slots(it)[4] == CivResidentItem("IRON_PICKAXE", 1) } shouldBe true
+            afterBoth.workers.first { it.id == waiting.id }.completedCycles shouldBe waiting.completedCycles + 1
+            afterBoth.minePlans shouldBe before.minePlans
+            afterBoth.mineProgress shouldBe before.mineProgress
+            verify(exactly = 2) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+})
+
 class CivsNativeProductionParityTest : FunSpec({
     for (type in listOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.FORESTER))
     test("native workers can drain existing items while another migration reserve waits type=$type") {

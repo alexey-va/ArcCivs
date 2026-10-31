@@ -116,7 +116,7 @@ internal class CivsWorkerCommits(
                 else citizens.requireWorldWorkArrival(cityId, workerId, work)
                 try { worksites.validate(city, work) } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
                 var completedWork: Settlement? = null
-                (if (CivsAutonomy.legacyStock(city)) autonomousForestryMutation(city, work, at) else authority.inventoryMutation(cityId, { current ->
+                val completion = try { if (CivsAutonomy.legacyStock(city)) autonomousForestryMutation(city, work, at) else authority.inventoryMutation(cityId, { current ->
                     worksites.validate(current, work)
                     if (citizenWorkFocus(work) == null) citizens.requireStorageArrival(cityId, workerId, assignment)
                     else citizens.requireWorldWorkArrival(cityId, workerId, work)
@@ -127,7 +127,8 @@ internal class CivsWorkerCommits(
                     storage.prepareWork(current, assignment, work.storageInputs(currentWorker), emptyMap(), work.changes, work)
                 }, keepViewersOpen = true) { _, inventory ->
                     requireNotNull(completedWork).copy(inventory = inventory)
-                }).whenCompleteSync(tasks) { saved, failure ->
+                } } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
+                completion.whenCompleteSync(tasks) { saved, failure ->
                     if (failure == null && saved != null) {
                         citizens.terrainChanged(city.worldId, work.changes.map { it.position })
                         val completed = saved.workers.first { it.id == workerId }
