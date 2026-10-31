@@ -375,7 +375,9 @@ object CivsRules {
         authorized(city, actor)
         check(damage.isFinite() && damage > 0, "invalid-damage")
         val worker = city.workers.find { it.id == workerId } ?: reject("worker-not-found")
-        val health = (CivsResidents.health(worker) - damage).let { if (immortal) it.coerceAtLeast(1.0) else it }
+        val health = (CivsResidents.health(worker) - damage).let {
+            if (immortal || CivsResidentLife.autonomousImmortality(city)) it.coerceAtLeast(1.0) else it
+        }
         return changed(city, city.copy(workers = if (health <= 0) city.workers.filterNot { it.id == workerId }
             else city.workers.map { if (it.id == workerId) it.copy(health = health) else it },
             families = if (health <= 0) city.families?.filterNot {

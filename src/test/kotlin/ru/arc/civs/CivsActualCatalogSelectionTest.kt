@@ -109,7 +109,7 @@ class CivsActualCatalogSelectionTest : FunSpec({
     }
 })
 
-private fun actualCatalogTemplate(entry: CivBlueprintCatalogEntry, id: UUID): CivBuilding {
+internal fun actualCatalogTemplate(entry: CivBlueprintCatalogEntry, id: UUID): CivBuilding {
     val site = checkNotNull(entry.worksite) { "Missing detached bounds for ${entry.id}" }
     val bounds = site.getAsJsonObject("schematicBounds")
     val marker = entry.control.zip(entry.origin) { cell, origin -> cell - origin }
@@ -122,7 +122,7 @@ private fun actualCatalogPoint(value: JsonObject, key: String): CivPosition = va
     CivPosition(it[0].asInt, it[1].asInt, it[2].asInt)
 }
 
-private fun actualCatalogBoardTemplate(id: UUID): CivBuilding {
+internal fun actualCatalogBoardTemplate(id: UUID): CivBuilding {
     val origin = CivsPlanBoardBlueprint.origin
     fun local(p: CivPosition) = CivPosition(p.x - origin.x, p.y - origin.y, p.z - origin.z)
     val marker = CivsPlanBoardBlueprint.body(CivsPlanBoardBlueprint.SCHEMATIC_ID).entries

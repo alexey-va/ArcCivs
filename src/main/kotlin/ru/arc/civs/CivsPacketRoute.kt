@@ -87,6 +87,8 @@ internal class CitizenPacketRoute(
         private set
     var waitingForCollision = false
         private set
+    /** Contact fallback changes only captured actor bodies; native terrain and domain predicates remain mandatory. */
+    internal var bodyContactAllowed = false
     var turning = false
         private set
     var forwardProgress = 0.0
@@ -141,8 +143,8 @@ internal class CitizenPacketRoute(
         CitizenPacketRoute(world, from, target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings)
 
     private fun permits(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to) &&
-        citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
-            .299, 1.798, .299, avoiding) == null
+        (bodyContactAllowed || citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
+            .299, 1.798, .299, avoiding) == null)
 
     /** Direct deterministic driver; production requests use the owner/executor and the identical solver. */
     fun expand() {

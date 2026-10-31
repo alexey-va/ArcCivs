@@ -21,18 +21,18 @@ import kotlin.math.floor
 
 /**
  * Physical resident bodies belong to this domain, not to the packet renderer.
- * Player contact makes a resident yield; an actually walking resident also gives
- * a small native horizontal impulse. Occupancy probes never move either body.
+ * Player-initiated contact may nudge a free resident. Navigation only observes
+ * player bodies and never moves either party to force an actor through.
  */
 internal class CivsResidentCollisions(
     plugin: Plugin,
     private val actors: () -> Collection<PacketPlayerNpc>,
     private val nudgeResident: (PacketPlayerNpc, Vector) -> Boolean,
+    private val bodyPassAllowed: (PacketPlayerNpc) -> Boolean = { false },
 ) : Listener, AutoCloseable {
     private var closed = false
     private var contactTick = Int.MIN_VALUE
     private val pushedResidents = hashSetOf<UUID>()
-    private val pushedPlayers = hashSetOf<UUID>()
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
 
@@ -46,9 +46,10 @@ internal class CivsResidentCollisions(
         if (from.world != to.world || player.world != from.world) return
         val nativeBody = player.boundingBox
         val body = bodyAt(to.toVector(), nativeBody.widthX / 2, nativeBody.height, nativeBody.widthZ / 2)
-        // ponytail: the resident runtime owns the hard 48-actor cap. No world/entity scan.
+        // The resident runtime owns its configured cap (at most CivsSettings.MAXIMUM_NPCS); no world/entity scan.
         for (npc in actors()) {
             if (!npc.isValid || npc.world != from.world || npc.pose == PacketNpcPose.SLEEPING ||
+                bodyPassAllowed(npc) ||
                 !residentBody(npc, npc.location).overlaps(body)) continue
             yieldResident(to.toVector(), npc, to.toVector().subtract(from.toVector()))
         }
@@ -71,13 +72,8 @@ internal class CivsResidentCollisions(
         val bodies = players.map(Player::getBoundingBox)
         // Recovery admission is a read-only occupancy probe, never an impulse source.
         if (from.x == to.x && from.y == to.y && from.z == to.z) return bodies.none(last::overlaps)
-        if (citizenSlideBody(from.toVector(), to.toVector(), first.widthX / 2,
-                first.height, first.widthZ / 2, bodies) == null) return true
-        for (player in players) if (first.overlaps(player.boundingBox) || last.overlaps(player.boundingBox)) {
-            pushPlayer(player, npc, from, to)
-            yieldResident(player.location.toVector(), npc, from.toVector().subtract(to.toVector()))
-        }
-        return false
+        return bodyPassAllowed(npc) || citizenSlideBody(from.toVector(), to.toVector(), first.widthX / 2,
+            first.height, first.widthZ / 2, bodies) == null
     }
 
     private fun contactFrame() {
@@ -85,24 +81,7 @@ internal class CivsResidentCollisions(
         if (contactTick != tick) {
             contactTick = tick
             pushedResidents.clear()
-            pushedPlayers.clear()
         }
-    }
-
-    private fun pushPlayer(player: Player, npc: PacketPlayerNpc, from: Location, to: Location) {
-        contactFrame()
-        if (!pushedPlayers.add(player.uniqueId)) return
-        val away = player.location.toVector().subtract(npc.location.toVector()).setY(0.0)
-        if (away.lengthSquared() < .000001) away.copy(to.toVector().subtract(from.toVector())).setY(0.0)
-        if (away.lengthSquared() < .000001) return
-        away.normalize()
-        val velocity = player.velocity
-        if (!velocity.x.isFinite() || !velocity.y.isFinite() || !velocity.z.isFinite()) return
-        // One impulse per player/tick across all owned residents. Preserve jump/fall
-        // velocity and tangential momentum; native terrain collision owns the result.
-        val speed = velocity.dot(away)
-        val impulse = minOf(.05, .18 - speed)
-        if (impulse > 0) player.velocity = velocity.add(away.multiply(impulse))
     }
 
     private fun yieldResident(playerAt: Vector, npc: PacketPlayerNpc, movement: Vector) {
@@ -125,7 +104,6 @@ internal class CivsResidentCollisions(
         if (closed) return
         closed = true
         pushedResidents.clear()
-        pushedPlayers.clear()
         HandlerList.unregisterAll(this)
     }
 

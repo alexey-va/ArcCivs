@@ -31,6 +31,14 @@ internal class CivsCitizenPlanning(
     fun currentPlan(actor: CitizenActor, city: Settlement, worker: CivWorker): CitizenPlan? {
         if (city.inventory != null && actor.plan.courier?.let { !it.carrying && it.cargo.sourceWorkerId != null } == true)
             return plan(city, worker)
+        val pending = actor.plan.pendingStockDelivery
+        // A retry may pause an accepted self-delivery just as a courier becomes staffed. Keep its exact
+        // saved goods/schedule; temporary capacity changes must not turn this return into new production.
+        if (pending != null && actor.cycle.phase == CitizenPhase.PAUSED && city.autonomy?.paused == false &&
+            city.pendingDeletion == null && city.inventory == null && worker.cargo == null &&
+            worker.pendingStock == pending && actor.plan.token ==
+                CitizenToken(worker.assignment, worker.completedCycles, worker.nextDeliveryAt, null) &&
+            city.buildings.any { CivsRules.isDepot(it) && it.entrance == actor.plan.storage }) return actor.plan
         val outputPaused = workRuntime.outputFullPause(actor, city, worker) != null
         val acceptedDetour = (actor.workDetour != null || actor.mealVisit != null || actor.tavernService != null ||
             actor.outputReturn != null || actor.foodSource != null || outputPaused) &&
@@ -40,6 +48,7 @@ internal class CivsCitizenPlanning(
     }
 
     fun reconcilePlan(actor: CitizenActor, nextPlan: CitizenPlan, city: Settlement): Boolean {
+        if (actor.bodyContactToken != null && actor.bodyContactToken != nextPlan.token) actor.bodyContactToken = null
         val mineEpisode = actor.mineRouteEpisode.key
         val mineActive = nextPlan.type == BuildingType.QUARRY && nextPlan.courier == null &&
             !actor.sheltering && !actor.returningToWarehouse && actor.attacker == null && actor.foodSource == null &&
@@ -84,7 +93,8 @@ internal class CivsCitizenPlanning(
         val retained = resident?.plan?.token
         val finishingCycle = retained?.assignmentId == worker.assignment && retained?.completedCycles == worker.completedCycles &&
             retained?.nextDeliveryAt == worker.nextDeliveryAt && resident?.cycle?.phase !in setOf(null, CitizenPhase.IDLE, CitizenPhase.CLOSED)
-        if (!CivsResidents.isChild(worker) && (worker.life?.adultMinutes ?: 0) >= CivsResidentLife.lifespanMinutes(worker) &&
+        if (!CivsResidentLife.autonomousImmortality(city) && !CivsResidents.isChild(worker) &&
+            (worker.life?.adultMinutes ?: 0) >= CivsResidentLife.lifespanMinutes(worker) &&
             worker.cargo == null && !finishingCycle) {
             val home = citizenHomeBuilding(city, worker) ?: return null
             // Finish an accepted cycle, then leave a visible idle boundary for the durable life owner.

@@ -17,13 +17,13 @@ class CivsSettingsTest : FunSpec({
         settings.radius shouldBe 128
     }
 
-    test("two mature towns fit the actor ceiling while old configured limits remain valid") {
+    test("a configured seven-town population fits while old actor limits and the default remain valid") {
         val config = YamlConfiguration().apply { set("schematics-root", "schematics") }
-        for (limit in listOf(1, 48, 64)) {
+        for (limit in listOf(1, 48, 64, 196, 256)) {
             config.set("maximum-active-npcs", limit)
             CivsSettings.read(config).maximumNpcs shouldBe limit
         }
-        config.set("maximum-active-npcs", 65)
+        config.set("maximum-active-npcs", 257)
         shouldThrow<IllegalArgumentException> { CivsSettings.read(config) }
     }
 

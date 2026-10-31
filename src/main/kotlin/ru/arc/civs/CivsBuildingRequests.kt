@@ -229,6 +229,105 @@ internal class CivsBuildingRequests(
         rejectIf(!autonomous && (authority.city(player) != null || membership.remoteCity(player) != null), "already-member")
     }
 
+    /** A searched town uses the ordinary SITE/grant/control transaction, with no manual administrator terrain bypass. */
+    fun foundAutomatic(admission: CivVillageSiteAdmission): CompletableFuture<Settlement> {
+        authority.checkMain()
+        val proposed = admission.city
+        val blueprint = admission.blueprint
+        val hall = blueprint.building
+        fun current() {
+            rejectIf(!authority.ready() || !admission.current(), "not-ready")
+            rejectIf(world.scanWorld(proposed.worldId)?.name !in settings.worlds, "world-not-allowed")
+            rejectIf(!authority.testingAllowed(proposed), "not-authorized")
+            rejectIf(proposed.id in records.unhealthy, "storage-unavailable")
+        }
+        current()
+        records.cities[proposed.id]?.let { existing ->
+            rejectIf(!CivsVillageSiteScoring.sameRequest(existing, proposed), "city-conflict")
+            return CompletableFuture.completedFuture(existing)
+        }
+        rejectIf(proposed.autonomy == null || proposed.pendingDeletion != null || proposed.workers.isNotEmpty() ||
+            proposed.construction != null || proposed.buildings.singleOrNull()?.id != hall.id ||
+            proposed.worldId != blueprint.worldId || proposed.owner in pendingFounders || proposed.id in records.busy ||
+            proposed.center != (hall.control ?: hall.entrance) || proposed.radius != settings.radius ||
+            proposed.settings != CivSettlementSettings(chunkLoading = true, immortalResidents = true,
+                autoConstructionMaterials = false), "invalid-state")
+        val layout = proposed.autonomy?.plan ?: throw CivsRejection("invalid-plan")
+        CivsSettlementPlans.validate(proposed, layout)
+        rejectIf(!CivsVillageSiteScoring.completeProfile(layout), "autonomy-no-site")
+        rejectIf(records.cities.values.any { it.name.equals(proposed.name, ignoreCase = true) }, "city-name-conflict")
+        checkSettlementSpace(proposed.worldId, proposed.center)
+        pendingFounders[proposed.owner] = FoundingReservation(proposed.id, proposed.worldId, proposed.center)
+        authority.reserveCity(proposed.id)
+        val result = authority.tracked<Settlement>()
+        var commitAttempted = false
+        fun finish(failure: Throwable?, saved: Settlement? = null) {
+            authority.releaseCity(proposed.id)
+            if (pendingFounders[proposed.owner]?.cityId == proposed.id) pendingFounders.remove(proposed.owner)
+            if (failure == null) result.complete(requireNotNull(saved)) else result.completeExceptionally(failure)
+            authority.updateHealth()
+        }
+        val capture = runCatching { world.captureAutonomousSite(proposed.id, proposed.owner, proposed.worldId,
+            hall, blueprint.cells, admission.terrain) }.getOrElse {
+            finish(it)
+            return result
+        }
+        capture.whenCompleteSync(tasks) { captured, captureFailure ->
+            if (captureFailure != null) { finish(captureFailure); return@whenCompleteSync }
+            runCatching {
+                current()
+                rejectIf(records.cities.containsKey(proposed.id) || records.cities.values.any {
+                    it.name.equals(proposed.name, ignoreCase = true)
+                }, "city-name-conflict")
+                checkSettlementSpace(proposed.worldId, proposed.center, proposed.owner)
+                val control = controlInstallations.prepare(proposed.id, proposed.worldId, proposed.owner, hall,
+                    prepareApproach = admission.terrain == null)
+                val next = CivsRules.validate(proposed.copy(pendingControls = listOf(control)))
+                val plan = requireNotNull(captured).copy(id = hall.id, capturedSha256 = blueprint.snapshot.fileSha256,
+                    adminPlacement = false)
+                store.saveSchematic(plan.id, blueprint.sourceBytes).thenCompose { store.savePlan(plan) }.thenCompose {
+                    tasks.callSync {
+                        current()
+                        rejectIf(records.cities.containsKey(proposed.id) || records.cities.values.any {
+                            it.name.equals(proposed.name, ignoreCase = true)
+                        }, "city-name-conflict")
+                        checkSettlementSpace(proposed.worldId, proposed.center, proposed.owner)
+                        commitAttempted = true
+                        authority.commitCapturedRecord(next)
+                    }.thenCompose { it }
+                }.whenCompleteSync(tasks) { saved, saveFailure ->
+                    if (saveFailure != null) {
+                        if (commitAttempted && CivsDiagnostics.rejection(saveFailure) == null) {
+                            // An unknown SQL outcome keeps its exact source/capture for canonical reload recovery.
+                            authority.quarantineCity(proposed.id)
+                            authority.invalidateReadiness()
+                            authority.log("commit automatic founding ${proposed.id}", saveFailure, proposed.id)
+                            finish(CivsRejection("storage-unavailable"))
+                        } else cleanupCaptured(plan.id).whenCompleteSync(tasks) { _, _ -> finish(saveFailure) }
+                    } else authority.publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
+                        if (publishFailure != null) {
+                            authority.quarantineCity(proposed.id)
+                            finish(publishFailure)
+                        } else {
+                            CivsDiagnostics.event("autonomous_village_founded", "city" to saved.id, "owner" to saved.owner,
+                                "name" to saved.name, "style" to saved.style, "center" to saved.center,
+                                "plots" to layout.plots.size)
+                            // The existing pending-control recovery also owns interrupted installation.
+                            authority.releaseCity(proposed.id)
+                            runCatching { controlInstallations.install(proposed.id, hall.id) }.onSuccess { installed ->
+                                installed.whenCompleteSync(tasks) { _, failure ->
+                                    if (failure != null) authority.log("install automatic founding control ${proposed.id}", failure, proposed.id)
+                                }
+                            }.onFailure { authority.log("install automatic founding control ${proposed.id}", it, proposed.id) }
+                            finish(null, saved)
+                        }
+                    }
+                }
+            }.onFailure { finish(it) }
+        }
+        return result
+    }
+
     fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit> = authority.action("construction_order", player, "building" to buildingId) {
         val offered = authority.managed(player)
         val cityId = offered.id

@@ -138,6 +138,7 @@ object CivsPopulation {
 
     /** Caller supplies fresh idle actor positions; accepted work and unobserved residents cannot die here. */
     internal fun retireElder(city: Settlement, observed: Map<UUID, CivDeathContext>): Settlement {
+        if (CivsResidentLife.autonomousImmortality(city)) return city
         val elder = city.workers.firstOrNull { worker ->
             !CivsResidents.isChild(worker) && worker.id in observed &&
                 (worker.life?.adultMinutes ?: 0) >= CivsResidentLife.lifespanMinutes(worker)

@@ -416,6 +416,42 @@ internal class CivsCitizenRoutes(
 
     fun resolvedTarget(actor: CitizenActor, target: CivPosition): CivPosition = actor.targets[target] ?: target
 
+    /** The moving actor tries a fresh body-aware path; an unavailable detour permits only short body contact. */
+    fun handleBodyContact(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
+        val since = route.bodyBlockedSince ?: return false
+        if (navigationHeld(actor)) return true
+        if (collisions.passingBodies(actor)) return false
+        val failed = route.bodyDetourFailed || route.bodyDetourStarted && route.previousMotion != null && route.motion.failure != null
+        if (failed || runtime.navigationTick - since >= 30 || route.replanAttempts >= 2 && !route.bodyDetourStarted) {
+            route.previousMotion?.let { original ->
+                route.motion.cancel()
+                route.motion = original
+                route.previousMotion = null
+            }
+            route.bodyPassUntil = runtime.navigationTick + 60
+            route.bodyContactTick = runtime.navigationTick
+            route.bodyBlockedSince = null
+            route.bodyDetourStarted = false
+            route.bodyDetourFailed = false
+            route.nativeCollisionTicks = 0
+            actor.collisionResident = null
+            route.completion = null
+            if (route.motion.failure != null || route.motion.finished) {
+                route.motion = navigation.replan(route.motion, actor.npc.location, emptyList())
+                route.timing.prepare(now)
+            } else route.motionReady(runtime.navigationTick, now)
+            route.motion.bodyContactAllowed = true
+            CivsDiagnostics.event("citizen_body_contact", "city" to actor.cityId, "worker" to actor.workerId,
+                "action" to "pass", "cause" to if (failed) "detour-unavailable" else "contact-timeout",
+                "phase" to actor.cycle.phase, "actual" to actor.npc.location.point().coordinates(),
+                "target" to route.authored)
+            return route.motion.searching
+        }
+        if (route.bodyDetourStarted) return route.motion.searching
+        route.bodyDetourStarted = true
+        return replanNavigation(actor, route, if (actor.collisionResident == null) "player-blocked" else "resident-blocked", now)
+    }
+
     // Returning after cosmetic work has no worldWork, but still leaves the assigned mine.
     fun routeMine(actor: CitizenActor, city: Settlement): CivBuilding? = actor.mineVisit?.takeIf {
         !actor.sheltering && actor.attacker == null && actor.foodSource == null && actor.mealVisit == null
@@ -426,6 +462,7 @@ internal class CivsCitizenRoutes(
     }?.token?.assignmentId?.let(city::building)?.takeIf { it.type == BuildingType.QUARRY }
 
     fun canWorkFrom(actor: CitizenActor, work: CivWorldWork): Boolean {
+        if (!arrivalBodyClear(actor)) return false
         // Reach during a step or fall is transient: keep walking until the feet have support.
         if (!citizenPacketSupported(actor.npc.world, actor.npc.location.point())) return false
         if (actor.plan.type == BuildingType.QUARRY && work.miningStep != null) {
@@ -455,6 +492,7 @@ internal class CivsCitizenRoutes(
     }
 
     fun arrivedAt(actor: CitizenActor, city: Settlement, world: World, target: CivPosition): Boolean {
+        if (!arrivalBodyClear(actor)) return false
         actor.mineVisit?.takeIf { it.owns(target) }?.let {
             return citizenControlClear(city, target) && citizenStandable(world, target) &&
                 citizenPacketBodyClear(world, actor.npc.location.point(), false) &&
@@ -486,6 +524,16 @@ internal class CivsCitizenRoutes(
             resolvedTarget(actor, target) == storage.entrance
     }
 
+    /** A hand/container reach during contact transit is not a safe stationary work or transfer endpoint. */
+    fun arrivalBodyClear(actor: CitizenActor): Boolean {
+        if (actor.bodyContactToken != actor.plan.token) return true
+        // arriveForWork retires its route before accepting work/transfer. Later player occupancy cannot revoke that receipt.
+        if (actor.route == null && actor.cycle.phase !in
+            setOf(CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING)) return true
+        val feet = actor.npc.location
+        return collisions.residentMoveAllowed(actor, feet, feet)
+    }
+
     /** Only accepted physical travel resets this deadline; capture/search retries may reread the same terrain. */
     fun observeArrivalWait(actor: CitizenActor, route: CitizenRoute): Boolean {
         val clock = recoveryClock()
@@ -509,6 +557,8 @@ internal class CivsCitizenRoutes(
         if (actor.mineVisit != null) return false
         val recoveryAnchor = failed.idleAnchor ?: idleAnchor
         val timedOut = observeArrivalWait(actor, failed)
+        // A contact detour never licenses relocating the same accepted work/cargo cycle through later native walls.
+        if (!actor.sheltering && actor.bodyContactToken == actor.plan.token) return false
         if (timedOnly && !timedOut) return false
         if (actor.plan.worldWork?.upkeep != null && !timedOut) return false
         if (actor.plan.token.constructionId != null && recoveryAnchor == null && !actor.sheltering &&
@@ -589,6 +639,36 @@ internal class CivsCitizenRoutes(
         leisure.stopCamp(actor, reason)
         cancelRoute(actor)
         actor.cycle.pause(reason, now, false)
+    }
+
+    /** Accepted native receipts own the actor's position; a night retry cannot interrupt or age through that hold. */
+    fun navigationHeld(actor: CitizenActor): Boolean = actor.workerId in runtime.pendingHarm ||
+        actor.supplyPickup != null || life.residentLifePending(actor) || logistics.collectedPending(actor) ||
+        actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)
+
+    fun canResetNightShelter(actor: CitizenActor): Boolean = actor.sheltering && !actor.sleeping &&
+        !actor.alarmSheltering && actor.attacker == null && actor.npc.world.time in 12_000L..23_000L &&
+        !navigationHeld(actor)
+
+    fun resetNightShelter(actor: CitizenActor, now: Long): Boolean {
+        if (!canResetNightShelter(actor) || runtime.recoveryBudget <= 0) return false
+        val target = actor.shelter ?: return false
+        val failed = actor.route
+        runtime.recoveryBudget--
+        citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+        cancelRoute(actor)
+        actor.targets.remove(target)
+        actor.shelter = null
+        actor.shelterPose = null
+        actor.arrivalWait = null
+        actor.cycle.deferWork(now)
+        actor.nightHomeProgress.clear()
+        CivsDiagnostics.event("citizen_night_route_reset", "city" to actor.cityId, "worker" to actor.workerId,
+            "target" to target, "actual" to actor.npc.location.point().coordinates(),
+            "stationary_ms" to CitizenNightHomeProgress.STALL_MILLIS,
+            "cause" to (failed?.motion?.failure ?: failed?.completion?.cancelReason ?: "no-progress"),
+            "phase" to actor.cycle.phase)
+        return true
     }
 
     fun cancelRoute(actor: CitizenActor, wakeDestination: Location? = null) {

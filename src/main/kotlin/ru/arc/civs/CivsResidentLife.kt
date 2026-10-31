@@ -42,6 +42,9 @@ object CivsResidentLife {
     const val MAX_EDUCATION_XP = 10L
     private const val MAX_COUNTER = 1_000_000_000L
 
+    /** Administrator-created villages retain their explicit policy without an owner permission lease. */
+    fun autonomousImmortality(city: Settlement): Boolean = city.autonomy != null && city.settings?.immortalResidents == true
+
     const val MIN_ADULT_LIFESPAN_MINUTES = 7 * 24 * 60L
     private const val LIFESPAN_VARIATION_MINUTES = 3 * 24 * 60
     fun lifespanMinutes(worker: CivWorker): Long = MIN_ADULT_LIFESPAN_MINUTES +

@@ -97,6 +97,19 @@ class CivsWorld(
         AutonomousHeightField(city, envelope, previous, waterColumns.toSet())
     }
 
+    /** Administrative discovery only: unavailable chunks remain unavailable until its explicit loader prepares them. */
+    internal fun prospectiveHeightField(city: Settlement, envelope: CivBuilding,
+        columns: List<CivPosition>? = null): CompletableFuture<CivTerrainSurface> = admit {
+        requireCivs(city.autonomy != null && city.buildings.singleOrNull()?.id == envelope.id &&
+            envelope.type == BuildingType.TOWN_HALL && envelope.level == 1, "invalid-building")
+        columns?.let { requested ->
+            requireCivs(requested.size in 1..CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS &&
+                requested.map { it.x to it.z }.distinct().size == requested.size &&
+                requested.all { city.contains(it.x, it.z) }, "autonomy-search-budget")
+        }
+        AutonomousHeightField(city, envelope, null, emptySet(), prospective = true, requested = columns?.toList())
+    }
+
     internal fun captureTerraform(city: Settlement, draft: CivTerraformDraft, executor: Executor,
         previous: CivBuilding? = null): CompletableFuture<CivTerraformPlan> = admit {
         TerraformCapture(city, draft, executor, previous)
@@ -293,10 +306,12 @@ class CivsWorld(
     }
 
     private inner class AutonomousHeightField(private val citySnapshot: Settlement, envelope: CivBuilding,
-        private val previous: CivBuilding?, private val waterColumns: Set<Long>) : CivsWorldScan<CivTerrainSurface>(this@CivsWorld, citySnapshot.id, citySnapshot.owner, citySnapshot.worldId, envelope) {
+        private val previous: CivBuilding?, private val waterColumns: Set<Long>,
+        private val prospective: Boolean = false, private val requested: List<CivPosition>? = null) :
+        CivsWorldScan<CivTerrainSurface>(this@CivsWorld, citySnapshot.id, citySnapshot.owner, citySnapshot.worldId, envelope) {
         private val radius = citySnapshot.radius.coerceIn(0, 127)
         private val width = radius * 2 + 1
-        private val area = width * width
+        private val area = requested?.size ?: (width * width)
         private val columns = linkedMapOf<Long, CivTerrainSurfaceColumn>()
         private var topY: Int? = null
         private var waterTopY: Int? = null
@@ -306,12 +321,13 @@ class CivsWorld(
 
         init { requireCivs(area <= CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS, "autonomy-search-budget") }
         override fun validateIdentity(city: Settlement?) {
-            requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == previous, "stale-building")
+            requireCivs(if (prospective) city == null else
+                city != null && city.pendingDeletion == null && city.building(building.id) == previous, "stale-building")
         }
         override fun step() {
             if (index == area) return finish(CivTerrainSurface(world.minHeight, world.maxHeight, columns))
-            val x = Math.addExact(citySnapshot.center.x, index % width - radius)
-            val z = Math.addExact(citySnapshot.center.z, index / width - radius)
+            val x = requested?.get(index)?.x ?: Math.addExact(citySnapshot.center.x, index % width - radius)
+            val z = requested?.get(index)?.z ?: Math.addExact(citySnapshot.center.z, index / width - radius)
             val key = civsTerrainKey(x, z)
             fun complete(ground: Int, natural: Boolean, loaded: Boolean = true, water: CivTerrainSurfaceColumn? = null,
                 dirtPath: Boolean = false) {
@@ -334,6 +350,10 @@ class CivsWorld(
             }
             val block = read(CivPosition(x, probeY, z))
             probes++
+            if (prospective && !canModify(owner, block)) {
+                complete(probeY, false)
+                return
+            }
             val waterTop = waterTopY
             if (waterTop != null) {
                 if (block.type == Material.WATER && waterTop.toLong() - probeY < MAXIMUM_SURFACE_WATER_DEPTH) {

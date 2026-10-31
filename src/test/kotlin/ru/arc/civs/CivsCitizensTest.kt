@@ -711,7 +711,12 @@ class CivsCitizensTest : FunSpec({
         citizenSpawnBudget(48, 48) shouldBe 0
         citizenSpawnBudget(48, 200) shouldBe 2
         citizenSpawnBudget(63, 64) shouldBe 1
-        citizenSpawnBudget(64, 200) shouldBe 0
+        citizenSpawnBudget(64, 64) shouldBe 0
+        citizenSpawnBudget(64, 200) shouldBe 2
+        citizenSpawnBudget(195, 196) shouldBe 1
+        citizenSpawnBudget(196, 196) shouldBe 0
+        citizenSpawnBudget(255, 1000) shouldBe 1
+        citizenSpawnBudget(256, 1000) shouldBe 0
         citizenSpawnBudget(8, 8) shouldBe 0
         citizenSpawnBudget(7, 8) shouldBe 1
     }

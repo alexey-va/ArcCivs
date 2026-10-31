@@ -5,6 +5,28 @@ import org.bukkit.World
 import org.bukkit.util.BoundingBox
 import ru.arc.paper.npc.PacketNpcPose
 
+/** Route replacement is not progress; only a quarter-block change of the resident's actual feet renews this window. */
+internal class CitizenNightHomeProgress {
+    private var home: CivBuilding? = null
+    private var feet: CitizenPoint? = null
+    private var progressedAt = 0L
+    private var observedAt = 0L
+
+    fun stalled(currentHome: CivBuilding, actual: CitizenPoint, now: Long): Boolean {
+        if (home != currentHome || feet?.distanceSquared(actual)?.let { it >= .25 * .25 } != false || now < observedAt) {
+            home = currentHome
+            feet = actual
+            progressedAt = now
+        }
+        observedAt = now
+        return now - progressedAt >= STALL_MILLIS
+    }
+
+    fun clear() { home = null; feet = null; progressedAt = 0; observedAt = 0 }
+
+    companion object { const val STALL_MILLIS = 30_000L }
+}
+
 /** Night shelter reservation and native sleeping posture lifecycle. */
 internal class CivsCitizenShelters(
     private val runtime: CitizenRuntime,
@@ -38,8 +60,9 @@ internal class CivsCitizenShelters(
             reserveShelter(actor, city, worker, world)
         }
         runtime.statuses[actor.workerId] = if (actor.sleeping) "sleeping" else "sheltering"
-        val target = actor.shelter ?: return
+        val target = actor.shelter ?: run { actor.nightHomeProgress.clear(); return }
         if (actor.sleeping) {
+            actor.nightHomeProgress.clear()
             if (sleepStillSafe(actor)) return
             if (!wake(actor)) return
             runtime.statuses[actor.workerId] = "sheltering"
@@ -58,6 +81,7 @@ internal class CivsCitizenShelters(
                 actor.npc.headYaw = pose.position.yaw
                 actor.npc.pose = PacketNpcPose.SLEEPING
                 actor.sleeping = true
+                actor.nightHomeProgress.clear()
                 runtime.statuses[actor.workerId] = "sleeping"
                 CivsDiagnostics.event("citizen_sleep", "city" to actor.cityId, "worker" to actor.workerId,
                     "action" to "sleep_requested", "target" to target)
@@ -73,6 +97,10 @@ internal class CivsCitizenShelters(
                 return
             }
         }
+        val home = citizenHomeBuilding(city, worker)
+        if (!routes.canResetNightShelter(actor) || home == null) actor.nightHomeProgress.clear()
+        else if (actor.nightHomeProgress.stalled(home, actor.npc.location.point(), now) &&
+            routes.resetNightShelter(actor, now)) return
         val route = actor.route
         if (route == null) { routes.startRoute(actor, world, target, now); return }
         if (route.completion?.cancelReason == "resident-blocked") {

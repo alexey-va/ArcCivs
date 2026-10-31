@@ -18,7 +18,8 @@ data class CivsSettings(
     val worksites: CivsWorksiteSettings = CivsWorksiteSettings(),
 ) {
     companion object {
-        const val MAXIMUM_NPCS = 64
+        const val DEFAULT_NPCS = 64
+        const val MAXIMUM_NPCS = 256
 
         fun chunkLoadingMaximum(config: FileConfiguration, warn: (String) -> Unit = {}): Int {
             val value = config.get("chunk-loading.maximum-chunks") ?: return 2048
@@ -35,7 +36,7 @@ data class CivsSettings(
             config.getInt("maximum-building-volume", 50_000).also { require(it in 1..75_000) },
             config.getInt("maximum-previews", 4).also { require(it in 1..8) },
             config.getInt("preview-seconds", 120).also { require(it in 30..300) },
-            config.getInt("maximum-active-npcs", MAXIMUM_NPCS).also { require(it in 1..MAXIMUM_NPCS) },
+            config.getInt("maximum-active-npcs", DEFAULT_NPCS).also { require(it in 1..MAXIMUM_NPCS) },
             config.getInt("npc-viewer-range", 96).also { require(it in 24..96) },
             chunkLoadingMaximum(config),
             CivsNavigationSettings.read(config),

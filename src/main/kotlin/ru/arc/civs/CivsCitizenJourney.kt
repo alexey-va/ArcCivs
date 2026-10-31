@@ -474,6 +474,11 @@ internal class CitizenRoute(val from: CitizenPoint, val target: Location, val ch
     var preparationReportAfter = startedAt + 2_000
     var preparationRetryAt: Long? = null
     var blockedWaypoint: CitizenPoint? = null
+    var bodyBlockedSince: Long? = null
+    var bodyDetourStarted = false
+    var bodyDetourFailed = false
+    var bodyPassUntil = 0L
+    var bodyContactTick = 0L
 
     fun motionReady(tick: Long, now: Long) {
         timing.ready(now)

@@ -106,7 +106,7 @@ class CivsResidentCollisionsTest : FunSpec({
         }
     }
 
-    test("repeated contact has one bounded counter impulse per player tick and preserves vertical momentum") {
+    test("repeated NPC admission never pushes the player while player initiated contact keeps bounded resident probes") {
         collisionScenario { f ->
             f.allowNudge = false
             val momentum = Vector(.13, .2, -.07)
@@ -137,8 +137,8 @@ class CivsResidentCollisionsTest : FunSpec({
                 (f.velocity.x >= -.180001) shouldBe true
                 f.tick()
             }
-            (f.velocityWrites in 1..20) shouldBe true
-            near(f.velocity.x, -.18)
+            f.velocityWrites shouldBe 0
+            f.velocity shouldBe momentum
             f.nudgeAttempts shouldBe 120 // Two residents, three safe probes, once per tick.
             f.npcAt shouldBe Location(f.world, 0.0, 64.0, 0.0)
             verify(exactly = 0) { f.player.teleport(any<Location>()) }
@@ -275,20 +275,20 @@ class CivsResidentCollisionsTest : FunSpec({
         }
     }
 
-    test("walking resident nudges the player while recovery occupancy remains read only") {
+    test("walking resident observes a player without moving either body and recovery occupancy remains strict") {
         collisionScenario { f ->
             f.mode = GameMode.CREATIVE
             f.playerAt = Location(f.world, .7, 64.0, 0.0)
             val from = Location(f.world, 0.0, 64.0, 0.0)
             val to = Location(f.world, .2, 64.0, 0.0)
             f.owner.canResidentMove(f.npc, from, to) shouldBe false
-            f.velocityWrites shouldBe 1
-            f.velocity shouldBe Vector(.05, .2, 0.0)
+            f.velocityWrites shouldBe 0
+            f.velocity shouldBe Vector(0.0, .2, 0.0)
             repeat(20) { f.owner.canResidentMove(f.npc, from, to) shouldBe false }
-            f.velocityWrites shouldBe 1
-            near(f.npcAt.x, -.05)
+            f.velocityWrites shouldBe 0
+            near(f.npcAt.x, 0.0)
             f.owner.canResidentMove(f.npc, f.playerAt, f.playerAt) shouldBe false
-            f.velocityWrites shouldBe 1
+            f.velocityWrites shouldBe 0
             f.mode = GameMode.SPECTATOR
             f.owner.canResidentMove(f.npc, from, to) shouldBe true
             f.mode = GameMode.SURVIVAL
@@ -296,6 +296,23 @@ class CivsResidentCollisionsTest : FunSpec({
             f.owner.canResidentMove(f.npc, from, to) shouldBe true
             f.owner.canResidentMove(f.npc, from, Location(f.world, 30.0, 64.0, 0.0)) shouldBe false
             verify(exactly = 0) { f.world.entities; f.world.players }
+        }
+    }
+
+    test("an admitted short body pass permits walking contact while recovery and oversized steps remain denied") {
+        collisionScenario { f ->
+            f.playerAt = Location(f.world, .7, 64.0, 0.0)
+            val from = Location(f.world, 0.0, 64.0, 0.0)
+            val to = Location(f.world, .2, 64.0, 0.0)
+            f.owner.canResidentMove(f.npc, from, to) shouldBe false
+            f.allowBodyPass = true
+            f.owner.canResidentMove(f.npc, from, to) shouldBe true
+            f.owner.canResidentMove(f.npc, f.playerAt, f.playerAt) shouldBe false
+            f.owner.canResidentMove(f.npc, from, from.clone().add(30.0, 0.0, 0.0)) shouldBe false
+            f.velocityWrites shouldBe 0
+            f.nudgeAttempts shouldBe 0
+            f.allowBodyPass = false
+            f.owner.canResidentMove(f.npc, from, to) shouldBe false
         }
     }
 
@@ -396,6 +413,7 @@ private class ResidentCollisionFixture(private val paper: MockBukkitTestRuntime)
     var velocityWrites = 0
     var nudgeAttempts = 0
     var allowNudge = true
+    var allowBodyPass = false
     var loaded = true
     var supported = true
     var blockReads = 0
@@ -454,7 +472,7 @@ private class ResidentCollisionFixture(private val paper: MockBukkitTestRuntime)
             val from = actor.location
             val to = from.clone().add(impulse)
             if (allowNudge && citizenResidentNudgeClear(actor, from, to)) { actor.teleport(to); true } else false
-        })
+        }, bodyPassAllowed = { allowBodyPass })
     }
 
     fun move(to: Location, from: Location = Location(world, -2.0, 64.0, 0.0), canceled: Boolean = false): PlayerMoveEvent {

@@ -61,6 +61,7 @@ internal class CivsCitizenWork(
 
     fun update(actor: CitizenActor, city: Settlement, world: World, now: Long) {
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
+        if (!routes.canResetNightShelter(actor)) actor.nightHomeProgress.clear()
         actor.mealVisit?.let { visit ->
             if (visit.arrivedAt != null && (!life.lifeActorReady(actor) || visit.seat == null &&
                 !citizenArrived(actor.npc.location, visit.target.location(world)))) life.stopMeal(actor)

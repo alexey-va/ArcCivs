@@ -63,18 +63,50 @@ internal class CivsCitizenCollisions(
         citizenResidentStepClear(actor.npc, from, to, shelterOccupied(actor)) && residentStepAllowed(actor.npc, from, to)
 
     fun routeMoveAllowed(actor: CitizenActor, from: Location, to: Location): Boolean {
-        if (citizenResidentStepClear(actor.npc, from, to, shelterOccupied(actor)))
+        val occupied = shelterOccupied(actor)
+        val clear = citizenResidentStepClear(actor.npc, from, to, occupied)
+        if (passingBodies(actor)) {
+            val route = requireNotNull(actor.route)
+            // Escaping an overlap is a permitted sweep, but is still contact until the endpoint body is clear.
+            if (!citizenResidentStepClear(actor.npc, to, to, occupied) || !yieldPlayerClear(actor, to, to))
+                route.bodyContactTick = runtime.navigationTick
+            else if (runtime.navigationTick - route.bodyContactTick >= 4) route.bodyPassUntil = 0
+            return residentStepAllowed(actor.npc, from, to)
+        }
+        if (clear)
             return residentStepAllowed(actor.npc, from, to).also { allowed ->
-                if (!allowed) actor.route?.nativeCollisionTicks = 40
+                if (!allowed) {
+                    actor.route?.nativeCollisionTicks = 40
+                    if (!yieldPlayerClear(actor, from, to)) markBodyContact(actor)
+                }
             }
         // Preserve the aggregate fast path; identify an owner only for an actually denied sweep.
         actor.collisionResident = runtime.actors.values.firstOrNull { other -> other !== actor &&
             other.worldId == actor.worldId && other.npc.isValid &&
             !citizenResidentStepClear(actor.npc, from, to, residentOccupied(other)) }?.workerId
+        markBodyContact(actor)
         return false
     }
 
-    private fun canYield(actor: CitizenActor): Boolean = actor.npc.isValid && !actor.npc.isSeated && !actor.sleeping &&
+    private fun markBodyContact(actor: CitizenActor) {
+        actor.bodyContactToken = actor.plan.token
+        actor.route?.let { route ->
+            if (route.bodyBlockedSince == null) route.bodyBlockedSince = runtime.navigationTick
+            route.bodyContactTick = runtime.navigationTick
+        }
+    }
+
+    fun passingBodies(actor: CitizenActor): Boolean = actor.route?.let {
+        it.bodyPassUntil > runtime.navigationTick && !routes.navigationHeld(actor) &&
+            !actor.sleeping && actor.npc.isValid && !actor.npc.isSeated
+    } == true
+
+    private fun travelling(actor: CitizenActor): Boolean = actor.route?.let {
+        it.completion == null && it.motion.navigating
+    } == true && (actor.sheltering || actor.cycle.phase in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED,
+        CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING))
+
+    private fun canYield(actor: CitizenActor): Boolean = travelling(actor) && actor.npc.isValid && !actor.npc.isSeated && !actor.sleeping &&
         actor.route?.let { it.completion != null || it.motion.finished || it.motion.failure != null } != true &&
         actor.attacker == null && actor.supplyPickup == null && !logistics.collectedPending(actor) &&
         actor.workerId !in runtime.pendingHarm &&
@@ -267,12 +299,14 @@ internal class CivsCitizenCollisions(
 
     /** Existing overlaps separate by ordinary bounded steps, without teleport recovery or work credit. */
     fun separateResident(actor: CitizenActor): Boolean? {
-        // ponytail: pair checks stay bounded by 48 owned runtime.actors; index only if that cap grows.
+        if (!travelling(actor) || routes.navigationHeld(actor) || passingBodies(actor)) return null
+        // Pair checks use the configured actor cap (at most CivsSettings.MAXIMUM_NPCS); admission is shared by four actors per frame.
         val npc = actor.npc
         val at = npc.location
         val body = citizenStandingBounds(at, npc.scale)
         val other = runtime.actors.values.firstOrNull { it !== actor && it.worldId == actor.worldId && it.npc.isValid &&
             !it.sleeping && citizenStandingBounds(it.npc.location, it.npc.scale).overlaps(body) } ?: return null
+        if (passingBodies(other)) return null
         val away = at.toVector().subtract(other.npc.location.toVector()).setY(0.0)
         if (away.lengthSquared() < .000001) away.x = if (actor.workerId < other.workerId) -1.0 else 1.0
         away.normalize().multiply(.05)
@@ -309,7 +343,7 @@ internal class CivsCitizenCollisions(
     }
 
     fun shelterOccupied(actor: CitizenActor): List<BoundingBox> = buildList {
-        // The existing runtime cap is 48 runtime.actors; reservations do not scan the world.
+        // Only the configured, capped runtime actors and their reservations are read; no world/entity discovery.
         for (other in runtime.actors.values) {
             if (other === actor || other.worldId != actor.worldId || !other.npc.isValid) continue
             addAll(residentOccupied(other))

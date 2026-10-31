@@ -9,7 +9,7 @@ import java.util.UUID
 
 class CivsResidentEarlyYieldTest : FunSpec({
     for (obstruction in listOf("clear", "solid", "player"))
-    test("a ready resident collision attempts an early bounded yield with $obstruction side corridors") {
+    test("a ready resident collision starts an early detour while its neighbour stays fixed with $obstruction side corridors") {
         residentRuntime { h ->
             val quarry = h.assignQuarry().copy(control = null, production = null,
                 bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)))
@@ -34,6 +34,7 @@ class CivsResidentEarlyYieldTest : FunSpec({
                 if (h.routeMotion(h.workerId)?.let { !it.searching && it.waitingForCollision } == true) break
             }
             h.routeMotion(h.workerId)?.waitingForCollision shouldBe true
+            for (x in -2..3) for (z in -2..2) h.world.loadChunk(x, z)
             actors.getValue(blocker).teleport(Location(h.world, 1.25, 64.0, .5))
             when (obstruction) {
                 "solid" -> {
@@ -50,26 +51,34 @@ class CivsResidentEarlyYieldTest : FunSpec({
                 }
             }
             val before = h.city
-            h.owner.residentStepAllowed = { _, _, _ -> true }
-            var startedAt: Int? = null
-            repeat(8) { tick ->
-                val previous = actors.mapValues { it.value.location }
-                h.navigate()
-                if (actors.keys.any(h::yielding) && startedAt == null) startedAt = tick + 1
-                actors.forEach { (id, npc) ->
-                    (previous.getValue(id).distance(npc.location) <= .172001) shouldBe true
-                    citizenPacketBodyClear(h.world, npc.location.point(), false) shouldBe true
+            val fixed = actors.getValue(blocker).location
+            val original = requireNotNull(h.routeMotion(h.workerId))
+            val route = requireNotNull(h.routeIdentity(h.workerId))
+            val phase = h.phase()
+            val collisions = h.nativeCollisions()
+            try {
+                h.owner.residentStepAllowed = { npc, from, to -> npc.uniqueId != blocker && collisions.canResidentMove(npc, from, to) }
+                var detouredAt: Int? = null
+                repeat(8) { tick ->
+                    val previous = actors.mapValues { it.value.location }
+                    h.navigate()
+                    if (h.routeMotion(h.workerId)?.let { it !== original } == true && detouredAt == null) detouredAt = tick + 1
+                    actors.getValue(blocker).location shouldBe fixed
+                    actors.keys.any(h::yielding) shouldBe false
+                    actors.forEach { (id, npc) ->
+                        (previous.getValue(id).distance(npc.location) <= .172001) shouldBe true
+                        citizenPacketBodyClear(h.world, npc.location.point(), false) shouldBe true
+                        citizenPacketSupported(h.world, npc.location.point()) shouldBe true
+                    }
                 }
-            }
-            if (obstruction == "clear") {
-                withClue(h.owner.debug(h.city.id, null)) { (startedAt != null && startedAt!! <= 8) shouldBe true }
-                (actors.getValue(blocker).location.z > .5) shouldBe true
-            } else {
-                startedAt shouldBe null
-                actors.getValue(blocker).location.point() shouldBe CitizenPoint(1.25, 64.0, .5)
-            }
-            h.deliveries shouldBe 0
-            h.city shouldBe before
+                withClue(h.owner.debug(h.city.id, null)) { (detouredAt != null && detouredAt!! <= 8) shouldBe true }
+                h.routeIdentity(h.workerId) shouldBe route
+                h.phase() shouldBe phase
+                h.deliveries shouldBe 0
+                h.unloads shouldBe 0
+                h.pickups shouldBe 0
+                h.city shouldBe before
+            } finally { collisions.close() }
         }
     }
 

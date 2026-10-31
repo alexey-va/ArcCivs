@@ -49,7 +49,8 @@ internal class CivsCitizenLogistics(
     fun collectedPending(actor: CitizenActor): Boolean = collectedRequests.pending(actor.workerId, actor.instanceId)
 
     fun supplyFood(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
-        if (actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) || now < actor.supplyRetryAt) return false
+        if (actor.residentYield != null || actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) ||
+            now < actor.supplyRetryAt) return false
         if (world.time !in 12_000L..23_000L && worker.cargo == null && CivsResidents.hunger(worker) <= 14 &&
             residentFoods.carried(city, worker) == null) {
             val physical = actor.foodPickupSource ?: residentFoodSource(city, worker)
@@ -62,7 +63,7 @@ internal class CivsCitizenLogistics(
                     actor.foodSource = physical.buildingId
                 }
                 actor.cycle.deferWork(now)
-                if (civsCanReachContainer(actor.npc.location, physical.container)) {
+                if (civsCanReachContainer(actor.npc.location, physical.container) && routes.arrivalBodyClear(actor)) {
                     routes.cancelRoute(actor)
                     beginSupplies(actor, physical.buildingId, now, false)
                 } else {
@@ -99,6 +100,7 @@ internal class CivsCitizenLogistics(
 
     fun travelForSupplies(actor: CitizenActor, city: Settlement, world: World, target: CivPosition, now: Long,
                                   resumeWork: Boolean = false) {
+        if (actor.residentYield != null) return
         runtime.statuses[actor.workerId] = if (actor.outputReturn != null) "returning-output" else "moving-to-storage"
         if (now < actor.supplyRetryAt) {
             runtime.statuses[actor.workerId] = if (actor.outputReturn != null &&
@@ -171,6 +173,8 @@ internal class CivsCitizenLogistics(
             } else {
                 actor.supplyFailure = null
                 actor.foodSource = null
+                // A successful no-op must leave a navigation interval free of another pending pickup.
+                actor.supplyRetryAt = now + 1_000
                 if (completion.pickup.returnOutputs) {
                     actor.outputReturn = null
                     actor.outputFullPause = null

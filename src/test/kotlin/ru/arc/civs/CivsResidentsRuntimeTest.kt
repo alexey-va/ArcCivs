@@ -2880,7 +2880,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 
     for (headOn in listOf(false, true))
-    test("autonomous depot traffic yields and completes both real resource trips headOn=$headOn") {
+    test("autonomous depot traffic detours or uses short contact transit and completes both real trips headOn=$headOn") {
         residentRuntime(workerId = UUID.fromString("06254fa5-4795-4a8e-a7c7-783f9fc90cfd")) { h ->
             val (farm, quarry, forester) = h.autonomousTrafficTown(headOn)
             h.navigationNow = 2_000
@@ -2968,19 +2968,17 @@ class CivsResidentsRuntimeTest : FunSpec({
                     BoundingBox(at.x - .3, at.y, at.z - .3, at.x + .3, at.y + 1.8, at.z + .3)
                 } }
                 withClue("tick=$tick positions=${actors.mapValues { it.value.location }}") {
-                    bodies.indices.all { a -> (a + 1 until bodies.size).all { b -> !bodies[a].overlaps(bodies[b]) } } shouldBe true
+                    val handles = actors.values.toList()
+                    bodies.indices.all { a -> (a + 1 until bodies.size).all { b ->
+                        !bodies[a].overlaps(bodies[b]) || h.owner.passingBodies(handles[a]) || h.owner.passingBodies(handles[b])
+                    } } shouldBe true
                 }
                 if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
                 if (received.containsAll(listOf(h.workerId, minerId))) break
             }
             withClue("received=$received ${h.owner.debug(h.city.id, null)}") {
-                // A frontal meeting must yield; the neighbouring diagonal can now
-                // take a clear route directly. Both cases still require real trips,
-                // bounded steps, non-overlapping bodies and actual resource receipts.
-                if (headOn) {
-                    yielded shouldBe true
-                    (passingResumed > 0) shouldBe true
-                }
+                // Both trips retain their real arrival/receipt contract. Stationary neighbours are never displaced.
+                yielded shouldBe false
                 received.containsAll(listOf(h.workerId, minerId)) shouldBe true
             }
             (h.city.workers.first { it.id == h.workerId }.completedCycles >= 114) shouldBe true
@@ -2993,7 +2991,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 
     for (supportHole in listOf(false, true))
-    test("resident yielding checks the whole corridor and sealed routes pause without relocation supportHole=$supportHole") {
+    test("a fixed resident cannot authorize crossing a missing support or sealed native corridor supportHole=$supportHole") {
         residentRuntime { h ->
             val quarry = h.assignQuarry().copy(control = null, production = null,
                 bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)))
@@ -3026,24 +3024,29 @@ class CivsResidentsRuntimeTest : FunSpec({
                 for (x in listOf(-1, 2)) for (z in -1..1) for (y in 64..66)
                     h.world.getBlockAt(x, y, z).type = Material.STONE
             }
-            h.owner.residentStepAllowed = { _, _, _ -> true }
-            var paused = false
+            h.owner.residentStepAllowed = { npc, _, _ -> npc.uniqueId != blocker }
+            val fixed = actors.getValue(blocker).location
             var yielded = false
-            for (tick in 1..400) {
+            val frames = if (supportHole) 200 else 1_400
+            for (tick in 1..frames) {
                 val previous = actors.mapValues { it.value.location }
                 h.navigate()
-                yielded = yielded || h.yielding(blocker)
-                if (supportHole) (actors.getValue(blocker).location.z <= .800001) shouldBe true
-                actors.forEach { (id, npc) -> (previous.getValue(id).distance(npc.location) <= .172001) shouldBe true }
                 if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
-                if (supportHole && yielded && actors.getValue(blocker).location.z < .3) break
-                if (!supportHole && h.phase() == CitizenPhase.PAUSED) { paused = true; break }
+                yielded = yielded || h.yielding(blocker)
+                actors.getValue(blocker).location shouldBe fixed
+                actors.forEach { (id, npc) -> (previous.getValue(id).distance(npc.location) <= .172001) shouldBe true }
+                val walker = actors.getValue(h.workerId).location
+                citizenPacketSupported(h.world, walker.point()) shouldBe true
+                citizenPacketBodyClear(h.world, walker.point(), false) shouldBe true
             }
             withClue(h.owner.debug(h.city.id, null)) {
-                if (supportHole) {
-                    yielded shouldBe true
-                    (actors.getValue(blocker).location.z < .3) shouldBe true
-                } else paused shouldBe true
+                yielded shouldBe false
+                if (supportHole) (actors.getValue(h.workerId).location.x > 3) shouldBe true
+                else {
+                    // The native standing envelope uses .299 half-width against the wall beginning at x=2.
+                    (actors.getValue(h.workerId).location.x <= 1.701001) shouldBe true
+                    (h.recoveryMillis > 60_000) shouldBe true
+                }
             }
             h.deliveries shouldBe 0
             h.city.stock shouldBe Stock()
@@ -3128,7 +3131,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a real native player retains collision priority and departure resumes the original mine job") {
+    test("a real player permits bounded contact transit and departure preserves the original mine job receipt") {
         residentRuntime { h ->
             // This canonical landing cut lies over five blocks from the blocked feet;
             // the neighbouring x=25 cut can legitimately be worked from the approach.
@@ -3145,6 +3148,8 @@ class CivsResidentsRuntimeTest : FunSpec({
             val focus = requireNotNull(work.focus)
             citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH) shouldBe false
             val player = h.playerAt(Location(h.world, 21.2, 64.0, .5))
+            val velocity = player.velocity.clone()
+            val originalCity = h.city
             h.nativeCollisions().use { collisions ->
                 var nativeDenials = 0
                 h.owner.residentStepAllowed = { npc, from, to ->
@@ -3155,6 +3160,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 var blockedFrames = 0
                 var heldSearchAt: Int? = null
                 var heldSearchFrames = 0
+                var contact = false
                 repeat(360) { tick ->
                     if (nativeDenials > 0 && heldSearchAt == null) h.holdNavigation = true
                     val before = actor.location
@@ -3168,10 +3174,24 @@ class CivsResidentsRuntimeTest : FunSpec({
                         (before.distance(actor.location) <= .222001) shouldBe true
                         val at = actor.location
                         val half = .3 * actor.scale
-                        BoundingBox(at.x - half, at.y, at.z - half,
+                        val overlaps = BoundingBox(at.x - half, at.y, at.z - half,
                             at.x + half, at.y + actor.height, at.z + half)
-                            .overlaps(player.boundingBox) shouldBe false
-                        citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH) shouldBe false
+                            .overlaps(player.boundingBox)
+                        if (overlaps) {
+                            contact = true
+                            h.owner.passingBodies(actor) shouldBe true
+                            h.observedWork() shouldBe 0
+                            h.deliveries shouldBe 0
+                        }
+                        citizenPacketBodyClear(h.world, at.point(), false) shouldBe true
+                        citizenPacketSupported(h.world, at.point()) shouldBe true
+                        if (!citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH)) {
+                            h.deliveries shouldBe 0
+                            h.observedWork() shouldBe 0
+                        }
+                        if (h.deliveries > 0) h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+                        player.location.x shouldBe 21.2
+                        player.velocity shouldBe velocity
                     }
                     h.yielding(h.workerId) shouldBe false
                     val row = (h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>).single() as Map<*, *>
@@ -3182,23 +3202,33 @@ class CivsResidentsRuntimeTest : FunSpec({
                     }
                 }
                 withClue(h.owner.debug(h.city.id, h.workerId)) {
-                    (blockedFrames >= 100) shouldBe true
-                    (nativeDenials >= 100) shouldBe true
+                    (blockedFrames > 0) shouldBe true
+                    (nativeDenials > 0) shouldBe true
                     (heldSearchFrames >= 80) shouldBe true
                 }
-                h.deliveries shouldBe 0
+                contact shouldBe true
+                h.deliveries shouldBe 1
                 h.failedWorkPositions shouldBe emptyList()
+                h.city shouldBe originalCity
+                h.pendingDelivery.isDone shouldBe false
+                h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
                 player.location.x shouldBe 21.2
+                // This separate, player-initiated overlap happens after the original work receipt was accepted.
+                player.teleport(actor.location)
+                h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+                h.deliveries shouldBe 1
+                h.pendingDelivery.isDone shouldBe false
                 player.teleport(Location(h.world, 24.5, 68.0, 4.5))
-                for (tick in 1..1_000) {
+                for (tick in 1..100) {
                     val before = actor.location
                     h.navigate()
                     (before.distance(actor.location) <= .172001) shouldBe true
                     if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                    if (h.deliveries == 1) break
                 }
                 h.deliveries shouldBe 1
                 h.work shouldBe work
+                h.city shouldBe originalCity
+                h.pendingDelivery.isDone shouldBe false
                 h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
             }
         }
@@ -3260,7 +3290,13 @@ class CivsResidentsRuntimeTest : FunSpec({
                     if (distance > .000001) movingNow++
                 }
                 if (movingNow in 1..4) mixedMotionTicks++
-                withClue("tick=$tick positions=${actors.mapValues { it.value.location }}") { separated() shouldBe true }
+                withClue("tick=$tick positions=${actors.mapValues { it.value.location }}") {
+                    ids.indices.all { a -> (a + 1 until ids.size).all { b ->
+                        val first = actors.getValue(ids[a])
+                        val second = actors.getValue(ids[b])
+                        !body(first).overlaps(body(second)) || h.owner.passingBodies(first) || h.owner.passingBodies(second)
+                    } } shouldBe true
+                }
             }
             withClue("walked=$walked starts=$starts") {
                 walked.values.all { it >= 4.0 } shouldBe true
@@ -4907,7 +4943,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
         collisions.beginResidentYield(actor as CitizenActor)
     }
     fun playerAt(at: Location): Player = paper.addPlayer("TrafficBlocker").also { it.teleport(at); world.threatEntities += it }
-    fun nativeCollisions() = CivsResidentCollisions(plugin, owner::collisionActors, owner::nudgeResident)
+    fun nativeCollisions() = CivsResidentCollisions(plugin, owner::collisionActors, owner::nudgeResident, owner::passingBodies)
 
     fun monsterAt(x: Double, z: Double): Monster {
         world.difficulty = Difficulty.NORMAL

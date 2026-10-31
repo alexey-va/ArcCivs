@@ -20,6 +20,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var courierReturnHint: CitizenCourierReturnHint? = null
     var courierInboundPrefix: CitizenCourierInboundPrefix? = null
     var collisionResident: UUID? = null
+    var bodyContactToken: CitizenToken? = null
     var residentYield: CitizenResidentYield? = null
     var yieldRetryAfter = 0L
     // Physical yielding grants no progress; only subsequent accepted route travel replenishes this allowance.
@@ -60,6 +61,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var shelter: CivPosition? = null
     var shelterPose: CitizenSleepPose? = null
     var shelterSearchIndex = 0
+    val nightHomeProgress = CitizenNightHomeProgress()
     var nextPlayAt = 0L
     var supplyPickup: CitizenSupplyPickup? = null
     var outputReturn: UUID? = null

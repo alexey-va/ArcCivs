@@ -153,7 +153,7 @@ class CivsService(
         constructionSite = { cityId, orderId -> construction.site(cityId, orderId) },
         collectionAvailable = ::collectionAvailable, collectionHome = ::collectedHome,
         pickupGround = ::pickupGround, depositCollected = ::depositCollected,
-        immortalResidents = { id -> cities[id]?.let { it.settings?.immortalResidents == true && testingAllowed(it) } == true })).also(onCitizensCreated)
+        immortalResidents = { id -> cities[id]?.let(::immortalResidents) == true })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
     private val supply = CivsSupplyDispatcher(tasks, nativeWork,
         { cityId, retained -> cargoRequests.captureSupply(cityId, retained) },
@@ -200,6 +200,7 @@ class CivsService(
     private val membership: CivsCityMembership
     private val cityResearch: CivsCityResearch
     private val cityPlans: CivsCityPlans
+    private val villageSites: CivsVillageSites
 
     init {
         controlInstallations.controlOccupied = citizens::growthBlocked
@@ -327,6 +328,10 @@ class CivsService(
             store = store,
             executor = executor,
             roadMaintenance = roadMaintenance)
+        villageSites = CivsVillageSites(plugin, tasks, settings, blueprints, world, executor,
+            cities = { cities.values.toList() }, ready = ::ready,
+            checkSpace = { worldId, center -> buildingRequests.checkSettlementSpace(worldId, center) },
+            retainLoaded = chunkLoading::retainLoaded, found = buildingRequests::foundAutomatic)
         storage.residentFoods = residentFoods
         storage.forestryLeafCurrentCity = { cities[it] }
         storage.relocationCurrentCity = { cities[it] }
@@ -375,6 +380,17 @@ class CivsService(
     fun start(): CompletableFuture<Unit> = loadCities()
     fun health(): RuntimeHealthContribution = health
 
+    internal fun foundVillages(referenceId: UUID, count: Int, prefix: String): CompletableFuture<Any> {
+        checkMain()
+        rejectIf(!ready(), "not-ready")
+        val reference = cities[referenceId] ?: throw CivsRejection("city-not-found")
+        rejectIf(reference.autonomy == null || reference.pendingDeletion != null, "invalid-reference-city")
+        rejectIf(!testingAllowed(reference), "not-authorized")
+        return villageSites.search(reference, count, prefix).thenApply { it }
+    }
+
+    internal fun villageSearchStatus(): Map<String, Any?> = villageSites.status()
+
     override fun canChangeSettlementSetting(player: Player, setting: CivSettlementSetting): Boolean =
         ready() && city(player)?.owner == player.uniqueId && player.hasPermission(CIVS_TESTING_PERMISSION) &&
             (setting != CivSettlementSetting.CHUNK_LOADING || player.hasPermission(CIVS_CHUNK_PERMISSION))
@@ -415,6 +431,9 @@ class CivsService(
     internal fun testingAllowed(city: Settlement): Boolean = plugin.server.getWorld(city.worldId)?.let {
         testingPermissions.allowed(city.owner, it.name)
     } == true
+
+    internal fun immortalResidents(city: Settlement): Boolean = CivsResidentLife.autonomousImmortality(city) ||
+        city.settings?.immortalResidents == true && testingAllowed(city)
     override fun ready(): Boolean = initialized && !closed && !loading
     override fun unavailableReason(): String? = loadFailure ?: if (!initialized && unhealthy.isNotEmpty()) "storage-unavailable" else null
     override fun styles(): List<String> = blueprints.availableStyles(BuildingType.TOWN_HALL)
@@ -506,7 +525,7 @@ class CivsService(
             "damage_cause" to death.cause, "source" to death.killerType, "position" to death.position) {
             afterCityAvailable(cityId) {
                 mutate(cityId) { CivsRules.hurtResident(it, it.owner, workerId, damage, death,
-                    immortal = it.settings?.immortalResidents == true && testingAllowed(it)) }.thenApply { saved ->
+                    immortal = immortalResidents(it)) }.thenApply { saved ->
                     saved.corpses.orEmpty().firstOrNull { it.worker.id == workerId }?.let { corpse ->
                         CivsDiagnostics.event("resident_death", "city" to cityId, "worker" to workerId,
                             "cause" to corpse.cause, "killer" to corpse.killerType, "position" to corpse.position,
@@ -885,6 +904,7 @@ class CivsService(
     private fun loadCities(maximumLoadedChunks: Int = settings.maximumLoadedChunks): CompletableFuture<Unit> {
         checkMain()
         rejectIf(loading || closed, "not-ready")
+        villageSites.cancel("reload")
         loading = true
         planBoardSnapshots.retain(emptySet())
         planBoards.pulse(emptyList())
@@ -1152,6 +1172,7 @@ class CivsService(
         if (closed) return
         closed = true
         initialized = false
+        villageSites.close()
         layoutDebug.close()
         planBoardSnapshots.close()
         planBoardDrain = runCatching { planBoards.closeAsync() }

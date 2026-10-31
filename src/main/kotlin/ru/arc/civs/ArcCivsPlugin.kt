@@ -163,7 +163,8 @@ open class ArcCivsPlugin : JavaPlugin() {
                 residentFoods = CivsResidentFoods.native(),
                 offlinePlayerData = ru.arc.paper.player.PaperOfflinePlayerData.capture(server),
                 previewRenderer = preview, boundaryRenderer = boundary, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
-                    val collisions = lifecycle.own(CivsResidentCollisions(this, citizens::collisionActors, citizens::nudgeResident))
+                    val collisions = lifecycle.own(CivsResidentCollisions(this, citizens::collisionActors,
+                        citizens::nudgeResident, bodyPassAllowed = citizens::passingBodies))
                     citizens.residentStepAllowed = collisions::canResidentMove
                     val labels = CivsHolograms(this, lifecycle.tasks, text, citizens::hologramSnapshots, queue, citizens::workplaceSnapshots)
                     lifecycle.own(AutoCloseable {
@@ -221,7 +222,8 @@ open class ArcCivsPlugin : JavaPlugin() {
             val command = CivsCommand(service, ui, text, lifecycle.tasks, service::debugState, service::configureSettlementSetting,
                 service::repairBuildingStorage, service::retryConstruction, service::debugLayout,
                 this::prepareHotload, this::hotloadStatus, service::debugTerrainAt,
-                CivsTerrainDebugFile(dataRoot, executor)::save, CivsSettlementDebugFile(dataRoot, executor)::save)
+                CivsTerrainDebugFile(dataRoot, executor)::save, CivsSettlementDebugFile(dataRoot, executor)::save,
+                service::foundVillages, service::villageSearchStatus)
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)

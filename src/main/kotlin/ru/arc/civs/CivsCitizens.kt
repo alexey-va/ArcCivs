@@ -39,7 +39,7 @@ class CivsCitizens(
     private val cityProvider: () -> Collection<Settlement>,
     private val delivery: (UUID, UUID, UUID, Long, Long, UUID?, Long) -> CompletableFuture<Settlement>,
     private val interact: (Player, UUID, UUID) -> Unit,
-    private val maxActive: Int = CivsSettings.MAXIMUM_NPCS,
+    private val maxActive: Int = CivsSettings.DEFAULT_NPCS,
     private val viewerRange: Int = 96,
     private val hurt: (UUID, UUID, Double) -> CompletableFuture<Settlement> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
@@ -149,6 +149,12 @@ class CivsCitizens(
     internal fun collisionActors(): Collection<PacketPlayerNpc> {
         checkCitizenMainThread()
         return actors.values.map { it.npc }
+    }
+
+    /** Typed player-collision seam; short contact transit never authorizes a recovery endpoint. */
+    internal fun passingBodies(npc: PacketPlayerNpc): Boolean {
+        checkCitizenMainThread()
+        return actors.values.firstOrNull { it.npc === npc }?.let(collisions::passingBodies) == true
     }
 
     /** Natural tree growth happens later than tending; protect the bodies present at that instant. */

@@ -43,30 +43,30 @@ internal class CivsCitizenMotion(
         navigation.pulse()
         threats.tick()
         val viewers = audience.viewers()
-        var separationBudget = 4 // Shared by native-overlap exits and at most twelve resident separation probes.
-        for (actor in runtime.actors.values.toList().sortedBy { if (it.residentYield == null) 1 else 0 }) {
+        var separationBudget = 4 // Shared by overlap exits, separation and fresh dynamic-body detours.
+        for (actor in runtime.actors.values.toList().sortedBy {
+            when { it.residentYield != null -> 0; it.route?.bodyBlockedSince != null -> 1; else -> 2 }
+        }) {
             val npc = actor.npc
+            if (!routes.canResetNightShelter(actor)) actor.nightHomeProgress.clear()
             if (npc.isSeated) { actor.footsteps.reset(); continue }
-            var separationAdmitted = false
             if (separationBudget > 0 && npc.isValid && !actor.sleeping && actor.supplyPickup == null &&
                 !logistics.collectedPending(actor) &&
                 actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) &&
                 audience.activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers)) {
                 separationBudget--
-                separationAdmitted = true
                 citizenRotateAfterAdmission(runtime.actors, actor.workerId)
                 if (collisions.escapeTerrain(actor, now)) continue
-                if (collisions.advanceResidentYield(actor)) continue
-                val separated = if (actor.workerId !in runtime.pendingHarm) collisions.separateResident(actor) else null
-                if (separated == true) {
-                    actor.route?.progressTick = runtime.navigationTick
-                    continue
+                if (!routes.navigationHeld(actor)) {
+                    if (collisions.advanceResidentYield(actor)) continue
+                    val separated = collisions.separateResident(actor)
+                    if (separated == true) {
+                        actor.route?.progressTick = runtime.navigationTick
+                        continue
+                    }
+                    val blocked = actor.route
+                    if (blocked?.bodyBlockedSince != null && routes.handleBodyContact(actor, blocked, now)) continue
                 }
-                // A ready neighbour collision can yield on the next admitted frame;
-                // the existing cooldown, real-progress and corridor guards still own admission.
-                if (actor.plan.idleReason == null && actor.social.visit == null &&
-                    actor.route?.motion?.waitingForCollision == true && actor.collisionResident != null &&
-                    runtime.actors[actor.collisionResident]?.social?.visit == null && collisions.beginResidentYield(actor)) continue
             }
             if (actor.residentYield != null) {
                 // A skipped separation-budget frame is still owned by the bounded yield.
@@ -94,7 +94,7 @@ internal class CivsCitizenMotion(
             if (route == null && !actor.sleeping && actor.workerId !in runtime.pendingHarm && npc.isValid) {
                 actor.lookYaw?.let { citizenFace(npc, it, actor.lookPitch, if (actor.attacker != null) 16f else CITIZEN_TURN_PER_TICK) }
             }
-            if (route == null || logistics.collectedPending(actor) || actor.workerId in runtime.pendingHarm || !npc.isValid ||
+            if (route == null || routes.navigationHeld(actor) || !npc.isValid ||
                 !audience.activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers) ||
                 !route.chunks.ready(npc.world)) {
                 actor.footsteps.reset()
@@ -129,6 +129,7 @@ internal class CivsCitizenMotion(
                     // to resume when they leave; a failed detour never licenses teleporting.
                     route.motion.cancel()
                     route.motion = previous
+                    if (route.bodyDetourStarted) route.bodyDetourFailed = true
                 } else previous.cancel()
                 route.previousMotion = null
                 route.motionReady(runtime.navigationTick, now)
@@ -136,6 +137,7 @@ internal class CivsCitizenMotion(
                 route.path = null
             }
             val motion = route.motion
+            motion.bodyContactAllowed = collisions.passingBodies(actor)
             // Stop on the first valid arrival tick, including at any usable side of a barrel.
             // Waiting for the coarse work pulse used to keep walking around the barrel after arrival.
             val travelTarget = actor.combatDestination ?: actor.foodSource?.let(city::building)?.control ?:
@@ -149,7 +151,7 @@ internal class CivsCitizenMotion(
             }
             if (travelTarget != null && !actor.sheltering && actor.mealVisit == null && actor.tavernService == null && actor.collectionSeek == null && actor.collectionHome == null &&
                 (actor.returningToWarehouse || actor.plan.idleReason in listOf(null, "placing")) &&
-                (physicalFood?.let { civsCanReachContainer(npc.location, it.container) }
+                (physicalFood?.let { routes.arrivalBodyClear(actor) && civsCanReachContainer(npc.location, it.container) }
                     ?: routes.arrivedAt(actor, city, npc.world, travelTarget))) {
                 motion.cancel()
                 route.trip?.let { paths.complete(city, it) }
@@ -209,7 +211,12 @@ internal class CivsCitizenMotion(
                 npc.headYaw = next.yaw
                 npc.pitch = next.pitch
                 val forward = (motion.forwardProgress - route.observedProgress).coerceAtLeast(0.0)
-                if (forward > .000001) actor.arrivalWait = null
+                if (forward > .000001) {
+                    actor.arrivalWait = null
+                    route.bodyBlockedSince = null
+                    route.bodyDetourStarted = false
+                    route.bodyDetourFailed = false
+                }
                 route.observedProgress = motion.forwardProgress
                 route.progressSinceObservation += forward
                 route.progressSinceReplan += forward
@@ -275,9 +282,8 @@ internal class CivsCitizenMotion(
             }
             else if (runtime.navigationTick - route.progressTick >= 40) {
                 val residentBlocked = motion.waitingForCollision && actor.collisionResident != null
-                // Let a neighbour clear the corridor before abandoning an optional walk.
-                // Cancelling first made idle residents retry from the same mutually blocked positions.
-                if (residentBlocked && (!separationAdmitted || collisions.beginResidentYield(actor))) continue
+                // Dynamic-body work uses the same four admitted actors; do not reset a job or move its neighbour.
+                if (route.bodyBlockedSince != null) continue
                 // Two optional walks must not wait forever for each other in a narrow passage.
                 // Give up only this leisure leg; work routes keep their existing bounded detour/wait.
                 if (motion.waitingForCollision && route.idleAnchor != null && actor.social.visit == null) {

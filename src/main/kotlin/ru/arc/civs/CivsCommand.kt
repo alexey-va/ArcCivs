@@ -36,8 +36,39 @@ class CivsCommand(
         CompletableFuture.failedFuture(CivsRejection("terrain-file-unavailable")) },
     private val saveSettlementCapture: (UUID, () -> Settlement) -> CompletableFuture<Path> = { _, _ ->
         CompletableFuture.failedFuture(CivsRejection("settlement-file-unavailable")) },
+    private val foundVillages: (UUID, Int, String) -> CompletableFuture<Any> = { _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("village-search-unavailable")) },
+    private val villageSearchStatus: () -> Map<String, Any?> = { mapOf("state" to "unavailable") },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
+        if (args.firstOrNull() in setOf("found-villages", "village-search-status")) {
+            val status = args.firstOrNull() == "village-search-status"
+            val reference = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val count = args.getOrNull(2)?.toIntOrNull()
+            val prefix = args.getOrNull(3)
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                status && args.size != 1 -> "invalid-village-search-arguments"
+                !status && (args.size != 4 || reference == null || count == null || count !in 1..5 ||
+                    prefix == null || prefix.isBlank() || prefix.length > 24) -> "invalid-village-search-arguments"
+                hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
+                else -> null
+            }
+            fun reply(value: Any) = sender.sendMessage("ARCCIVS_VILLAGE_SEARCH " + Gson().toJson(value))
+            if (error != null) reply(mapOf("state" to "failed", "error" to error))
+            else if (status) reply(villageSearchStatus())
+            else runCatching { foundVillages(requireNotNull(reference), requireNotNull(count), requireNotNull(prefix)) }
+                .onSuccess { future ->
+                    reply(mapOf("state" to "accepted", "reference" to reference, "requested" to count, "prefix" to prefix))
+                    future.whenCompleteSync(tasks) { result, failure ->
+                        if (failure == null && result != null) reply(result)
+                        else reply(mapOf("state" to "failed", "error" to
+                            (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "village-search-failed")))
+                    }
+                }.onFailure { reply(mapOf("state" to "failed", "error" to
+                    (CivsDiagnostics.rejection(it)?.reason ?: "village-search-failed"))) }
+            return true
+        }
         if (args.firstOrNull() == "hotload") {
             val error = when {
                 sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
@@ -244,7 +275,7 @@ class CivsCommand(
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
             return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
-                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
+                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "village-search-status") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         private fun settlementFileLine(path: Path? = null, failure: Throwable? = null): String =
