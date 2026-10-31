@@ -6,6 +6,44 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsSettlementPerimeterLimitsTest : FunSpec({
+    test("fortified plots reserve enough edge room for a complete five-wide perimeter") {
+        val base = settlementPlanCity().copy(radius = 128)
+        val frame = CivsSettlementLayout.frame(base).copy(fortified = true)
+        val template = CivBuilding(UUID(143, 1), BuildingType.HOUSE, 1, CivPosition(0, 0, 0), 0, "fixture/edge-house",
+            CivBox(CivPosition(-9, 0, -16), CivPosition(8, 18, -1)), CivPosition(0, 1, 0), BuildingPhase.ACTIVE)
+        // The native replay's rejected house had exactly this four-column gap to the core edge.
+        val edgeBounds = CivBox(CivPosition(51, 64, -20), CivPosition(68, 82, -5))
+        val legacy = CivsSettlementLayout.infill(base, template, template, frame = frame.copy(fortified = false),
+            eligible = { it.bounds == edgeBounds }).single().building
+        CivsSettlementLayout.infill(base, template, template, frame = frame,
+            eligible = { it.bounds == edgeBounds }) shouldBe emptyList()
+
+        val forester = CivBuilding(UUID(143, 2), BuildingType.FORESTER, 1, CivPosition(75, 64, 0), 0, "fixture/forest",
+            CivBox(CivPosition(75, 64, -7), CivPosition(81, 71, -1)), CivPosition(75, 65, 0), BuildingPhase.ACTIVE)
+        val city = base.copy(buildings = base.buildings + forester + legacy)
+        val routes = mapOf(forester.id to (0..75).map { CivPosition(it, 65, 0) })
+        val surface = settlementPlanSurface(city)
+        val blocked = shouldThrow<CivsRejection> {
+            CivsSettlementPerimeter.adapt(city, frame, surface, routes, emptyList())
+        }
+        blocked.reason shouldBe "autonomy-layout-obstructed"
+        blocked.values["stage"] shouldBe "no-dry-perimeter"
+        blocked.values["inner_boundary_seeds"] shouldBe "0"
+        blocked.values["first_steep_seed"] shouldBe "none"
+
+        // One more free column admits the existing separator without moving its boundary or narrowing the wall.
+        val inset = legacy.copy(anchor = legacy.anchor.copy(x = legacy.anchor.x - 1),
+            entrance = legacy.entrance.copy(x = legacy.entrance.x - 1),
+            bounds = CivBox(legacy.bounds.min.copy(x = legacy.bounds.min.x - 1), legacy.bounds.max.copy(x = legacy.bounds.max.x - 1)))
+        val admitted = CivsSettlementPerimeter.adapt(city.copy(buildings = base.buildings + forester + inset),
+            frame, surface, routes, emptyList())
+        admitted.core shouldBe frame.core
+        admitted.wallObstacles.isNotEmpty() shouldBe true
+        admitted.gates.isNotEmpty() shouldBe true
+        admitted.wallObstacles.none { CivsAutonomousGeometry.overlaps(it, inset.bounds) } shouldBe true
+        (admitted.wallObstacles.size + admitted.gates.size <= CivsRules.MAX_INFRASTRUCTURE) shouldBe true
+    }
+
     test("the terrain separator accepts the shared maximum core and rejects either oversized dimension") {
         val base = settlementPlanCity()
         val farm = CivBuilding(UUID(138, 10), BuildingType.FORESTER, 1, CivPosition(75, 64, 0), 0, "fixture/forest",

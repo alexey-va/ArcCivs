@@ -289,7 +289,7 @@ internal object CivsSettlementLayout {
                 CivsAutonomousGeometry.approach(b).none { p -> frame.wallObstacles.any { contains(it, p) } } &&
                 frame.wallObstacles.none { CivsAutonomousGeometry.overlaps(bounds, it, 2) } &&
                 (if (exterior) !CivsAutonomousGeometry.overlaps(bounds, frame.core, 3) else
-                    corners(bounds).all { insideCore(frame, it, 4) } &&
+                    corners(bounds).all { insideCore(frame, it, if (frame.fortified) 5 else 4) } &&
                         !CivsAutonomousGeometry.overlaps(bounds, frame.court) &&
                         (bounds.min.x..bounds.max.x).none { x -> (bounds.min.z..bounds.max.z).any { z -> key(x, z) in streetCells } }) &&
                 // Frontage is preferred by ranking. Infill may extend a short

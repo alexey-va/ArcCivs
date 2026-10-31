@@ -60,6 +60,8 @@ class CivsActualGeneratorPreviewTest : FunSpec({
             val upgraded = adopted.copy(buildings = buildings)
             check(plan.plots.count { it.building.type != BuildingType.DECORATION } == CivsRules.MAX_BUILDINGS)
             check(plan.plots.count { it.building.type == BuildingType.HOUSE } == CivsAutonomy.HOUSE_COUNT)
+            if (System.getenv("CIVS_ACTUAL_LAYOUT_REQUIRE_FORTIFICATION") == "true")
+                check(plan.plots.any { it.fortification != null }) { "Requested fortification fell back to an unfortified plan" }
             check(plan.halfWidth == CivsSettlementLayout.MAXIMUM_HALF_WIDTH)
             check(buildings.all { CivsRules.workRouteWithinReach(upgraded, it.entrance) })
             check(searches.all { it.expanded <= CivsAutonomousTerraform.MAXIMUM_ROUTE_NODES })

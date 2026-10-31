@@ -427,8 +427,8 @@ internal class CivSupplyRoom(capacity: CivSupplyCapacity, private val stacks: Ma
 }
 
 /**
- * Pure deterministic city-wide greedy allocation. Existing construction priority is preserved;
- * age rotates ordinary requests/collections, and least recently assigned couriers choose first.
+ * Pure deterministic city-wide greedy allocation. Missing work tools precede construction;
+ * age rotates each priority, and least recently assigned couriers choose first.
  * ponytail: one pass per at-most-48 courier, not an unproven global route optimiser.
  */
 internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSupplyTask, Long> = emptyMap(),
@@ -465,6 +465,11 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         .mapTo(hashSetOf()) { it.cargo.sourceBuildingId }
     fun task(request: CivSupplyRequest) = CivSupplyTask(null, null, request.buildingId, request.material, request.construction)
     val requests = (snapshot.requests + crafts.requests).associateBy(::task)
+    val missingWorkTools = requests.values.filter { request ->
+        val target = stores[request.buildingId] ?: return@filter false
+        !request.construction && request.needed > request.inTransit && target.type in CivsWorksites.TYPES &&
+            target.type?.let(CivsResidents::tool) == request.material && (target.stock[request.material] ?: 0L) == 0L
+    }.mapTo(hashSetOf()) { it.buildingId to it.material }
     val demand = requests.mapValues { (_, value) -> (value.needed - value.inTransit).coerceAtLeast(0) }.toMutableMap()
     val seen = requests.filterValues { it.needed > it.inTransit }.keys.toMutableSet()
     val served = hashSetOf<CivSupplyTask>()
@@ -652,9 +657,16 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             return source.outputMaterial != null && source.capacity.virtualRoom == null &&
                 (source.capacity.outputEmptySlots ?: (source.capacity.emptySlots - PRODUCTION_OUTPUT_HEADROOM)) <= 0
         }
+        fun missingWorkTool(candidate: Candidate): Boolean {
+            val cargo = candidate.plan.cargo
+            if (candidate.key.construction || cargo.redistribution || cargo.sourceWorkerId != null) return false
+            return if (cargo.sourceBuildingId == cargo.warehouseId)
+                (candidate.plan.destinationBuildingId to cargo.material) in missingWorkTools
+            else candidate.plan.destinationBuildingId == cargo.warehouseId && missingWorkTools.any { it.second == cargo.material }
+        }
         // Saturated producers share ordinary request age, so neither recovery nor meals can monopolise the courier.
         val selected = candidates.minWithOrNull(compareBy<Candidate> {
-            if (it.plan.cargo.redistribution) 3 else if (it.key.construction) 0
+            if (missingWorkTool(it)) -1 else if (it.plan.cargo.redistribution) 3 else if (it.key.construction) 0
             else if (capacityRecovery(it) || it.key.source == null) 1 else 2
         }.thenBy { if (it.key.construction && it.key.source != null) 1 else 0 }
             .thenBy { ages[it.key] ?: now }.thenBy { if (capacityRecovery(it)) 0 else 1 }

@@ -593,13 +593,135 @@ class CivsSupplyDispatcherTest : FunSpec({
     }
 })
 
+class CivsReadyWorkToolPriorityTest : FunSpec({
+    test("an older demanded ready tool gets the next free courier after unchanged carried cargo") {
+        val input = readyToolPriorityFixture()
+        val courier = input.couriers.single()
+        val warehouse = input.stores.getValue(courier.warehouseId)
+        val builder = input.stores.getValue(SUPPLY_TARGET)
+        val toolCollection = CivSupplyTask(SUPPLY_BLACKSMITH, null, warehouse.id, "IRON_PICKAXE", false)
+        val construction = CivSupplyTask(null, null, builder.id, "COBBLESTONE", true)
+        val ages = mapOf(toolCollection to 0L, construction to 100L)
+        val cargo = CivCargo(CivsLogistics.shipmentId(input.cityId, courier.workerId, courier.cycle,
+            warehouse.id, builder.id, "COBBLESTONE"), warehouse.id, warehouse.id, builder.id,
+            warehouse.entrance, "COBBLESTONE", 2, inventoryBacked = true)
+        val carried = CivCourierPlan(cargo, builder.id, builder.entrance, true)
+        val carrying = input.copy(couriers = emptyList(), retained = mapOf(courier.workerId to carried),
+            stores = input.stores + (warehouse.id to warehouse.copy(stock = warehouse.stock - "COBBLESTONE")),
+            requests = input.requests.map { if (it.construction) it.copy(inTransit = 2) else it })
+        val busy = allocateCivSupplies(carrying, ages, now = 200)
+        busy.plans shouldBe mapOf(courier.workerId to carried)
+        (toolCollection in busy.seen) shouldBe true
+
+        // The old receipt has unloaded; another fresh construction request must not reset the tool's age.
+        val free = input.copy(couriers = listOf(courier.copy(cycle = courier.cycle + 1)))
+        val next = allocateCivSupplies(free, ages.filterKeys { it in busy.seen }, now = 300)
+        next.crafts.values.single().let { job ->
+            job.material shouldBe "IRON_PICKAXE"
+            job.inputs shouldBe mapOf("IRON_INGOT" to 3L, "STICK" to 2L)
+        }
+        val selected = next.plans.getValue(courier.workerId)
+        selected.cargo.material shouldBe "IRON_PICKAXE"
+        selected.cargo.amount shouldBe 1L
+        selected.cargo.sourceBuildingId shouldBe SUPPLY_BLACKSMITH
+        selected.destinationBuildingId shouldBe warehouse.id
+        next.served shouldBe setOf(toolCollection)
+        input.stores.getValue(SUPPLY_BLACKSMITH).stock shouldBe mapOf("IRON_PICKAXE" to 1L)
+        input.retained shouldBe emptyMap()
+    }
+
+    for ((type, tool) in listOf(BuildingType.QUARRY to "IRON_PICKAXE", BuildingType.FORESTER to "IRON_AXE",
+        BuildingType.FARM to "IRON_HOE")) for (collection in listOf(true, false))
+    test("an absent $type tool precedes even older construction on ${if (collection) "collection" else "delivery"}") {
+        val original = readyToolPriorityFixture()
+        val quarry = original.stores.getValue(SUPPLY_QUARRY).copy(type = type, desiredStock = mapOf(tool to 2L))
+        val smith = original.stores.getValue(SUPPLY_BLACKSMITH).copy(stock = if (collection) mapOf(tool to 1L) else emptyMap())
+        val warehouse = original.stores.getValue(SUPPLY_WAREHOUSE).let {
+            it.copy(stock = it.stock + if (collection) emptyMap() else mapOf(tool to 1L)) }
+        val input = original.copy(stores = original.stores + mapOf(quarry.id to quarry, smith.id to smith, warehouse.id to warehouse),
+            requests = original.requests.filterNot { it.material == "IRON_PICKAXE" } + CivSupplyRequest(quarry.id, tool, 2, 0),
+            craftWorkers = emptyList(), stackSizes = original.stackSizes + (tool to 1),
+            couriers = original.couriers.map { it.copy(bagRoom = it.bagRoom + (tool to 1L)) })
+        val source = if (collection) SUPPLY_BLACKSMITH else null
+        val target = if (collection) SUPPLY_WAREHOUSE else SUPPLY_QUARRY
+        val ages = mapOf(CivSupplyTask(null, null, SUPPLY_TARGET, "COBBLESTONE", true) to 0L,
+            CivSupplyTask(source, null, target, tool, false) to 100L)
+        allocateCivSupplies(input, ages, now = 200).plans.values.single().let {
+            it.cargo.material shouldBe tool
+            it.cargo.amount shouldBe 1L
+            it.cargo.sourceBuildingId shouldBe if (collection) SUPPLY_BLACKSMITH else SUPPLY_WAREHOUSE
+            it.destinationBuildingId shouldBe target
+        }
+    }
+
+    for (collection in listOf(true, false))
+    test("a nonempty worksite tool buffer retains construction priority on ${if (collection) "collection" else "delivery"}") {
+        val original = readyToolPriorityFixture()
+        val quarry = original.stores.getValue(SUPPLY_QUARRY).copy(stock = mapOf("IRON_PICKAXE" to 1L))
+        val smith = original.stores.getValue(SUPPLY_BLACKSMITH).let { if (collection) it else it.copy(stock = emptyMap()) }
+        val warehouse = original.stores.getValue(SUPPLY_WAREHOUSE).let {
+            if (collection) it else it.copy(stock = it.stock + ("IRON_PICKAXE" to 1L)) }
+        val input = original.copy(stores = original.stores + mapOf(quarry.id to quarry, smith.id to smith, warehouse.id to warehouse),
+            requests = original.requests.map { if (it.material == "IRON_PICKAXE") it.copy(needed = 1) else it },
+            craftWorkers = emptyList())
+        val ages = mapOf(CivSupplyTask(if (collection) SUPPLY_BLACKSMITH else null, null,
+            if (collection) SUPPLY_WAREHOUSE else SUPPLY_QUARRY, "IRON_PICKAXE", false) to 0L,
+            CivSupplyTask(null, null, SUPPLY_TARGET, "COBBLESTONE", true) to 100L)
+        allocateCivSupplies(input, ages, now = 200).plans.values.single().cargo.material shouldBe "COBBLESTONE"
+    }
+
+    for (material in listOf("OAK_LOG", "BREAD", "IRON_PICKAXE"))
+    test("older ordinary $material output without an unmet tool request keeps construction priority") {
+        val original = readyToolPriorityFixture()
+        val source = original.stores.getValue(SUPPLY_BLACKSMITH).copy(stock = mapOf(material to 1L),
+            outputMaterial = material)
+        val input = original.copy(stores = original.stores + (source.id to source), craftWorkers = emptyList(),
+            requests = original.requests.filterNot { it.material == "IRON_PICKAXE" },
+            stackSizes = original.stackSizes + (material to if (material == "IRON_PICKAXE") 1 else 64),
+            couriers = original.couriers.map { it.copy(bagRoom = it.bagRoom + (material to 64L)) })
+        val ages = mapOf(CivSupplyTask(source.id, null, SUPPLY_WAREHOUSE, material, false) to 0L,
+            CivSupplyTask(null, null, SUPPLY_TARGET, "COBBLESTONE", true) to 100L)
+        allocateCivSupplies(input, ages, now = 200).plans.values.single().cargo.material shouldBe "COBBLESTONE"
+    }
+
+    test("a tool reserved by its source or already supplied in transit is not promoted for export") {
+        val original = readyToolPriorityFixture()
+        val source = original.stores.getValue(SUPPLY_BLACKSMITH)
+        val reserved = original.copy(stores = original.stores + (source.id to source.copy(desiredStock = mapOf("IRON_PICKAXE" to 1L))))
+        val inTransit = original.copy(requests = original.requests.map {
+            if (it.material == "IRON_PICKAXE") it.copy(inTransit = it.needed) else it })
+        val ages = mapOf(CivSupplyTask(source.id, null, SUPPLY_WAREHOUSE, "IRON_PICKAXE", false) to 0L,
+            CivSupplyTask(null, null, SUPPLY_TARGET, "COBBLESTONE", true) to 100L)
+        for (input in listOf(reserved, inTransit))
+            allocateCivSupplies(input, ages, now = 200).plans.values.single().cargo.material shouldBe "COBBLESTONE"
+    }
+})
+
 private val SUPPLY_CITY = UUID(0, 1)
 private val SUPPLY_WAREHOUSE = UUID(0, 10)
 private val SUPPLY_TARGET = UUID(0, 20)
 private val SUPPLY_QUARRY = UUID(0, 30)
 private val SUPPLY_TAVERN = UUID(0, 40)
+private val SUPPLY_BLACKSMITH = UUID(0, 50)
 private val SUPPLY_COURIER = UUID(0, 100)
 private val SUPPLY_SECOND = UUID(0, 101)
+
+private fun readyToolPriorityFixture(): CivSupplySnapshot {
+    val original = constructionCollectionFixture()
+    val warehouse = original.stores.getValue(SUPPLY_WAREHOUSE).copy(stock = mapOf("COBBLESTONE" to 2L, "BREAD" to 4L),
+        capacity = CivSupplyCapacity(190, emptyMap()))
+    val quarry = original.stores.getValue(SUPPLY_QUARRY).copy(stock = emptyMap(), desiredStock = mapOf("IRON_PICKAXE" to 2L),
+        capacity = CivSupplyCapacity(4, emptyMap(), outputEmptySlots = 1))
+    val smith = CivSupplyStore(SUPPLY_BLACKSMITH, CivPosition(-1860, 64, -2735), CivPosition(-1860, 65, -2735),
+        mapOf("IRON_PICKAXE" to 1L), emptyMap(), "IRON_SHOVEL", CivSupplyCapacity(24, emptyMap(), outputEmptySlots = 20),
+        BuildingType.BLACKSMITH)
+    return original.copy(stores = original.stores + mapOf(warehouse.id to warehouse, quarry.id to quarry, smith.id to smith),
+        requests = original.requests + CivSupplyRequest(quarry.id, "IRON_PICKAXE", 2, 0),
+        couriers = original.couriers.map { it.copy(bagRoom = it.bagRoom + ("IRON_PICKAXE" to 1L)) },
+        stackSizes = original.stackSizes + ("IRON_PICKAXE" to 1),
+        craftWorkers = listOf(CivCraftWorker(UUID(0, 200), smith.id, 0, 1,
+            mapOf("IRON_INGOT" to 1L, "STICK" to 2L), false, BuildingType.BLACKSMITH)))
+}
 
 private fun constructionCollectionFixture(): CivSupplySnapshot {
     val warehouse = CivSupplyStore(SUPPLY_WAREHOUSE, CivPosition(-1896, 64, -2774), CivPosition(-1905, 65, -2775),
