@@ -55,7 +55,7 @@ internal class CivsWorkstations(
             return null
         }
         val nativeWorld = world(city.worldId) ?: return null
-        return ordered(candidates, worker).take(MAXIMUM_PROBES).firstOrNull { valid(city, building, nativeWorld, it) }
+        return ordered(candidates, worker, building.type).take(MAXIMUM_PROBES).firstOrNull { valid(city, building, nativeWorld, it) }
     }
 
     override fun close() {
@@ -75,13 +75,14 @@ internal class CivsWorkstations(
         private val stations = mapOf(
             BuildingType.SMELTERY to listOf("furnace", "blast_furnace", "crafting_table"),
             BuildingType.CRUSHER to listOf("grindstone", "stonecutter", "crafting_table"),
-            BuildingType.BLACKSMITH to listOf("smithing_table", "anvil", "chipped_anvil", "damaged_anvil", "crafting_table"),
+            BuildingType.BLACKSMITH to listOf("smithing_table", "anvil", "chipped_anvil", "damaged_anvil", "crafting_table", "furnace", "blast_furnace"),
             BuildingType.SAWMILL to listOf("stonecutter", "crafting_table", "fletching_table"),
             BuildingType.STONEMASON to listOf("stonecutter", "crafting_table"),
             BuildingType.BAKERY to listOf("smoker", "furnace", "crafting_table"),
             BuildingType.LIBRARY to listOf("lectern", "crafting_table", "bookshelf"),
         )
         private val furniture = stations.values.flatten().toSet() + setOf("barrel", "chest", "trapped_chest", "hopper")
+        private val forgeFallbackMaterials = setOf("minecraft:furnace", "minecraft:blast_furnace")
         private val directions = listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)
         private val operatingOffsets = directions + listOf(1 to 1, 1 to -1, -1 to 1, -1 to -1) + directions.map { (x, z) -> x * 2 to z * 2 }
 
@@ -131,9 +132,13 @@ internal class CivsWorkstations(
             // Keep several actual machines before filling the bounded list with alternate standing sides.
             val sides = machines.map { cell -> operatingOffsets.flatMap { (dx, dz) -> listOf(0, -1, 1).map { dy ->
                 cell.position.let { p -> p.copy(x = p.x + dx, y = p.y + dy, z = p.z + dz) }
-            } }.filter(interior::interior).map { CivWorkstation(interior.world(it), interior.world(cell.position), cell.blockData.substringBefore('[')) } }
-            val preferred = sides.filter { side -> side.firstOrNull()?.material?.substringAfter(':') !in setOf(null, "crafting_table", "fletching_table") }
-            for (side in 0 until operatingOffsets.size * 3) for (machine in preferred.ifEmpty { sides }) machine.getOrNull(side)?.let { result.add(it) }
+            } }.filter { if (controlBarrels) interior.interior(it) else interior.operatingFloor(it) }
+                .map { CivWorkstation(interior.world(it), interior.world(cell.position), cell.blockData.substringBefore('[')) } }
+            val (forgeFallbacks, regular) = sides.partition { side -> building.type == BuildingType.BLACKSMITH && !controlBarrels &&
+                side.firstOrNull()?.material in forgeFallbackMaterials }
+            val preferred = regular.filter { side -> side.firstOrNull()?.material?.substringAfter(':') !in setOf(null, "crafting_table", "fletching_table") }
+            for (group in listOf(preferred.ifEmpty { regular }, forgeFallbacks))
+                for (side in 0 until operatingOffsets.size * 3) for (machine in group) machine.getOrNull(side)?.let { result.add(it) }
             if (result.isEmpty() && !controlBarrels) interior.reachable.asSequence().filter(interior::interior)
                 .sortedWith(compareBy({ kotlin.math.abs(it.y - entrance.y) },
                     { (it.x - entrance.x).toLong() * (it.x - entrance.x) + (it.z - entrance.z).toLong() * (it.z - entrance.z) },
@@ -143,7 +148,11 @@ internal class CivsWorkstations(
         }
 
         /** Rotate machines first, then their standing sides, once per committed production cycle. */
-        internal fun ordered(candidates: List<CivWorkstation>, worker: CivWorker): List<CivWorkstation> {
+        internal fun ordered(candidates: List<CivWorkstation>, worker: CivWorker, type: BuildingType? = null): List<CivWorkstation> {
+            if (type == BuildingType.BLACKSMITH) {
+                val (fallbacks, regular) = candidates.partition { it.material in forgeFallbackMaterials }
+                return ordered(regular, worker) + ordered(fallbacks, worker)
+            }
             val groups = candidates.groupBy(CivWorkstation::focus).values.toList()
             if (groups.isEmpty()) return emptyList()
             val first = (Math.floorMod(worker.id.hashCode(), groups.size) + Math.floorMod(worker.completedCycles, groups.size.toLong()).toInt()) % groups.size

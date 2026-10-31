@@ -22,8 +22,11 @@ internal class CivsAuthoredInterior(val building: CivBuilding, val snapshot: Arc
     fun world(p: ArcSchematicPoint): CivPosition = CivsWorksiteLayouts.point(building,
         CivPosition(p.x - snapshot.origin.x, p.y - snapshot.origin.y, p.z - snapshot.origin.z))
 
-    fun interior(p: ArcSchematicPoint): Boolean = p in reachable && p.x > snapshot.minimum.x && p.x < snapshot.maximum.x &&
-        p.z > snapshot.minimum.z && p.z < snapshot.maximum.z && world(p).let { building.bounds.contains(it.x, it.y + 1, it.z) } &&
+    /** Real machines need a reachable supported stance and headroom, including in an open forge. */
+    fun operatingFloor(p: ArcSchematicPoint): Boolean = p in reachable && p.x > snapshot.minimum.x && p.x < snapshot.maximum.x &&
+        p.z > snapshot.minimum.z && p.z < snapshot.maximum.z && world(p).let { building.bounds.contains(it.x, it.y + 1, it.z) }
+
+    fun interior(p: ArcSchematicPoint): Boolean = operatingFloor(p) &&
         (p.y + 2..minOf(p.y + 12, snapshot.maximum.y)).any { y -> name(p.copy(y = y)).let {
             it !in AIR && it !in setOf("structure_void", "water", "lava") && !it.endsWith("_leaves")
         } }
