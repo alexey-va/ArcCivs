@@ -34,7 +34,7 @@ class CivsMineAutoFallbackTest : FunSpec({
             work.changes shouldBe emptyList()
             work.inputs shouldBe emptyMap()
             work.outputs.values.single() shouldBe 1L
-            (work.outputs.keys.single() in setOf("COBBLESTONE", "COAL", "RAW_IRON")) shouldBe true
+            (work.outputs.keys.single() in CivsMineFallback.OUTPUTS) shouldBe true
             work.miningStep shouldBe null
             work.miningPlanVersion shouldBe null
             work.miningSections shouldBe null
@@ -42,6 +42,16 @@ class CivsMineAutoFallbackTest : FunSpec({
             work.autonomousVisual shouldBe false
             citizenWorkFocus(work) shouldBe null
             runtime.validate(city, work)
+            for (material in listOf("RAW_GOLD", "REDSTONE", "DIAMOND")) {
+                val selected = work.copy(outputs = mapOf(material to 1L))
+                CivsMineFallback.matches(selected) shouldBe true
+                val after = CivsRules.finishWorldWork(city, selected, 10_000)
+                CivsEquipment.plainCount(after.workers.single(), material) shouldBe
+                    CivsEquipment.plainCount(worker, material) + 1
+                val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList())
+                Gson().fromJson(Gson().toJson(receipt), CivInventoryTransaction::class.java).validated().after shouldBe after
+                shouldThrow<CivsRejection> { CivsRules.finishWorldWork(after, selected, 10_000) }.reason shouldBe "stale-delivery"
+            }
             world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.WATER
             val completed = CivsRules.finishWorldWork(city, work, 10_000)
             completed.minePlans shouldBe city.minePlans

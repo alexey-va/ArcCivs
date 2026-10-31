@@ -50,6 +50,7 @@ class CivsService(
     private val unhealthy = mutableSetOf<UUID>()
     private val completions = mutableSetOf<CompletableFuture<*>>()
     private val lastInjury = mutableMapOf<UUID, CivDeathContext>()
+    private val quarryStockWarnings = mutableSetOf<UUID>()
     private var initialized = false
     private var closed = false
     private var citizenDrain = CompletableFuture.completedFuture<Void>(null)
@@ -116,7 +117,7 @@ class CivsService(
     private val testingPermissions = CivsChunkPermissions(plugin, clock, CIVS_TESTING_PERMISSION)
     private val controlInstallations = CivsControlInstallations(plugin, world, storage, chunkLoading, { cities },
         busy, unhealthy, ::ready) { id, transform -> mutate(id, transform = transform) }
-    private val citizens = (citizenRuntime ?: CivsCitizens(plugin, { if (ready()) cities.values.filter { it.id !in unhealthy && it.pendingDeletion == null } else emptyList() },
+    private val citizens = (citizenRuntime ?: CivsCitizens(plugin, ::residentSettlements,
         ::deliver, { player, cityId, workerId ->
             if (cities[cityId]?.autonomy != null && player.hasPermission("arccivs.admin")) ui.openWorker(player, cityId, workerId)
             else if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
@@ -445,6 +446,10 @@ class CivsService(
     override fun blueprintChoices(type: BuildingType, style: String): List<CivBlueprintChoice> = blueprints.choices(type, style)
     override fun maximumBuildingLevel(building: CivBuilding): Int = blueprints.maximumLevel(building)
     override fun settlements(): List<Settlement> = cities.values.toList()
+
+    internal fun residentSettlements(): List<Settlement> = if (ready()) cities.values.filter {
+        it.id !in unhealthy && it.pendingDeletion == null
+    } else emptyList()
     internal fun corpseSettlements(): List<Settlement> = if (ready()) cities.values.filter {
         it.id !in unhealthy && it.pendingDeletion == null
     } else emptyList()
@@ -919,6 +924,7 @@ class CivsService(
         supply.clear()
         cargoRequests.clearObservations()
         loadFailure = null
+        quarryStockWarnings.clear()
         storage.cancelCollectedPersistence()
         chunkLoading.reset(maximumLoadedChunks)
         placement.cancelAll("reload")
@@ -1017,6 +1023,7 @@ class CivsService(
         if (closed) return
         construction.retain()
         placement.expire()
+        if (ready()) pulseQuarryStaffing()
         citizens.pulse(now())
         plugin.server.onlinePlayers.forEach({ player -> placement.refreshBoundary(player) })
         if (ready()) {
@@ -1046,6 +1053,26 @@ class CivsService(
         planBoardSnapshots.retain(visibleCities.mapTo(hashSetOf(), Settlement::id))
         planBoards.pulse(visibleCities)
         updateHealth()
+    }
+
+    private fun pulseQuarryStaffing() {
+        for (city in cities.values) {
+            if (city.id in busy || city.id in unhealthy || city.pendingDeletion != null || inventoryJournal.pending(city.id) ||
+                !CivsRules.needsQuarryStaffingReconciliation(city)) continue
+            if (city.inventory != null && CivsRules.excessQuarryWorkers(city).any { it.pendingStock?.let { stock -> stock != Stock() } == true }) {
+                if (quarryStockWarnings.add(city.id)) CivsDiagnostics.record(plugin.logger, Level.WARNING, city.id,
+                    CivsDiagnostics.line("quarry_staffing_waiting", "city" to city.id, "reason" to "physical-pending-stock"))
+                continue
+            }
+            val next = CivsRules.reconcileQuarryStaffing(city, now(), residentFoods) { citizens.canReassign(city.id, it) }
+            if (next == city) continue
+            runCatching { mutate(city.id) { next } }.onSuccess { future ->
+                future.whenCompleteSync(tasks) { _, failure ->
+                    if (failure != null) log("reconcile quarry staff ${city.id}", failure, city.id)
+                }
+            }.onFailure { log("reconcile quarry staff ${city.id}", it, city.id) }
+            return
+        }
     }
 
     private fun pulseCorpses() {

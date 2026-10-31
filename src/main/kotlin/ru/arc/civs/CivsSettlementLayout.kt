@@ -138,6 +138,12 @@ internal object CivsSettlementLayout {
                 val span = (frame.halfWidth - 12) * step / 5
                 listOf(-span, span)
             } else listOf(0, -8, 8, -16, 16, -24, 24, -32, 32, -36, 36)
+            val edge = frame.halfWidth + 8
+            val flank = frame.halfWidth / 2
+            // Keep a legal close frontage when the wider core puts the ordinary flank beyond work reach.
+            // The unchanged envelope, apron and wall guards still admit every candidate.
+            val distances = if (edge * edge + flank * flank > CivsRules.MAX_WORK_ROUTE_DISTANCE * CivsRules.MAX_WORK_ROUTE_DISTANCE)
+                listOf(5, 8, 14, 20) else listOf(8, 14, 20)
             val preferred = when (current.type) { BuildingType.FORESTER -> 3; BuildingType.QUARRY -> 1; else -> 2 }
             for (gate in frame.gates.sortedBy { if (it.side == preferred) 0 else 1 }) {
                 val outward = rotate(CivPosition(0, 0, -1), gate.side)
@@ -146,7 +152,7 @@ internal object CivsSettlementLayout {
                 val depot = city.buildings.filter(CivsRules::isDepot).minByOrNull { manhattan(it.entrance, gate.center) }
                 val alignment = depot?.entrance?.let { (it.x - gate.center.x) * worldSideways.x +
                     (it.z - gate.center.z) * worldSideways.z } ?: 0
-                for (distance in listOf(8, 14, 20)) for (offset in offsets) {
+                for (distance in distances) for (offset in offsets) {
                     val local = CivPosition(outward.x * distance + sideways.x * (offset + alignment), 0,
                         outward.z * distance + sideways.z * (offset + alignment))
                     val delta = rotate(local, frame.rotation / 90)

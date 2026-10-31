@@ -6,7 +6,7 @@ import java.util.WeakHashMap
 internal object CivsMineFallback {
     const val DISCOVERY_ADMISSIONS = 16
     const val DURATION_MILLIS = 6_000L
-    val OUTPUTS = setOf("COBBLESTONE", "COAL", "RAW_IRON")
+    val OUTPUTS = setOf("COBBLESTONE", "COAL", "RAW_IRON", "RAW_GOLD", "REDSTONE", "DIAMOND")
 
     fun eligible(city: Settlement, building: CivBuilding, worker: CivWorker): Boolean = city.autonomy?.paused == false &&
         city.inventory?.mode == CivStorageMode.PHYSICAL && city.pendingDeletion == null && building.type == BuildingType.QUARRY &&

@@ -464,7 +464,14 @@ are preserved; full jobs and inactive production sites are skipped.
 The SITE hall supplies the initial four beds and a depot. A SITE builder hut
 has one assignable slot: its builder can construct that same hut first, then
 other buildings. Completed builder huts and ordinary town halls have one/two/three
-worker slots at levels one/two/three, as existing production buildings already do.
+worker slots at levels one/two/three, as foresters and farms do.
+A quarry has one worker at every level. Higher levels retain their deeper authored
+mine plans and increase generated-output quality. The fixed one-item, six-second
+generator/fallback roll is exclusive, checks the selected ore's native tool
+requirement, and falls back to cobblestone without rerolling. Actual excavated
+blocks retain their vanilla drops. Old excess miners finish ordinary goods
+returns under their saved assignment before one durable staffing revision;
+critical automatic reassignment cannot bypass that drain.
 Ordinary hall workers are scribes: one observed 60-second work session at the
 workplace converts three plain PAPER and one LEATHER into one BOOK. Inputs,
 output, cycle token and internal profession point commit in the same receipt.
@@ -1019,6 +1026,9 @@ infill faces a nearby real street when one is available. Resource workplaces sta
 outside the core. Accepted buildings, routes and adopted plans never move as a
 side effect of this preference; an old city with no adopted plan has no full-plan
 infrastructure bill.
+When a wider core puts the ordinary exterior flank beyond the unchanged work
+reach, a closer frontage is considered under the same wall, apron and envelope
+guards. A small worksite must leave a feasible broad farm bay available.
 
 The board and runtime consume this same persisted geometry. Reserved SITE
 admission and later activation retain the adopted route and upgrade envelope while

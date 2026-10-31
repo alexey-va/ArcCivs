@@ -18,6 +18,7 @@ internal class CivsCitizenPlanning(
     private val craftPlan: (Settlement, CivWorker) -> CivCraftJob?,
     private val workstation: ((Settlement, CivWorker) -> CivWorkstation?)?,
     private val remove: (CitizenActor, String) -> Unit,
+    private val residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
 ) {
     private val routes get() = routesOwner()
     private val couriers get() = couriersOwner()
@@ -106,6 +107,18 @@ internal class CivsCitizenPlanning(
             city.inventory != null && !it.carrying && it.cargo.sourceWorkerId != null
         }
         var base = citizenPlan(city, worker, courier) ?: return null
+        if (CivsRules.excessQuarryWorkers(city).any { it.id == worker.id }) {
+            runtime.actors[worker.id]?.autonomousVisualSession = null
+            val returning = when {
+                base.courier != null || base.pendingStockDelivery != null -> base
+                worker.pendingStock?.let { it != Stock() } == true ||
+                    CivsLogistics.workerExcess(city, worker, foods = residentFoods).isNotEmpty() ->
+                    // Keep the real workplace/token for ordinary returns, never another mine action.
+                    base.copy(workMillis = 0, idleReason = "waiting-reassignment", autonomousWork = null)
+                else -> return null
+            }
+            return if (city.autonomy?.paused == true) returning.copy(idleReason = "autonomy-paused") else returning
+        }
         if (city.autonomy?.paused == true) return base.copy(idleReason = "autonomy-paused")
         if (base.pendingStockDelivery != null) {
             runtime.actors[worker.id]?.autonomousVisualSession = null

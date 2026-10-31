@@ -105,7 +105,7 @@ internal fun CivsUi.showOffer(player: Player, type: BuildingType, error: Compone
     val eligible = room && requiredResearch == null
     present(player, "civs.offer", "buildings.offer-title", listOfNotNull(
         body(buildingName(player, type, 1)), body(player, "building-purpose.${type.name.lowercase(Locale.ROOT)}"),
-        if (type !in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER) &&
+        if (type !in setOf(BuildingType.QUARRY, BuildingType.SMELTERY, BuildingType.CRUSHER) &&
             (type in setOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.SAWMILL) || CivsProduction.options(type).isNotEmpty()))
             body(player, "buildings.workplaces-levels") else null,
         body(player, "buildings.site-help"),

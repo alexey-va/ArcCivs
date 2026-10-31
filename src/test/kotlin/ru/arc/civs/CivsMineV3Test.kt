@@ -62,10 +62,16 @@ class CivsMineV3Test : FunSpec({
     }
 
     test("inexhaustible extraction has one weighted item and no high-tier yield from an unsuitable pickaxe") {
-        (0..99).map { CivsWorksites.generatorOutput(it, true) }.groupingBy { it }.eachCount() shouldBe
-            mapOf("COBBLESTONE" to 95, "COAL" to 4, "RAW_IRON" to 1)
-        (0..99).map { CivsWorksites.generatorOutput(it, false) }.groupingBy { it }.eachCount() shouldBe
-            mapOf("COBBLESTONE" to 96, "COAL" to 4)
+        for (level in 1..3) {
+            (0..9_999).map { CivsWorksites.generatorOutput(it, level) { true } }.groupingBy { it }.eachCount() shouldBe
+                mapOf("COBBLESTONE" to 10_000 - 516 * level, "COAL" to 400 * level, "RAW_IRON" to 100 * level,
+                    "RAW_GOLD" to 5 * level, "REDSTONE" to 10 * level, "DIAMOND" to level)
+            (0..9_999).map { CivsWorksites.generatorOutput(it, level) { material -> material == "RAW_IRON" } }
+                .groupingBy { it }.eachCount() shouldBe
+                mapOf("COBBLESTONE" to 10_000 - 500 * level, "COAL" to 400 * level, "RAW_IRON" to 100 * level)
+            (0..9_999).map { CivsWorksites.generatorOutput(it, level) { false } }.groupingBy { it }.eachCount() shouldBe
+                mapOf("COBBLESTONE" to 10_000 - 400 * level, "COAL" to 400 * level)
+        }
     }
 
     test("a historical V3 deferred access wall expires before transfer work and cannot borrow a later central opening row") {

@@ -577,8 +577,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 val standing = citizenStorageTarget(city, building, world) {
                     mineFallbackStanding(city, worker, building, world, it)
                 } ?: return null
-                val roll = java.util.concurrent.ThreadLocalRandom.current().nextInt(100)
-                val output = CivsWorksites.generatorOutput(roll, roll != 99 || Bukkit.createBlockData("minecraft:iron_ore").isPreferredTool(tool(worker)))
+                val output = generatedQuarryOutput(worker, building)
                 execution.discoveryAdmissions = 0
                 val cause = execution.blockedSections.toSortedMap().values.firstOrNull()
                     ?: execution.lastDenial ?: denial
@@ -884,9 +883,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val standing = beside(city, worker, building, world, point, ladder = true, miningStep = geometry.steps.size.toLong(),
             preferred = CivsWorksiteLayouts.point(building, localStanding)) ?: return null
         val outputs = if (autonomous) emptyMap() else {
-            val roll = java.util.concurrent.ThreadLocalRandom.current().nextInt(100)
-            val output = CivsWorksites.generatorOutput(roll, roll != 99 || Bukkit.createBlockData("minecraft:iron_ore").isPreferredTool(tool(worker)))
-            mapOf(output to 1L)
+            mapOf(generatedQuarryOutput(worker, building) to 1L)
         }
         // This permanent face is worked physically; the existing native receipt
         // atomically captures one item, one tool use and the completed work cycle.
@@ -901,6 +898,18 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         }
         return work
     }
+
+    private fun generatedQuarryOutput(worker: CivWorker, building: CivBuilding): String =
+        CivsWorksites.generatorOutput(java.util.concurrent.ThreadLocalRandom.current().nextInt(10_000), building.level) { material ->
+            val ore = when (material) {
+                "RAW_IRON" -> "minecraft:iron_ore"
+                "RAW_GOLD" -> "minecraft:gold_ore"
+                "REDSTONE" -> "minecraft:redstone_ore"
+                "DIAMOND" -> "minecraft:diamond_ore"
+                else -> error("Unsupported generated ore: $material")
+            }
+            Bukkit.createBlockData(ore).isPreferredTool(tool(worker))
+        }
 
     /** Fixed-size shaft/access frontier; native checks are still shared across bounded pulses. */
     fun mineFrontier(city: Settlement, building: CivBuilding, world: World,

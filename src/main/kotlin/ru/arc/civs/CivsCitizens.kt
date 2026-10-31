@@ -325,7 +325,7 @@ class CivsCitizens(
             workInputsReady = workInputsReady,
             craftPlan = craftPlan,
             workstation = workstation,
-            remove = ::remove)
+            remove = ::remove, residentFoods = residentFoods)
         equipment = CivsCitizenEquipment(runtime,
             threats = threats)
         audience = CivsCitizenAudience(runtime,

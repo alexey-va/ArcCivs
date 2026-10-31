@@ -91,10 +91,10 @@ object CivsRules {
         if (building.phase == BuildingPhase.ACTIVE) building.level else 1
     }
     else if (building.phase != BuildingPhase.ACTIVE) 0 else when (building.type) {
-        BuildingType.TOWN_HALL, BuildingType.WAREHOUSE, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
+        BuildingType.TOWN_HALL, BuildingType.WAREHOUSE, BuildingType.FORESTER, BuildingType.FARM,
         BuildingType.SAWMILL, BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY,
         BuildingType.BAKERY -> building.level
-        BuildingType.GUARD_TOWER, BuildingType.TAVERN -> 1
+        BuildingType.QUARRY, BuildingType.GUARD_TOWER, BuildingType.TAVERN -> 1
         else -> 0
     }
 
@@ -437,6 +437,29 @@ object CivsRules {
             .copy(health = minOf(CivsResidents.maxHealth(worker), CivsResidents.health(worker) + 6),
                 hunger = minOf(20, CivsResidents.hunger(worker) + 6))
         return changed(city, city.copy(workers = city.workers.map { if (it.id == workerId) updated else it }))
+    }
+
+    internal fun excessQuarryWorkers(city: Settlement): List<CivWorker> {
+        val quarries = city.buildings.filter { it.type == BuildingType.QUARRY }.mapTo(hashSetOf()) { it.id }
+        val retained = hashSetOf<UUID>()
+        return city.workers.filter { it.assignment in quarries && !retained.add(requireNotNull(it.assignment)) }
+    }
+
+    internal fun needsQuarryStaffingReconciliation(city: Settlement): Boolean = excessQuarryWorkers(city).isNotEmpty()
+
+    /** Existing goods return under their old assignment; accepted receipts must retire before this transition. */
+    internal fun reconcileQuarryStaffing(city: Settlement, now: Long,
+        foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY, canReassign: (UUID) -> Boolean = { true }): Settlement {
+        validate(city)
+        check(now >= 0, "invalid-time")
+        val excess = excessQuarryWorkers(city)
+        if (excess.isEmpty() || excess.any { it.cargo != null || it.pendingStock?.let { stock -> stock != Stock() } == true ||
+                CivsLogistics.workerExcess(city, it, foods = foods).isNotEmpty() || !canReassign(it.id) }) return city
+        val retiring = excess.mapTo(hashSetOf()) { it.id }
+        return changed(city, city.copy(workers = city.workers.map { worker ->
+            if (worker.id !in retiring) worker
+            else worker.copy(assignment = null, nextDeliveryAt = maxOf(add(worker.nextDeliveryAt, 1), now))
+        }))
     }
 
     fun needsAutoAssignment(city: Settlement, canReassign: (UUID) -> Boolean = { true }): Boolean =

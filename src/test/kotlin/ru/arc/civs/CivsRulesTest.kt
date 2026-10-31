@@ -5,9 +5,93 @@ import com.google.gson.JsonNull
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.mockk
+import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsRulesTest : FunSpec({
+    for (level in 1..3) test("one quarry worker is admitted at level $level for personal and autonomous cities") {
+        MockBukkitTestRuntime.open().use {
+            for (autonomous in listOf(false, true)) {
+                val before = quarryStaffingCity(level = level, autonomous = autonomous)
+                    .let { it.copy(workers = it.workers.map { worker -> worker.copy(assignment = null, nextDeliveryAt = 0) }) }
+                val quarry = before.buildings.first { it.type == BuildingType.QUARRY }
+                CivsRules.slots(quarry) shouldBe 1
+                CivsRules.slots(before, quarry) shouldBe 1
+                CivsRules.slots(quarry.copy(phase = BuildingPhase.SITE)) shouldBe 0
+                val assigned = CivsRules.assign(before, before.owner, before.workers.first().id, quarry.id, 10_000)
+                rejects("workplace-full") {
+                    CivsRules.assign(assigned, assigned.owner, assigned.workers[1].id, quarry.id, 10_000)
+                }
+                CivsRules.autoAssign(before, before.owner, 10_000).workers.count { it.assignment == quarry.id } shouldBe 1
+            }
+        }
+    }
+
+    test("historical quarry counts remain readable without relaxing other workplace or level caps") {
+        MockBukkitTestRuntime.open().use {
+            val before = quarryStaffingCity()
+            val quarry = before.buildings.first { it.type == BuildingType.QUARRY }
+            CivsRules.validate(Gson().fromJson(Gson().toJson(before), Settlement::class.java)) shouldBe before
+            rejects("invalid-state") { CivsRules.validate(before.copy(buildings = before.buildings.map {
+                if (it.id == quarry.id) it.copy(level = 2) else it
+            })) }
+            rejects("invalid-state") { CivsRules.validate(before.copy(workers = before.workers +
+                before.workers.first().copy(id = uuid(999), name = "Fourth miner"))) }
+            val forester = quarry.copy(type = BuildingType.FORESTER, level = 2)
+            rejects("invalid-state") { CivsRules.validate(before.copy(buildings = before.buildings.map {
+                if (it.id == quarry.id) forester else it
+            })) }
+            CivsRules.slots(forester.copy(level = 3)) shouldBe 3
+            CivsRules.slots(quarry.copy(type = BuildingType.FARM)) shouldBe 3
+            CivsRules.slots(quarry.copy(type = BuildingType.WAREHOUSE)) shouldBe 3
+        }
+    }
+
+    test("quarry reconciliation changes only excess assignments and schedules once") {
+        MockBukkitTestRuntime.open().use {
+            val before = quarryStaffingCity()
+            val quarry = before.buildings.first { it.type == BuildingType.QUARRY }
+            CivsRules.needsQuarryStaffingReconciliation(before) shouldBe true
+            val after = CivsRules.reconcileQuarryStaffing(before, 10_000)
+            after.revision shouldBe before.revision + 1
+            after.workers.first() shouldBe before.workers.first()
+            after.workers.drop(1).zip(before.workers.drop(1)).forEach { (updated, original) ->
+                updated shouldBe original.copy(assignment = null, nextDeliveryAt = maxOf(10_000, original.nextDeliveryAt + 1))
+            }
+            after.copy(workers = before.workers, revision = before.revision) shouldBe before
+            after.workers.count { it.assignment == quarry.id } shouldBe 1
+            CivsRules.needsQuarryStaffingReconciliation(after) shouldBe false
+            CivsRules.reconcileQuarryStaffing(after, 20_000) shouldBe after
+        }
+    }
+
+    test("quarry reconciliation waits for existing goods cargo and resident transfers") {
+        MockBukkitTestRuntime.open().use {
+            val before = quarryStaffingCity(autonomous = true)
+            val extra = before.workers[1]
+            val quarry = before.buildings.first { it.type == BuildingType.QUARRY }
+            val warehouse = quarry.copy(id = uuid(998), type = BuildingType.WAREHOUSE, level = 1,
+                anchor = CivPosition(25, 64, 0), bounds = CivBox(CivPosition(24, 63, -1), CivPosition(26, 68, 1)),
+                entrance = CivPosition(25, 64, 2), control = CivPosition(25, 64, 0))
+            val cargo = CivCargo(UUID.randomUUID(), warehouse.id, quarry.id, warehouse.id, quarry.entrance,
+                "COBBLESTONE", 1, inventoryBacked = true)
+            for (blocked in listOf(extra.copy(pendingStock = Stock(stone = 3)), extra.copy(cargo = cargo),
+                    CivsEquipment.collectSupplies(extra, mapOf("COAL" to 3L)))) {
+                val city = before.copy(buildings = before.buildings + warehouse,
+                    workers = before.workers.map { if (it.id == extra.id) blocked else it })
+                CivsRules.reconcileQuarryStaffing(city, 10_000) shouldBe city
+            }
+            CivsRules.reconcileQuarryStaffing(before, 10_000) { it != extra.id } shouldBe before
+            val apple = CivsEquipment.collectSupplies(extra, mapOf("APPLE" to 16L))
+            val withFood = before.copy(workers = before.workers.map { if (it.id == apple.id) apple else it })
+            val foods = CivsResidentFoods(mapOf("BREAD" to CivResidentFoodDefinition(6), "APPLE" to CivResidentFoodDefinition(4)))
+            val after = CivsRules.reconcileQuarryStaffing(withFood, 10_000, foods)
+            after.workers[1].assignment shouldBe null
+            after.workers[1].items shouldBe apple.items
+        }
+    }
+
     test("plan board is one ordinary paid plot with no resident job or economic output") {
         val city = activeCity()
         val board = building(70, BuildingType.PLAN_BOARD, x = 10, phase = BuildingPhase.ACTIVE)
@@ -565,10 +649,99 @@ class CivsRulesTest : FunSpec({
     }
 })
 
+class CivsQuarryStaffingPlanningTest : FunSpec({
+    fun planner(city: Settlement, select: (Settlement, CivWorker) -> CivWorldWork?,
+        courier: CivCourierPlan? = null, foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY) =
+        CivsCitizenPlanning(CitizenRuntime(mockk(relaxed = true)) { listOf(city) },
+            { mockk(relaxed = true) }, { mockk(relaxed = true) }, { mockk(relaxed = true) },
+            { mockk(relaxed = true) }, { mockk(relaxed = true) }, { mockk(relaxed = true) }, { mockk(relaxed = true) },
+            { _, _ -> courier }, select, { _, _ -> "searching-work" }, { _, _ -> true }, { _, _ -> true },
+            { _, _ -> null }, null, { _, _ -> }, residentFoods = foods)
+
+    test("only the retained miner selects new work and excess miners keep their token solely for existing output returns") {
+        MockBukkitTestRuntime.open().use {
+            val base = quarryStaffingCity(autonomous = true)
+            val extra = CivsEquipment.collectSupplies(base.workers[1], mapOf("COAL" to 4L))
+            val city = base.copy(workers = base.workers.map { if (it.id == extra.id) extra else it })
+            var selections = 0
+            val plans = planner(city, { _, _ -> selections++; null })
+            val returning = requireNotNull(plans.plan(city, extra))
+            returning.token.assignmentId shouldBe extra.assignment
+            returning.token.completedCycles shouldBe extra.completedCycles
+            returning.token.nextDeliveryAt shouldBe extra.nextDeliveryAt
+            returning.storage shouldBe city.building(requireNotNull(extra.assignment))!!.control
+            returning.idleReason shouldBe "waiting-reassignment"
+            returning.workMillis shouldBe 0L
+            returning.worldWork shouldBe null
+            returning.autonomousWork shouldBe null
+            plans.plan(city, city.workers[2]) shouldBe null
+            selections shouldBe 0
+            plans.plan(city, city.workers.first())!!.idleReason shouldBe "searching-work"
+            selections shouldBe 1
+        }
+    }
+
+    test("excess legacy miners retain ordinary pending stock self delivery without selecting another mine action") {
+        MockBukkitTestRuntime.open().use {
+            val base = quarryStaffingCity(autonomous = true)
+            val extra = base.workers[1].copy(pendingStock = Stock(stone = 3))
+            val city = base.copy(inventory = null, workers = base.workers.map { if (it.id == extra.id) extra else it })
+            val plan = requireNotNull(planner(city, { _, _ -> error("New mine work must not be selected") }).plan(city, extra))
+            plan.pendingStockDelivery shouldBe extra.pendingStock
+            plan.token shouldBe CitizenToken(extra.assignment, extra.completedCycles, extra.nextDeliveryAt, null)
+            plan.worldWork shouldBe null
+        }
+    }
+
+    test("an excess miner keeps its existing carried cargo journey before losing the old assignment") {
+        MockBukkitTestRuntime.open().use {
+            val base = quarryStaffingCity()
+            val quarry = base.buildings.first { it.type == BuildingType.QUARRY }
+            val warehouse = quarry.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, level = 1,
+                anchor = CivPosition(25, 64, 0), bounds = CivBox(CivPosition(24, 63, -1), CivPosition(26, 68, 1)),
+                entrance = CivPosition(25, 64, 2), control = CivPosition(25, 64, 0))
+            val cargo = CivCargo(UUID.randomUUID(), warehouse.id, quarry.id, warehouse.id, quarry.entrance,
+                "COBBLESTONE", 1, inventoryBacked = true)
+            val extra = base.workers[1].copy(cargo = cargo)
+            val city = base.copy(buildings = base.buildings + warehouse,
+                workers = base.workers.map { if (it.id == extra.id) extra else it })
+            val courier = requireNotNull(CivsLogistics.plan(city, extra) { emptyMap() })
+            courier.carrying shouldBe true
+            val plan = planner(city, { _, _ -> error("New mine work must not be selected") }, courier).plan(city, extra)
+            plan shouldBe citizenPlan(city, extra, courier)
+            plan!!.courier!!.cargo shouldBe cargo
+            CivsRules.reconcileQuarryStaffing(city, 10_000) shouldBe city
+        }
+    }
+
+    test("personal configured food does not spawn an otherwise empty retiring miner") {
+        MockBukkitTestRuntime.open().use {
+            val base = quarryStaffingCity(autonomous = true)
+            val extra = CivsEquipment.collectSupplies(base.workers[1], mapOf("APPLE" to 16L))
+            val city = base.copy(workers = base.workers.map { if (it.id == extra.id) extra else it })
+            val foods = CivsResidentFoods(mapOf("BREAD" to CivResidentFoodDefinition(6), "APPLE" to CivResidentFoodDefinition(4)))
+            planner(city, { _, _ -> error("New mine work must not be selected") }, foods = foods).plan(city, extra) shouldBe null
+        }
+    }
+})
+
 private val owner = uuid(20)
 private val hallId = uuid(1)
 private val foundationId = uuid(40)
 private fun uuid(value: Int) = UUID(0, value.toLong())
+
+internal fun quarryStaffingCity(worldId: UUID = UUID.randomUUID(), level: Int = 3,
+    autonomous: Boolean = false): Settlement {
+    val quarry = spatialBuilding("caledonia", "miner", level, CivPosition(0, 69, 0)).let {
+        it.copy(control = CivsWorksiteLayouts.point(it, requireNotNull(CivsMinePlan.forBuilding(it)).bottom).copy(x = -2))
+    }
+    val workers = (0..2).map { index -> spatialWorker(quarry, "IRON_PICKAXE").copy(
+        name = "Miner $index", assignment = quarry.id.takeIf { index < level },
+        nextDeliveryAt = 100L + index, completedCycles = 10L + index,
+        skills = mapOf("QUARRY" to (index * 10L)), health = 20.0, hunger = 20) }
+    return CivsRules.validate(spatialCity(worldId, listOf(quarry), workers.first()).copy(workers = workers,
+        inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = if (autonomous) CivAutonomy() else null))
+}
 
 private fun building(id: Int, type: BuildingType, x: Int, z: Int = 0, phase: BuildingPhase = BuildingPhase.CONSTRUCTING): CivBuilding =
     CivBuilding(uuid(id), type, 1, CivPosition(x, 64, z), 0, "${type.name.lowercase()}-1",

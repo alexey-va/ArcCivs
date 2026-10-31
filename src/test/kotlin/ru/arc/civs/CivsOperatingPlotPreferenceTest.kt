@@ -1,13 +1,15 @@
 package ru.arc.civs
 
 import com.google.gson.JsonParser
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsOperatingPlotPreferenceTest : FunSpec({
-    test("a larger new frame samples eleven bounded depot aligned offsets while a legacy frame keeps its smaller span") {
-        val base = settlementPlanCity().copy(radius = 128)
+    for (halfWidth in listOf(72, 74))
+    test("frame $halfWidth samples bounded depot aligned offsets while a legacy frame keeps its smaller span") {
+        val base = settlementPlanCity().copy(radius = 128, autonomy = CivAutonomy(layoutHalfWidth = halfWidth))
         val warehouse = CivsSettlementPlans.at(settlementPlanTemplates().getValue(BuildingType.WAREHOUSE).first,
             CivPosition(-40, 64, 0), 0, UUID(141, 250)).copy(phase = BuildingPhase.ACTIVE)
         val city = base.copy(buildings = base.buildings + warehouse)
@@ -16,7 +18,8 @@ class CivsOperatingPlotPreferenceTest : FunSpec({
         val future = current.copy(level = 3)
         val choices = CivsSettlementLayout.candidates(city, current, future)
         (choices.size in 1..64) shouldBe true
-        choices.any { it.building.entrance.x == -80 && kotlin.math.abs(it.building.entrance.z) == 60 } shouldBe true
+        choices.any { it.building.entrance.x == -(halfWidth + 8) &&
+            kotlin.math.abs(it.building.entrance.z) == halfWidth - 12 } shouldBe true
         choices.all { CivsRules.workRouteWithinReach(city, it.building.entrance) } shouldBe true
         val legacy = city.copy(autonomy = CivAutonomy(layoutHalfWidth = 56))
         CivsSettlementLayout.candidates(legacy, current, future).none {
@@ -50,7 +53,7 @@ class CivsOperatingPlotPreferenceTest : FunSpec({
     }
 
     test("a small forester leaves the remaining broad dry frontage available for a future farm") {
-        val base = settlementPlanCity().copy(radius = 128)
+        val base = settlementPlanCity().copy(radius = 128, autonomy = CivAutonomy(layoutHalfWidth = 72))
         val templates = settlementPlanTemplates()
         val farm = templates.getValue(BuildingType.FARM).second.copy(
             bounds = CivBox(CivPosition(-20, -1, -29), CivPosition(31, 9, -1)))
@@ -78,7 +81,7 @@ class CivsOperatingPlotPreferenceTest : FunSpec({
     }
 
     test("a graded small quarry reserves a bounded flank while a broad dry farm parcel is still missing") {
-        val base = settlementPlanCity().copy(radius = 128)
+        val base = settlementPlanCity().copy(radius = 128, autonomy = CivAutonomy(layoutHalfWidth = 72))
         val templates = settlementPlanTemplates()
         val farm = templates.getValue(BuildingType.FARM).second.copy(
             bounds = CivBox(CivPosition(-20, -1, -29), CivPosition(31, 9, -1)))
@@ -99,6 +102,51 @@ class CivsOperatingPlotPreferenceTest : FunSpec({
             it.building.entrance.x == 0 && it.building.entrance.z == -80
         } shouldBe true
         city.buildings shouldBe base.buildings + firstFarm
+        city.stock shouldBe base.stock
+    }
+
+    for (halfWidth in listOf(72, 74)) for (type in listOf(BuildingType.FORESTER, BuildingType.QUARRY))
+    test("frame $halfWidth keeps its only broad dry farm bay after grading a small $type") {
+        val base = settlementPlanCity().copy(radius = 128, autonomy = CivAutonomy(layoutHalfWidth = halfWidth))
+        val templates = settlementPlanTemplates()
+        val farm = templates.getValue(BuildingType.FARM).second.copy(
+            bounds = CivBox(CivPosition(-20, -1, -29), CivPosition(31, 9, -1)))
+        val smallQuarry = templates.getValue(BuildingType.QUARRY).second.copy(
+            bounds = CivBox(CivPosition(-10, -6, -22), CivPosition(10, 17, -1)))
+        val firstFarm = CivsSettlementPlans.at(farm, CivPosition(-(halfWidth + 8), 64, 0), 270,
+            UUID(142, 100)).copy(phase = BuildingPhase.SITE)
+        // This accepted southern site also excludes the broad farm's diagonal offsets at width72.
+        val southernQuarry = smallQuarry.copy(bounds = CivBox(CivPosition(-18, -6, -22), CivPosition(18, 17, -1)))
+        val firstQuarry = CivsSettlementPlans.at(southernQuarry, CivPosition(0, 64, halfWidth + 8), 180,
+            UUID(142, 101)).copy(phase = BuildingPhase.SITE)
+        val city = base.copy(buildings = base.buildings + firstFarm + firstQuarry)
+        val surface = settlementPlanSurface(city)
+        val dry: (CivBuilding) -> Boolean = { it.bounds.max.x <= 40 }
+        val beforeCandidates = CivsSettlementLayout.candidates(city, farm, farm, eligible = dry)
+        val beforeFarms = CivsAutonomousTerraform.options(city, beforeCandidates, surface)
+        beforeFarms.isNotEmpty() shouldBe true
+        beforeFarms.all { it.building.entrance.z < -halfWidth } shouldBe true
+        val small = if (type == BuildingType.QUARRY) smallQuarry else
+            templates.getValue(BuildingType.FORESTER).second.copy(
+                bounds = CivBox(CivPosition(-5, -1, -16), CivPosition(9, 9, -1)))
+        val choices = CivsSettlementLayout.candidates(city, small, small, eligible = dry)
+        (choices.size in 1..64) shouldBe true
+        choices.all { CivsRules.workRouteWithinReach(city, it.building.entrance) } shouldBe true
+        val options = CivsAutonomousTerraform.options(city, choices, surface)
+        options.isNotEmpty() shouldBe true
+        options.all { CivsRules.workRouteWithinReach(city, it.building.entrance) } shouldBe true
+        val chosen = options.first().building.copy(phase = BuildingPhase.SITE)
+        val next = city.copy(buildings = city.buildings + chosen)
+        val afterCandidates = CivsSettlementLayout.candidates(next, farm, farm, eligible = dry)
+        val afterFarms = CivsAutonomousTerraform.options(next, afterCandidates, surface)
+        withClue("halfWidth=$halfWidth small=$type chosen=${chosen.entrance} before=${beforeFarms.size} after=${afterFarms.size}") {
+            afterFarms.isNotEmpty() shouldBe true
+        }
+        afterFarms.all { it.building.entrance.z < -halfWidth &&
+            !CivsAutonomousGeometry.overlaps(it.building.bounds, chosen.bounds, 2) &&
+            CivsRules.workRouteWithinReach(next, it.building.entrance) } shouldBe true
+        (afterCandidates.size <= 64) shouldBe true
+        city.buildings shouldBe base.buildings + firstFarm + firstQuarry
         city.stock shouldBe base.stock
     }
 

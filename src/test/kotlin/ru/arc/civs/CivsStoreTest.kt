@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FreeSpec
 import io.kotest.matchers.shouldBe
+import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.nio.file.Path
@@ -37,6 +38,34 @@ class CivsStoreTest : FreeSpec({
         reopened.deletePlan(plan.id).join() shouldBe true
         reopened.loadPlan(plan.id).join() shouldBe null
         reopened.deletePlan(plan.id).join() shouldBe false
+    }
+
+    "historical three-miner city and its exact receipt load before a once-only staffing revision" {
+        MockBukkitTestRuntime.open().use {
+            val original = quarryStaffingCity()
+            val extra = CivsEquipment.collectSupplies(original.workers[1], mapOf("COAL" to 4L))
+            val before = original.copy(workers = original.workers.map { if (it.id == extra.id) extra else it })
+            val returned = CivsEquipment.consume(extra, "COAL", 4)
+            val after = before.copy(workers = before.workers.map { if (it.id == extra.id) returned else it }, revision = before.revision + 1)
+            val control = requireNotNull(before.buildings.first { it.type == BuildingType.QUARRY }.control)
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after,
+                listOf(CivInventorySlotChange(control, "BARREL", 0, null, CivPlainItem("COAL", 4)))).validated()
+            Files.createDirectories(root.resolve("cities"))
+            Files.writeString(root.resolve("cities/${before.id}.json"), Gson().toJson(mapOf("schemaVersion" to CivsStore.SCHEMA_VERSION, "city" to before)))
+            CivsStore(root, directExecutor).use { it.saveInventoryTransaction(receipt).join() shouldBe receipt }
+            CivsStore(root, directExecutor).use { store ->
+                store.load().join() shouldBe listOf(before)
+                store.loadInventoryTransactions().join() shouldBe listOf(receipt)
+                store.save(receipt.after).join() shouldBe receipt.after
+                store.deleteInventoryTransaction(receipt.id).join() shouldBe true
+                val normalized = CivsRules.reconcileQuarryStaffing(receipt.after, 10_000)
+                normalized.revision shouldBe receipt.after.revision + 1
+                store.save(normalized).join() shouldBe normalized
+                CivsRules.reconcileQuarryStaffing(normalized, 20_000) shouldBe normalized
+                store.load().join() shouldBe listOf(normalized)
+                store.loadInventoryTransactions().join() shouldBe emptyList()
+            }
+        }
     }
 
     "administrator placement intent roundtrips while legacy plans keep automatic terrain protection" {

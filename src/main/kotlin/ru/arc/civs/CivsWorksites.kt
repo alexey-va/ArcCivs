@@ -482,9 +482,17 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     companion object {
         /** Existing domain consumers classify native work before a live coordinator is constructed. */
         val TYPES = BuildingType.entries.filter(BuildingType::isWorldWork).toSet()
-        internal fun generatorOutput(roll: Int, canMineIron: Boolean): String {
-            require(roll in 0..99)
-            return when { roll < 95 -> "COBBLESTONE"; roll < 99 -> "COAL"; canMineIron -> "RAW_IRON"; else -> "COBBLESTONE" }
+        internal fun generatorOutput(roll: Int, level: Int, canMineOre: (String) -> Boolean): String {
+            require(roll in 0..9_999 && level in 1..3)
+            val material = when {
+                roll < level -> "DIAMOND"
+                roll < 11 * level -> "REDSTONE"
+                roll < 16 * level -> "RAW_GOLD"
+                roll < 116 * level -> "RAW_IRON"
+                roll < 516 * level -> "COAL"
+                else -> "COBBLESTONE"
+            }
+            return if (material == "COBBLESTONE" || material == "COAL" || canMineOre(material)) material else "COBBLESTONE"
         }
     }
 }

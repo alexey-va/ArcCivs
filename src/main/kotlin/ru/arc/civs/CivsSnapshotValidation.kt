@@ -141,8 +141,13 @@ internal object CivsSnapshotValidation {
             })
             CivsPopulation.validated(city)
             snapshot(city.buildings.all { building ->
+                // Immutable old cities and inventory receipts may retain the former level-sized quarry staff.
+                // New admission uses slots(); the runtime retires excess assignments only after receipt replay.
+                val maximum = if (building.type == BuildingType.QUARRY && building.phase == BuildingPhase.ACTIVE) building.level
+                    else if (city.autonomy == null && building.type == BuildingType.TOWN_HALL && CivsRules.isFounding(city)) 1
+                    else CivsRules.slots(city, building)
                 city.workers.count { it.assignment == building.id } <=
-                    if (city.autonomy == null && building.type == BuildingType.TOWN_HALL && CivsRules.isFounding(city)) 1 else CivsRules.slots(city, building)
+                    maximum
             })
             // Retiring housing/storage does not evict residents or erase stock. New intake still checks current capacity.
             snapshot(city.workers.size <= CivsRules.residentLimit(city) &&

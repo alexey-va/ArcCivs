@@ -75,6 +75,9 @@ internal class CivBlueprintCatalog private constructor(
             else -> minOf(2, type.maxLevel)
         }
         val available = current.filter { it.type == type && it.level == 1 }
+            // Reviewed rack-only annexes remain available manually and by accepted ID.
+            .filterNot { it.type == BuildingType.WAREHOUSE && it.style == "farthest-frontier" &&
+                it.family in warehouseRackAnnexes }
         val capable = available.filter { it.maxLevel >= required }.ifEmpty { available }
         return capable.sortedWith(compareBy<CivBlueprintCatalogEntry> { if (it.style == style) 0 else 1 }
             .thenByDescending { it.maxLevel }.thenBy { it.style }.thenBy { it.family }.thenBy { it.id })
@@ -92,6 +95,7 @@ internal class CivBlueprintCatalog private constructor(
         private val id = Regex("civs/v2/[a-z0-9_-]+/[a-z0-9_-]+/[a-f0-9]{20}/level[1-3]")
         private val checks = setOf("source-hashes", "shared-max-level-frame", "ground-origin", "front-door-route",
             "one-control", "storage-provenance", "fluid-boundary", "full-cell-readback")
+        private val warehouseRackAnnexes = setOf("craftsmanship/masonry/leftwarehouse", "craftsmanship/masonry/rightwarehouse")
 
         fun load(root: Path): CivBlueprintCatalog {
             val file = root.resolve("civs/v2/catalog.json")

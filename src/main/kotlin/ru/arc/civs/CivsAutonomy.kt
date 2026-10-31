@@ -237,12 +237,14 @@ object CivsAutonomy {
         }
         val target = urgent ?: warehouse ?: missingProducer ?: industry?.takeIf(::unstaffed) ?: tavern
         target ?: return null
+        val returningQuarryStaff = CivsRules.excessQuarryWorkers(city).mapTo(hashSetOf()) { it.id }
         val worker = city.workers.sortedBy { worker -> when {
             worker.assignment == null -> 0
             returningTavernkeeper && worker.assignment.let(city::building)?.type == BuildingType.TAVERN -> 1
             else -> 2
         } }.firstOrNull { worker ->
-            !CivsResidents.isChild(worker) && worker.cargo == null && worker.pendingStock == null && worker.hasCollectedItems != true &&
+            worker.id !in returningQuarryStaff && !CivsResidents.isChild(worker) &&
+                worker.cargo == null && worker.pendingStock == null && worker.hasCollectedItems != true &&
                 worker.assignment?.toString() !in city.forestryJobs.orEmpty() &&
                 !(city.construction != null && worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true) &&
                 (target.type != BuildingType.TAVERN || worker.assignment?.let(city::building)?.type != BuildingType.TAVERN ||

@@ -7,6 +7,25 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsAutonomyTest : FunSpec({
+    test("critical staffing waits for excess quarry goods without blocking another eligible resident") {
+        ru.arc.paper.testing.MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val initial = quarryStaffingCity(autonomous = true)
+            val warehouse = autonomyBuilding(BuildingType.WAREHOUSE, phase = BuildingPhase.ACTIVE, occurrence = 4)
+            val extra = CivsEquipment.collectSupplies(initial.workers[1], mapOf("COAL" to 4L))
+            val city = CivsRules.validate(initial.copy(buildings = initial.buildings + warehouse,
+                workers = initial.workers.map { if (it.id == extra.id) extra else it }))
+            CivsAutonomy.criticalAssignment(city) { it == extra.id } shouldBe null
+            CivsRules.autoAssign(city, city.owner, 10_000) { it == extra.id } shouldBe city
+            val smith = autonomyBuilding(BuildingType.BLACKSMITH, phase = BuildingPhase.ACTIVE, occurrence = 5)
+            val other = CivWorker(UUID.randomUUID(), "Smith", smith.id, nextDeliveryAt = 1)
+            val available = CivsRules.validate(city.copy(buildings = city.buildings + smith,
+                workers = city.workers + other))
+            CivsAutonomy.criticalAssignment(available) { it == extra.id || it == other.id } shouldBe
+                (other.id to warehouse.id)
+            available.workers.first { it.id == extra.id } shouldBe extra
+        }
+    }
+
     test("a legacy town upgrades an existing supported building before requesting missing expansion parcels") {
         val types = CivsAutonomy.profile + List(2) { BuildingType.HOUSE }
         val city = autonomyCity().copy(buildings = types.mapIndexed { index, type ->

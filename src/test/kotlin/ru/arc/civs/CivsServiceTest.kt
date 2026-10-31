@@ -29,6 +29,7 @@ import org.bukkit.block.BlockFace
 import org.bukkit.entity.Player
 import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.util.RayTraceResult
+import org.mockbukkit.mockbukkit.ServerMock
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.network.BackendServerId
@@ -935,6 +936,119 @@ class CivsProducerReturnRecoveryTest : FunSpec({
             recovered.stock shouldBe Stock()
             verify(exactly = 0) { h.citizens.requireStorageArrival(any(), any(), any()) }
             verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+        }
+    }
+})
+
+class CivsQuarryStaffingRecoveryTest : FunSpec({
+    for (persisted in listOf(false, true)) for (nativeAfter in listOf(false, true))
+    test("legacy quarry staff wait for exact receipt retirement before one staffing revision persisted=$persisted nativeAfter=$nativeAfter") {
+        serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
+            val original = quarryStaffingCity(h.world.uid).copy(owner = h.owner)
+            val extra = CivsEquipment.collectSupplies(original.workers[1], mapOf("COAL" to 4L))
+            val before = original.copy(workers = original.workers.map { if (it.id == extra.id) extra else it })
+            val returned = CivsEquipment.consume(extra, "COAL", 4)
+            val after = before.copy(workers = before.workers.map { if (it.id == extra.id) returned else it },
+                revision = before.revision + 1)
+            val control = requireNotNull(before.buildings.first { it.type == BuildingType.QUARRY }.control)
+            h.world.loadChunk(control.x shr 4, control.z shr 4)
+            h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(control.x, control.y, control.z).state as org.bukkit.block.Barrel).inventory
+            if (nativeAfter) barrel.setItem(0, ItemStack(Material.COAL, 4))
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after,
+                listOf(CivInventorySlotChange(control, "BARREL", 0, null, CivPlainItem("COAL", 4)))).validated()
+            val retirement = CompletableFuture<Boolean>()
+            var retiring = false
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(if (persisted) after else before))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            every { h.store.deleteInventoryTransaction(receipt.id) } answers { retiring = true; retirement }
+            every { h.citizens.canReassign(any(), any()) } returns true
+            h.start()
+            h.service.residentSettlements() shouldBe emptyList()
+            if (!persisted) {
+                h.tickUntil("exact old receipt city write") { h.saves.isNotEmpty() }
+                h.saves.single().first shouldBe receipt.after
+                h.commit()
+            }
+            h.tickUntil("exact old receipt deletion") { retiring }
+            val receiptWrites = if (persisted) 0 else 1
+            h.paper.performTicks(40)
+            h.saves.size shouldBe receiptWrites
+            h.service.settlements().single() shouldBe receipt.after
+            h.service.residentSettlements() shouldBe emptyList()
+            barrel.getItem(0) shouldBe ItemStack(Material.COAL, 4)
+            retirement.complete(true)
+            h.tickUntil("one staffing write after old receipt retirement") { h.saves.size == receiptWrites + 1 }
+            val normalized = h.saves.last().first
+            normalized shouldBe CivsRules.reconcileQuarryStaffing(receipt.after, h.time)
+            normalized.revision shouldBe receipt.after.revision + 1
+            normalized.workers.first() shouldBe receipt.after.workers.first()
+            normalized.workers.drop(1).zip(receipt.after.workers.drop(1)).forEach { (worker, originalWorker) ->
+                worker shouldBe originalWorker.copy(assignment = null, nextDeliveryAt = maxOf(h.time, originalWorker.nextDeliveryAt + 1))
+            }
+            h.service.settlements().single() shouldBe receipt.after
+            h.commit()
+            h.service.settlements().single() shouldBe normalized
+            h.service.residentSettlements() shouldBe listOf(normalized)
+            h.paper.performTicks(40)
+            h.saves.size shouldBe receiptWrites + 1
+            barrel.getItem(0) shouldBe ItemStack(Material.COAL, 4)
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("existing output and an accepted resident transfer postpone staffing reconciliation") {
+        serviceScenario { h ->
+            val original = quarryStaffingCity(h.world.uid).copy(owner = h.owner)
+            val extra = CivsEquipment.collectSupplies(original.workers[1], mapOf("COAL" to 4L))
+            val loaded = original.copy(workers = original.workers.map { if (it.id == extra.id) extra else it })
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(loaded))
+            every { h.citizens.canReassign(any(), any()) } returns true
+            h.start()
+            h.paper.performTicks(40)
+            h.saves shouldBe emptyList()
+            h.service.settlements().single() shouldBe loaded
+            h.service.residentSettlements() shouldBe listOf(loaded)
+            val drained = original.copy(revision = loaded.revision + 1)
+            val saved = h.service.mutate(loaded.id) { drained }
+            every { h.citizens.canReassign(loaded.id, extra.id) } returns false
+            h.commit(); saved.join() shouldBe drained
+            h.paper.performTicks(40)
+            h.saves.size shouldBe 1
+            every { h.citizens.canReassign(loaded.id, extra.id) } returns true
+            h.tickUntil("drained available residents reconcile") { h.saves.size == 2 }
+            h.saves.last().first shouldBe CivsRules.reconcileQuarryStaffing(drained, h.time)
+            h.commit()
+        }
+    }
+
+    test("unknown physical pending stock remains assigned intact instead of becoming orphaned") {
+        serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
+            val base = quarryStaffingCity(h.world.uid, autonomous = true).copy(owner = h.owner,
+                autonomy = CivAutonomy(paused = true))
+            val loaded = base.copy(workers = base.workers.mapIndexed { index, worker ->
+                if (index == 1) worker.copy(pendingStock = Stock(stone = 3)) else worker
+            })
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(loaded))
+            every { h.citizens.canReassign(any(), any()) } returns true
+            loaded.buildings.mapNotNull { it.control }.forEach { control ->
+                h.world.loadChunk(control.x shr 4, control.z shr 4)
+                h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            }
+            val messages = mutableListOf<String>()
+            val handler = object : Handler() {
+                override fun publish(record: LogRecord) { messages += record.message }
+                override fun flush() = Unit
+                override fun close() = Unit
+            }
+            h.plugin.logger.addHandler(handler)
+            try {
+                h.start(); h.paper.performTicks(60)
+                h.saves shouldBe emptyList()
+                h.service.settlements().single() shouldBe loaded
+                messages.count { "quarry_staffing_waiting" in it && "physical-pending-stock" in it } shouldBe 1
+            } finally { h.plugin.logger.removeHandler(handler) }
         }
     }
 })
@@ -7656,10 +7770,11 @@ private fun deliverCraftTest(h: ServiceScenario, city: Settlement, worker: CivWo
 
 private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
     allowedWorlds: Set<String> = setOf("vanilla"), storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)? = null,
-    nativeGeometry: Boolean = false,
+    nativeGeometry: Boolean = false, serverFixture: ServerMock? = null,
     action: (ServiceScenario) -> Unit) =
     failOnUnsupportedMockBukkitOperation {
-        MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory, nativeGeometry).use(action) }
+        val runtime = if (serverFixture == null) MockBukkitTestRuntime.open() else MockBukkitTestRuntime.open(serverFixture)
+        runtime.use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory, nativeGeometry).use(action) }
     }
 
 private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int,

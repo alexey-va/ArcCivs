@@ -1,0 +1,665 @@
+{
+  "version": 1,
+  "title": "ArcCivs158: one miner per quarry, level-based generated ore and warehouse annex selection",
+  "participants": [
+    1,
+    5,
+    16
+  ],
+  "assumptions": [
+    "Low/base/high scenarios are 1/5/16 settlements, quarry levels1/2/3, 1/1/2 quarries per settlement, and0.25/1/4 active hours per settlement-day. These are illustrative assumptions, not measured uptime, adoption or player income.",
+    "Before staffing cap is1/2/3 miners per quarry by level; after it is1/1/1. Item generator/fallback still produces exactly one item after6000ms observed work, consuming one tool use. The ideal no-travel no-pause ceiling is600 actions per worker-hour; native digging is a different path and cannot be added simultaneously.",
+    "Before events per settlement-day are150/1200/14400 at the old fully-staffed ceiling; after150/600/4800. Physical-shaft lease, collisions, travel, supply, capacity, sleep and actor contention can make realized production lower; these upper scenarios are not forecasts or proof of a threefold realized throughput reduction.",
+    "Coal probabilities are4/8/12 percent, raw iron1/2/3 percent, raw gold0.05/0.10/0.15 percent, redstone0.10/0.20/0.30 percent, diamond0.01/0.02/0.03 percent. Each action selects exactly one result, never independent rolls. Cobblestone fills the remaining94.84/89.68/84.52 percent.",
+    "The user requested stronger coal/iron and very rare gold/redstone/diamond. No emerald, lapis or copper outputs are added. The corresponding vanilla ore must accept the actual pickaxe; an unsuitable tool converts that selected output to cobblestone with no reroll. Coal remains available to ordinary quarry pickaxes.",
+    "Before rare generated outputs were95percent cobblestone/4percent coal/1percent rawiron at every level and no precious output. Coal and iron ideal per-building maxima remain equal to the former full-staffing maxima after level-scaled chances; newly enabled precious outputs replace cobblestone within the same one-item action.",
+    "Native encountered blocks still use Bukkit block.getDrops(tool); no extra ore is added to those receipts and depth/topology/old accepted mine proofs are unchanged. Existing depth scales through authored family floors plus the v7 extension; no arbitrary world edits or deeper hole is introduced by this update.",
+    "Runtime level rolls are captured in existing work intent and native inventory receipts before publication. Recovery replays accepted output exactly, without rerolling or altering saved items. Excess legacy miners drain existing outputs under their old assignment before one durable unassignment; cargo, personal food, equipment, skills and completed cycles are retained.",
+    "Warehouse left/right rack annexes leave only the new autonomous standalone selection pool. Existing accepted IDs, inventories, upgrades and manual selection remain readable. Replacement family geometry can increase normal construction material demand, paid through the existing builder receipt path. No resource grant follows merely from a changed selector.",
+    "Current EconomyShopGUI SELL/AutoSellChests and the planned SELL-to-contract transition remain separate. No item-to-Vault or token rate is invented. Monetary redemption, demand and realized adoption are unknown; outputs below are item units, not revenue or player XP.",
+    "Direct before/after are separately0Vault,0premiumtokens and0playerXP. No new price, bonus stack, account reward claim, currency mint, buyback or item multiplication is introduced. Personal travel, delivery and production are alternative time uses, not additive free actions."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "item_cobblestone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "cobblestone_level_1",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.95"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.9484"
+          }
+        },
+        {
+          "id": "cobblestone_level_2",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1200,
+              0
+            ],
+            "chance": "0.95"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              600,
+              0
+            ],
+            "chance": "0.8968"
+          }
+        },
+        {
+          "id": "cobblestone_level_3",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              14400
+            ],
+            "chance": "0.95"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              4800
+            ],
+            "chance": "0.8452"
+          }
+        }
+      ]
+    },
+    "item_coal": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "coal_level_1",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.04"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.04"
+          }
+        },
+        {
+          "id": "coal_level_2",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1200,
+              0
+            ],
+            "chance": "0.04"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              600,
+              0
+            ],
+            "chance": "0.08"
+          }
+        },
+        {
+          "id": "coal_level_3",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              14400
+            ],
+            "chance": "0.04"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              4800
+            ],
+            "chance": "0.12"
+          }
+        }
+      ]
+    },
+    "item_raw_iron": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "raw_iron_level_1",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.01"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.01"
+          }
+        },
+        {
+          "id": "raw_iron_level_2",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1200,
+              0
+            ],
+            "chance": "0.01"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              600,
+              0
+            ],
+            "chance": "0.02"
+          }
+        },
+        {
+          "id": "raw_iron_level_3",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              14400
+            ],
+            "chance": "0.01"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              4800
+            ],
+            "chance": "0.03"
+          }
+        }
+      ]
+    },
+    "item_raw_gold": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "raw_gold_level_1",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.0005"
+          }
+        },
+        {
+          "id": "raw_gold_level_2",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1200,
+              0
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              600,
+              0
+            ],
+            "chance": "0.001"
+          }
+        },
+        {
+          "id": "raw_gold_level_3",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              14400
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              4800
+            ],
+            "chance": "0.0015"
+          }
+        }
+      ]
+    },
+    "item_redstone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "redstone_level_1",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.001"
+          }
+        },
+        {
+          "id": "redstone_level_2",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1200,
+              0
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              600,
+              0
+            ],
+            "chance": "0.002"
+          }
+        },
+        {
+          "id": "redstone_level_3",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              14400
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              4800
+            ],
+            "chance": "0.003"
+          }
+        }
+      ]
+    },
+    "item_diamond": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "diamond_level_1",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              0,
+              0
+            ],
+            "chance": "0.0001"
+          }
+        },
+        {
+          "id": "diamond_level_2",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1200,
+              0
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              600,
+              0
+            ],
+            "chance": "0.0002"
+          }
+        },
+        {
+          "id": "diamond_level_3",
+          "kind": "item",
+          "source": "CivsWorksites.generatorOutput + CivsMineWorksite.generatedQuarryOutput",
+          "basis": "One mutually-exclusive generated item per6000ms action; all qualifying tools, no transit or pauses; alternative to native excavation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              14400
+            ],
+            "chance": "0"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              4800
+            ],
+            "chance": "0.0003"
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "validation": [
+    "Exhaust all10000rolls for each level and tool eligibility class; total10000, one output, unsuitable ore becomes cobblestone.",
+    "Real legacy-store and receipt replay before staffing reconciliation, then one assignment per quarry with exact inventory conservation.",
+    "Re-run privatecatalog ten full plans after removing rack annex alternatives; verify accepted annex identity remains resolvable.",
+    "After activation read canonical one-miner assignments, native observed production and warehouse stocks; report measured behavior separately from these bounds."
+  ],
+  "conclusion": "Use one miner per quarry and level-scaled quality instead of extra jobs. Preserve the old ideal coal/iron ceiling at full staffing, bound new precious outputs well below one per quarry-hour, keep exact accepted goods and distinguish all monetary redemption uncertainty.",
+  "one_time_world_repair": {
+    "purpose": "Restore an enclosed appearance to the already accepted Auto2 warehouse rack annex, without changing its items or containers.",
+    "placed_blocks": 346,
+    "placed_material_blocks": {
+      "minecraft:stripped_spruce_log": 103,
+      "minecraft:dark_prismarine_slab": 152,
+      "minecraft:dark_prismarine": 9,
+      "minecraft:stone_bricks": 37,
+      "minecraft:spruce_planks": 26,
+      "minecraft:glass": 16,
+      "minecraft:lantern": 3
+    },
+    "containers_moved_or_written": 0,
+    "funding": "Owner-authorized one-time administrative world repair; these are placed block counts, not inventory issuance or a repeatable player income flow. Ordinary native breaking rules remain.",
+    "scene_id": "arccivs_auto2_warehouse_enclosure",
+    "revision": 1,
+    "native_expected_blocks_matching": 346,
+    "native_client_visual_acceptance": false
+  }
+}

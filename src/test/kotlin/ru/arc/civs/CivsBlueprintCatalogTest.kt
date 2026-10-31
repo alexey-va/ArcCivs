@@ -50,6 +50,34 @@ class CivsBlueprintCatalogTest : FunSpec({
             listOf(compact.first()["schematicId"].asString)
         catalog.upgrade(preferred.first()["schematicId"].asString, 3)?.id shouldBe preferred.last()["schematicId"].asString
     }
+    test("automatic warehouses skip reviewed rack annexes without hiding manual or accepted entries") {
+        fun warehouse(style: String, family: String, size: List<Int>) =
+            catalogFamily(style, BuildingType.WAREHOUSE, family).onEach {
+                it.add("size", Gson().toJsonTree(size))
+                it.add("origin", Gson().toJsonTree(listOf(3, 1, size[2])))
+                it.add("control", Gson().toJsonTree(listOf(4, 2, size[2] - 1)))
+            }
+        val preferred = warehouse("caledonia", "craftsmanship/storage/warehouse", listOf(21, 19, 22))
+        val compact = warehouse("fortress", "craftsmanship/storage/warehouse", listOf(10, 15, 19))
+        val annexes = listOf("leftwarehouse", "rightwarehouse").map {
+            warehouse("farthest-frontier", "craftsmanship/masonry/$it", listOf(23, 5, 7))
+        }
+        val catalog = parseCatalog(preferred + compact + annexes.flatten())
+        catalog.autonomous("caledonia", BuildingType.WAREHOUSE)?.id shouldBe preferred.first()["schematicId"].asString
+        catalog.autonomous("farthest-frontier", BuildingType.WAREHOUSE)?.id shouldBe preferred.first()["schematicId"].asString
+        catalog.autonomousAlternatives("caledonia", BuildingType.WAREHOUSE).map { it.id } shouldBe
+            listOf(compact.first()["schematicId"].asString)
+        catalog.choices(BuildingType.WAREHOUSE, "farthest-frontier").map { it.id } shouldBe
+            annexes.map { it.first()["schematicId"].asString }
+        for (annex in annexes) {
+            val id = annex.first()["schematicId"].asString
+            catalog.entry(id)?.id shouldBe id
+            catalog.upgrade(id, 3)?.id shouldBe annex.last()["schematicId"].asString
+        }
+        val onlyAnnexes = parseCatalog(annexes.flatten())
+        onlyAnnexes.autonomous("farthest-frontier", BuildingType.WAREHOUSE) shouldBe null
+        onlyAnnexes.autonomousAlternatives("farthest-frontier", BuildingType.WAREHOUSE) shouldBe emptyList()
+    }
     test("frame drift and absent check evidence fail closed before source loading") {
         for (mutation in listOf<(JsonObject) -> Unit>(
             { it.add("origin", Gson().toJsonTree(listOf(2, 2, 9))) },

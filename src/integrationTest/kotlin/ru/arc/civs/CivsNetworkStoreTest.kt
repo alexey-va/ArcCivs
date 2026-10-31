@@ -84,6 +84,36 @@ class CivsNetworkStoreTest : FreeSpec({
             stock = CivsRules.STARTING_STOCK, revision = 1)).await() }.shouldBeInstanceOf<IllegalStateException>()
     }
 
+    "historical three-miner snapshot remains canonical until one durable staffing revision" {
+        val base = settlement()
+        val hall = base.buildings.single().copy(level = 3, phase = BuildingPhase.ACTIVE)
+        val quarry = hall.copy(id = UUID.randomUUID(), type = BuildingType.QUARRY,
+            anchor = CivPosition(10, 64, 0), schematicId = "fixture/quarry3",
+            bounds = CivBox(CivPosition(9, 63, -1), CivPosition(11, 68, 1)),
+            entrance = CivPosition(10, 64, 2), control = CivPosition(10, 64, 0))
+        val workers = (0..2).map { index -> CivWorker(UUID.randomUUID(), "Miner $index", quarry.id,
+            nextDeliveryAt = 100L + index, completedCycles = index.toLong(), skills = mapOf("QUARRY" to index.toLong()),
+            items = List(CivsEquipment.SLOTS) { if (it == 4) CivResidentItem("IRON_PICKAXE", 1) else null }) }
+        val historical = CivsRules.validate(base.copy(buildings = listOf(hall, quarry), workers = workers,
+            construction = null, immigration = null, stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+        spawn.save(historical).await() shouldBe historical
+        val loaded = spawn.loadOwned(emptyList()).await().single()
+        loaded shouldBe historical
+        loaded.workers.count { it.assignment == quarry.id } shouldBe 3
+        val normalized = CivsRules.reconcileQuarryStaffing(loaded, 10_000)
+        normalized.revision shouldBe historical.revision + 1
+        spawn.save(normalized).await() shouldBe normalized
+        spawn.loadOwned(emptyList()).await() shouldBe listOf(normalized)
+        spawn.lookup(historical.owner).await()?.city shouldBe normalized
+        CivsRules.reconcileQuarryStaffing(normalized, 20_000) shouldBe normalized
+        spawn.save(normalized).await() shouldBe normalized
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_city") shouldBe 1
+        survival.loadOwned(emptyList()).await() shouldBe emptyList()
+        normalized.workers.drop(1).zip(workers.drop(1)).forEach { (worker, before) ->
+            worker shouldBe before.copy(assignment = null, nextDeliveryAt = 10_000)
+        }
+    }
+
     "autonomous tombstones do not consume personal founding reserves and preserve their own identity fence" {
         val removed = settlement().copy(inventory = null, stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
         spawn.save(removed).await()
