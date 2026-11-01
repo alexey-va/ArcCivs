@@ -491,7 +491,7 @@ class CivsUiTest : FunSpec({
                 h.player.setLocale(Locale.forLanguageTag(locale))
                 h.city = settlement(h.player)
                 h.open()
-                h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "upgrade", "hall_inventory", "guide")
+                h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "upgrade", "hall_inventory", "guide", "visit_villages")
                 h.body().codePoints().anyMatch { it in 0xF9000..0xF9FFF } shouldBe font.isNotEmpty()
                 h.screen.body.count { plainText(it.text).codePoints().anyMatch { point -> point in 0xFA300..0xFAF1B } } shouldBe
                     if (font.isEmpty()) 0 else 1
@@ -1117,7 +1117,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Ваш город находится на сервере survival"
             h.body().contains("Дубовое бревно") shouldBe false
             h.body().contains("общий резерв") shouldBe false
-            h.screen.buttons.map { it.id.value } shouldBe listOf("transfer")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("transfer", "visit_villages")
             plainText(h.screen.buttons.first().label) shouldBe "На сервер survival ›"
             h.click("transfer")
             h.paper.performTicks(2)
@@ -1162,7 +1162,7 @@ class CivsUiTest : FunSpec({
         withUi { h ->
             every { h.host.foundingAllowed() } returns false
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe emptyList()
+            h.screen.buttons.map { it.id.value } shouldBe listOf("visit_villages")
             val pending = CompletableFuture<Unit>()
             every { h.host.refreshCity(any()) } returns pending
             h.open()
