@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "version": "0.1.164",
+  "status": "verified_local_not_delivered",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "problem": "Native full-volume capture correctly refuses reserved first builder hut that would replace coal ore; the fresh city has only its actual initial SITE town hall and an unpaid future layout.",
+  "change": "Use existing guarded candidate search and full layout preparation to replace only infeasible unpaid future intent atomically; retain actual hall/control/workers/settings/items and strict world protection. No persisted intermediate null plan, refounding, direct world placement or new admin API.",
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "at_atomic_plan_adoption": {
+    "item_minted": 0,
+    "item_burned": 0,
+    "workers_created": 0,
+    "initial_reserve_repeated": false,
+    "native_world_blocks_written": 0,
+    "initial_reserve_before_after": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "holders_and_receipts": "preserved exactly from fresh current state; native initial216 already materialized once"
+  },
+  "future_effect": "A feasible first hut may enable normal village development. Its concrete material bill, paid work and resulting ordinary item activity can change with legitimate new geometry. Existing production, grants and supply limits remain authoritative; no stock self-sufficiency or zero indirect item-flow effect claimed.",
+  "bounds": {
+    "eligibility": "only pristine actual initial L1townhall SITE; no other building/road/paid construction/queue/pending control/deletion; original plan/hall rechecked at adoption",
+    "search": "existing at most64 strict native candidates then one complete34 forecast per existing retry/backoff",
+    "layout": "same accepted width (newtown74; legacy72/nullhint retained), routes88,192 infrastructure and262144 codec limits",
+    "failure": "no adoption or item/world mutation; old intent retained",
+    "concurrent_updates": "preserve fresh workers, hunger, inventory, settings and unrelated fields"
+  },
+  "income_model": {
+    "active_SELL": "unchanged; no conversion rate assumed",
+    "planned_SELL_to_contract": "future/SHADOW kept separate and not counted active"
+  },
+  "native_red_evidence": {
+    "city": "04067946-4637-3373-b723-572623b1581f",
+    "cube_sha256": "ad0153712f31b2f25f7ede0ff2c8b32bce08d9b3bc38d6a401480cacf63e7118",
+    "inside_hut_ore_cells": 14,
+    "actual_schematic_replacements": {
+      "cobblestone": 13,
+      "dirt": 1
+    },
+    "ore_preserved": true,
+    "development_accepted_before": false
+  },
+  "verification": {
+    "source_and_focused_tests": {
+      "source_review": "clean",
+      "passed_new_behavioral_cases_union": 17,
+      "source_preserved_state_and_no_grants": true,
+      "note": "16passed in fullrun; onlychangedv2fixturewait retested1PASS, other16filter-skipped andcarried; not claimedfreshall17run"
+    },
+    "delivery": "not_delivered",
+    "activation": "not_active",
+    "native_recovery": "not_verified",
+    "legacy_focused": {
+      "tests": 289,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "mysql": {
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "production_jar": "pass_with_ArcCore0.1.28",
+    "consumer": "pass_2.7.81"
+  }
+}

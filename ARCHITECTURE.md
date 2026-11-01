@@ -1085,6 +1085,18 @@ ordinary single-site growth remains available during that backoff. Paid work and
 production never depend on completing a distant reservation. Unadopted candidates
 are diagnostics only and are not drawn as an accepted future village.
 
+A pristine autonomous city whose only actual building is its original level-one
+SITE town hall may recover an infeasible unpaid first-hut reservation after a
+proved native terrain refusal. Ordinary guarded placement searches a detached
+plan-null shadow; native identity checks still use the actual city. One returned
+hut and its exact route seed a complete 34-site forecast. Only a successful full
+proof may atomically replace the future plan, after rechecking the original plan,
+hall and absence of construction, queued work, pending controls or new buildings.
+The current workers, items, settings and unrelated state survive that write.
+Failure preserves the original plan and uses the existing retry delay. Recovery
+neither persists the shadow nor refounds the city, grants supplies, moves actual
+buildings or writes world blocks; normal construction repeats native validation.
+
 Infrastructure is encoded as bounded entity-free Sponge v3, decoded by the existing
 Core schematic provider, and built through ordinary immutable plans and payment
 receipts. It has no control barrel, housing, storage or work slots. Player construction

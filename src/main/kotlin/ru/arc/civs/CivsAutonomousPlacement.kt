@@ -30,8 +30,9 @@ internal class CivsAutonomousPlacement(
     private val terminal = linkedMapOf<UUID, Map<String, Any?>>()
     private var closed = false
 
-    fun search(city: Settlement, type: BuildingType, level: Int, buildingId: UUID): CompletableFuture<CivAutonomousDesign> =
-        admit(Search(city, type, level, buildingId))
+    fun search(city: Settlement, type: BuildingType, level: Int, buildingId: UUID,
+        captureVolume: Boolean = false): CompletableFuture<CivAutonomousDesign> =
+        admit(Search(city, type, level, buildingId, captureVolume = captureVolume))
 
     fun decoration(city: Settlement, entryId: String, buildingId: UUID): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, BuildingType.DECORATION, 1, buildingId, catalogEntry = entryId))
@@ -40,7 +41,7 @@ internal class CivsAutonomousPlacement(
         admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
 
     /** One adopted plan, using the same detached height field, catalogue and finite solvers. */
-    fun plan(city: Settlement): CompletableFuture<CivSettlementPlan> {
+    fun plan(city: Settlement, unpaidBuilder: CivAutonomousDesign? = null): CompletableFuture<CivSettlementPlan> {
         val result = CompletableFuture<CivSettlementPlan>()
         synchronized(jobs) {
             if (closed) return CompletableFuture.failedFuture(CivsRejection("world-closed"))
@@ -49,10 +50,20 @@ internal class CivsAutonomousPlacement(
             planning[city.id] = result
         }
         val prepared = runCatching {
+            val seed = unpaidBuilder?.blueprint?.building?.copy(phase = BuildingPhase.SITE)
+            val seedRoute = unpaidBuilder?.terrain?.route?.toList()
+            if (seed != null && (seed.type != BuildingType.BUILDER_HUT || seed.level != 1 || city.building(seed.id) != null ||
+                city.buildings.singleOrNull()?.let { it.type == BuildingType.TOWN_HALL && it.level == 1 &&
+                    it.phase == BuildingPhase.SITE } != true || seedRoute.isNullOrEmpty() || seedRoute.last() != seed.entrance))
+                throw CivsRejection("stale-development")
+            val projected = if (seed == null) city else city.copy(buildings = city.buildings + seed,
+                autonomy = requireNotNull(city.autonomy).copy(plan = null,
+                    layoutHalfWidth = requireNotNull(city.autonomy?.plan).halfWidth))
             val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
             val templates = CivsAutonomy.profile.associateWith { type ->
                 val id = UUID.nameUUIDFromBytes("arccivs-plan-template/${city.id}/$type".toByteArray(Charsets.UTF_8))
-                val entry = blueprints.autonomousSource(city.style, type)
+                val entry = seed?.schematicId?.takeIf { type == BuildingType.BUILDER_HUT && it.startsWith("civs/v2/") }
+                    ?: blueprints.autonomousSource(city.style, type)
                 val first = if (entry == null) blueprints.prepare(city.style, type, 1, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
                     else blueprints.prepareEntry(entry, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
                 val last = if (entry != null) first.thenCompose { blueprint ->
@@ -63,9 +74,9 @@ internal class CivsAutonomousPlacement(
                     blueprints.prepare(city.style, type, type.maxLevel, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
                 first.thenCombine(last) { x, y -> x.building to y.building }
             }
-            val frame = CivsSettlementLayout.frame(city)
-            val fortification: CompletableFuture<CivFortificationTemplate?> = if (frame.halfWidth > 56 && city.autonomy?.plan == null &&
-                city.buildings.none { it.type.isInfrastructure }) blueprints.fortification(city.style)
+            val frame = CivsSettlementLayout.frame(projected)
+            val fortification: CompletableFuture<CivFortificationTemplate?> = if (frame.halfWidth > 56 && projected.autonomy?.plan == null &&
+                projected.buildings.none { it.type.isInfrastructure }) blueprints.fortification(city.style)
                 else CompletableFuture.completedFuture(null)
             val waterColumns = (listOf(frame.core) + frame.gates.map { it.passage }).flatMapTo(hashSetOf()) { box ->
                 (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
@@ -73,8 +84,18 @@ internal class CivsAutonomousPlacement(
             val inputs = loadAccess(city).thenCombine(world.autonomousHeightField(city, hall, hall, waterColumns)) { access, surface -> access to surface }
                 .thenCombine(fortification) { input, template -> Triple(input.first, input.second, template) }
             CompletableFuture.allOf(*templates.values.toTypedArray()).thenCombineAsync(inputs, { _, input ->
-                CivsSettlementPlans.prepare(city, templates.mapValues { it.value.join() }, input.second, input.first,
+                if (result.isDone || closed) throw CivsRejection("world-closed")
+                val access = if (seed == null) input.first else input.first.copy(
+                    routes = input.first.routes + (seed.id to requireNotNull(seedRoute)), reservedFortificationPorts = emptyList())
+                val plan = CivsSettlementPlans.prepare(projected, templates.mapValues { it.value.join() }, input.second, access,
                     fortification = input.third)
+                if (seed == null) plan else {
+                    if (!CivsVillageSiteScoring.completeProfile(plan) ||
+                        plan.plots.count { it.building.type != BuildingType.DECORATION } != CivsAutonomy.completeProfile.size ||
+                        plan.plots.singleOrNull { it.building.id == seed.id }?.building != seed ||
+                        plan.routes[seed.id.toString()] != seedRoute) throw CivsRejection("invalid-plan")
+                    plan.copy(revision = Math.addExact(requireNotNull(city.autonomy?.plan).revision, 1L))
+                }
             }, executor)
         }.getOrElse { CompletableFuture.failedFuture(it) }
         prepared.whenComplete { value, failure ->
@@ -146,7 +167,8 @@ internal class CivsAutonomousPlacement(
         private val pinned: CivBlueprint? = null, private val previous: CivBuilding? = null,
         private val infrastructure: Boolean = false, private val reservation: CivSettlementPlot? = null,
         private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null,
-        private val pinnedWaterFoundations: List<CivWaterFoundation> = emptyList()) {
+        private val pinnedWaterFoundations: List<CivWaterFoundation> = emptyList(),
+        private val captureVolume: Boolean = false) {
         private val adopted = CivsSettlementPlans.current(city)
         @Volatile private var resolvedCatalogEntry: String? = catalogEntry
         @Volatile private var familiesTried = emptyList<String>()
@@ -172,6 +194,7 @@ internal class CivsAutonomousPlacement(
         @Volatile private var candidateSource = "frontage"
         @Volatile private var gradingSamples = emptyList<Map<String, Any>>()
         @Volatile private var routeRefreshed = false
+        @Volatile private var nativeTerrainRejected = false
         val rejections = java.util.concurrent.ConcurrentHashMap<String, Int>()
         @Volatile private var blockers = emptyList<CivSettlementBlocker>()
 
@@ -252,6 +275,7 @@ internal class CivsAutonomousPlacement(
                     }
                     return
                 }
+                resolvedCatalogEntry = reservation.building.schematicId.takeIf { it.startsWith("civs/v2/") }
                 candidates = listOf(CivsAutonomousCandidate(reservation.building.copy(bounds = reservation.envelope)))
                 captureSurface()
                 return
@@ -405,7 +429,10 @@ internal class CivsAutonomousPlacement(
                 preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }) }
             catch (failure: RuntimeException) { retry(failure); return }
             phase = "earthworks"
-            await(world.captureTerraform(city, draft, executor, previous), ::retry) { terrain ->
+            await(world.captureTerraform(city, draft, executor, previous), { failure ->
+                if ((unwrap(failure) as? CivsRejection)?.reason == "autonomy-terrain") nativeTerrainRejected = true
+                retry(failure)
+            }) { terrain ->
                 phase = "route"
                 await(world.autonomousRoute(city, draft.building, terrain.route.first(), executor, terrain, previous), ::retry) {
                     phase = "blueprint"
@@ -429,6 +456,12 @@ internal class CivsAutonomousPlacement(
                         if (!civsContainsBox(draft.building.bounds, blueprint.building.bounds) ||
                             blueprint.building.entrance != draft.building.entrance || blueprint.building.control != draft.building.control) {
                             fail("autonomy-catalog-changed")
+                        } else if (captureVolume) {
+                            phase = "capture"
+                            await(world.captureAutonomousSite(city.id, city.owner, city.worldId, blueprint.building,
+                                blueprint.cells, terrain), ::retry) {
+                                result.complete(CivAutonomousDesign(blueprint, terrain))
+                            }
                         } else result.complete(CivAutonomousDesign(blueprint, terrain))
                     }
                 }
@@ -437,7 +470,8 @@ internal class CivsAutonomousPlacement(
 
         private fun fail(reason: String) {
             result.completeExceptionally(CivsRejection(reason, rejections.mapValues { it.value.toString() } +
-                mapOf("attempted" to attempted.toString(), "options" to options.size.toString())))
+                mapOf("attempted" to attempted.toString(), "options" to options.size.toString()) +
+                if (nativeTerrainRejected) mapOf("native-terrain" to "true") else emptyMap()))
         }
 
         private fun retry(failure: Throwable) {
