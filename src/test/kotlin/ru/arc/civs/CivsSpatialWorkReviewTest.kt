@@ -1654,7 +1654,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 city = city.copy(minePlans = mapOf(mine.id.toString() to seedV4MinePrefix(world, mine, floorStep)))
                 var paused = false
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused }, nanoTime = { 0L })
                     val workerId = city.workers.single().id
                     val originalStone = CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE")
                     fun nextWork(): CivWorldWork {

@@ -396,6 +396,11 @@ class CivsService(
 
     internal fun villageSearchStatus(): Map<String, Any?> = villageSites.status()
 
+    internal fun cancelVillageSearch() {
+        checkMain()
+        villageSites.cancel("console-cancelled")
+    }
+
     override fun canChangeSettlementSetting(player: Player, setting: CivSettlementSetting): Boolean =
         ready() && city(player)?.owner == player.uniqueId && player.hasPermission(CIVS_TESTING_PERMISSION) &&
             (setting != CivSettlementSetting.CHUNK_LOADING || player.hasPermission(CIVS_CHUNK_PERMISSION))

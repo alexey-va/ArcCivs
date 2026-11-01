@@ -335,7 +335,7 @@ internal class CivsForestryWorksite(
             }
             if (!forestBudget()) return blocked(worker, "searching-work")
             nextColumn()
-            if (ground?.type?.name in CivsForestry.soils && ground?.type != Material.COARSE_DIRT &&
+            if (plantingSoil(city, ground) && ground?.type != Material.COARSE_DIRT &&
                 planting?.blockData?.asString?.let(CivsForestry::plantingRootState) == true)
                 search.planting += position(planting)
             // Do not spend a second full sweep before using the retained candidates.
@@ -433,9 +433,12 @@ internal class CivsForestryWorksite(
         else listOf(focus).takeIf { at(focus.copy(y = focus.y - 1))?.type?.name in CivsForestry.soils }
     }
 
-    private fun forestSupply(city: Settlement, worker: CivWorker, building: CivBuilding, sapling: String): Long =
+    private fun forestSupply(city: Settlement, worker: CivWorker, building: CivBuilding, material: String): Long =
         if (CivsAutonomy.legacyStock(city)) if (city.stock.wood > 0 || building.id.toString() !in city.forestrySeeded.orEmpty()) 4L else 0L
-        else CivsEquipment.available(worker, context.stock(city, building.id))[sapling] ?: 0
+        else CivsEquipment.available(worker, context.stock(city, building.id))[material] ?: 0
+
+    private fun plantingSoil(city: Settlement, block: Block?): Boolean = block?.type?.name in CivsForestry.soils ||
+        city.inventory != null && block?.blockData?.asString in CivsForestry.soilPreparationStates
 
     private fun finishForestScan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         pending: ForestScan): CivWorldWork? {
@@ -566,12 +569,14 @@ internal class CivsForestryWorksite(
             return blocked(worker, "waiting-saplings", sapling, pending.roots.size.toLong())
         }
         val cleared = mutableListOf<CivPlanBlock>()
+        val preparedSoil = mutableListOf<CivPlanBlock>()
         val blocks = pending.roots.map { point ->
             val block = read(city, building, world, point) ?: return unavailable(temporary = true)
             val soil = read(city, building, world, point.copy(y = point.y - 1))
                 ?: return unavailable(temporary = true)
-            if (!CivsForestry.plantingRootState(block.blockData.asString) || soil.type.name !in CivsForestry.soils)
+            if (!CivsForestry.plantingRootState(block.blockData.asString) || !plantingSoil(city, soil))
                 return unavailable(reasons = listOf("planting-root-changed"), point = point)
+            if (soil.blockData.asString in CivsForestry.soilPreparationStates) preparedSoil += change(soil, "minecraft:dirt")
             val tall = block.blockData.asString == "minecraft:tall_grass[half=lower]"
             for (height in 1..4) {
                 val headroom = read(city, building, world, point.copy(y = point.y + height))
@@ -587,13 +592,16 @@ internal class CivsForestryWorksite(
             }
             block
         }
+        if (preparedSoil.isNotEmpty() && forestSupply(city, worker, building, "DIRT") < preparedSoil.size)
+            return blocked(worker, "waiting-materials", "DIRT", preparedSoil.size.toLong())
         val standing = beside(city, worker, building, world, pending.roots.first()) ?: run {
             if (!spotSearchPending) forestPlants.remove(worker.id)
             return null
         }
         forestPlants.remove(worker.id)
-        return work(worker, building, standing, blocks.map { change(it, CivsForestry.saplingState(sapling)) } + cleared,
-            mapOf(sapling to pending.roots.size.toLong()), status = "planting-tree", focus = pending.roots.first())
+        return work(worker, building, standing, preparedSoil + blocks.map { change(it, CivsForestry.saplingState(sapling)) } + cleared,
+            mapOf(sapling to pending.roots.size.toLong()) + if (preparedSoil.isEmpty()) emptyMap()
+                else mapOf("DIRT" to preparedSoil.size.toLong()), status = "planting-tree", focus = pending.roots.first())
             .let { if (CivsAutonomy.legacyStock(city)) it.copy(equipmentAfter = null) else it }
     }
 
@@ -666,7 +674,8 @@ internal class CivsForestryWorksite(
             val cells = (0..1).flatMap { x -> (0..1).map { z -> root.copy(x = root.x + dx + x, z = root.z + dz + z) } }
             if (cells.all { point -> at(point)?.let { if (material == Material.AIR)
                     CivsForestry.plantingRootState(it.blockData.asString) else it.type == material } == true &&
-                    at(point.copy(y = point.y - 1))?.type?.name in CivsForestry.soils }) return cells
+                    at(point.copy(y = point.y - 1)).let { soil -> if (material == Material.AIR) plantingSoil(city, soil)
+                        else soil?.type?.name in CivsForestry.soils } }) return cells
         }
         return null
     }

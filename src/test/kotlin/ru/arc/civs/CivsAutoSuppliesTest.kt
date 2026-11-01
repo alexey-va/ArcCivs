@@ -117,7 +117,8 @@ class CivsAutoSuppliesTest : FunSpec({
         val city = base.copy(buildings = base.buildings + other, workers = base.workers + worker)
         val observed = supplyObservation(city, mapOf(base.buildings[2].id to mapOf("OAK_PLANKS" to 6L),
             other.id to mapOf("IRON_AXE" to 1L)))
-        CivsAutoSupplies.demands(city, null, CivsResidentFoods.BREAD_ONLY, observed) shouldBe emptyList()
+        CivsAutoSupplies.demands(city, null, CivsResidentFoods.BREAD_ONLY, observed) shouldBe
+            listOf(CivAutoSupplyDemand(other.id, mapOf("DIRT" to 4L)))
     }
 
     test("carried cargo is counted once and does not also become producer bag surplus") {

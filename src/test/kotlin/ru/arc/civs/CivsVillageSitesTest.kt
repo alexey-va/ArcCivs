@@ -60,23 +60,39 @@ class CivsVillageSiteScoringTest : FunSpec({
                 val outer = kotlin.math.abs((key shr 32).toInt()) > 90 || kotlin.math.abs(key.toInt()) > 90
                 if (!outer) column else column.copy(natural = fringe != "wet", groundY = 95, topY = 95)
             })
-            (CivsVillageSiteScoring.score(surface).rejection(full = true) != null) shouldBe true
+            (CivsVillageSiteScoring.score(surface).rejection() != null) shouldBe true
             CivsVillageSiteScoring.coreScore(surface, center).let { score ->
                 score.columns shouldBe 181 * 181
-                score.rejection(full = true) shouldBe null
+                score.rejection() shouldBe null
             }
         }
         val split = flat.copy(columns = flat.columns.mapValues { (key, column) ->
             column.copy(natural = (key shr 32).toInt() != 0)
         })
-        CivsVillageSiteScoring.coreScore(split, center).rejection(full = false) shouldBe "village-disconnected"
+        CivsVillageSiteScoring.coreScore(split, center).rejection() shouldBe "village-disconnected"
         val wet = flat.copy(columns = flat.columns.mapValues { (_, column) -> column.copy(natural = false) })
-        CivsVillageSiteScoring.coreScore(wet, center).rejection(full = false) shouldBe "village-wet-or-obstructed"
+        CivsVillageSiteScoring.coreScore(wet, center).rejection() shouldBe "village-wet-or-obstructed"
         val threshold = CivVillageTerrainScore(0, 100, 80, 60, 8, 12, 63)
-        threshold.rejection(full = true) shouldBe null
-        threshold.copy(dryColumns = 79).rejection(full = true) shouldBe "village-wet-or-obstructed"
-        threshold.copy(connectedColumns = 59).rejection(full = true) shouldBe "village-disconnected"
-        threshold.copy(relief = 13).rejection(full = true) shouldBe "village-steep"
+        threshold.rejection() shouldBe null
+        threshold.copy(dryColumns = 79).rejection() shouldBe "village-wet-or-obstructed"
+        threshold.copy(connectedColumns = 59).rejection() shouldBe "village-disconnected"
+        threshold.copy(relief = 13).rejection() shouldBe null
+        threshold.copy(treeColumns = 0).rejection() shouldBe null
+        val uniformTrees = flat.copy(columns = flat.columns.mapValues { (_, column) ->
+            column.copy(topY = column.groundY + 3)
+        })
+        val hillside = uniformTrees.copy(columns = uniformTrees.columns.mapValues { (key, column) ->
+            val y = 63 + Math.floorDiv(key.toInt() - center.z, 8)
+            column.copy(groundY = y, topY = y + 3)
+        })
+        val flatScore = CivsVillageSiteScoring.coreScore(uniformTrees, center)
+        val hillScore = CivsVillageSiteScoring.coreScore(hillside, center)
+        hillScore.dryColumns shouldBe flatScore.dryColumns
+        hillScore.connectedColumns shouldBe flatScore.connectedColumns
+        hillScore.treeColumns shouldBe flatScore.treeColumns
+        hillScore.relief shouldBe 18
+        hillScore.rejection() shouldBe null
+        (flatScore.score - hillScore.score) shouldBe hillScore.relief * 10_000L
     }
 
     test("usable timber belongs to the first rotated forester work zone and excludes future buildings and roads") {
@@ -140,25 +156,28 @@ class CivsVillageSiteScoringTest : FunSpec({
         (ids.first() != CivsVillageSiteScoring.id(reference.id, "Other-", 1)) shouldBe true
     }
 
-    test("ranking prefers connected flat dry land with trees and rejects water cliffs and missing chunks") {
+    test("ranking prefers timber but accepts bare connected land and rejects water cliffs and missing chunks") {
         val flat = villageSurface(CivPosition(0, 63, 0), 12)
         val eligible = CivsVillageSiteScoring.score(flat)
-        eligible.rejection(full = true) shouldBe null
+        eligible.rejection() shouldBe null
         eligible.connectedColumns shouldBe flat.columns.size
         val wet = flat.copy(columns = flat.columns.mapValues { (key, column) ->
             column.copy(natural = key.toInt() > 0)
         })
-        CivsVillageSiteScoring.score(wet).rejection(full = true) shouldBe "village-wet-or-obstructed"
+        CivsVillageSiteScoring.score(wet).rejection() shouldBe "village-wet-or-obstructed"
         val cliff = flat.copy(columns = flat.columns.mapValues { (key, column) ->
             column.copy(groundY = if ((key shr 32).toInt() > 0) 90 else 63)
         })
         (eligible.score > CivsVillageSiteScoring.score(cliff).score) shouldBe true
-        (CivsVillageSiteScoring.score(cliff).rejection(full = true) != null) shouldBe true
+        (CivsVillageSiteScoring.score(cliff).rejection() != null) shouldBe true
         val unavailable = flat.copy(columns = flat.columns.mapValues { (_, column) -> column.copy(loaded = false) })
         CivsVillageSiteScoring.score(unavailable).dryColumns shouldBe 0
-        CivsVillageSiteScoring.score(unavailable).rejection(full = true) shouldBe "village-wet-or-obstructed"
+        CivsVillageSiteScoring.score(unavailable).rejection() shouldBe "village-wet-or-obstructed"
         val treeless = flat.copy(columns = flat.columns.mapValues { (_, column) -> column.copy(topY = column.groundY) })
-        CivsVillageSiteScoring.score(treeless).rejection(full = true) shouldBe "village-no-trees"
+        val bareScore = CivsVillageSiteScoring.score(treeless)
+        bareScore.rejection() shouldBe null
+        bareScore.treeColumns shouldBe 0
+        (eligible.score > bareScore.score) shouldBe true
     }
 
     test("a narrow protected cut splits an otherwise dry village and missing profile plots are refused") {
@@ -166,7 +185,7 @@ class CivsVillageSiteScoringTest : FunSpec({
         val split = flat.copy(columns = flat.columns.mapValues { (key, column) ->
             column.copy(natural = (key shr 32).toInt() != 0)
         })
-        CivsVillageSiteScoring.score(split).rejection(full = true) shouldBe "village-disconnected"
+        CivsVillageSiteScoring.score(split).rejection() shouldBe "village-disconnected"
         val city = villageReference(UUID.randomUUID())
         val full = villageLayout(city)
         CivsVillageSiteScoring.completeProfile(full) shouldBe true
@@ -869,30 +888,44 @@ class CivsVillageSitesTest : FunSpec({
         }
     }
 
-    test("a complete layout with only remote provincial trees is refused with its detached usable timber evidence") {
-        villageScenario { s ->
+    test("a complete layout can be founded without provincial or reachable timber") {
+        for (withRemoteTrees in listOf(false, true)) villageScenario { s ->
             s.fullSurface = { city ->
                 val surface = villageSurface(city.center, 127)
                 surface.copy(columns = surface.columns.mapValues { (key, column) ->
-                    val timber = (key shr 32).toInt() in city.center.x + 112..city.center.x + 119 &&
+                    val timber = withRemoteTrees && (key shr 32).toInt() in city.center.x + 112..city.center.x + 119 &&
                         key.toInt() == city.center.z + 120
                     column.copy(topY = if (timber) 68 else column.groundY)
                 })
             }
             val result = s.subject.search(s.reference, 1, "Auto-")
-            s.until { (s.subject.status()["rejected_sites"] as? List<*>)?.filterIsInstance<CivVillageSiteRejection>()
-                ?.any { it.usableTreeColumns == 0 } == true }
-            val evidence = (s.subject.status()["rejected_sites"] as List<*>).filterIsInstance<CivVillageSiteRejection>().last()
-            evidence.phase shouldBe "complete-layout-proof"
-            evidence.reason shouldBe "village-no-trees"
-            evidence.provinceTreeColumns shouldBe 8
-            evidence.terrain?.columns shouldBe 181 * 181
-            evidence.point shouldBe s.fullCities.single().center
-            s.admissions shouldBe emptyList()
-            s.subject.cancel("timber-evidence-test")
             s.until { result.isDone }
-            result.join().rejectedSites.last() shouldBe evidence
+            result.join().complete shouldBe true
+            result.join().created.single().treeColumns shouldBe 0
+            s.siteProofs.size shouldBe 1
+            val founded = s.admissions.single().city
+            CivsVillageSiteScoring.completeProfile(requireNotNull(founded.autonomy?.plan)) shouldBe true
+            founded.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("a bare province still requires native terrain permission before founding") {
+        villageScenario { s ->
+            s.fullSurface = { city -> villageSurface(city.center, 127).let { surface ->
+                surface.copy(columns = surface.columns.mapValues { (_, column) -> column.copy(topY = column.groundY) })
+            } }
+            s.siteProof = { CompletableFuture.failedFuture(CivsRejection("lands-denied")) }
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { (s.subject.status()["rejected"] as? Map<*, *>)?.containsKey("lands-denied") == true || result.isDone }
+            s.siteProofs.size shouldBe 1
+            s.admissions shouldBe emptyList()
+            s.subject.cancel("bare-native-proof-test")
+            s.until { result.isDone }
             result.join().created shouldBe emptyList()
+            result.join().rejected["lands-denied"] shouldBe 1
+            s.cities shouldBe listOf(s.reference)
             s.registry.activeLeaseCount shouldBe 0
             s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
         }
@@ -961,29 +994,27 @@ class CivsVillageSitesTest : FunSpec({
 
     test("a partial canonical receipt resumes in another batch without repeating grants or changing its existing town") {
         villageScenario { s ->
-            val forested = s.fullSurface
             var proofs = 0
-            s.layout = { city -> proofs++; villageLayout(city) }
-            s.fullSurface = { city -> forested(city).let { surface ->
-                if (s.admissions.isEmpty()) surface else surface.copy(columns = surface.columns.mapValues { (_, column) ->
-                    column.copy(topY = column.groundY)
-                })
-            } }
+            s.layout = { city ->
+                proofs++
+                if (s.admissions.isNotEmpty()) throw CivsRejection("autonomy-no-site")
+                villageLayout(city)
+            }
             val result = s.subject.search(s.reference, 5, "Auto-")
             s.until { result.isDone }
             result.join().complete shouldBe false
             result.join().batch shouldBe 0
             result.join().reason shouldBe "village-chunk-budget"
             result.join().created.size shouldBe 1
-            (requireNotNull(result.join().rejected["village-no-trees"]) > 0) shouldBe true
-            proofs shouldBe 1 // Treeless provinces never enter the expensive full layout solver.
+            (requireNotNull(result.join().rejected["autonomy-no-site"]) > 0) shouldBe true
+            proofs shouldBe s.fullCities.size
             val saved = s.cities.last()
             val savedReceipt = result.join().created.single()
             saved.id shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
             CivsVillageSiteScoring.probeFits(s.peakRequests, 25, 4, 361) shouldBe false
             (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
             s.registry.activeLeaseCount shouldBe 0
-            s.fullSurface = forested
+            s.layout = ::villageLayout
             val replay = s.subject.search(s.reference, 5, "Auto-", batch = 2)
             s.until { replay.isDone }
             replay.join().complete shouldBe true

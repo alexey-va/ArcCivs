@@ -39,11 +39,9 @@ internal data class CivVillageSitesResult(val operation: UUID, val reference: UU
 
 internal data class CivVillageTerrainScore(val score: Long, val columns: Int, val dryColumns: Int,
     val connectedColumns: Int, val treeColumns: Int, val relief: Int, val groundY: Int) {
-    fun rejection(full: Boolean): String? = when {
+    fun rejection(): String? = when {
         columns == 0 || dryColumns.toLong() * 100 < columns.toLong() * 80 -> "village-wet-or-obstructed"
         connectedColumns.toLong() * 100 < columns.toLong() * 60 -> "village-disconnected"
-        relief > 12 -> "village-steep"
-        full && treeColumns < 8 -> "village-no-trees"
         else -> null
     }
 }
@@ -398,7 +396,7 @@ internal class CivsVillageSites(
                 }) { surface ->
                     search.examined++
                     val score = CivsVillageSiteScoring.score(surface, CivsVillageSiteScoring.SAMPLE_STEP)
-                    val refused = score.rejection(full = false)
+                    val refused = score.rejection()
                     if (refused != null) reject(search, refused, score) else {
                         search.shortlist += Candidate(anchor.copy(y = score.groundY), score)
                         search.shortlist.sortByDescending { it.score.score }
@@ -453,7 +451,7 @@ internal class CivsVillageSites(
             surface.columns.values.count { it.loaded && it.natural && it.topY.toLong() - it.groundY >= 2 } }, executor), failed = {
             finish(search, rejection(it))
         }) { (score, provinceTrees) ->
-            val refused = score.rejection(full = false) ?: "village-no-trees".takeIf { provinceTrees < 8 }
+            val refused = score.rejection()
             if (refused != null) {
                 reject(search, refused, score, provinceTrees)
                 release(search) { full(search) }
@@ -496,7 +494,6 @@ internal class CivsVillageSites(
                                     fortification = fortification, inspect = inspect)
                                 if (!CivsVillageSiteScoring.completeProfile(plan)) throw CivsRejection("autonomy-no-site")
                                 val trees = CivsVillageSiteScoring.usableTreeColumns(city, plan, surface)
-                                if (trees < 8) throw CivsRejection("village-no-trees", mapOf("usable-tree-columns" to trees.toString()))
                                 return plan to trees
                             }
                             capture?.prove(search.id, search.reference.id, city, preparedSurface, templates) { inspect -> prepare(inspect) }

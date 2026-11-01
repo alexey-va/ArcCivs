@@ -155,6 +155,16 @@ keeps its existing 8192 chunk-request and two-pending-load limits. Reference,
 prefix and ordinal still determine city identity across every page, so a partial
 result resumes without a second founding reserve. Every selected site still
 requires the complete layout and strict native foundation and volume proofs.
+Relief remains a ranking penalty rather than an absolute admission limit: a
+natural hillside can still receive a complete graded plan through the existing
+terraforming policy. Existing trees improve ranking and remain visible in search
+receipts, but are not required for founding: foresters can establish new trees
+from saplings. The dry-column and raw connectivity checks and every final
+foundation, volume, route and full-profile proof remain required.
+Console administrators can request `civs village-search-cancel` while the host is
+draining. Its structured reply reports the current cancellation state; the
+existing founding and lease lifecycle finishes any entered commit and releases
+the search-owned chunks before reporting the search inactive.
 Default style preference is nordic, medievaloak, birch, original, acacia, then
 medievaldarkoak and the remaining supported themes. Existing city styles are
 retained on continuation; an uncreated ordinal prefers an unused supported theme.
@@ -625,6 +635,13 @@ authored fields, approaches, transit columns and retained terrain roads. Nearby
 saplings reserve space for their future crowns too. `StructureGrowEvent` cancels
 the entire generated tree if its actual crown reaches one of those columns or
 an origin/generated cell is still locked by a native receipt.
+Treeless sandy ground can use the same planting action: only SAND or RED_SAND
+directly below a selected root may become DIRT, at one carried DIRT per replaced
+cell. Existing plantable soil adds no DIRT cost. Soil preparation and saplings
+share one paid, replayable native receipt with exact before-images and no item
+outputs. Ordinary foresters request and reserve four DIRT per assigned worker
+through existing logistics; Auto settlements use the existing physical deficit
+allocator. Legacy sapling-only receipts remain valid.
 Tree discovery captures diagonal and downward log branches before foliage in
 resumable slices of at most 192 work units and two milliseconds, beside the
 existing 16 candidate-column probes. A captured tree fits within 2,048 cells,

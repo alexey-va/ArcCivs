@@ -1,0 +1,208 @@
+{
+  "schema": 1,
+  "plugin_version": "0.1.171",
+  "status": "offline_source_candidate_not_activated",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "problem": "The initial search rejects raw relief above12 before allowing the existing graded full-layout planner to evaluate a hillside. A controlled one-in-eight natural slope passes the existing complete34-building forecast, infrastructure and store roundtrip despite raw coarse relief23 and construction-core relief18. Requiring ready timber also rejects treeless land even though foresters already plant independently.",
+  "change": "Remove the absolute relief veto and ready-forest admission requirements. Preserve relief and tree counts in ranking/analytics, complete34 layout and native checks. Reuse ordinary planting receipts for SAND/RED_SAND-to-DIRT under actual roots, consuming one DIRT per replaced cell and the existing sapling count. Console cancellation delegates to the existing lifecycle.",
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "unchanged_bounds": {
+    "requested_villages": 5,
+    "full_layout_plots": 34,
+    "routes": 33,
+    "search_pages": 8,
+    "candidates_per_page": 192,
+    "chunk_requests_per_search": 8192,
+    "pending_chunk_loads": 2,
+    "minimum_natural_dry_percent": 80,
+    "minimum_raw_connected_percent": 60,
+    "terraform_cut_or_fill_blocks": 24,
+    "foundation_support_scan_blocks": 24,
+    "native_guards": "Existing support, ownership, ore, liquids, containers, protected structures, volume, route and complete-layout checks remain required."
+  },
+  "founding_reserve_before_equals_after": {
+    "per_new_ID": {
+      "OAK_LOG": 96,
+      "COBBLESTONE": 96,
+      "BREAD": 24
+    },
+    "five_total": {
+      "OAK_LOG": 480,
+      "COBBLESTONE": 480,
+      "BREAD": 120
+    },
+    "repeat_existing_ID": 0,
+    "remaining_one": {
+      "OAK_LOG": 96,
+      "COBBLESTONE": 96,
+      "BREAD": 24
+    }
+  },
+  "search_and_cancel": "No reward, drop, item grant or native construction write is created by the new score rule or cancellation command. Existing bounded chunk loading/generation is unchanged. Cancellation uses the existing guarded commit and lease-release lifecycle; it does not undo a committed city or issue another reserve.",
+  "indirect_effect": "More terrain may reach existing native proof and ordinary founding. Accepted blueprint-specific materials, earthwork, planted timber and later normal supply-grants remain unmeasured before live acceptance; no zero indirect-item effect or self-sufficiency is claimed. Existing harvest rates, drop probabilities, work durations and supply allocator limits are unchanged; the new four-DIRT stock target and actual soil inputs are assessed separately below.",
+  "income_model": {
+    "active_SELL": "unchanged; actual DIRT sale availability/value is not assumed or counted as measured currency income",
+    "planned_SELL_to_contract": "future/SHADOW, separate from active income"
+  },
+  "offline_evidence": {
+    "scope": "Generic existing complete-profile fixture, not an actual-catalog or native founding proof",
+    "slope": "groundY=64+floorDiv(z,8)",
+    "plots": 34,
+    "routes": 33,
+    "closed_infrastructure_pieces": 102,
+    "infrastructure_rejections": 0,
+    "codec_bytes": 57727,
+    "codec_limit_bytes": 262144,
+    "store_roundtrip_equal": true,
+    "actual_city_and_surface_unchanged": true,
+    "steeper_control": "The distinct one-in-four slope still fails three infrastructure approaches. Its refusal is preserved and does not justify weakening final approach checks or the raw-connectivity policy."
+  },
+  "test_followup": "The previous full CI found a second unchanged semantic worksite test depending on the real2ms scan clock. The late-gravel test now uses the existing injected deterministic clock while retaining64pulses, its8-ray per-pulse bound and all receipt/gravel/tool/route assertions. Production worksite timing is unchanged.",
+  "live_scope": "The owner chose to finish the current170search without a restart and stop further searches. That search ended with4of5founded. This171candidate has not run a native search, been delivered or activated; no new restart or search is performed by these offline checks.",
+  "version": 1,
+  "title": "ArcCivs171: terraform-aware and treeless founding with paid forestry soil preparation",
+  "ready_forest_requirement": {
+    "before_columns": 8,
+    "after_columns": 0,
+    "existing_tree_counts": "retained for ranking and diagnostics",
+    "no_instant_or_free_mature_trees": true
+  },
+  "forestry_soil_before_after": {
+    "ordinary_plantable_soil": {
+      "additional_DIRT_before": 0,
+      "additional_DIRT_after": 0
+    },
+    "replaceable_soil": [
+      "SAND",
+      "RED_SAND"
+    ],
+    "per_replaced_under_root_cell": {
+      "DIRT_input_before": "action_not_supported",
+      "DIRT_input_after": 1,
+      "sapling_input_per_root_before": 1,
+      "sapling_input_per_root_after": 1,
+      "item_outputs": 0
+    },
+    "roots_per_plant_action": [
+      1,
+      4
+    ],
+    "DIRT_input_per_action": [
+      0,
+      4
+    ],
+    "desired_and_reserved_DIRT_per_worker": {
+      "before": 0,
+      "after": 4
+    },
+    "fully_staffed_forester_DIRT_buffer_by_level_after": {
+      "L1": 4,
+      "L2": 8,
+      "L3": 12
+    },
+    "planned_five_full_profiles": {
+      "foresters_per_village": 2,
+      "maximum_workers_per_forester_L3": 3,
+      "maximum_forester_workers": 30,
+      "one_time_inventory_buffer_DIRT": 120
+    },
+    "supply_contract": "Ordinary villages haul real stock; Auto uses the existing physical deficit top-up allocator. No direct manual grant, UI-derived64 target, new supply endpoint or new starting reserve. Native soil and sapling edits share the existing paid/replayed receipt; only actually replaced soil consumes DIRT."
+  },
+  "assumptions": [
+    "Calculator participants represent forester workers, not human players. Values are in DIRT item units; no money exchange value is invented.",
+    "Low/base/high are declared activity scenarios:1/5/30 workers and0/4/16 newly replaced sandy under-root cells per worker-day. They are not telemetry or universal caps.",
+    "The separate4-DIRT inventory buffer per worker is established once as a stock target; it is NOT another daily payout and is NOT multiplied by7 in the recurring calculator.",
+    "Recurring mint potential applies only to eligible existing Auto deficit grants for consumed DIRT. The exact live grants, native growth rate, logistics limits and player export access remain unmeasured.",
+    "The recurring Auto restock and paid consumption have equal DIRT item counts in each declared scenario. Zero net inventory DIRT does not mean zero benefit: the inputs become native soil and enable planted timber. The separate initial buffer remains a one-time item source."
+  ],
+  "participants": [
+    1,
+    5,
+    30
+  ],
+  "currencies": {
+    "DIRT_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "soil_preparation_auto_restock",
+          "kind": "mint",
+          "source": "CivsLogistics.desiredStock/workerWorkReserve -> existing Auto supply allocator -> paid planting receipt",
+          "basis": "Potential recurring top-ups for actually consumed soil inputs; normal owned settlements do not mint items. Existing inventory and incoming cargo reduce the real grant.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              16
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              16
+            ]
+          }
+        },
+        {
+          "id": "paid_soil_consumption",
+          "kind": "burn",
+          "source": "CivsRules.finishWorldWork -> accepted planting receipt",
+          "basis": "Each exact SAND/RED_SAND-to-DIRT cell consumes one inventory DIRT. Auto top-ups replace these consumed items; ordinary settlements consume existing stock without minting. The native soil becomes a world block, not transferable item output.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              16
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              16
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "scope_limits": "No live search or runtime activation is performed in the offline candidate. More viable terrain and real planted timber can change ordinary item production; no measured zero indirect impact or self-sufficiency is claimed. Ready-tree gates are removed only together with a validated treeless planting path."
+}

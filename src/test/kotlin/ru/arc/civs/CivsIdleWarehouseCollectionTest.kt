@@ -12,7 +12,7 @@ class CivsIdleWarehouseCollectionTest : FunSpec({
             val forester = city.buildings.last()
             val warehouse = city.buildings[1]
             val snapshot = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L,
-                "IRON_AXE" to 1L, "STICK" to 5L, "APPLE" to 1L))
+                "DIRT" to 4L, "IRON_AXE" to 1L, "STICK" to 5L, "APPLE" to 1L))
             snapshot.requests shouldBe emptyList()
             snapshot.workerSources shouldBe emptyList()
             snapshot.maximumTransferDistance shouldBe CivsLogistics.maximumTransferDistance(city)
@@ -33,7 +33,7 @@ class CivsIdleWarehouseCollectionTest : FunSpec({
             val city = idleCollectionCity(auto = false, distance = 40)
             val source = city.buildings.last()
             val warehouse = city.buildings[1]
-            val base = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L, "IRON_AXE" to 1L),
+            val base = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L, "DIRT" to 4L, "IRON_AXE" to 1L),
                 mapOf("STICK" to 64L))
             val request = CivSupplyRequest(source.id, "STICK", 2L, 0L)
             val oldCollection = CivSupplyTask(source.id, null, warehouse.id, "OAK_LOG", false)
@@ -49,7 +49,7 @@ class CivsIdleWarehouseCollectionTest : FunSpec({
     for (auto in listOf(false, true)) test("idle native collection is shared by ordinary and Auto towns Auto=$auto") {
         MockBukkitTestRuntime.open().use {
             val city = idleCollectionCity(auto, 40)
-            val snapshot = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L, "IRON_AXE" to 1L))
+            val snapshot = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L, "DIRT" to 4L, "IRON_AXE" to 1L))
             snapshot.requests shouldBe emptyList()
             snapshot.workerSources shouldBe emptyList()
             val plan = allocateCivSupplies(snapshot.detached()).plans.values.single()
@@ -57,7 +57,7 @@ class CivsIdleWarehouseCollectionTest : FunSpec({
             plan.cargo.amount shouldBe 64L
             plan.cargo.sourceWorkerId shouldBe null
             snapshot.stores.getValue(city.buildings.last().id).desiredStock shouldBe
-                mapOf("OAK_SAPLING" to 4L, "IRON_AXE" to 1L)
+                mapOf("OAK_SAPLING" to 4L, "DIRT" to 4L, "IRON_AXE" to 1L)
             CivsEquipment.plainCount(city.workers.last(), "OAK_LOG") shouldBe 64
         }
     }
@@ -67,7 +67,7 @@ class CivsIdleWarehouseCollectionTest : FunSpec({
             val city = idleCollectionCity(false, 40)
             val source = city.buildings.last().id
             val warehouse = city.buildings[1].id
-            val base = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L, "IRON_AXE" to 1L)).detached()
+            val base = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L, "DIRT" to 4L, "IRON_AXE" to 1L)).detached()
             val input = base.copy(couriers = (0..3).map { index -> base.couriers.single().copy(
                 workerId = UUID(0, 100L + index), bagRoom = mapOf("OAK_LOG" to 64L)) })
             val allocated = allocateCivSupplies(input).plans
@@ -78,7 +78,7 @@ class CivsIdleWarehouseCollectionTest : FunSpec({
             val carried = allocated.getValue(pickedId).let { it.copy(carrying = true, cargo = it.cargo.copy(inventoryBacked = true)) }
             val afterPickup = input.copy(retained = mapOf(pickedId to carried),
                 couriers = input.couriers.filterNot { it.workerId == pickedId }, stores = input.stores +
-                    (source to input.stores.getValue(source).copy(stock = mapOf("OAK_LOG" to 112L, "OAK_SAPLING" to 4L, "IRON_AXE" to 1L))))
+                    (source to input.stores.getValue(source).copy(stock = mapOf("OAK_LOG" to 112L, "OAK_SAPLING" to 4L, "DIRT" to 4L, "IRON_AXE" to 1L))))
             val next = allocateCivSupplies(afterPickup).plans
             next.getValue(pickedId) shouldBe carried
             next.values.filterNot { it.carrying }.sumOf { it.cargo.amount } shouldBe 112L
@@ -89,7 +89,7 @@ class CivsIdleWarehouseCollectionTest : FunSpec({
                 .copy(capacity = CivSupplyCapacity(0, mapOf("OAK_LOG" to 5L)))))
             allocateCivSupplies(partial).plans.values.sumOf { it.cargo.amount } shouldBe 5L
             val inputsOnly = input.copy(stores = input.stores + (source to input.stores.getValue(source)
-                .copy(stock = mapOf("OAK_SAPLING" to 4L, "IRON_AXE" to 1L))))
+                .copy(stock = mapOf("OAK_SAPLING" to 4L, "DIRT" to 4L, "IRON_AXE" to 1L))))
             allocateCivSupplies(inputsOnly).plans shouldBe emptyMap()
         }
     }
@@ -97,7 +97,7 @@ class CivsIdleWarehouseCollectionTest : FunSpec({
     test("background source age rotates past a continuously replenished nearer producer") {
         MockBukkitTestRuntime.open().use {
             val city = idleCollectionCity(false, 40)
-            val base = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L, "IRON_AXE" to 1L)).detached()
+            val base = idleCollectionSnapshot(city, mapOf("OAK_LOG" to 176L, "OAK_SAPLING" to 4L, "DIRT" to 4L, "IRON_AXE" to 1L)).detached()
             val source = base.stores.getValue(city.buildings.last().id)
             val far = source.copy(id = UUID(0, 40), entrance = CivPosition(60, 64, -3), control = CivPosition(60, 64, 0))
             val input = base.copy(stores = base.stores + (far.id to far))

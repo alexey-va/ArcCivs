@@ -38,26 +38,34 @@ class CivsCommand(
         CompletableFuture.failedFuture(CivsRejection("settlement-file-unavailable")) },
     private val foundVillages: (UUID, Int, String, Int) -> CompletableFuture<Any> = { _, _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("village-search-unavailable")) },
+    private val cancelVillageSearch: () -> Unit = { throw CivsRejection("village-search-unavailable") },
     private val villageSearchStatus: () -> Map<String, Any?> = { mapOf("state" to "unavailable") },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
-        if (args.firstOrNull() in setOf("found-villages", "village-search-status")) {
+        if (args.firstOrNull() in setOf("found-villages", "village-search-status", "village-search-cancel")) {
             val status = args.firstOrNull() == "village-search-status"
+            val cancel = args.firstOrNull() == "village-search-cancel"
             val reference = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
             val count = args.getOrNull(2)?.toIntOrNull()
             val prefix = args.getOrNull(3)
             val batch = if (args.size > 4) args[4].toIntOrNull() else 0
             val error = when {
                 sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
-                status && args.size != 1 -> "invalid-village-search-arguments"
-                !status && (args.size !in 4..5 || reference == null || count == null || count !in 1..5 ||
+                (status || cancel) && args.size != 1 -> "invalid-village-search-arguments"
+                !status && !cancel && (args.size !in 4..5 || reference == null || count == null || count !in 1..5 ||
                     prefix == null || prefix.isBlank() || prefix.length > 24 || batch == null || batch !in 0..CivsVillageSites.MAXIMUM_BATCH) -> "invalid-village-search-arguments"
-                hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
+                !cancel && (hotloadStatus()["state"] != "active" || !host.ready()) -> "not-ready"
                 else -> null
             }
             fun reply(value: Any) = sender.sendMessage("ARCCIVS_VILLAGE_SEARCH " + Gson().toJson(value))
             if (error != null) reply(mapOf("state" to "failed", "error" to error))
             else if (status) reply(villageSearchStatus())
+            else if (cancel) runCatching {
+                cancelVillageSearch()
+                villageSearchStatus()
+            }.onSuccess { reply(mapOf("state" to "cancel-requested", "status" to it)) }
+                .onFailure { reply(mapOf("state" to "failed", "error" to
+                    (CivsDiagnostics.rejection(it)?.reason ?: "village-search-cancel-failed"))) }
             else runCatching { foundVillages(requireNotNull(reference), requireNotNull(count), requireNotNull(prefix), requireNotNull(batch)) }
                 .onSuccess { future ->
                     reply(mapOf("state" to "accepted", "reference" to reference, "requested" to count, "prefix" to prefix, "batch" to batch))
@@ -260,7 +268,7 @@ class CivsCommand(
         completions(sender.hasPermission("arccivs.use"), sender.hasPermission("arccivs.admin"), args,
             sender is ConsoleCommandSender).let { choices ->
             if (hotloadStatus()["state"] == "active" || args.firstOrNull() == "hotload") choices
-            else choices.filter { it == "hotload" }
+            else choices.filter { it == "hotload" || it == "village-search-cancel" }
         }
 
     companion object {
@@ -278,7 +286,7 @@ class CivsCommand(
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
             return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
-                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "village-search-status") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
+                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "village-search-status", "village-search-cancel") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         private fun settlementFileLine(path: Path? = null, failure: Throwable? = null): String =

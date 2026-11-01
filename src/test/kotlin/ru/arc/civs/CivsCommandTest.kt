@@ -14,6 +14,127 @@ import org.bukkit.entity.Player
 import java.util.UUID
 
 class CivsCommandTest : FunSpec({
+    test("village search cancellation is suggested only to console administrators during drain") {
+        val args = arrayOf("village-search-c")
+        CivsCommand.completions(true, true, args, console = true) shouldBe listOf("village-search-cancel")
+        CivsCommand.completions(false, true, args, console = true) shouldBe emptyList()
+        CivsCommand.completions(true, false, args, console = true) shouldBe emptyList()
+        CivsCommand.completions(true, true, args, console = false) shouldBe emptyList()
+        CivsCommand.completions(true, true, arrayOf("village-search-cancel", ""), console = true) shouldBe emptyList()
+        val router = CivsCommand(mockk(), mockk(), mockk(), mockk(),
+            hotloadStatus = { mapOf("state" to "preparing") })
+        val console = mockk<ConsoleCommandSender> {
+            every { hasPermission(any<String>()) } returns true
+        }
+        router.onTabComplete(console, mockk(), "civs", args) shouldBe listOf("village-search-cancel")
+    }
+
+    test("village search cancellation reports finishing and repeated idle status without requiring readiness") {
+        val host = mockk<CivsUiHost> { every { ready() } returns false }
+        val messages = mutableListOf<String>()
+        var cancellations = 0
+        var statuses = 0
+        var status = mapOf<String, Any?>("active" to true, "phase" to "founding", "finishing" to false, "created" to 4)
+        val router = CivsCommand(host, mockk(), mockk(), mockk(),
+            hotloadStatus = { mapOf("state" to "preparing") },
+            foundVillages = { _, _, _, _ -> error("cancel must not start another search") },
+            cancelVillageSearch = {
+                cancellations++
+                if (status["active"] == true) status = status + mapOf("phase" to "cancelling-founding", "finishing" to true)
+            },
+            villageSearchStatus = { statuses++; status })
+        val console = mockk<ConsoleCommandSender> {
+            every { hasPermission(any<String>()) } returns true
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        val args = arrayOf("village-search-cancel")
+        router.onCommand(console, mockk(), "civs", args) shouldBe true
+        cancellations shouldBe 1
+        statuses shouldBe 1
+        val receipt = JsonParser.parseString(messages.single().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject
+        receipt["state"].asString shouldBe "cancel-requested"
+        receipt["status"].asJsonObject.let { actual ->
+            actual["active"].asBoolean shouldBe true
+            actual["finishing"].asBoolean shouldBe true
+            actual["phase"].asString shouldBe "cancelling-founding"
+            actual["created"].asInt shouldBe 4
+        }
+        status = mapOf("active" to false, "last" to mapOf("reason" to "console-cancelled", "created" to 4))
+        val idle = status
+        repeat(2) {
+            router.onCommand(console, mockk(), "civs", args) shouldBe true
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject.let { actual ->
+                actual["state"].asString shouldBe "cancel-requested"
+                actual["status"].asJsonObject["active"].asBoolean shouldBe false
+                actual["status"].asJsonObject["last"].asJsonObject["reason"].asString shouldBe "console-cancelled"
+            }
+            status shouldBe idle
+        }
+        cancellations shouldBe 3
+        statuses shouldBe 3
+        messages.size shouldBe 3
+        verify(exactly = 0) { host.ready() }
+    }
+
+    test("village search cancellation rejects players missing permissions and extra arguments before callbacks") {
+        var cancellations = 0
+        var statuses = 0
+        val messages = mutableListOf<String>()
+        val router = CivsCommand(mockk(), mockk(), mockk(), mockk(),
+            cancelVillageSearch = { cancellations++ }, villageSearchStatus = { statuses++; emptyMap() })
+        for ((sender, denied) in listOf(
+            mockk<Player>() to null,
+            mockk<CommandSender>() to null,
+            mockk<ConsoleCommandSender>() to "arccivs.use",
+            mockk<ConsoleCommandSender>() to "arccivs.admin")) {
+            every { sender.hasPermission(any<String>()) } returns true
+            if (denied != null) every { sender.hasPermission(denied) } returns false
+            every { sender.sendMessage(capture(messages)) } returns Unit
+            router.onCommand(sender, mockk(), "civs", arrayOf("village-search-cancel")) shouldBe true
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject.let { receipt ->
+                receipt["state"].asString shouldBe "failed"
+                receipt["error"].asString shouldBe "not-authorized"
+            }
+        }
+        val console = mockk<ConsoleCommandSender> {
+            every { hasPermission(any<String>()) } returns true
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        for (extra in listOf("extra", "", UUID.randomUUID().toString())) {
+            router.onCommand(console, mockk(), "civs", arrayOf("village-search-cancel", extra)) shouldBe true
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject.let { receipt ->
+                receipt["state"].asString shouldBe "failed"
+                receipt["error"].asString shouldBe "invalid-village-search-arguments"
+            }
+        }
+        cancellations shouldBe 0
+        statuses shouldBe 0
+    }
+
+    test("village search cancellation reports unavailable or failed callbacks without reading a misleading status") {
+        var statuses = 0
+        val messages = mutableListOf<String>()
+        val status = { statuses++; mapOf<String, Any?>("active" to false) }
+        val unavailable = CivsCommand(mockk(), mockk(), mockk(), mockk(), villageSearchStatus = status)
+        val rejected = CivsCommand(mockk(), mockk(), mockk(), mockk(),
+            cancelVillageSearch = { throw CivsRejection("world-closed") }, villageSearchStatus = status)
+        val failed = CivsCommand(mockk(), mockk(), mockk(), mockk(),
+            cancelVillageSearch = { error("controlled callback failure") }, villageSearchStatus = status)
+        val console = mockk<ConsoleCommandSender> {
+            every { hasPermission(any<String>()) } returns true
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        for ((router, error) in listOf(unavailable to "village-search-unavailable", rejected to "world-closed",
+                failed to "village-search-cancel-failed")) {
+            router.onCommand(console, mockk(), "civs", arrayOf("village-search-cancel")) shouldBe true
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject.let { receipt ->
+                receipt["state"].asString shouldBe "failed"
+                receipt["error"].asString shouldBe error
+            }
+        }
+        statuses shouldBe 0
+    }
+
     test("automatic village founding requires ready console administration and bounded exact arguments") {
         val host = mockk<CivsUiHost> { every { ready() } returns true }
         val calls = mutableListOf<Pair<Triple<UUID, Int, String>, Int>>()
@@ -225,7 +346,7 @@ class CivsCommandTest : FunSpec({
         messages.map { JsonParser.parseString(it.removePrefix("ARCCIVS_HOTLOAD ")).asJsonObject["state"].asString } shouldBe
             listOf("preparing", "ready")
         JsonParser.parseString(messages.last().removePrefix("ARCCIVS_HOTLOAD ")).asJsonObject["version"].asString shouldBe "0.9.3"
-        router.onTabComplete(console, mockk(), "civs", arrayOf("")) shouldBe listOf("hotload")
+        router.onTabComplete(console, mockk(), "civs", arrayOf("")) shouldBe listOf("hotload", "village-search-cancel")
         router.onTabComplete(console, mockk(), "civs", arrayOf("hotload", "")) shouldBe listOf("prepare", "status")
     }
 

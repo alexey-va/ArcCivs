@@ -109,7 +109,7 @@ object CivsLogistics {
         if (workers == 0) return emptyMap()
         return (CivsProduction.inputs(city, building) + when (building.type) {
             BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "BONE_MEAL" to 16L, "IRON_HOE" to 1L)
-            BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
+            BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "DIRT" to 4L, "IRON_AXE" to 1L)
             BuildingType.QUARRY -> quarrySupplies(building) + ("IRON_PICKAXE" to 1L)
             else -> emptyMap()
         }).filterValues { it > 0 }.mapValues { (_, amount) ->
@@ -230,7 +230,7 @@ object CivsLogistics {
                 "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS"
             }) to (CivsWorksiteLayouts.field(building).size.toLong().takeIf { it > 0 } ?: 16L), "BONE_MEAL" to 16L)
             BuildingType.QUARRY -> quarrySupplies(building)
-            BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L)
+            BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "DIRT" to 4L)
             else -> emptyMap()
         }
     }

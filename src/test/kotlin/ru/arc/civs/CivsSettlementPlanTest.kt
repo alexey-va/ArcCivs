@@ -10,6 +10,48 @@ import java.nio.file.Path
 import java.util.UUID
 
 class CivsSettlementPlanTest : FunSpec({
+    test("a gentle terraformable hillside keeps the full profile despite its raw relief") {
+        val city = settlementPlanCity().copy(radius = 128)
+        val hall = city.buildings.single()
+        val raw = settlementPlanSurface(city.copy(radius = 127)).let { flat -> flat.copy(
+            columns = flat.columns.mapValues { (key, column) ->
+                val y = 64 + Math.floorDiv(key.toInt(), 8)
+                column.copy(groundY = y, topY = y)
+            }) }
+        val before = Gson().toJson(city to raw)
+        val coarse = CivsVillageSiteScoring.score(raw.copy(columns = CivsVillageSiteScoring.samples(city.center)
+            .associate { point -> civsTerrainKey(point.x, point.z) to requireNotNull(raw.at(point.x, point.z)) }),
+            CivsVillageSiteScoring.SAMPLE_STEP)
+        val core = CivsVillageSiteScoring.coreScore(raw, city.center)
+        coarse.columns shouldBe 25
+        coarse.dryColumns shouldBe 25
+        coarse.connectedColumns shouldBe 25
+        coarse.relief shouldBe 23
+        core.columns shouldBe 181 * 181
+        core.dryColumns shouldBe core.columns
+        core.connectedColumns shouldBe core.columns
+        core.relief shouldBe 18
+        var infrastructure: CivSettlementInfrastructure? = null
+        val plan = planWithDiagnostics { CivsSettlementPlans.prepare(city, settlementPlanTemplates(),
+            CivsVillageSiteScoring.preparedSurface(raw, hall), CivAutonomousAccess(),
+            inspect = { _, generated -> infrastructure = generated }) }
+        CivsSettlementPlans.validate(city, plan)
+        plan.plots.size shouldBe 34
+        plan.routes.size shouldBe 33
+        plan.halfWidth shouldBe 74
+        CivsVillageSiteScoring.completeProfile(plan) shouldBe true
+        plan.plots.single { it.building.id == hall.id }.building shouldBe hall.copy(phase = BuildingPhase.SITE)
+        requireNotNull(infrastructure).perimeterClosed shouldBe true
+        requireNotNull(infrastructure).rejected shouldBe emptyMap()
+        (requireNotNull(infrastructure).pieces.size <= 192) shouldBe true
+        val adopted = city.copy(autonomy = city.autonomy!!.copy(plan = plan))
+        Gson().fromJson(Gson().toJson(adopted), Settlement::class.java) shouldBe adopted
+        Gson().toJson(city to raw) shouldBe before
+        // Raw relief ranks otherwise viable sites; the ordinary full forecast owns feasibility.
+        coarse.rejection() shouldBe null
+        core.rejection() shouldBe null
+    }
+
     test("adopted plan reserves the complete profile and real closed infrastructure without granting anything") {
         val city = settlementPlanCity().copy(radius = 128)
         val before = Gson().toJson(city)
