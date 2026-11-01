@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "title": "ArcCivs178: upkeep supply journey and exact food arrival",
+  "plugin_version": "0.1.178",
+  "status": "reviewed_for_implementation",
+  "baseline": "ArcCivs177 source0906911b40af2fa1db37b1746ca0b73904b76a8f active onSpawn; native failures2026-11-01T18:42-18:45Z",
+  "participants": [
+    1,
+    2,
+    7
+  ],
+  "currencies": {
+    "Vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "premium_tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "player_XP": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "proposed_change": "Use existing supply-needed journey and native resident pickup for upkeep requirements/buffer before returning to work. Match food route arrival to the same exact native container reach already required by motion/pickup. No bypass of road admission, native materials, container reach, Lands or construction-ready checks.",
+  "physical_item_flow": {
+    "mint_delta": 0,
+    "food": "Existing native BREAD transfers at most4 per existing receipt and ordinary3BREAD meal consumption unchanged.",
+    "upkeep": "Existing native COBBLESTONE transfers under the existing upkeep input requirement/buffer16 and exact slot debit=bag credit; one actual repair still consumes its existing required item. No grant or materialization source added."
+  },
+  "direct_currency_delta": {
+    "Vault": 0,
+    "premium_tokens": 0,
+    "player_XP": 0
+  },
+  "rates_and_limits": "Existing work quotas, delays, hunger periods, pickup batch4, upkeep buffer16, prices and rewards unchanged. Restoring legal supply/work journeys may change downstream production; measured daily throughput unknown.",
+  "assumptions": [
+    "Sensitivityparticipants1/2/7 and0/1/4events/day are not measured player activity or new caps.",
+    "Unlocking food may restore ordinary work, material use and later production; total downstream throughput is unmeasured.",
+    "Current SELL and futureSHADOWcontracts remain distinct; no invented item-to-currency price."
+  ],
+  "native_acceptance": "Observe actual V5builder obtain existing food and commit same paid warehouse batch571, and actual Auto2builders obtain existing COBBLESTONE, finish admitted road upkeep and admit ordinary paid QUARRY2. No grants, teleport, forced arrival, inventory rewrite or QA world edit.",
+  "observed_before": {
+    "Auto2": "Three admitted road-upkeep builders retain same work cycles/targets, hold0COBBLESTONE, waiting-materials with no route; selected upkeep blocks QUARRY2 admission. suppliesNeeded is lost by direct worldWork TO_WORK journey, and builder pickup rejects no construction.",
+    "Village-5": "Original warehouse batch571 paid/nativepartpending; actualbuilder hungry0 stopped0.25blocks short of food standing with food.source retained and route null. Coarse route-start arrival disagrees with existing native container reach."
+  }
+}

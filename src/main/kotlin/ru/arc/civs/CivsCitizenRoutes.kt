@@ -493,6 +493,8 @@ internal class CivsCitizenRoutes(
 
     fun arrivedAt(actor: CitizenActor, city: Settlement, world: World, target: CivPosition): Boolean {
         if (!arrivalBodyClear(actor)) return false
+        actor.foodPickupSource?.takeIf { actor.combatDestination == null && actor.foodSource == it.buildingId &&
+            target == it.standing }?.let { return civsCanReachContainer(actor.npc.location, it.container) }
         actor.mineVisit?.takeIf { it.owns(target) }?.let {
             return citizenControlClear(city, target) && citizenStandable(world, target) &&
                 citizenPacketBodyClear(world, actor.npc.location.point(), false) &&

@@ -298,8 +298,19 @@ internal class CivsResidentSupplies(
                     } else {
                         rejectIf(worker.assignment != buildingId || worker.cargo != null || CivsResidents.isChild(worker), "invalid-assignment")
                         if (builder) {
-                            required = city.construction?.payment?.awaiting ?: construction.supplyNeed(city)
-                            storage.prepareBuilderPickup(city, workerId, required.orEmpty())
+                            if (city.construction == null) {
+                                required = roadMaintenance.requirements(city)[workerId] ?: throw CivsRejection("no-construction")
+                                val stock = storage.buildingAvailable(city, buildingId)
+                                val pickup = CivsEquipment.storageInputs(worker,
+                                    requireNotNull(required).mapValues { (_, count) -> maxOf(count, UPKEEP_SUPPLY_BUFFER) })
+                                    .mapValues { (material, count) -> minOf(count, stock[material] ?: 0L,
+                                        CivsEquipment.supplyRoom(worker, Material.valueOf(material)).toLong()) }.filterValues { it > 0 }
+                                if (pickup.isEmpty()) CivResidentTransferPlan(CivStoragePlan(requireNotNull(city.inventory), emptyList()), worker)
+                                else storage.prepareResidentPickup(city, workerId, buildingId, pickup)
+                            } else {
+                                required = city.construction.payment?.awaiting ?: construction.supplyNeed(city)
+                                storage.prepareBuilderPickup(city, workerId, required.orEmpty())
+                            }
                         } else {
                             rejectIf(!CivsRules.productionAvailable(city, source) || source.type in CivsWorksites.TYPES, "invalid-assignment")
                             required = if (craftJobId != null || source.type == BuildingType.SAWMILL) requireCraftJob(city, worker, craftJobId).inputs

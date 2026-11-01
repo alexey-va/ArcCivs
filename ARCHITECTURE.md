@@ -306,6 +306,8 @@ Both the five-tick work pulse and the twenty-tick owner pulse advance the same
 resident observation clock before updating actors. Meal admission checks existing
 body occupancy and route reservations when choosing a supported hall barrel side;
 an unadmitted route cannot leave the actor claiming to travel to food.
+Food route arrival also requires the same exact native container reach as motion
+and pickup; the coarse standing radius alone cannot finish that detour.
 An interrupted work detour returns to its existing target without earning travel
 time or losing already observed work. Child lessons likewise require four fresh
 seconds after interruption and grant at most ten education points before adulthood.
@@ -1221,6 +1223,11 @@ preflight checks the final cut, support, headroom and permissions; each later
 column still requires its own exact before/after receipt. Only natural ground
 and a verified old pavement state at its original road height may be cleared.
 This preflight never supplies navigation arrival, work credit or free world writes.
+A physical builder retaining an upkeep target still travels for missing inputs.
+Without a construction order it uses the existing selected upkeep requirements
+and ordinary native pickup from its assigned hut, bounded by the existing
+sixteen-item supply buffer, actual indexed stock and bag room. Existing courier
+demand provides that input; the repair and its growth admission gate are unchanged.
 
 Mine V5 adds paid timber frames, lower-level perimeter walls, rails around the central
 opening and connected galleries to the existing single ladder shaft. V2/V3/V4 plans

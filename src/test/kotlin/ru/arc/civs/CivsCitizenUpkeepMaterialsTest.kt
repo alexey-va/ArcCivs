@@ -1,43 +1,58 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 
 class CivsCitizenUpkeepMaterialsTest : FunSpec({
-    test("a builder already in work reach reports missing upkeep materials until its native hut payment arrives") {
+    test("a retained native upkeep with an empty bag returns to its hut and waits for the supply receipt") {
         residentRuntime { h ->
             val selected = h.assignRoadUpkeep().copy(inputs = mapOf("COBBLESTONE" to 1L), durationMillis = 3_000)
             h.work = selected
             h.city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL))
             val before = h.city
             h.workReady = false
-            val actor = h.owner.collisionActors().single()
-            actor.teleport(selected.standing.location(h.world))
-            val atWork = actor.location
-            for (now in listOf(2_000L, 3_000L, 4_000L)) {
-                h.owner.pulse(now)
-                h.owner.status(h.workerId) shouldBe "workers.status.waiting-materials"
-                h.phase() shouldBe CitizenPhase.TO_WORK
-                h.routeIdentity() shouldBe null
-                h.observedWork() shouldBe 0L
-                h.deliveries shouldBe 0
-                h.supplyRequests shouldBe 0
-                actor.location shouldBe atWork
-                h.city shouldBe before
+            h.navigationNow = 2_000
+            h.owner.collisionActors().single().teleport(selected.standing.location(h.world))
+            h.owner.pulse(2_000)
+            h.phase() shouldBe CitizenPhase.TO_STORAGE
+            for (tick in 1..400) {
+                if (h.supplyRequests == 1) break
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
             }
-            // The existing input authority may be satisfied by a real local receipt;
-            // a carried-item pickup is not required by upkeep's payment contract.
-            h.workReady = true
-            h.owner.pulse(5_000)
-            h.phase() shouldBe CitizenPhase.WORKING
-            h.owner.status(h.workerId) shouldBe "workers.status.repairing-road"
+            withClue(h.navigationState()) { h.supplyRequests shouldBe 1 }
+            val actor = h.owner.javaClass.getDeclaredField("actors").run {
+                isAccessible = true
+                requireNotNull((get(h.owner) as Map<*, *>)[h.workerId]) as CitizenActor
+            }
+            actor.plan.worldWork shouldBe selected
+            actor.plan.token.completedCycles shouldBe selected.cycle
+            h.phase() shouldBe CitizenPhase.TO_STORAGE
+            (actor.supplyPickup != null) shouldBe true
             h.observedWork() shouldBe 0L
             h.deliveries shouldBe 0
-            for (now in listOf(6_000L, 7_000L, 8_000L)) h.owner.pulse(now)
-            h.deliveries shouldBe 1
-            h.phase() shouldBe CitizenPhase.DELIVERING
             h.city shouldBe before
-            h.supplyRequests shouldBe 0
+            repeat(3) {
+                h.navigationNow = requireNotNull(h.navigationNow) + 1_000
+                h.owner.pulse(requireNotNull(h.navigationNow))
+                h.phase() shouldBe CitizenPhase.TO_STORAGE
+                h.supplyRequests shouldBe 1
+                h.deliveries shouldBe 0
+                h.city shouldBe before
+            }
+        }
+    }
+
+    test("other captured world work still goes directly to its selected workplace") {
+        residentRuntime { h ->
+            val selected = h.assignRoadUpkeep().copy(upkeep = null, status = "working-field")
+            val plan = CitizenPlan(CitizenToken(selected.buildingId, selected.cycle, 0, null),
+                CivPosition(20, 64, 0), selected.standing, BuildingType.FARM, 3_000, null,
+                completeAtWorkplace = true, worldWork = selected, suppliesNeeded = true)
+            val cycle = plan.cycle()
+            cycle.start()
+            cycle.phase shouldBe CitizenPhase.TO_WORK
         }
     }
 })

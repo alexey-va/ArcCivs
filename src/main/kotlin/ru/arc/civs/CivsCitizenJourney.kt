@@ -24,7 +24,8 @@ internal data class CitizenPlan(val token: CitizenToken, val storage: CivPositio
     fun travelTarget(phase: CitizenPhase): CivPosition =
         if (phase == CitizenPhase.TO_WORK || phase == CitizenPhase.RETURNING && completeAtWorkplace) requireNotNull(workplace) else storage
     fun cycle() = CitizenCycle(token, workMillis, completeAtWorkplace, courier != null, courier?.carrying == true,
-        worldWork != null || type == BuildingType.GUARD_TOWER || type == BuildingType.TAVERN ||
+        worldWork != null && (worldWork.upkeep == null || !suppliesNeeded) ||
+            type == BuildingType.GUARD_TOWER || type == BuildingType.TAVERN ||
             completeAtWorkplace && autonomousWork != null ||
             type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded,
         visualSubaction = worldWork?.autonomousVisual == true, pendingStockDelivery = pendingStockDelivery != null)
