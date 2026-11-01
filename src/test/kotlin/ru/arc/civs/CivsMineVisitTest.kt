@@ -925,6 +925,73 @@ class CivsMineVisitTest : FunSpec({
         }
     }
 
+    for (ready in listOf(false, true)) test("a pending idle route returns to physical work without losing observed credit ready=$ready") {
+        mineVisitFixture { h ->
+            h.selectTarget()
+            val real = h.addMiner()
+            val action = h.physical(real)
+            real.actor.cycle.arrive(h.now)
+            for (elapsed in 1_000L..(if (ready) 6_000L else 1_000L) step 1_000) real.actor.cycle.work(h.now + elapsed)
+            val plan = real.actor.plan
+            real.actor.workDetour = plan.token
+            val cycle = real.actor.cycle
+            val phase = cycle.phase
+            val credited = cycle.observedWorkMillis
+            phase shouldBe if (ready) CitizenPhase.READY else CitizenPhase.WORKING
+            credited shouldBe if (ready) 6_000L else 1_000L
+            val queued = h.addMiner()
+            val before = h.city
+            val from = real.at.point()
+            val (work, routes) = h.nativeWorkOwner()
+            // A spent shared budget admits waiting without making a UUID-seeded wander choice.
+            h.runtime.wanderBudget = 0
+            work.update(real.actor, h.city, h.world, h.now + 10_000)
+            h.runtime.statuses[real.worker.id] shouldBe "mine-waiting"
+            real.actor.route shouldBe null
+
+            // Admit a normal, supported local walk outside the occupied quarry through the real route owner.
+            val idleAnchor = citizenIdleAnchor(h.city, h.mine)
+            val idleTarget = idleAnchor.copy(x = h.mine.bounds.min.x - 1)
+            citizenWithinIdleArea(idleAnchor, idleTarget.point()) shouldBe true
+            citizenRouteCellAllowed(h.city, emptySet(), idleTarget.x, idleTarget.z) shouldBe true
+            citizenStandable(h.world, idleTarget) shouldBe true
+            citizenIdleTerrain(h.world, idleTarget, h.city.buildings) shouldBe true
+            routes.startRoute(real.actor, h.world, idleTarget, h.now + 10_001, idleAnchor = idleAnchor) shouldBe true
+            val idleRoute = requireNotNull(real.actor.route)
+            idleRoute.authored shouldBe idleTarget
+            idleRoute.idleAnchor shouldBe idleAnchor
+            // Keep the real request pending; this fixture does not claim completed-path feasibility.
+            idleRoute.motion.searching shouldBe true
+            idleRoute.completion shouldBe null
+            idleRoute.timedOut(h.now + 10_002) shouldBe false
+            citizenArrived(real.actor.npc.location, idleRoute.target) shouldBe false
+            h.runtime.wanderBudget = 8
+            work.update(real.actor, h.city, h.world, h.now + 10_002)
+            h.runtime.statuses[real.worker.id] shouldBe "mine-waiting"
+            (real.actor.route === idleRoute) shouldBe true
+            routes.startRoute(real.actor, h.world, action.standing, h.now + 10_003) shouldBe false
+            (real.actor.route === idleRoute) shouldBe true
+
+            h.runtime.actors.remove(h.worker.id)
+            work.retainConstruction(listOf(h.city))
+            work.waitingForMineAccess(real.actor, h.city, real.worker, register = false) shouldBe false
+            h.runtime.wanderBudget = 8
+            work.update(real.actor, h.city, h.world, h.now + 10_004)
+            (real.actor.cycle === cycle) shouldBe true
+            cycle.phase shouldBe phase
+            cycle.observedWorkMillis shouldBe credited
+            (real.actor.plan === plan) shouldBe true
+            real.actor.workDetour shouldBe plan.token
+            real.at.point() shouldBe from
+            h.city shouldBe before
+            withClue("released mine must preempt pending idle route authored=${real.actor.route?.authored}, idleAnchor=${real.actor.route?.idleAnchor}") {
+                requireNotNull(real.actor.route).authored shouldBe action.standing
+            }
+            requireNotNull(real.actor.route).idleAnchor shouldBe null
+            work.waitingForMineAccess(queued.actor, h.city, queued.worker) shouldBe true
+        }
+    }
+
     test("a current real barrel below the saved entrance releases physical access without height assumptions") {
         mineVisitFixture { h ->
             val real = h.addMiner()

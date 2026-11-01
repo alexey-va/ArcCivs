@@ -651,11 +651,15 @@ class CivsWorld(
             }
             if (route == null) {
                 val endpoint = building.entrance
+                val corridor = terraform?.route?.mapTo(hashSetOf()) { it.copy(y = it.y - 1) }?.let {
+                    CitizenSearchCorridor.fromWalked(it, from.point(), endpoint.point())
+                }
                 val path = CitizenPacketRoute(world, Location(world, from.x + .5, from.y.toDouble(), from.z + .5),
                     Location(world, endpoint.x + .5, endpoint.y.toDouble(), endpoint.z + .5),
                     { p -> citySnapshot.contains(p.x, p.z) && obstacles.none { CivsAutonomousGeometry.horizontalContains(it, p) } &&
                         citySnapshot.buildings.none { CivsWorksiteLayouts.isField(it, p.x, p.z) } },
-                    { a, b -> citizenControlStepClear(citySnapshot, a, b) }, { 1.0 }, settings = navigationSettings)
+                    { a, b -> citizenControlStepClear(citySnapshot, a, b) }, { 1.0 }, settings = navigationSettings,
+                    corridor = corridor)
                 route = path
                 search = path.newSearch()
                 dispatch(emptyList())
@@ -670,17 +674,21 @@ class CivsWorld(
                         "chunk-unloaded" -> "chunks-unloaded"
                         "search-budget" -> "autonomy-search-budget"
                         else -> "autonomy-no-path"
-                    })
+                    }, mapOf("stage" to "native-route-search", "corridor" to requireNotNull(route).hasCourierCorridorHint.toString(),
+                        "failure" to it, "nodes" to result.nodes.toString()))
                 }
                 // A movement segment does not prove access to a future building entrance.
                 if (result.continuation) throw CivsRejection(
-                    if (result.continuationReason == "no-path") "autonomy-no-path" else "autonomy-search-budget")
+                    if (result.continuationReason == "no-path") "autonomy-no-path" else "autonomy-search-budget",
+                    mapOf("stage" to "native-route-continuation", "corridor" to requireNotNull(route).hasCourierCorridorHint.toString(),
+                        "continuation_reason" to result.continuationReason.orEmpty(), "nodes" to result.nodes.toString()))
                 if (result.path != null) return finish(Unit)
                 capture = CitizenNavigationCapture(requireNotNull(route), result.probes, terrain)
             }
             val cursor = capture ?: return
             val complete = try { cursor.step() } catch (_: CitizenNavigationCaptureLimit) {
-                throw CivsRejection("autonomy-search-budget")
+                throw CivsRejection("autonomy-search-budget", mapOf("stage" to "native-route-capture",
+                    "corridor" to requireNotNull(route).hasCourierCorridorHint.toString(), "terrain_cache_entries" to terrain.size.toString()))
             }
             if (complete) {
                 capture = null

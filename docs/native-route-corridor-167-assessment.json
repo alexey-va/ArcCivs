@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "version": "0.1.167",
+  "status": "verified_local_not_delivered",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "problem": "Village-2 earthworks capture succeeds, but independent fresh native A* search exceeds a guard before validating access. The authored terrain route is rechecked but was not supplied as the existing search preference; the precise live subguard was not logged.",
+  "change": "Supply the already rechecked earthworks route through the existing nullable CitizenSearchCorridor.fromWalked API. This is a search preference with normal fallback, not an accepted path or permission. Retain all native checks and default limits, reject every continuation, and record the exact failure stage without changing its reason.",
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "at_atomic_plan_adoption": {
+    "item_minted": 0,
+    "item_burned": 0,
+    "workers_created": 0,
+    "initial_reserve_repeated": false,
+    "native_world_blocks_written": 0,
+    "initial_reserve_before_after": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24,
+      "note": "Nominal once per newly founded ID; never restored on existing cities."
+    },
+    "holders_and_receipts": "preserved exactly from fresh current state; native initial216 already materialized once"
+  },
+  "future_effect": "Fresh route preflight and correct return from idle may restore normal paid construction and productive uptime. Nominal one-worker mine capacity, depths, drop chances, cycle duration, rates and supply limits are unchanged. Neither operation grants items/currency or credits work. Existing native operation receipts still govern actual output; a zero indirect item-flow effect or self-sufficiency is not claimed.",
+  "bounds": {
+    "eligibility": "only pristine actual initial L1townhall SITE; no other building/road/paid construction/queue/pending control/deletion; original plan/hall rechecked at adoption",
+    "search": "At most64 candidates including preferred terraces, one complete34 forecast per existing retry/backoff; raw search batches0..31 select eight finite192-position pages.",
+    "layout": "same accepted width (newtown74; legacy72/nullhint retained), routes88,192 infrastructure and262144 codec limits",
+    "failure": "no adoption or item/world mutation; old intent retained",
+    "concurrent_updates": "preserve fresh workers, hunger, inventory, settings and unrelated fields",
+    "native": "Ore, exact before-images, volume, route, permissions, width, perimeter and protection rules unchanged; no native proof from virtual unpaid roads.",
+    "loader": "8192 chunk requests and two pending loads per explicit search;6144 loaded-chunk and196 NPC limits unchanged."
+  },
+  "income_model": {
+    "active_SELL": "unchanged; no conversion rate assumed",
+    "planned_SELL_to_contract": "future/SHADOW kept separate and not counted active"
+  },
+  "requested_five_village_reserve": {
+    "per_new_ID": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "five_total": {
+      "logs": 480,
+      "cobblestone": 480,
+      "bread": 120
+    },
+    "remaining_three_maximum": {
+      "logs": 288,
+      "cobblestone": 288,
+      "bread": 72
+    },
+    "repeat_existing_ID": 0,
+    "scope": "Same five requested villages before and after; search success controls delivery, no extra village or grant authority."
+  },
+  "native_red_evidence": {
+    "source_version": "0.1.166",
+    "city": "04067946-4637-3373-b723-572623b1581f",
+    "earthworks": "completed01:46:31.948Z",
+    "following_route": "rejected autonomy-search-budget01:46:41.848Z",
+    "metrics": {
+      "earthworks": 19797,
+      "native_route": 146774,
+      "unit": "WorldScan.index generic work steps; not unique blocks or A* nodes"
+    },
+    "exact_subguard": "unknown before additional failure details",
+    "plan_adoption_observed": false,
+    "new_paid_or_committed": 0,
+    "new_initial_materialization": 0,
+    "normal_supply_grants_in_two_sample_window": 0
+  },
+  "verification": {
+    "source_and_focused_tests": {
+      "status": "611_passed_case_ids_union_plus2_existing_skips",
+      "first_run": {
+        "tests": 613,
+        "passed": 608,
+        "failures": 3,
+        "errors": 0,
+        "skipped": 2,
+        "failure_scope": "new route fixture ramp entered mandatory flatapron; not production changes"
+      },
+      "corrected_new_class": {
+        "tests": 5,
+        "passed": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "test_sha256": "799e14ab01cf1874f4de8e9bf6c489781295227ee0c866ade7388c9044812533"
+      },
+      "passed_case_ids_union": 611,
+      "existing_skipped_cases": [
+        {
+          "suite": "ru.arc.civs.CivsWorldTest",
+          "case": "native leaf litter clears through terrain overlay - MockBukkit lacks LeafLitter properties"
+        },
+        {
+          "suite": "ru.arc.civs.CivsWorldTest",
+          "case": "native leaf litter fills through terrain overlay - MockBukkit lacks LeafLitter properties"
+        }
+      ],
+      "source_unchanged_between_green_runs": true,
+      "not_a_new_full613_run": true
+    },
+    "production_jar": "pass_ArcCore0.1.28",
+    "consumer": "pass2.7.81",
+    "delivery": "not_delivered",
+    "activation": "not_active",
+    "native_recovery": "not_verified",
+    "native_client": "not_observed",
+    "corrected_native_route_RED": {
+      "tests": 5,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 4,
+      "bad": [
+        {
+          "name": "a bent ninety eight cell valley proves its complete native route within the original budgets",
+          "message": "java.lang.AssertionError: World preflight failed: reason=autonomy-search-budget, details={}"
+        }
+      ]
+    },
+    "detour_fix": {
+      "private_causal_RED": {
+        "cases": 2,
+        "failures_at_handoff": 2,
+        "filtered_skips": 45,
+        "preconditions_passed": true
+      },
+      "canonical_MineVisit_class": {
+        "tests": 47,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "four_detour_guard_classes": {
+        "tests": 58,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    }
+  },
+  "additional_confirmed_problem": "A legally admitted pending idle route survives physical mine-access release. Deterministic private166 tests fail the authored work target for both WORKING and READY while preserving all observed cycle credit; earlier random CI failures have a matching possible branch but exact CI cause remains unproven.",
+  "additional_change": "On return to a still-valid admitted work detour, preempt only an idleAnchor route and use ordinary work-target routing, retry and shared budget. Preserve phase, observed millis, plan/token, position and mine access fairness. No artificial arrival, credit, work completion or resource grant."
+}

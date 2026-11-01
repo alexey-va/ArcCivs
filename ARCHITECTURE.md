@@ -1110,6 +1110,11 @@ Optional route shoulders leave columns reserved by another unpaid route untouche
 The required centreline, building pad and apron are still drafted and checked at
 their exact grades; a conflict there rejects the candidate. Every emitted column
 still receives the ordinary strict native proof and paid construction receipt.
+After rechecking an earthworks journal and every authored route column, native
+access proof supplies that route as the existing A* corridor preference. Fresh
+collision, support, headroom and control checks remain authoritative, and an
+incomplete movement segment still fails building-access proof. Searches without
+an earthworks route retain their ordinary behaviour and limits.
 
 Infrastructure is encoded as bounded entity-free Sponge v3, decoded by the existing
 Core schematic provider, and built through ordinary immutable plans and payment

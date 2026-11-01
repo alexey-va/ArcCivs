@@ -412,6 +412,7 @@ internal class CivsCitizenWork(
             return false
         }
         runtime.statuses[actor.workerId] = if (target == actor.plan.workplace) "moving-to-work" else "moving-to-storage"
+        if (actor.route?.idleAnchor != null) routes.cancelRoute(actor)
         if (now < actor.lifeRetryAt) return true
         if (actor.route?.let { it.completion != null || it.timedOut(now) } == true) {
             routes.cancelRoute(actor)
