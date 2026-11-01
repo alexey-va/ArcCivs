@@ -221,34 +221,58 @@ class CivsVillageSiteRejectionDetailsTest : FunSpec({
 })
 
 class CivsVillageSitesTest : FunSpec({
-    test("four finite candidate pages preserve all legacy anchors and occupy disjoint bounded annuli") {
+    test("eight finite candidate pages preserve frozen legacy anchors and add a disjoint angular set") {
         val legacy = villageReference(UUID(0, 1)).copy(id = UUID(0, 123), center = CivPosition(-1883, 67, -2760))
-        val original = CivsVillageSiteScoring.candidates(legacy, "Auto-").joinToString(";") { "${it.x},${it.y},${it.z}" }
-        MessageDigest.getInstance("SHA-256").digest(original.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) } shouldBe "437a57a3fb7646ad65ad054d2856094444de05e7ca477f8d9151438699ea547b"
+        val frozenLegacyPageHashes = listOf(
+            "437a57a3fb7646ad65ad054d2856094444de05e7ca477f8d9151438699ea547b",
+            "19f8a8ab155dda92e0eb45a5f092cde95c9c3376bbd17afbd235c12c5eccdbbf",
+            "7b34dfc24b22e1cdd6c3ea9c356a1037535649db03ac601f9e5f7f23dbbe6f83",
+            "81f59ad7a5cd58a63ded954def2c95cd96e0247fb12fd2dde3400e8ec117cff0")
         val references = listOf(legacy,
             legacy.copy(id = UUID(7, 13), center = CivPosition(20_000_000, 81, -20_000_000)),
             legacy.copy(id = UUID(19, 23), center = CivPosition(-20_000_000, 49, 20_000_000)))
         for (reference in references) for (prefix in listOf("Auto-", "Continuation-")) {
-            val pages = (0..3).map { page -> CivsVillageSiteScoring.candidates(reference, prefix, page) }
+            val pages = (0..7).map { page -> CivsVillageSiteScoring.candidates(reference, prefix, page) }
+            val pageHashes = pages.map { points ->
+                val serialized = points.joinToString(";") { "${it.x},${it.y},${it.z}" }
+                MessageDigest.getInstance("SHA-256").digest(serialized.toByteArray(Charsets.UTF_8))
+                    .joinToString("") { "%02x".format(it) }
+            }
+            if (reference == legacy && prefix == "Auto-") {
+                pageHashes.take(4) shouldBe frozenLegacyPageHashes
+                pageHashes.drop(4) shouldBe listOf(
+                    "783237e9e05cee10697f6fc1ff34df6fbbb11783d770cafe86a11f9d58b46941",
+                    "6ce7e319f4b33407ea37e939e51b093c643af31d47a148e78a28fcdc166fce18",
+                    "be0e192cd8d9b289456dfcd854b7d429a918391a49939d9419b6c51387943d5e",
+                    "0235f483cf767075a15e8bacaf402ddeca5555005d9ac8bda1b56fbeab0df262")
+                pages[4].first() shouldBe CivPosition(-2491, 67, -3224)
+            }
             pages.first() shouldBe CivsVillageSiteScoring.candidates(reference, prefix)
-            pages.map { it.size } shouldBe listOf(192, 192, 192, 192)
-            pages.flatten().distinct().size shouldBe 768
+            pages.map { it.size } shouldBe List(8) { 192 }
+            pages.flatten().distinct().size shouldBe 1_536
             pages.flatten().all { point -> point.y == reference.center.y &&
                 (point.x - reference.center.x) % 16 == 0 && (point.z - reference.center.z) % 16 == 0 } shouldBe true
             fun distance(point: CivPosition) = kotlin.math.hypot((point.x - reference.center.x).toDouble(),
                 (point.z - reference.center.z).toDouble())
-            val annuli = pages.map { points -> points.minOf(::distance) to points.maxOf(::distance) }
-            annuli.zipWithNext().all { (inner, outer) -> inner.second < outer.first } shouldBe true
+            for (angularGroup in 0..1) {
+                val annuli = pages.slice(angularGroup * 4 until angularGroup * 4 + 4)
+                    .map { points -> points.minOf(::distance) to points.maxOf(::distance) }
+                annuli.zipWithNext().all { (inner, outer) -> inner.second < outer.first } shouldBe true
+                val maximumNominalRadii = listOf(3_584.0, 6_656.0, 9_728.0, 12_800.0)
+                annuli.map { it.second }.zip(maximumNominalRadii).all { (actual, nominal) ->
+                    kotlin.math.abs(actual - nominal) < 16.0
+                } shouldBe true
+            }
         }
-        for (page in listOf(-1, 4, Int.MAX_VALUE)) shouldThrow<IllegalArgumentException> {
+        for (page in listOf(-1, 8, Int.MAX_VALUE)) shouldThrow<IllegalArgumentException> {
             CivsVillageSiteScoring.candidates(legacy, "Auto-", page)
         }
+        CivsVillageSiteScoring.id(legacy.id, "Auto-", 1).toString() shouldBe "b4b74cf2-d8e4-35de-b985-e0da0cbaeeaa"
     }
 
     test("invalid continuation batches are rejected before native loads surveys or founding") {
         villageScenario { s ->
-            for (batch in listOf(-1, 16, Int.MIN_VALUE, Int.MAX_VALUE)) {
+            for (batch in listOf(-1, 32, Int.MIN_VALUE, Int.MAX_VALUE)) {
                 val failure = shouldThrow<java.util.concurrent.CompletionException> {
                     s.subject.search(s.reference, 5, "Auto-", batch = batch).join()
                 }
@@ -263,7 +287,7 @@ class CivsVillageSitesTest : FunSpec({
         }
     }
 
-    for (batch in listOf(4, 15)) test("continuation batch $batch searches a new bounded outer page instead of replaying the first 192 anchors") {
+    for (batch in listOf(4, 15, 16, 31)) test("continuation batch $batch searches a new bounded outer page instead of replaying the first 192 anchors") {
         villageScenario { s ->
             val original = CivsVillageSiteScoring.candidates(s.reference, "Auto-").mapTo(hashSetOf()) { it.x to it.z }
             val result = s.subject.search(s.reference, 1, "Auto-", batch = batch)

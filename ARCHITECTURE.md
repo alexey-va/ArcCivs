@@ -146,10 +146,11 @@ and aggregate wood/stone/food production rates are unchanged. Source tests cover
 uneven terrain and replay safety, and are separate from native-client visual
 acceptance of a constructed village.
 
-Console village search has four finite, disjoint pages of 192 deterministic
-candidate positions. Continuation batches 0–15 select a page and one of its four
-48-position starting tiers. Page zero retains the original coordinates; later
-pages shift the same rings outward by 3072 blocks per page. Each explicit search
+Console village search has eight finite, disjoint pages of 192 deterministic
+candidate positions. Continuation batches 0–31 select a page and one of its four
+48-position starting tiers. Pages zero through three retain their original
+coordinates and 3072-block radial spacing. Pages four through seven repeat that
+bounded radial extent with directions shifted by 11.25 degrees. Each explicit search
 keeps its existing 8192 chunk-request and two-pending-load limits. Reference,
 prefix and ordinal still determine city identity across every page, so a partial
 result resumes without a second founding reserve. Every selected site still
@@ -1096,6 +1097,15 @@ The current workers, items, settings and unrelated state survive that write.
 Failure preserves the original plan and uses the existing retry delay. Recovery
 neither persists the shadow nor refounds the city, grants supplies, moves actual
 buildings or writes world blocks; normal construction repeats native validation.
+
+Recovery first considers the old hut's exact horizontal footprint, rotation and
+schematic family at the ordinary offered terrace heights. These alternatives
+consume the same 64-candidate quota. A proved terrace preserves the other unpaid
+plots and routes, replacing only the old hut and its route before the one complete
+forecast; the old and raised vertical envelopes are never combined. A candidate
+elsewhere retains the detached full-layout search. Planned routes may guide route
+selection, but native terraform proof is drafted against the actual city and its
+actual infrastructure; unpaid roads never become preserved world columns.
 
 Infrastructure is encoded as bounded entity-free Sponge v3, decoded by the existing
 Core schematic provider, and built through ordinary immutable plans and payment

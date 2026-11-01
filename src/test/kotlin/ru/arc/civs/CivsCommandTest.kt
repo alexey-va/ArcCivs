@@ -30,7 +30,7 @@ class CivsCommandTest : FunSpec({
         val reference = UUID.randomUUID()
         val valid = arrayOf("found-villages", reference.toString(), "5", "Auto-")
         router.onCommand(player, mockk(), "civs", valid)
-        for (args in listOf(valid.dropLast(1).toTypedArray(), valid + "extra", valid + "-1", valid + "16",
+        for (args in listOf(valid.dropLast(1).toTypedArray(), valid + "extra", valid + "-1", valid + "32",
                 valid + "2147483647", valid + "2147483648", valid + "1.5", valid + "", valid + arrayOf("2", "extra"),
                 arrayOf("found-villages", "invalid", "5", "Auto-"),
                 arrayOf("found-villages", reference.toString(), "0", "Auto-"),
@@ -55,16 +55,16 @@ class CivsCommandTest : FunSpec({
             receipt["state"].asString shouldBe "accepted"
             receipt["batch"].asInt shouldBe 0
         }
-        for (batch in 0..15) {
+        for (batch in 0..31) {
             router.onCommand(console, mockk(), "civs", valid + batch.toString())
             calls.last() shouldBe (Triple(reference, 5, "Auto-") to batch)
             JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject["batch"].asInt shouldBe batch
         }
-        calls.size shouldBe 17
+        calls.size shouldBe 33
         CivsCommand.completions(true, true, arrayOf("found-"), console = false) shouldBe emptyList()
         CivsCommand.completions(true, true, arrayOf("found-"), console = true) shouldBe listOf("found-villages")
-        CivsCommand.completions(true, true, valid + "", console = true) shouldBe (0..15).map { it.toString() }
-        CivsCommand.completions(true, true, valid + "2", console = true) shouldBe listOf("2")
+        CivsCommand.completions(true, true, valid + "", console = true) shouldBe (0..31).map { it.toString() }
+        CivsCommand.completions(true, true, valid + "2", console = true) shouldBe listOf("2") + (20..29).map { it.toString() }
         CivsCommand.completions(true, true, valid + "", console = false) shouldBe emptyList()
         CivsCommand.completions(true, false, valid + "", console = true) shouldBe emptyList()
     }

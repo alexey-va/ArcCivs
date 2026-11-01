@@ -302,11 +302,9 @@ internal class CivsAutonomousDevelopment(
         fun failed(failure: Throwable) {
             if (autonomyRequests.remove(city.id, request)) autonomyFailed(city.id, goal, failure)
         }
-        val shadow = runCatching {
-            civsPlanBoardCapture(current()).let { it.copy(autonomy = requireNotNull(it.autonomy).copy(
-                plan = null, layoutHalfWidth = oldPlan.halfWidth)) }
-        }.getOrElse { failed(it); return }
-        runCatching { autonomousPlacement.search(shadow, BuildingType.BUILDER_HUT, 1, oldHut.building.id, captureVolume = true) }
+        val snapshot = runCatching { civsPlanBoardCapture(current()) }.getOrElse { failed(it); return }
+        runCatching { autonomousPlacement.search(snapshot, BuildingType.BUILDER_HUT, 1, oldHut.building.id,
+            captureVolume = true, initialPlan = oldPlan) }
             .getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { design, searchFailure ->
             if (autonomyRequests[city.id] != request) return@whenCompleteSync
             if (searchFailure != null) { failed(searchFailure); return@whenCompleteSync }

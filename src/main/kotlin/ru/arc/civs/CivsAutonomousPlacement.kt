@@ -31,8 +31,16 @@ internal class CivsAutonomousPlacement(
     private var closed = false
 
     fun search(city: Settlement, type: BuildingType, level: Int, buildingId: UUID,
-        captureVolume: Boolean = false): CompletableFuture<CivAutonomousDesign> =
-        admit(Search(city, type, level, buildingId, captureVolume = captureVolume))
+        captureVolume: Boolean = false, initialPlan: CivSettlementPlan? = null): CompletableFuture<CivAutonomousDesign> {
+        if (initialPlan != null && (!captureVolume || type != BuildingType.BUILDER_HUT || level != 1 ||
+            city.autonomy?.plan != initialPlan || city.building(buildingId) != null ||
+            city.buildings.singleOrNull()?.let { it.type == BuildingType.TOWN_HALL && it.level == 1 &&
+                it.phase == BuildingPhase.SITE } != true)) return CompletableFuture.failedFuture(CivsRejection("stale-development"))
+        val planningCity = if (initialPlan == null) city else city.copy(autonomy = requireNotNull(city.autonomy).copy(
+            plan = null, layoutHalfWidth = initialPlan.halfWidth))
+        return admit(Search(planningCity, type, level, buildingId, captureVolume = captureVolume,
+            nativeCity = city, initialPlan = initialPlan))
+    }
 
     fun decoration(city: Settlement, entryId: String, buildingId: UUID): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, BuildingType.DECORATION, 1, buildingId, catalogEntry = entryId))
@@ -56,9 +64,14 @@ internal class CivsAutonomousPlacement(
                 city.buildings.singleOrNull()?.let { it.type == BuildingType.TOWN_HALL && it.level == 1 &&
                     it.phase == BuildingPhase.SITE } != true || seedRoute.isNullOrEmpty() || seedRoute.last() != seed.entrance))
                 throw CivsRejection("stale-development")
+            val oldPlan = if (seed == null) null else requireNotNull(city.autonomy?.plan)
+            val oldSlot = oldPlan?.plots?.singleOrNull { it.building.id == seed?.id }?.building
+            val kept = oldPlan?.takeIf { seed != null && oldSlot != null && sameHorizontalSlot(seed, oldSlot) }?.let { intent ->
+                val seedId = requireNotNull(seed).id
+                intent.copy(plots = intent.plots.filter { it.building.id != seedId }, routes = intent.routes - seedId.toString())
+            }
             val projected = if (seed == null) city else city.copy(buildings = city.buildings + seed,
-                autonomy = requireNotNull(city.autonomy).copy(plan = null,
-                    layoutHalfWidth = requireNotNull(city.autonomy?.plan).halfWidth))
+                autonomy = requireNotNull(city.autonomy).copy(plan = kept, layoutHalfWidth = requireNotNull(oldPlan).halfWidth))
             val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
             val templates = CivsAutonomy.profile.associateWith { type ->
                 val id = UUID.nameUUIDFromBytes("arccivs-plan-template/${city.id}/$type".toByteArray(Charsets.UTF_8))
@@ -94,6 +107,9 @@ internal class CivsAutonomousPlacement(
                         plan.plots.count { it.building.type != BuildingType.DECORATION } != CivsAutonomy.completeProfile.size ||
                         plan.plots.singleOrNull { it.building.id == seed.id }?.building != seed ||
                         plan.routes[seed.id.toString()] != seedRoute) throw CivsRejection("invalid-plan")
+                    if (kept != null && (plan.plots.filter { it.building.id != seed.id } != kept.plots ||
+                        plan.routes - seed.id.toString() != kept.routes || plan.walls != kept.walls ||
+                        plan.gates != kept.gates || plan.gateSides != kept.gateSides)) throw CivsRejection("invalid-plan")
                     plan.copy(revision = Math.addExact(requireNotNull(city.autonomy?.plan).revision, 1L))
                 }
             }, executor)
@@ -104,6 +120,11 @@ internal class CivsAutonomousPlacement(
         }
         return result
     }
+
+    private fun sameHorizontalSlot(a: CivBuilding, b: CivBuilding): Boolean = a.id == b.id && a.type == b.type &&
+        a.schematicId == b.schematicId && a.anchor.x == b.anchor.x && a.anchor.z == b.anchor.z && a.rotation == b.rotation &&
+        a.bounds.min.x == b.bounds.min.x && a.bounds.max.x == b.bounds.max.x &&
+        a.bounds.min.z == b.bounds.min.z && a.bounds.max.z == b.bounds.max.z
 
     fun reserved(city: Settlement, plot: CivSettlementPlot): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, plot.building.type, 1, plot.building.id, reservation = plot))
@@ -168,7 +189,8 @@ internal class CivsAutonomousPlacement(
         private val infrastructure: Boolean = false, private val reservation: CivSettlementPlot? = null,
         private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null,
         private val pinnedWaterFoundations: List<CivWaterFoundation> = emptyList(),
-        private val captureVolume: Boolean = false) {
+        private val captureVolume: Boolean = false, private val nativeCity: Settlement = city,
+        private val initialPlan: CivSettlementPlan? = null) {
         private val adopted = CivsSettlementPlans.current(city)
         @Volatile private var resolvedCatalogEntry: String? = catalogEntry
         @Volatile private var familiesTried = emptyList<String>()
@@ -195,6 +217,9 @@ internal class CivsAutonomousPlacement(
         @Volatile private var gradingSamples = emptyList<Map<String, Any>>()
         @Volatile private var routeRefreshed = false
         @Volatile private var nativeTerrainRejected = false
+        private var preferredPending = initialPlan != null
+        private var preferredTerrace = false
+        private var preferredAttempts = 0
         val rejections = java.util.concurrent.ConcurrentHashMap<String, Int>()
         @Volatile private var blockers = emptyList<CivSettlementBlocker>()
 
@@ -205,7 +230,7 @@ internal class CivsAutonomousPlacement(
             "candidate_source" to candidateSource, "frontage_candidates" to frontageCandidates,
             "infill_candidates" to infillCandidates, "grading_samples" to gradingSamples,
             "catalog_source" to resolvedCatalogEntry, "families_tried" to familiesTried, "attempted" to attempted,
-            "route_refreshed" to routeRefreshed)
+            "route_refreshed" to routeRefreshed, "preferred_terraces_attempted" to preferredAttempts)
 
         private fun frame(): CivSettlementFrame = CivsPerimeterCrossings.adapt(
             CivsSettlementLayout.frame(city), access.routes.values + adopted?.routes.orEmpty().values, access.infrastructure)
@@ -291,6 +316,17 @@ internal class CivsAutonomousPlacement(
                 captureSurface()
                 return
             }
+            if (preferredPending) {
+                preferredPending = false
+                preferredTerrace = true
+                val plot = initialPlan?.plots?.singleOrNull { it.building.id == buildingId && it.building.type == type }
+                    ?: throw CivsRejection("invalid-plan")
+                candidateSource = "reserved-terrace"
+                resolvedCatalogEntry = plot.building.schematicId.takeIf { it.startsWith("civs/v2/") }
+                candidates = listOf(CivsAutonomousCandidate(plot.building.copy(bounds = plot.envelope)))
+                captureSurface()
+                return
+            }
             resolvedCatalogEntry = catalogEntry ?: reservation?.building?.schematicId?.takeIf { it.startsWith("civs/v2/") }
                 ?: blueprints.autonomousSource(city.style, type)
             loadTemplates(resolvedCatalogEntry)
@@ -368,7 +404,7 @@ internal class CivsAutonomousPlacement(
             if (this::surface.isInitialized) { gradeSurface(); return }
             phase = "surface"
             val waterColumns = pinnedWaterFoundations.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
-            await(world.autonomousHeightField(city, first.building, previous, waterColumns)) { field ->
+            await(world.autonomousHeightField(nativeCity, first.building, previous, waterColumns)) { field ->
                 surface = field
                 columns = field.columns.size
                 gradeSurface()
@@ -379,12 +415,25 @@ internal class CivsAutonomousPlacement(
             phase = "grading"
             options = if (infrastructure && pinned != null) listOf(CivTerraformOption(pinned.building, 0))
                 else grade(candidates).take(MAXIMUM_OPTIONS - attempted)
+            if (preferredTerrace) {
+                val oldY = requireNotNull(initialPlan).plots.single { it.building.id == buildingId }.building.anchor.y
+                options = options.sortedWith(compareBy<CivTerraformOption> {
+                    when { it.building.anchor.y > oldY -> 0; it.building.anchor.y == oldY -> 1; else -> 2 }
+                }.thenBy { abs(it.building.anchor.y - oldY) })
+            }
             attempt()
         }
 
         private fun attempt() {
             if (result.isDone) return
             if (next >= options.size || attempted >= MAXIMUM_OPTIONS) {
+                if (preferredTerrace && attempted < MAXIMUM_OPTIONS) {
+                    preferredTerrace = false
+                    candidates = emptyList(); options = emptyList(); next = 0
+                    candidateSource = "frontage"
+                    catalog()
+                    return
+                }
                 // Every tier and family shares this detached surface and the original 64-attempt budget.
                 if (!infillTried && templates != null && attempted < MAXIMUM_OPTIONS) {
                     val extra = infill()
@@ -402,6 +451,7 @@ internal class CivsAutonomousPlacement(
             }
             val option = options[next++]
             attempted++
+            if (preferredTerrace) preferredAttempts++
             selected = option.building
             phase = "grading"
             val piece = pieces[option.building.id]
@@ -417,7 +467,7 @@ internal class CivsAutonomousPlacement(
                 piece?.transit.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.y - 1) }
                 piece?.waterFoundations.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.floorY) }
             }
-            val draft = try { CivsAutonomousTerraform.draft(city, option, surface, access,
+            val draft = try { if (preferredTerrace) preferredDraft(option) else CivsAutonomousTerraform.draft(city, option, surface, access,
                 (if (pinned != null && !infrastructure && pinnedRoute == null) emptyList()
                     else frame().wallObstacles) + futureObstacles,
                 infrastructureFloors, waterFoundations = piece?.waterFoundations.orEmpty(),
@@ -429,12 +479,12 @@ internal class CivsAutonomousPlacement(
                 preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }) }
             catch (failure: RuntimeException) { retry(failure); return }
             phase = "earthworks"
-            await(world.captureTerraform(city, draft, executor, previous), { failure ->
+            await(world.captureTerraform(nativeCity, draft, executor, previous), { failure ->
                 if ((unwrap(failure) as? CivsRejection)?.reason == "autonomy-terrain") nativeTerrainRejected = true
                 retry(failure)
             }) { terrain ->
                 phase = "route"
-                await(world.autonomousRoute(city, draft.building, terrain.route.first(), executor, terrain, previous), ::retry) {
+                await(world.autonomousRoute(nativeCity, draft.building, terrain.route.first(), executor, terrain, previous), ::retry) {
                     phase = "blueprint"
                     val prepared = when {
                         pinned != null -> CompletableFuture.completedFuture(pinned)
@@ -453,8 +503,11 @@ internal class CivsAutonomousPlacement(
                             draft.building.anchor, 2, draft.building.rotation)
                     }
                     await(prepared) { blueprint ->
+                        val oldSlot = initialPlan?.plots?.singleOrNull { it.building.id == buildingId }?.building
                         if (!civsContainsBox(draft.building.bounds, blueprint.building.bounds) ||
                             blueprint.building.entrance != draft.building.entrance || blueprint.building.control != draft.building.control) {
+                            fail("autonomy-catalog-changed")
+                        } else if (preferredTerrace && (oldSlot == null || !sameHorizontalSlot(blueprint.building, oldSlot))) {
                             fail("autonomy-catalog-changed")
                         } else if (captureVolume) {
                             phase = "capture"
@@ -466,6 +519,27 @@ internal class CivsAutonomousPlacement(
                     }
                 }
             }
+        }
+
+        private fun preferredDraft(option: CivTerraformOption): CivTerraformDraft {
+            val intent = requireNotNull(initialPlan)
+            val otherPlots = intent.plots.filter { it.building.id != buildingId && city.building(it.building.id) == null }
+            val virtual = city.copy(buildings = city.buildings + otherPlots.map {
+                it.building.copy(bounds = it.envelope, phase = BuildingPhase.SITE)
+            })
+            val hinted = access.copy(routes = access.routes + (intent.routes - buildingId.toString()).mapKeys { UUID.fromString(it.key) },
+                reservedFortificationPorts = intent.plots.flatMap { it.fortification?.let { metadata ->
+                    CivsSettlementPlans.portReservations(metadata.proof) }.orEmpty() })
+            val roads = hinted.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            val planned = CivsAutonomousTerraform.draft(virtual, option, surface, hinted, intent.walls, preferredRoads = roads)
+            // Only this second draft reaches native capture: unpaid intent never claims an already-built road.
+            val actual = CivsAutonomousTerraform.draft(city, option, surface, access,
+                intent.walls + otherPlots.map { it.envelope }, reservedRoute = planned.route, preferredRoads = roads)
+            val standing = hinted.standing(virtual, buildingId)
+            if (actual.columns.any { column -> standing[civsTerrainKey(column.x, column.z)]?.let {
+                    column.groundY != it.y - 1
+                } == true }) throw CivsRejection("autonomy-no-path", mapOf("stage" to "retained-grade"))
+            return actual
         }
 
         private fun fail(reason: String) {

@@ -63,11 +63,13 @@ internal object CivsVillageSiteScoring {
         require(page in 0..CivsVillageSites.MAXIMUM_BATCH / 4)
         val seed = id(reference.id, prefix, 0)
         val phase = ((seed.leastSignificantBits ushr 11).toDouble() / (1L shl 53).toDouble()) * PI * 2
+        val angularGroup = page / 4
+        val radialPage = page % 4
         return (0 until MAXIMUM_CANDIDATES).map { index ->
             val tier = index / CANDIDATE_BATCH
             val ring = index % CANDIDATE_BATCH / 8
-            val angle = phase + (index % 8) * PI / 4 + (ring % 2) * PI / 8 + (tier % 2) * PI / 8
-            val distance = 768 + ring * 512 + (tier / 2) * 256 + page * 3_072
+            val angle = phase + angularGroup * PI / 16 + (index % 8) * PI / 4 + (ring % 2) * PI / 8 + (tier % 2) * PI / 8
+            val distance = 768 + ring * 512 + (tier / 2) * 256 + radialPage * 3_072
             CivPosition(Math.addExact(reference.center.x, (cos(angle) * distance / 16).roundToInt() * 16),
                 reference.center.y, Math.addExact(reference.center.z, (sin(angle) * distance / 16).roundToInt() * 16))
         }
@@ -712,7 +714,7 @@ internal class CivsVillageSites(
     }
 
     companion object {
-        const val MAXIMUM_BATCH = 15
+        const val MAXIMUM_BATCH = 31
         const val MAXIMUM_CHUNK_REQUESTS = 8_192
         const val MAXIMUM_TICKS = 36_000
         internal fun rejectionDetails(values: Map<String, String>): Map<String, String> {

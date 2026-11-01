@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "version": "0.1.165",
+  "status": "verified_local_not_delivered",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "problem": "The first safe unrelated hut candidate passes native proof but repacking the other unpaid plots can produce no-dry-perimeter; the four old search pages are exhausted with only two of five villages founded.",
+  "change": "Prefer ordinary terraces at the original unpaid hut footprint within the same64 quota and preserve all other unpaid intent only for that coherent same-footprint choice. Native terraform uses actual infrastructure. Add exactly four search pages at11.25-degree shifted directions within the old radial extent, preserving all old coordinates and stable IDs.",
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "at_atomic_plan_adoption": {
+    "item_minted": 0,
+    "item_burned": 0,
+    "workers_created": 0,
+    "initial_reserve_repeated": false,
+    "native_world_blocks_written": 0,
+    "initial_reserve_before_after": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24,
+      "note": "Nominal once per newly founded ID; never restored on existing cities."
+    },
+    "holders_and_receipts": "preserved exactly from fresh current state; native initial216 already materialized once"
+  },
+  "future_effect": "A feasible first hut may enable normal village development. Its concrete material bill, paid work and resulting ordinary item activity can change with legitimate new geometry. Existing production, grants and supply limits remain authoritative; no stock self-sufficiency or zero indirect item-flow effect claimed.",
+  "bounds": {
+    "eligibility": "only pristine actual initial L1townhall SITE; no other building/road/paid construction/queue/pending control/deletion; original plan/hall rechecked at adoption",
+    "search": "At most64 candidates including preferred terraces, one complete34 forecast per existing retry/backoff; raw search batches0..31 select eight finite192-position pages.",
+    "layout": "same accepted width (newtown74; legacy72/nullhint retained), routes88,192 infrastructure and262144 codec limits",
+    "failure": "no adoption or item/world mutation; old intent retained",
+    "concurrent_updates": "preserve fresh workers, hunger, inventory, settings and unrelated fields",
+    "native": "Ore, exact before-images, volume, route, permissions, width, perimeter and protection rules unchanged; no native proof from virtual unpaid roads.",
+    "loader": "8192 chunk requests and two pending loads per explicit search;6144 loaded-chunk and196 NPC limits unchanged."
+  },
+  "income_model": {
+    "active_SELL": "unchanged; no conversion rate assumed",
+    "planned_SELL_to_contract": "future/SHADOW kept separate and not counted active"
+  },
+  "native_red_evidence": {
+    "city": "04067946-4637-3373-b723-572623b1581f",
+    "cube_sha256": "ad0153712f31b2f25f7ede0ff2c8b32bce08d9b3bc38d6a401480cacf63e7118",
+    "inside_hut_ore_cells": 14,
+    "actual_schematic_replacements": {
+      "cobblestone": 13,
+      "dirt": 1
+    },
+    "ore_preserved": true,
+    "development_accepted_before": false
+  },
+  "verification": {
+    "source_and_focused_tests": {
+      "source_and_static_test_reviews": "clean",
+      "tests": 371,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "new_recovery_class": 19,
+      "coverage": 63,
+      "legacy_guards": 289
+    },
+    "delivery": "not_delivered",
+    "activation": "not_active",
+    "native_recovery": "not_verified",
+    "native_client": "not_observed",
+    "production_jar": "pass_ArcCore0.1.28",
+    "consumer": "pass2.7.81",
+    "behavioral_red": {
+      "tests_reported": 19,
+      "expected_positive_missing_recovery_failure": 1,
+      "filtered_skips": 18,
+      "errors": 0
+    }
+  },
+  "requested_five_village_reserve": {
+    "per_new_ID": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "five_total": {
+      "logs": 480,
+      "cobblestone": 480,
+      "bread": 120
+    },
+    "remaining_three_maximum": {
+      "logs": 288,
+      "cobblestone": 288,
+      "bread": 72
+    },
+    "repeat_existing_ID": 0,
+    "scope": "Same five requested villages before and after; search success controls delivery, no extra village or grant authority."
+  }
+}
