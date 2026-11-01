@@ -1111,13 +1111,13 @@ class CivsWorldTest : FunSpec({
         Triple("minecraft:gravel", 63, true),
         Triple("minecraft:sand", 63, true),
         Triple("minecraft:red_sand", 63, true),
-        Triple("minecraft:gravel", 65, false),
-        Triple("minecraft:sand", 65, false),
-        Triple("minecraft:red_sand", 65, false),
+        Triple("minecraft:gravel", 65, true),
+        Triple("minecraft:sand", 65, true),
+        Triple("minecraft:red_sand", 65, true),
         Triple("minecraft:bedrock", 63, false),
         Triple("minecraft:chest", 63, false),
-        Triple("minecraft:oak_planks", 63, false),
-        Triple("minecraft:cobblestone", 63, false),
+        Triple("minecraft:oak_planks", 63, true),
+        Triple("minecraft:cobblestone", 63, true),
         Triple("minecraft:water", 63, false),
         Triple("minecraft:lava", 63, false),
         Triple("minecraft:mangrove_roots[waterlogged=true]", 63, false),
@@ -1129,7 +1129,12 @@ class CivsWorldTest : FunSpec({
             val city = worldTerraformCity(s, proposed).copy(buildings = emptyList(), construction = null)
             s.cities.clear(); s.cities += city
             s.world.getBlockAt(0, 64, 0).type = Material.DIRT
-            val target = s.world.getBlockAt(0, y, 0).also { it.blockData = Bukkit.createBlockData(data) }
+            val blockData = Bukkit.createBlockData(data)
+            val target = s.world.getBlockAt(0, y, 0).also {
+                it.type = blockData.material
+                it.blockData = blockData
+            }
+            if (blockData.material == Material.CHEST) (target.state is org.bukkit.block.TileState) shouldBe true
             val original = target.blockData.asString
             val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
                 listOf(worldCell(0, 63, "minecraft:stone"), worldCell(0, 64, "minecraft:air"),
@@ -1424,7 +1429,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("height field resolves soil below a bounded natural canopy but refuses bare logs") {
+    test("height field resolves soil below bounded canopy and bare logs without changing either") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(worldBox(0, 0))
             val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), radius = 1, autonomy = CivAutonomy())
@@ -1439,7 +1444,8 @@ class CivsWorldTest : FunSpec({
             surface.at(0, 0)!!.groundY shouldBe 63
             surface.at(0, 0)!!.topY shouldBe 66
             surface.at(0, 0)!!.natural shouldBe true
-            surface.at(1, 0)!!.natural shouldBe false
+            surface.at(1, 0)!!.natural shouldBe true
+            surface.at(1, 0)!!.groundY shouldBe 63
             s.world.getBlockAt(0, 66, 0).type shouldBe Material.OAK_LEAVES
         }
     }
@@ -1458,7 +1464,8 @@ class CivsWorldTest : FunSpec({
             val foundation = s.subject.captureManualFoundation(cityId, owner, s.world.uid, building, cells,
                 java.util.concurrent.Executor(Runnable::run), autonomous = true, adminPlacement = true)
             s.scheduler.tick()
-            completed(foundation) shouldBe null
+            completed(foundation)!!.blocks.first { it.position == CivPosition(0, 67, 0) } shouldBe
+                CivPlanBlock(CivPosition(0, 67, 0), "minecraft:stone_bricks", "minecraft:air")
             val first = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null, adminPlacement = true)
             s.scheduler.tick()
             val confirmed = completed(first)
@@ -1482,7 +1489,7 @@ class CivsWorldTest : FunSpec({
             s.cities[0] = city
             val automatic = s.subject.capture(cityId, owner, s.world.uid, building, cells, site)
             s.scheduler.tick()
-            failureReason(automatic) shouldBe "autonomy-terrain"
+            completed(automatic).blocks.first { it.position.y == 67 }.before shouldBe "minecraft:stone_bricks"
         }
     }
 
@@ -1749,7 +1756,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("autonomous foundation retains ore and crafted fill support without authorizing a crafted schematic replacement") {
+    test("autonomous foundation retains ore and crafted support while recording a permitted body replacement") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(CivBox(CivPosition(0, 66, 0), CivPosition(0, 70, 0)))
                 .copy(anchor = CivPosition(0, 68, 0), entrance = CivPosition(-1, 69, 0))
@@ -1767,10 +1774,7 @@ class CivsWorldTest : FunSpec({
                 CivPlanBlock(CivPosition(0, 68, 0), "minecraft:air", "minecraft:dirt"))
             val capture = s.subject.captureAutonomousSite(cityId, owner, s.world.uid, building, cells, terrain)
             s.scheduler.tick()
-            val failure = rejection(capture)
-            failure.reason shouldBe "autonomy-terrain"
-            failure.values["block"] shouldBe "STONE_BRICKS"
-            failure.values["y"] shouldBe "67"
+            completed(capture).blocks.first { it.position == CivPosition(0, 67, 0) }.before shouldBe "minecraft:stone_bricks"
             s.world.getBlockAt(0, 65, 0).type shouldBe Material.COAL_ORE
             s.world.getBlockAt(0, 67, 0).type shouldBe Material.STONE_BRICKS
             s.world.getBlockAt(0, 66, 0).type shouldBe Material.AIR
@@ -1797,15 +1801,15 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("ordinary foundation still refuses to cut a crafted block above its intended ground") {
+    test("ordinary foundation still refuses to cut a technical block above its intended ground") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(CivBox(CivPosition(0, 64, 0), CivPosition(0, 70, 0)))
-            s.world.getBlockAt(0, 67, 0).type = Material.OAK_PLANKS
+            s.world.getBlockAt(0, 67, 0).type = Material.BARRIER
             val preparation = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
                 building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
             s.scheduler.tick()
             failureReason(preparation) shouldBe "autonomy-terrain"
-            s.world.getBlockAt(0, 67, 0).type shouldBe Material.OAK_PLANKS
+            s.world.getBlockAt(0, 67, 0).type shouldBe Material.BARRIER
         }
     }
 
@@ -2288,6 +2292,226 @@ class CivsUpgradeStorageQueuedProposalTest : FunSpec({
         }
     }
 })
+
+class CivsOrdinaryOreTerrainTest : FunSpec({
+    test("terrain blacklist admits ores crafted blocks and obsidian without adding them to the fill palette") {
+        worldScenario(collisionWorld = true) { s ->
+            val ores = listOf(Material.COAL_ORE, Material.DEEPSLATE_COAL_ORE,
+                Material.COPPER_ORE, Material.DEEPSLATE_COPPER_ORE,
+                Material.IRON_ORE, Material.DEEPSLATE_IRON_ORE,
+                Material.GOLD_ORE, Material.DEEPSLATE_GOLD_ORE,
+                Material.REDSTONE_ORE, Material.DEEPSLATE_REDSTONE_ORE,
+                Material.EMERALD_ORE, Material.DEEPSLATE_EMERALD_ORE,
+                Material.LAPIS_ORE, Material.DEEPSLATE_LAPIS_ORE,
+                Material.DIAMOND_ORE, Material.DEEPSLATE_DIAMOND_ORE,
+                Material.NETHER_GOLD_ORE, Material.NETHER_QUARTZ_ORE, Material.ANCIENT_DEBRIS,
+                Material.STONE_BRICKS, Material.BRICKS, Material.OBSIDIAN, Material.OAK_PLANKS)
+            for (ore in ores) {
+                val block = s.world.getBlockAt(0, 63, 0).also { it.type = ore }
+                CivsTerrainPolicy.naturalTerraform(block) shouldBe true
+                CivsTerrainPolicy.fullTerraformSupport(block) shouldBe true
+                CivsTerrainPolicy.checkAutonomousTerrain(block, 63)
+                (ore in CivsTerrainPolicy.TERRAFORM_GROUND) shouldBe false
+            }
+        }
+    }
+
+    test("native capture and routed materialization retain ordinary crafted and timber support unchanged") {
+        for (material in listOf(Material.STONE_BRICKS, Material.OAK_LOG)) worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            s.cities += city
+            s.world.getBlockAt(0, 63, 0).type = material
+            val draft = worldTerrainDraft(building, 63)
+            val capture = s.subject.captureTerraform(city, draft, java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            val terrain = completed(capture)
+            terrain.route shouldBe listOf(building.entrance)
+            terrain.blocks shouldBe listOf(CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:coarse_dirt"))
+            terrain.cutCount shouldBe 0
+            terrain.fillCount shouldBe 1
+            s.world.getBlockAt(0, 63, 0).type shouldBe material
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+        }
+    }
+
+    for (data in listOf("minecraft:copper_ore", "minecraft:stone_bricks", "minecraft:obsidian",
+        "minecraft:oak_log[axis=y]", "minecraft:oak_leaves[distance=1,persistent=true,waterlogged=false]"))
+    test("a $data cut uses exact native before images and the existing replayable no-drop receipt") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), CivPosition(0, 65, 0)))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            s.cities += city
+            s.world.getBlockAt(0, 63, 0).type = Material.DEEPSLATE_DIAMOND_ORE
+            val cut = s.world.getBlockAt(0, 65, 0).also { it.blockData = Bukkit.createBlockData(data) }
+            val before = cut.blockData.asString
+            val capture = s.subject.captureTerraform(city, worldTerrainDraft(building, 65),
+                java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            val terrain = completed(capture)
+            val changes = listOf(
+                CivPlanBlock(CivPosition(0, 65, 0), before, "minecraft:air"),
+                CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:coarse_dirt"))
+            terrain.blocks shouldBe changes
+            terrain.cutCount shouldBe 1
+            terrain.fillCount shouldBe 1
+            val site = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                listOf(worldCell(0, 64, "minecraft:stone"), worldCell(0, 65, "minecraft:air")), terrain)
+            s.scheduler.tick()
+            val plan = completed(site)
+            plan.terrain!!.blocks shouldBe changes
+            plan.blocks.first().before shouldBe "minecraft:coarse_dirt"
+            cut.blockData.asString shouldBe before
+            s.cities.clear()
+            val published = worldTerraformCity(s, plan)
+            val placed = mutableListOf<CivPlanBlock>()
+            val apply = s.subject.applyTerraform(plan, published.owner, changes, 0, { true }, placed::add)
+            s.scheduler.tick(changes.size + 1L)
+            completed(apply) shouldBe Unit
+            placed shouldBe changes
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.DEEPSLATE_DIAMOND_ORE
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.COARSE_DIRT
+            s.world.getBlockAt(0, 65, 0).type shouldBe Material.AIR
+            val replayed = mutableListOf<CivPlanBlock>()
+            val replay = s.subject.applyTerraform(plan, published.owner, changes, 0, { true }, replayed::add)
+            s.scheduler.tick()
+            completed(replay) shouldBe Unit
+            replayed shouldBe changes
+            s.cities.single() shouldBe published
+            s.world.entities.filterIsInstance<org.bukkit.entity.Item>() shouldBe emptyList()
+        }
+    }
+
+    test("a falling powder column over a captured void cannot become a foundation support") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            s.cities += city
+            for (y in 63 - CivsAutonomousTerraform.MAXIMUM_CHANGE..63) s.world.getBlockAt(0, y, 0).type = Material.AIR
+            s.world.getBlockAt(0, 63, 0).type = Material.WHITE_CONCRETE_POWDER
+            val capture = s.subject.captureTerraform(city, worldTerrainDraft(building, 63),
+                java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "autonomy-foundation"
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.WHITE_CONCRETE_POWDER
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("ordinary powder over a real solid base can become paid journaled soil without drops") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            s.cities += city
+            s.world.getBlockAt(0, 64, 0).type = Material.WHITE_CONCRETE_POWDER
+            val capture = s.subject.captureTerraform(city, worldTerrainDraft(building, 64),
+                java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            val terrain = completed(capture)
+            terrain.blocks shouldBe listOf(CivPlanBlock(CivPosition(0, 64, 0), "minecraft:white_concrete_powder", "minecraft:coarse_dirt"))
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.WHITE_CONCRETE_POWDER
+            val captured = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                listOf(worldCell(0, 64, "minecraft:stone")), terrain)
+            s.scheduler.tick()
+            val plan = completed(captured)
+            s.cities.clear()
+            val published = worldTerraformCity(s, plan)
+            val apply = s.subject.applyTerraform(plan, published.owner, terrain.blocks, 0, { true }, {})
+            s.scheduler.tick(2)
+            completed(apply) shouldBe Unit
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.STONE
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.COARSE_DIRT
+            s.world.entities.filterIsInstance<org.bukkit.entity.Item>() shouldBe emptyList()
+        }
+    }
+
+    test("native schematic capture accepts an ordinary ore floor outside the terraform overlay") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 63, 0), CivPosition(0, 64, 0)))
+            s.world.getBlockAt(0, 63, 0).type = Material.NETHER_QUARTZ_ORE
+            val capture = s.subject.captureAutonomousSite(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, listOf(worldCell(0, 63, "minecraft:stone"), worldCell(0, 64, "minecraft:air")))
+            s.scheduler.tick()
+            completed(capture).blocks.first() shouldBe CivPlanBlock(CivPosition(0, 63, 0),
+                "minecraft:nether_quartz_ore", "minecraft:stone")
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.NETHER_QUARTZ_ORE
+        }
+    }
+
+    test("ordinary ore permission still requires Lands permission before a captured cut") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), CivPosition(0, 65, 0)))
+            val cut = CivPlanBlock(CivPosition(0, 65, 0), "minecraft:copper_ore", "minecraft:air")
+            val proposed = worldTerraformPlan(s, listOf(cut), building)
+            val city = worldTerraformCity(s, proposed).copy(buildings = emptyList(), construction = null)
+            s.cities.clear(); s.cities += city
+            s.world.getBlockAt(0, 65, 0).type = Material.COPPER_ORE
+            val lands = s.paper.createSimplePlugin("Lands")
+            lands.server.pluginManager.disablePlugin(lands)
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                worldSchematicCells(building), proposed.terrain)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "lands-denied"
+            s.world.getBlockAt(0, 65, 0).type shouldBe Material.COPPER_ORE
+        }
+    }
+
+    test("terrain blacklist keeps filled containers bedrock barrier and lava protected") {
+        for ((material, reason) in listOf(Material.CHEST to "container-not-empty", Material.BEDROCK to "protected-terrain",
+            Material.LAVA to "autonomy-terrain", Material.BARRIER to "protected-terrain")) {
+            worldScenario(collisionWorld = true) { s ->
+                val building = worldBuilding(CivBox(CivPosition(0, 64, 0), CivPosition(0, 65, 0)))
+                val block = s.world.getBlockAt(0, 65, 0).also { it.type = material }
+                if (material == Material.CHEST) (block.state as Chest).blockInventory.setItem(0, ItemStack(Material.DIAMOND, 2))
+                val cut = CivPlanBlock(CivPosition(0, 65, 0), block.blockData.asString, "minecraft:air")
+                val proposed = worldTerraformPlan(s, listOf(cut), building)
+                val city = worldTerraformCity(s, proposed).copy(buildings = emptyList(), construction = null)
+                s.cities.clear(); s.cities += city
+                val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                    worldSchematicCells(building), proposed.terrain)
+                s.scheduler.tick()
+                failureReason(capture) shouldBe reason
+                block.type shouldBe material
+                if (material == Material.CHEST) (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 2)
+            }
+        }
+    }
+
+    test("ore materialization cannot modify a foreign building control") {
+        worldScenario(collisionWorld = true) { s ->
+            val point = CivPosition(0, 65, 0)
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), point))
+            val occupied = worldBuilding(worldBox(10, 10)).copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+                phase = BuildingPhase.ACTIVE, control = point)
+            val city = worldCity(s.world.uid, occupied).copy(autonomy = CivAutonomy())
+            s.cities += city
+            s.world.getBlockAt(point.x, point.y, point.z).type = Material.COPPER_ORE
+            val capture = s.subject.captureTerraform(city, worldTerrainDraft(building, 65),
+                java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "building-overlap"
+            s.world.getBlockAt(point.x, point.y, point.z).type shouldBe Material.COPPER_ORE
+        }
+    }
+
+    test("a forged ore fill remains invalid even when its natural before image is admitted") {
+        worldScenario(collisionWorld = true) { s ->
+            val fill = CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:diamond_ore")
+            val proposed = worldTerraformPlan(s, listOf(fill))
+            val city = worldTerraformCity(s, proposed).copy(buildings = emptyList(), construction = null)
+            s.cities.clear(); s.cities += city
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, proposed.building,
+                worldCells(proposed.building), proposed.terrain)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "invalid-plan"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+        }
+    }
+})
+
+private fun worldTerrainDraft(building: CivBuilding, surfaceY: Int) = CivTerraformDraft(building, listOf(
+    CivTerraformColumn(-1, 0, 63, 63, 63, preserve = true),
+    CivTerraformColumn(0, 0, 64, 63, surfaceY)), listOf(building.entrance), 64)
 
 private class WorldScenario(val paper: MockBukkitTestRuntime, collisionWorld: Boolean = false,
     nanoTime: () -> Long = { 0L }) : AutoCloseable {

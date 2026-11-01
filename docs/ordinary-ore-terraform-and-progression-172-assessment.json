@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "title": "ArcCivs172: blacklist for input terrain and recovery of stalled construction",
+  "plugin_version": "0.1.172",
+  "status": "before_implementation",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "owner_requirement": "Use a blacklist for input terrain rather than a whitelist of rocks/ores; remove arbitrary material prohibitions and fix repeated next-building placement failures.",
+  "direct_currency_delta": {
+    "Vault": 0,
+    "premium_tokens": 0,
+    "player_XP": 0
+  },
+  "ore_policy": {
+    "before": "Input terrain uses a curated whitelist of soils/rocks/plants and refuses other materials, including ordinary ores.",
+    "after": "Input terrain is eligible by default. A short blacklist excludes bedrock and technical unbreakable/portal/marker blocks; native state excludes liquids/waterlogged and data-bearing/container cells. Actual ownership and protected-coordinate checks remain.",
+    "unchanged": "Existing ownership, native before-images, physical support/headroom, liquids, bedrock no-mutation, admitted buildings and roads, stored objects, paid batches and complete34profile checks.",
+    "drops_or_item_refunds": 0,
+    "ore_mining_rewards": "unchanged; terrain preparation does not become a mining reward",
+    "native_support_only": "Reading or retaining a support cell destroys no material. Only actually replaced cells count as world-cell removal.",
+    "output_contract": "Construction still emits its existing concrete DIRT/STONE/AIR recipe. Its output palette does not restrict input terrain and does not mint ore or valuables."
+  },
+  "progression_scope": "Reuse the existing bounded unpaid-plan recovery for the next missing ordinary level-one plot after a site refusal, including developed towns. Keep all actual buildings and accepted routes fixed; only adopt unpaid intent after fresh native proof and complete34forecast. Existing64attempt/oneforecast-per-retry/five-minute limits and ordinary payment remain. No new supply endpoint, starting grant, money reward, work-rate multiplier, receipt schema or manual resource grant. Actual material throughput after restored construction remains unmeasured.",
+  "founding_reserve_unchanged": {
+    "OAK_LOG": 96,
+    "COBBLESTONE": 96,
+    "BREAD": 24,
+    "repeat_existing_ID": 0
+  },
+  "assumptions": [
+    "Calculator participants are settlements, not human players. Low/base/high1/4/5 represents affected settlements.",
+    "Activity is an explicit planning scenario, not telemetry or a hard cap:0/1/2 new construction sites per settlement-day, with0/16/128 actually replaced natural ore cells per site. This yields0/16/256 ore-cell events per settlement-day.",
+    "natural_ore_cells below are an ore-specific example of native world cells, not transferable ore items, Vault or premium tokens. They must never be converted to an invented money value.",
+    "A support cell left intact is excluded. New source permits some ore-bearing terrain; it does not grant mining drops or economic output for earthwork.",
+    "Actual counts depend on accepted blueprints and terrain. Restored ordinary construction/production can change physical item throughput and existing Auto deficit grants; zero indirect impact and self-sufficiency are not claimed.",
+    "Current SELL remains separate from the planned future/SHADOW SELL-to-contract transition. No shop, contract or price is changed."
+  ],
+  "participants": [
+    1,
+    4,
+    5
+  ],
+  "currencies": {
+    "natural_ore_cells": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "approved_earthwork_ore_cells_replaced",
+          "kind": "burn",
+          "source": "Existing durable native construction/terraform receipt",
+          "basis": "One native ore cell is replaced without drops; no transferable item is issued.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              16,
+              256
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              16,
+              256
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "live_verification": "After delivery distinguish disk hash, JVM activation and actual next-building paid progress. No direct world edits, forced arrival or manual grants are used to pass acceptance.",
+  "scope": "Input policy applies to unprotected ordinary block materials, not only ores. Valuable block material alone is not an authority rule. Existing cut/fill no-drop accounting and physical budgets remain; actual modified-cell and later production throughput are not yet measured.",
+  "blacklist_economic_scope": "The calculator isolates the observed ore incident. Other newly eligible ordinary native materials can also be replaced without drops; counts/value are unknown and not converted to currency. All these writes remain in the existing paid/native receipt; no item reward or manual grant is introduced."
+}

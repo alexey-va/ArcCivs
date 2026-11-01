@@ -18,6 +18,120 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
+class CivsDevelopedUnpaidPlanRecoveryTest : FunSpec({
+    for (target in listOf(BuildingType.FORESTER, BuildingType.FARM))
+    test("developed unpaid recovery preserves the actual town while replacing its blocked $target") {
+        initialRecoveryScenario(targetType = target, preferOldTerrace = target == BuildingType.FARM,
+            draftRefusal = target == BuildingType.FORESTER, stalePaidIntent = target == BuildingType.FARM) { s ->
+            val paidBefore = s.paidPlans.toList()
+            s.before.buildings.any { it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE } shouldBe true
+            s.before.building(s.oldTarget.id) shouldBe null
+            s.start(); s.finish { s.subject.debug(s.city.id)["request"] == null }
+            s.saves.size shouldBe 1
+            val selected = requireNotNull(s.selected)
+            val plan = requireNotNull(s.city.autonomy?.plan)
+            selected.id shouldBe s.oldTarget.id
+            plan.plots.single { it.building.id == selected.id }.building shouldBe selected.copy(phase = BuildingPhase.SITE)
+            plan.routes[selected.id.toString()] shouldBe s.selectedRoute
+            plan.plots.size shouldBe 34
+            plan.routes.size shouldBe 33
+            CivsVillageSiteScoring.completeProfile(plan) shouldBe true
+            plan.revision shouldBe s.oldPlan.revision + 1
+            plan.halfWidth shouldBe s.oldPlan.halfWidth
+            s.forecasts shouldBe 1
+            (s.searchDebug()["attempted"] as Int <= 64) shouldBe true
+            s.volumeCaptures.last() shouldBe selected
+            s.acceptedAccess.routes.forEach { (id, route) -> plan.routes[id.toString()] shouldBe route }
+            if (target == BuildingType.FARM) {
+                s.searchDebug()["preferred_terraces_attempted"] shouldBe 3
+                if (selected.anchor.x == s.oldTarget.anchor.x && selected.anchor.z == s.oldTarget.anchor.z &&
+                    selected.rotation == s.oldTarget.rotation && selected.schematicId == s.oldTarget.schematicId) {
+                    selected.anchor shouldBe s.oldTarget.anchor.copy(y = s.oldTarget.anchor.y + 4)
+                    plan.plots.filter { it.building.id != selected.id } shouldBe s.oldPlan.plots.filter { it.building.id != selected.id }
+                    val unpaid = s.oldPlan.routes.keys - s.acceptedAccess.routes.keys.map(UUID::toString).toSet() - selected.id.toString()
+                    plan.routes.filterKeys { it in unpaid } shouldBe s.oldPlan.routes.filterKeys { it in unpaid }
+                    plan.walls shouldBe s.oldPlan.walls
+                    plan.gates shouldBe s.oldPlan.gates
+                    s.preferredDrafts.single().access shouldBe s.acceptedAccess
+                } else {
+                    s.unreservedDrafts.last().building.anchor shouldBe selected.anchor
+                    s.unreservedDrafts.last().access shouldBe s.acceptedAccess
+                }
+            } else {
+                // The reserved draft fails before any native terrain callback, without a native-terrain marker.
+                s.reservedCaptures shouldBe 0
+                s.unreservedDrafts.isNotEmpty() shouldBe true
+            }
+            s.paidPlans shouldBe paidBefore
+            s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+
+    test("developed unpaid recovery retains paid infrastructure while adding complete planner gate connections") {
+        initialRecoveryScenario(preferOldTerrace = true, paidInfrastructure = true) { s ->
+            val paidBefore = s.paidPlans.toList()
+            s.acceptedAccess.infrastructure.single().type shouldBe BuildingType.ROAD
+            s.start(); s.finish { s.subject.debug(s.city.id)["request"] == null }
+            s.saves.size shouldBe 1
+            val selected = requireNotNull(s.selected)
+            val plan = requireNotNull(s.city.autonomy?.plan)
+            selected.anchor shouldBe s.oldTarget.anchor.copy(y = s.oldTarget.anchor.y + 4)
+            selected.rotation shouldBe s.oldTarget.rotation
+            selected.schematicId shouldBe s.oldTarget.schematicId
+            plan.plots.filter { it.building.id != selected.id } shouldBe s.oldPlan.plots.filter { it.building.id != selected.id }
+            (s.oldPlan.routes - selected.id.toString()).forEach { (id, route) -> plan.routes[id] shouldBe route }
+            (plan.routes.keys - s.oldPlan.routes.keys).size shouldBe s.oldPlan.gates.size
+            plan.routes[selected.id.toString()] shouldBe s.selectedRoute
+            plan.plots.size shouldBe 34
+            plan.routes.size shouldBe s.oldPlan.routes.size + s.oldPlan.gates.size
+            CivsVillageSiteScoring.completeProfile(plan) shouldBe true
+            plan.walls shouldBe s.oldPlan.walls
+            plan.gates shouldBe s.oldPlan.gates
+            s.preferredDrafts.single().access shouldBe s.acceptedAccess
+            s.forecasts shouldBe 1
+            s.paidPlans shouldBe paidBefore
+            s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+
+    test("developed unpaid recovery keeps all accepted state when the complete forecast refuses") {
+        initialRecoveryScenario(targetType = BuildingType.FARM, preferOldTerrace = true) { s ->
+            s.failure = "no-full-forecast"
+            s.start(); s.finish { s.subject.debug(s.city.id)["request"] == null }
+            s.forecasts shouldBe 1
+            s.volumeCaptures.isNotEmpty() shouldBe true
+            s.saves shouldBe emptyList()
+            s.city shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+            s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
+            s.forecasts shouldBe 1
+            s.saves shouldBe emptyList()
+        }
+    }
+
+    test("developed unpaid recovery fences a changed active building while its forecast is pending") {
+        initialRecoveryScenario(targetType = BuildingType.FARM, preferOldTerrace = true) { s ->
+            s.holdForecast = true
+            s.start(); s.finish { s.forecasts == 1 }
+            val current = s.city.copy(buildings = s.city.buildings.map { building ->
+                if (building.type != BuildingType.BUILDER_HUT) building else building.copy(level = building.level + 1)
+            })
+            s.city = current
+            s.forecast.complete(s.surface)
+            s.finish { s.subject.debug(s.city.id)["request"] == null }
+            s.saves shouldBe emptyList()
+            s.city shouldBe current
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+})
+
 class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
     test("recovery continuation forecasts the next native proven choice after a complete layout refusal") {
         initialRecoveryScenario(continuation = true) { s ->
@@ -372,7 +486,8 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
 /** Real development/placement/terraform/full34 planner, with the native read boundary controlled explicitly. */
 private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private val v2: Boolean,
     halfWidth: Int, legacyWidth: Boolean, private val preferOldTerrace: Boolean, shoulderConflicts: Boolean,
-    private val continuation: Boolean) : AutoCloseable {
+    private val continuation: Boolean, private val targetType: BuildingType,
+    private val draftRefusal: Boolean, stalePaidIntent: Boolean, paidInfrastructure: Boolean) : AutoCloseable {
     val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler, true)
     private val plugin = paper.createSimplePlugin("InitialUnpaidRecoveryTest")
@@ -396,12 +511,36 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     }
     val surface = settlementPlanSurface(base.copy(radius = 127))
     val shoulderGrades = linkedMapOf<Long, Int>()
-    val oldPlan = CivsSettlementPlans.prepare(base.copy(autonomy = base.autonomy!!.copy(layoutHalfWidth = halfWidth)),
+    private val initialPlan = CivsSettlementPlans.prepare(base.copy(autonomy = base.autonomy!!.copy(layoutHalfWidth = halfWidth)),
         templates, surface, CivAutonomousAccess()).let { if (shoulderConflicts) withShoulderConflicts(it) else it }
-    val before = CivsRules.validate(base.copy(autonomy = base.autonomy!!.copy(plan = oldPlan,
+    private val paidRoad = if (!paidInfrastructure) null else CivsInfrastructure.building(CivSettlementPiece(UUID(172, 1),
+        BuildingType.ROAD, CivBox(CivPosition(0, 64, 0), CivPosition(0, 66, 0)), CivPosition(0, 65, 0),
+        listOf(CivSettlementBlock(CivPosition(0, 64, 0), "minecraft:dirt_path"),
+            CivSettlementBlock(CivPosition(0, 65, 0), "minecraft:air"), CivSettlementBlock(CivPosition(0, 66, 0), "minecraft:air")),
+        listOf(CivPosition(0, 65, 0)))).copy(phase = BuildingPhase.ACTIVE)
+    private val actualBuildings = base.buildings + listOfNotNull(paidRoad) + CivsAutonomy.baseProfile.takeWhile { it != targetType }
+        .filterNot { it == BuildingType.TOWN_HALL }.map { type ->
+            initialPlan.plots.first { it.building.type == type }.building.copy(phase = BuildingPhase.ACTIVE)
+        }
+    val oldPlan = if (!stalePaidIntent) initialPlan else initialPlan.copy(routes = initialPlan.routes.mapValues { (id, route) ->
+        if (actualBuildings.any { it.id.toString() == id && it.phase == BuildingPhase.ACTIVE }) route.map { it.copy(y = it.y + 1) }
+        else route
+    })
+    val before = CivsRules.validate(base.copy(buildings = actualBuildings, autonomy = base.autonomy!!.copy(plan = oldPlan,
         layoutHalfWidth = if (legacyWidth) null else oldPlan.halfWidth)))
     var city = before
     val oldHut = oldPlan.plots.single { it.building.type == BuildingType.BUILDER_HUT }.building
+    val oldTarget = oldPlan.plots.first { it.building.type == targetType }.building
+    val paidPlans = before.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map { building ->
+        val route = if (building.id == paidRoad?.id) listOf(building.entrance) else initialPlan.routes.getValue(building.id.toString())
+        val blocks = if (building.id != paidRoad?.id) emptyList() else listOf(
+            CivPlanBlock(CivPosition(0, 64, 0), "minecraft:dirt", "minecraft:dirt_path"),
+            CivPlanBlock(CivPosition(0, 65, 0), "minecraft:air", "minecraft:air"),
+            CivPlanBlock(CivPosition(0, 66, 0), "minecraft:air", "minecraft:air"))
+        CivPlacementPlan(building.id, before.id, before.worldId, building, blocks, terrain =
+            CivTerraformPlan(building.bounds, emptyList(), route, building.anchor.y, 0, 0))
+    }
+    val acceptedAccess = CivAutonomousAccess.from(before, paidPlans)
     var time = 10_000L
     var closed = false
     var failure: String? = null
@@ -425,21 +564,30 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     var selected: CivBuilding? = null
     var selectedDraft: CivBuilding? = null
     var selectedRoute = emptyList<CivPosition>()
-    val ore = oldHut.bounds.min.copy(y = oldHut.bounds.min.y + 1)
-    private fun nativeSurface(): CivTerrainSurface = if (!preferOldTerrace) surface else surface.copy(
-        columns = surface.columns + (civsTerrainKey(ore.x, ore.z) to CivTerrainSurfaceColumn(ore.y + 1, true)))
+    val ore = oldTarget.bounds.min.copy(y = oldTarget.bounds.min.y + 1)
+    private fun nativeSurface(): CivTerrainSurface {
+        val raised = if (!preferOldTerrace) surface else surface.copy(
+            columns = surface.columns + (civsTerrainKey(ore.x, ore.z) to CivTerrainSurfaceColumn(ore.y + 1, true)))
+        if (!draftRefusal) return raised
+        val blocked = CivsAutonomousGeometry.approach(oldTarget).first { point ->
+            !CivsAutonomousGeometry.horizontalContains(oldTarget.bounds, point) &&
+                civsTerrainKey(point.x, point.z) !in acceptedAccess.standing(before, oldTarget.id)
+        }
+        val key = civsTerrainKey(blocked.x, blocked.z)
+        return raised.copy(columns = raised.columns + (key to raised.columns.getValue(key).copy(natural = false)))
+    }
     private val control = requireNotNull(base.buildings.single().control)
     val beforeItems: List<ItemStack?>
     private val planner = CivsAutonomousPlacement(blueprints, world, executor,
         loadAccess = { actual ->
             actual.buildings shouldBe city.buildings
             recovering = actual.autonomy?.plan == null
-            CompletableFuture.completedFuture(CivAutonomousAccess())
+            CompletableFuture.completedFuture(acceptedAccess)
         })
     val subject = CivsAutonomousDevelopment(plugin, tasks, world, blueprints, planner, executor,
         settlements = { mapOf(city.id to city) }, busy = mutableSetOf(), unhealthy = emptySet(),
         isPlacing = { false }, ready = { true }, isClosed = { closed },
-        loadAutonomousPlans = { CompletableFuture.completedFuture(emptyList()) }, settlementActive = { true },
+        loadAutonomousPlans = { CompletableFuture.completedFuture(paidPlans) }, settlementActive = { true },
         afterCityAvailable = { _, action -> action() },
         mutate = { _, transform -> save(transform) }, mutateWhenAvailable = { _, transform -> save(transform) },
         commitAutonomousDesign = { actual, design ->
@@ -618,8 +766,8 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         CivsSettlementPlans.validate(base, changed)
         return changed
     }
-    private fun sameOldSlot(building: CivBuilding) = building.anchor.x == oldHut.anchor.x && building.anchor.z == oldHut.anchor.z &&
-        building.rotation == oldHut.rotation && building.schematicId == oldHut.schematicId
+    private fun sameOldSlot(building: CivBuilding) = building.anchor.x == oldTarget.anchor.x && building.anchor.z == oldTarget.anchor.z &&
+        building.rotation == oldTarget.rotation && building.schematicId == oldTarget.schematicId
     private fun nativeTerrain(draft: CivTerraformDraft): CivTerraformPlan {
         val cells = buildMap {
             draft.columns.forEach { column ->
@@ -669,7 +817,9 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
 
 private fun initialRecoveryScenario(v2: Boolean = false, halfWidth: Int = 74, legacyWidth: Boolean = false,
     preferOldTerrace: Boolean = false, shoulderConflicts: Boolean = false, continuation: Boolean = false,
+    targetType: BuildingType = BuildingType.BUILDER_HUT, draftRefusal: Boolean = false, stalePaidIntent: Boolean = false,
+    paidInfrastructure: Boolean = false,
     action: (InitialRecoveryScenario) -> Unit) = failOnUnsupportedMockBukkitOperation {
     MockBukkitTestRuntime.open().use { paper -> InitialRecoveryScenario(paper, v2, halfWidth, legacyWidth, preferOldTerrace,
-        shoulderConflicts, continuation).use(action) }
+        shoulderConflicts, continuation, targetType, draftRefusal, stalePaidIntent, paidInfrastructure).use(action) }
 }

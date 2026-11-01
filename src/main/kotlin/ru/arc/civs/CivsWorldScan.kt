@@ -13,16 +13,14 @@ import org.bukkit.block.data.type.Leaves
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
-import ru.arc.civs.CivsTerrainPolicy.naturalLeaves
 import ru.arc.civs.CivsTerrainPolicy.naturalTerraform
 import ru.arc.civs.CivsTerrainPolicy.fullTerraformSupport
 import ru.arc.civs.CivsTerrainPolicy.routeTerraformSupport
 import ru.arc.civs.CivsTerrainPolicy.passableTerraform
 import ru.arc.civs.CivsTerrainPolicy.MAXIMUM_TREE_READS
 import ru.arc.civs.CivsTerrainPolicy.MAXIMUM_TREE_LEDGER_PROBE
-import ru.arc.civs.CivsTerrainPolicy.TREE_GROUND
+import ru.arc.civs.CivsTerrainPolicy.PROTECTED_TERRAIN
 import ru.arc.civs.CivsTerrainPolicy.TERRAFORM_GROUND
-import ru.arc.civs.CivsTerrainPolicy.AUTONOMOUS_PLANTS
 
 /** Per-request native scan state. The host alone admits, schedules and retires scans. */
 internal abstract class CivsWorldScan<T>(
@@ -147,12 +145,12 @@ internal abstract class CivsWorldScan<T>(
         val state = if (block.type.isAir) null else block.state
         if ((state as? InventoryHolder)?.inventory?.any { it != null && !it.type.isAir } == true)
             rejectAt("container-not-empty", block)
-        if (block.type == Material.BEDROCK || state is TileState) rejectAt("protected-terrain", block)
-        if (!acceptedPlan && !naturalTerraform(block, tree)) rejectAt("autonomy-terrain", block)
-        if (!acceptedPlan && Tag.LOGS.isTagged(block.type)) {
+        if (block.type in PROTECTED_TERRAIN || state is TileState) rejectAt("protected-terrain", block)
+        if (!acceptedPlan && !naturalTerraform(block)) rejectAt("autonomy-terrain", block)
+        if (!acceptedPlan && tree && Tag.LOGS.isTagged(block.type)) {
             val support = treeSupports[civsTerrainKey(block.x, block.z)] ?: rejectAt("autonomy-terrain", block)
             val ground = read(support)
-            if (ground.type !in TREE_GROUND || !naturalTerraform(ground) || !fullTerraformSupport(ground))
+            if (!naturalTerraform(ground) || ground.type.hasGravity() || !fullTerraformSupport(ground))
                 rejectAt("autonomy-terrain", ground)
         }
         requireCivs(after.material.isAir || after.material in TERRAFORM_GROUND, "invalid-plan")
@@ -182,12 +180,11 @@ internal abstract class CivsWorldScan<T>(
         if (treeProbe != position) { treeProbe = position; treeProbeDepth = 0 }
         requireCivs(treeProbeDepth < MAXIMUM_TREE_READS, "autonomy-terrain")
         val below = read(position.copy(y = position.y - ++treeProbeDepth))
-        if (below.type in TREE_GROUND && naturalTerraform(below) && fullTerraformSupport(below)) {
+        if (naturalTerraform(below) && !below.type.hasGravity() && fullTerraformSupport(below)) {
             treeSupports[key] = CivPosition(below.x, below.y, below.z)
             return true
         }
-        if (!below.type.isAir && below.type !in AUTONOMOUS_PLANTS && !Tag.LOGS.isTagged(below.type) &&
-            !naturalLeaves(below.blockData)) rejectAt("autonomy-terrain", below)
+        if (!naturalTerraform(below)) rejectAt("autonomy-terrain", below)
         return false
     }
 
@@ -256,7 +253,7 @@ internal abstract class CivsWorldScan<T>(
         val block = read(position)
         if (authoredControl != null) return checkControl(block)
         // Legacy controls can lie outside the old footprint and still must not replace player data.
-        if (block.type != Material.BARREL && (block.state is TileState || block.type == Material.BEDROCK))
+        if (block.type != Material.BARREL && (block.state is TileState || block.type in PROTECTED_TERRAIN))
             rejectAt("control-obstructed", block)
         if (!access.canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
     }

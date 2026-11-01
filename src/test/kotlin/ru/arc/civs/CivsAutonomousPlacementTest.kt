@@ -246,7 +246,7 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
-    test("search exhausts unsafe frontage then captures a connected native infill without rewriting ore") {
+    test("search exhausts unsafe frontage then captures a connected native infill without rewriting technical blocks") {
         spatialScenario { s ->
             s.city = s.city.copy(autonomy = CivAutonomy(layoutHalfWidth = 24))
             val id = UUID.randomUUID()
@@ -267,7 +267,7 @@ class CivsAutonomousPlacementTest : FunSpec({
             for (candidate in frontage) {
                 val point = requireNotNull(obstruction(candidate.building, yard))
                 protected += point
-                s.world.getBlockAt(point.x, point.y, point.z).type = Material.COPPER_ORE
+                s.world.getBlockAt(point.x, point.y, point.z).type = Material.BARRIER
             }
             val search = s.planner.search(s.city, BuildingType.HOUSE, 1, id)
             s.finish(search)
@@ -286,7 +286,7 @@ class CivsAutonomousPlacementTest : FunSpec({
             s.finish(captured)
             captured.isCompletedExceptionally shouldBe false
             protected.forEach { point ->
-                s.world.getBlockAt(point.x, point.y, point.z).type shouldBe Material.COPPER_ORE
+                s.world.getBlockAt(point.x, point.y, point.z).type shouldBe Material.BARRIER
                 terrain.blocks.none { it.position == point } shouldBe true
             }
         }
@@ -326,7 +326,8 @@ class CivsAutonomousPlacementTest : FunSpec({
             val stale = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId,
                 blueprint.building, blueprint.cells, site, oldTerrain)
             s.finish(stale)
-            spatialFailure(stale) shouldBe "autonomy-terrain"
+            stale.join().blocks.single { it.position == added }.before shouldBe addedBlock.blockData.asString
+            oldTerrain.blocks.any { it.position == added } shouldBe false
 
             val refreshed = s.planner.prepareExisting(s.city, blueprint)
             s.finish(refreshed)
@@ -448,7 +449,7 @@ class CivsAutonomousPlacementTest : FunSpec({
                 for (x in -3..3) for (z in -3..3) if (kotlin.math.abs(x) == 3 || kotlin.math.abs(z) == 3)
                     for (y in 65..67) add(CivPosition(x, y, z))
             }
-            barriers.forEach { s.world.getBlockAt(it.x, it.y, it.z).type = Material.STONE_BRICKS }
+            barriers.forEach { s.world.getBlockAt(it.x, it.y, it.z).type = Material.BARRIER }
             val before = s.city
             val activation = s.planner.prepareExisting(s.city, blueprint)
             s.finish(activation)
@@ -471,7 +472,7 @@ class CivsAutonomousPlacementTest : FunSpec({
             s.city.building(site.id) shouldBe site
             s.city.construction shouldBe null
             s.city.constructionQueue shouldBe listOf(site.id)
-            barriers.forEach { s.world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.STONE_BRICKS }
+            barriers.forEach { s.world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.BARRIER }
         }
     }
 
@@ -487,7 +488,7 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
-    test("native terrain rejects water steep ground and a player wall without clearing them") {
+    test("native terrain rejects water steep ground and technical barriers while admitting an ordinary wall") {
         spatialScenario { s ->
             val b = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(18, 64, 10), 0, 1).building
             val p = b.bounds.min
@@ -506,12 +507,17 @@ class CivsAutonomousPlacementTest : FunSpec({
             s.world.getBlockAt(p.x, 65, p.z).type = Material.OAK_PLANKS
             val occupied = s.worldAccess.validateAutonomousSite(s.city, b)
             s.finish(occupied)
-            spatialFailure(occupied) shouldBe "autonomy-terrain"
+            occupied.join() shouldBe Unit
             s.world.getBlockAt(p.x, 65, p.z).type shouldBe Material.OAK_PLANKS
+            s.world.getBlockAt(p.x, 65, p.z).type = Material.BARRIER
+            val forbidden = s.worldAccess.validateAutonomousSite(s.city, b)
+            s.finish(forbidden)
+            spatialFailure(forbidden) shouldBe "autonomy-terrain"
+            s.world.getBlockAt(p.x, 65, p.z).type shouldBe Material.BARRIER
         }
     }
 
-    test("a late foreign block is refused by the final automatic capture") {
+    test("a late filled barrel is refused by the final automatic capture without losing its items") {
         spatialScenario { s ->
             val blueprint = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(18, 64, 10), 0, 1)
             val b = blueprint.building
@@ -519,11 +525,14 @@ class CivsAutonomousPlacementTest : FunSpec({
             s.finish(checked)
             checked.join() shouldBe Unit
             val p = b.bounds.min.copy(y = 65)
-            s.world.getBlockAt(p.x, p.y, p.z).type = Material.BRICKS
+            (p == b.control) shouldBe false
+            val block = s.world.getBlockAt(p.x, p.y, p.z).also { it.type = Material.BARREL }
+            (block.state as Barrel).inventory.setItem(0, ItemStack(Material.DIAMOND, 1))
             val captured = s.worldAccess.captureAutonomousSite(s.city.id, s.city.owner, s.city.worldId, b, blueprint.cells)
             s.finish(captured)
             spatialFailure(captured) shouldBe "autonomy-terrain"
-            s.world.getBlockAt(p.x, p.y, p.z).type shouldBe Material.BRICKS
+            block.type shouldBe Material.BARREL
+            (block.state as Barrel).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 1)
         }
     }
 
@@ -543,7 +552,7 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
-    test("autonomous upgrade preserves its own walls but refuses foreign expansion and a late filled cell") {
+    test("autonomous upgrade preserves its own walls but refuses another building overlap and a late filled cell") {
         spatialScenario { s ->
             val upgrade = s.ownedUpgrade()
             val old = s.city.buildings.single()
@@ -554,10 +563,19 @@ class CivsAutonomousPlacementTest : FunSpec({
 
             val outside = s.world.getBlockAt(upgrade.bounds.max.x, 65, -3)
             outside.type = Material.BRICKS
+            val authorizedCity = s.city
+            val neighbour = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(6, 64, 1), 0, 1)
+                .building.copy(phase = BuildingPhase.ACTIVE)
+            old.bounds.overlaps(neighbour.bounds) shouldBe false
+            upgrade.bounds.overlaps(neighbour.bounds) shouldBe true
+            s.city = s.city.copy(buildings = s.city.buildings + neighbour)
+            val guardedCity = s.city
             val obstructed = s.worldAccess.captureSite(s.city.id, s.city.owner, s.city.worldId, upgrade, cells, old)
             s.finish(obstructed)
-            spatialFailure(obstructed) shouldBe "autonomy-terrain"
+            spatialFailure(obstructed) shouldBe "building-overlap"
             outside.type shouldBe Material.BRICKS
+            s.city shouldBe guardedCity
+            s.city = authorizedCity
             outside.type = Material.AIR
 
             val inside = s.world.getBlockAt(0, 65, -4)

@@ -34,10 +34,15 @@ internal class CivsAutonomousPlacement(
         captureVolume: Boolean = false, initialPlan: CivSettlementPlan? = null,
         skipPrepared: Int = 0): CompletableFuture<CivAutonomousDesign> {
         if (skipPrepared !in 0..MAXIMUM_OPTIONS || skipPrepared > 0 && initialPlan == null ||
-            initialPlan != null && (!captureVolume || type != BuildingType.BUILDER_HUT || level != 1 ||
-            city.autonomy?.plan != initialPlan || city.building(buildingId) != null ||
-            city.buildings.singleOrNull()?.let { it.type == BuildingType.TOWN_HALL && it.level == 1 &&
-                it.phase == BuildingPhase.SITE } != true)) return CompletableFuture.failedFuture(CivsRejection("stale-development"))
+            initialPlan != null && (!captureVolume || type !in CivsAutonomy.profile || type == BuildingType.TOWN_HALL || level != 1 ||
+            CivsSettlementPlans.current(city) != initialPlan || !CivsVillageSiteScoring.completeProfile(initialPlan) ||
+            city.building(buildingId) != null || CivsSettlementPlans.next(city, type)?.building?.id != buildingId ||
+            CivsAutonomy.nextGoal(city, blueprints::maximumLevel)?.let {
+                it.type == type && it.targetLevel == 1 && it.buildingId == null
+            } != true || city.autonomy?.paused != false || city.pendingDeletion != null ||
+            city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL } == null ||
+            city.construction != null || city.constructionQueue.orEmpty().isNotEmpty() || city.pendingControls.orEmpty().isNotEmpty()))
+            return CompletableFuture.failedFuture(CivsRejection("stale-development"))
         val planningCity = if (initialPlan == null) city else city.copy(autonomy = requireNotNull(city.autonomy).copy(
             plan = null, layoutHalfWidth = initialPlan.halfWidth))
         return admit(Search(planningCity, type, level, buildingId, captureVolume = captureVolume,
@@ -51,7 +56,7 @@ internal class CivsAutonomousPlacement(
         admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
 
     /** One adopted plan, using the same detached height field, catalogue and finite solvers. */
-    fun plan(city: Settlement, unpaidBuilder: CivAutonomousDesign? = null): CompletableFuture<CivSettlementPlan> {
+    fun plan(city: Settlement, unpaidSite: CivAutonomousDesign? = null): CompletableFuture<CivSettlementPlan> {
         val result = CompletableFuture<CivSettlementPlan>()
         synchronized(jobs) {
             if (closed) return CompletableFuture.failedFuture(CivsRejection("world-closed"))
@@ -60,13 +65,18 @@ internal class CivsAutonomousPlacement(
             planning[city.id] = result
         }
         val prepared = runCatching {
-            val seed = unpaidBuilder?.blueprint?.building?.copy(phase = BuildingPhase.SITE)
-            val seedRoute = unpaidBuilder?.terrain?.route?.toList()
-            if (seed != null && (seed.type != BuildingType.BUILDER_HUT || seed.level != 1 || city.building(seed.id) != null ||
-                city.buildings.singleOrNull()?.let { it.type == BuildingType.TOWN_HALL && it.level == 1 &&
-                    it.phase == BuildingPhase.SITE } != true || seedRoute.isNullOrEmpty() || seedRoute.last() != seed.entrance))
+            val seed = unpaidSite?.blueprint?.building?.copy(phase = BuildingPhase.SITE)
+            val seedRoute = unpaidSite?.terrain?.route?.toList()
+            if (seed != null && (seed.type !in CivsAutonomy.profile || seed.type == BuildingType.TOWN_HALL ||
+                seed.level != 1 || city.building(seed.id) != null || CivsSettlementPlans.next(city, seed.type)?.building?.id != seed.id ||
+                CivsAutonomy.nextGoal(city, blueprints::maximumLevel)?.let {
+                    it.type == seed.type && it.targetLevel == 1 && it.buildingId == null
+                } != true || city.autonomy?.paused != false || city.pendingDeletion != null ||
+                city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL } == null ||
+                city.construction != null || city.constructionQueue.orEmpty().isNotEmpty() || city.pendingControls.orEmpty().isNotEmpty() ||
+                seedRoute.isNullOrEmpty() || seedRoute.last() != seed.entrance))
                 throw CivsRejection("stale-development")
-            val oldPlan = if (seed == null) null else requireNotNull(city.autonomy?.plan)
+            val oldPlan = if (seed == null) null else requireNotNull(CivsSettlementPlans.current(city))
             val oldSlot = oldPlan?.plots?.singleOrNull { it.building.id == seed?.id }?.building
             val kept = oldPlan?.takeIf { seed != null && oldSlot != null && sameHorizontalSlot(seed, oldSlot) }?.let { intent ->
                 val seedId = requireNotNull(seed).id
@@ -77,7 +87,7 @@ internal class CivsAutonomousPlacement(
             val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
             val templates = CivsAutonomy.profile.associateWith { type ->
                 val id = UUID.nameUUIDFromBytes("arccivs-plan-template/${city.id}/$type".toByteArray(Charsets.UTF_8))
-                val entry = seed?.schematicId?.takeIf { type == BuildingType.BUILDER_HUT && it.startsWith("civs/v2/") }
+                val entry = seed?.takeIf { type == it.type }?.schematicId?.takeIf { it.startsWith("civs/v2/") }
                     ?: blueprints.autonomousSource(city.style, type)
                 val first = if (entry == null) blueprints.prepare(city.style, type, 1, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
                     else blueprints.prepareEntry(entry, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
@@ -108,9 +118,15 @@ internal class CivsAutonomousPlacement(
                     if (!CivsVillageSiteScoring.completeProfile(plan) ||
                         plan.plots.count { it.building.type != BuildingType.DECORATION } != CivsAutonomy.completeProfile.size ||
                         plan.plots.singleOrNull { it.building.id == seed.id }?.building != seed ||
-                        plan.routes[seed.id.toString()] != seedRoute) throw CivsRejection("invalid-plan")
-                    if (kept != null && (plan.plots.filter { it.building.id != seed.id } != kept.plots ||
-                        plan.routes - seed.id.toString() != kept.routes || plan.walls != kept.walls ||
+                        plan.routes[seed.id.toString()] != seedRoute || city.buildings.filterNot { it.type.isInfrastructure }.any { actual ->
+                            !civsSameBuildingGeometry(plan.plots.singleOrNull { it.building.id == actual.id }?.building,
+                                actual.copy(phase = BuildingPhase.SITE))
+                        }) throw CivsRejection("invalid-plan")
+                    val paidRoutes = input.first.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
+                        .mapKeys { it.key.toString() }
+                    if (kept != null && (plan.plots.filter { it.building.id != seed.id && city.building(it.building.id) == null } !=
+                        kept.plots.filter { city.building(it.building.id) == null } ||
+                        (kept.routes + paidRoutes).any { (id, route) -> plan.routes[id] != route } || plan.walls != kept.walls ||
                         plan.gates != kept.gates || plan.gateSides != kept.gateSides)) throw CivsRejection("invalid-plan")
                     plan.copy(revision = Math.addExact(requireNotNull(city.autonomy?.plan).revision, 1L))
                 }
@@ -534,7 +550,7 @@ internal class CivsAutonomousPlacement(
             val virtual = city.copy(buildings = city.buildings + otherPlots.map {
                 it.building.copy(bounds = it.envelope, phase = BuildingPhase.SITE)
             })
-            val hinted = access.copy(routes = access.routes + (intent.routes - buildingId.toString()).mapKeys { UUID.fromString(it.key) },
+            val hinted = access.copy(routes = (intent.routes - buildingId.toString()).mapKeys { UUID.fromString(it.key) } + access.routes,
                 reservedFortificationPorts = intent.plots.flatMap { it.fortification?.let { metadata ->
                     CivsSettlementPlans.portReservations(metadata.proof) }.orEmpty() })
             val roads = hinted.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }

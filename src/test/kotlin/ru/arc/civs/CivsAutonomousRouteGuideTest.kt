@@ -44,15 +44,15 @@ class CivsAutonomousRouteGuideTest : FunSpec({
         }
     }
 
-    test("an authored guide never authorizes replacing native protected ore in its terrace") {
+    test("an authored guide never authorizes replacing a native technical block in its terrace") {
         routeGuideScenario { s ->
             val terrain = s.captureTerrace()
             val cut = terrain.blocks.first { it.before == "minecraft:stone" && it.after == "minecraft:air" }
-            s.world.getBlockAt(cut.position.x, cut.position.y, cut.position.z).type = Material.COAL_ORE
+            s.world.getBlockAt(cut.position.x, cut.position.y, cut.position.z).type = Material.BARRIER
             val before = s.snapshot(terrain)
             val failure = s.rejected(s.subject.autonomousRoute(s.city, s.building, terrain.route.first(), s.executor, terrain))
-            failure.reason shouldBe "autonomy-terrain"
-            failure.values["block"] shouldBe "COAL_ORE"
+            failure.reason shouldBe "protected-terrain"
+            failure.values["block"] shouldBe "BARRIER"
             s.snapshot(terrain) shouldBe before
         }
     }

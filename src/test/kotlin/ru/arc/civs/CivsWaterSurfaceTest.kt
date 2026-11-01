@@ -17,11 +17,14 @@ class CivsWaterSurfaceTest : FunSpec({
         }
     }
 
-    test("water classification refuses unproved natural beds structures lava and invalid depth") {
-        for (bottom in listOf(Material.WATER, Material.LAVA, Material.AIR, Material.OAK_PLANKS,
-            Material.STONE_BRICKS, Material.CHEST, Material.DIRT_PATH)) {
+    test("water classification refuses unproved beds technical blocks lava and invalid depth") {
+        for (bottom in listOf(Material.WATER, Material.LAVA, Material.AIR, Material.BARRIER, Material.BEDROCK)) {
             civsWaterSurfaceColumn(62, 55, bottom, true) shouldBe null
         }
+        for (bottom in listOf(Material.OAK_PLANKS, Material.STONE_BRICKS, Material.DIRT_PATH))
+            civsWaterSurfaceColumn(62, 55, bottom, true) shouldBe
+                CivTerrainSurfaceColumn(62, natural = false, waterTopY = 62, waterBottomY = 55)
+        civsWaterSurfaceColumn(62, 55, Material.CHEST, false) shouldBe null
         civsWaterSurfaceColumn(62, 55, Material.GRAVEL, false) shouldBe null
         for (depth in listOf(-1, 0, 13)) civsWaterSurfaceColumn(62, 62 - depth, Material.GRAVEL, true) shouldBe null
         civsWaterSurfaceColumn(Int.MAX_VALUE, Int.MIN_VALUE, Material.GRAVEL, true) shouldBe null
@@ -45,7 +48,7 @@ class CivsWaterSurfaceTest : FunSpec({
         }
     }
 
-    test("native water survey stops at its depth limit and refuses mixed liquid air pockets bridges and crafted beds") {
+    test("native water survey rejects invalid columns and accepts eligible crafted beds and dry bridges") {
         waterSurfaceScenario { s ->
             s.water(0, 0, 7)
             s.water(1, 0, 12)
@@ -63,13 +66,16 @@ class CivsWaterSurfaceTest : FunSpec({
             val surface = s.capture(columns)
             surface.at(0, 0)!!.waterBottomY shouldBe 55
             surface.at(1, 0)!!.waterBottomY shouldBe 50
-            for ((x, z) in listOf(0 to 1, 1 to 1, -1 to 0, -1 to -1, -1 to 1, 0 to -1, 1 to -1)) {
+            for ((x, z) in listOf(0 to 1, -1 to 0, -1 to -1, 0 to -1)) {
                 val column = requireNotNull(surface.at(x, z))
                 column.natural shouldBe false
                 column.waterTopY shouldBe null
                 column.waterBottomY shouldBe null
                 column.dirtPath shouldBe false
             }
+            for ((x, z) in listOf(1 to 1, 1 to -1))
+                surface.at(x, z) shouldBe CivTerrainSurfaceColumn(62, natural = false, waterTopY = 62, waterBottomY = 55)
+            surface.at(-1, 1) shouldBe CivTerrainSurfaceColumn(64, natural = true)
             s.world.getBlockAt(0, 50, 1).type shouldBe Material.WATER
             s.world.getBlockAt(-1, 64, 1).type shouldBe Material.OAK_PLANKS
             s.world.getBlockAt(1, 55, 1).type shouldBe Material.STONE_BRICKS
@@ -85,7 +91,7 @@ class CivsWaterSurfaceTest : FunSpec({
             val surface = s.capture()
             surface.at(0, 0) shouldBe CivTerrainSurfaceColumn(63, natural = false, dirtPath = true)
             surface.at(1, 0) shouldBe CivTerrainSurfaceColumn(63, natural = true)
-            for ((x, z) in listOf(0 to 1, 1 to 1)) surface.at(x, z) shouldBe CivTerrainSurfaceColumn(63, natural = false)
+            for ((x, z) in listOf(0 to 1, 1 to 1)) surface.at(x, z) shouldBe CivTerrainSurfaceColumn(63, natural = true)
             s.world.getBlockAt(0, 63, 0).type shouldBe Material.DIRT_PATH
         }
     }

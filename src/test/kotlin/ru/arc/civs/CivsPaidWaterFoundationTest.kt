@@ -55,11 +55,11 @@ class CivsPaidWaterFoundationTest : FunSpec({
         }
     }
 
-    test("native admission rejects changed depth lava a constructed bed and a filled container") {
+    test("native admission rejects changed depth lava a protected bed and a filled container") {
         val changes: List<(PaidWaterScenario) -> Unit> = listOf(
             { it.world.getBlockAt(0, 55, 0).type = Material.WATER },
             { it.world.getBlockAt(0, 60, 0).type = Material.LAVA },
-            { it.world.getBlockAt(0, 55, 0).type = Material.STONE_BRICKS },
+            { it.world.getBlockAt(0, 55, 0).type = Material.BARRIER },
             { it.world.getBlockAt(0, 63, 0).type = Material.WATER },
             { s -> s.world.getBlockAt(0, 60, 0).also { block -> block.type = Material.CHEST
                 (block.state as Chest).inventory.setItem(0, ItemStack(Material.DIAMOND)) } },
@@ -73,15 +73,22 @@ class CivsPaidWaterFoundationTest : FunSpec({
             s.denied += CivPosition(0, 60, 0)
             shouldThrow<CompletionException> { s.capture() }.cause!!.let { (it as CivsRejection).reason } shouldBe "lands-denied"
         }
+        paidWaterScenario { s ->
+            s.world.getBlockAt(0, 55, 0).type = Material.STONE_BRICKS
+            s.capture().terrain!!.waterFoundations shouldBe s.foundations
+            s.world.getBlockAt(0, 56, 0).type shouldBe Material.WATER
+        }
     }
 
     test("batch revalidation probes only the affected bed and refuses a changed immutable target") {
         paidWaterScenario(width = 2) { s ->
             val plan = s.capture()
-            s.world.getBlockAt(1, 55, 0).type = Material.STONE_BRICKS
+            s.world.getBlockAt(1, 55, 0).type = Material.BARRIER
             val first = plan.copy(blocks = plan.blocks.filter { it.position.x == 0 && it.position.y == 56 })
             s.revalidate(first)
             shouldThrow<CompletionException> { s.revalidate(plan.copy(blocks = plan.blocks.filter { it.position.x == 1 && it.position.y == 56 })) }
+            s.world.getBlockAt(1, 55, 0).type = Material.STONE_BRICKS
+            s.revalidate(plan.copy(blocks = plan.blocks.filter { it.position.x == 1 && it.position.y == 56 }))
             s.world.getBlockAt(0, 56, 0).type = Material.OAK_PLANKS
             shouldThrow<CompletionException> { s.revalidate(first) }.cause!!.let { (it as CivsRejection).reason } shouldBe "world-changed"
         }
@@ -101,6 +108,8 @@ class CivsPaidWaterFoundationTest : FunSpec({
             }
             block.type = Material.WATER
             s.world.getBlockAt(0, 55, 0).type = Material.STONE_BRICKS
+            s.subject.permitsWaterFoundationMutation(plan, cell, block) shouldBe true
+            s.world.getBlockAt(0, 55, 0).type = Material.BARRIER
             s.subject.permitsWaterFoundationMutation(plan, cell, block) shouldBe false
             s.world.getBlockAt(0, 55, 0).type = Material.GRAVEL
             s.denied += cell.position

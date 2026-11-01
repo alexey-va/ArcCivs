@@ -41,13 +41,14 @@ internal class CivsAutonomousDevelopment(
     private val autonomyProgress = mutableMapOf<UUID, CivsAutonomyView>()
     private val autonomyRetryAt = mutableMapOf<UUID, Long>()
     private val autonomyPlanRetryAt = mutableMapOf<UUID, Long>()
-    private data class InitialRecoveryCursor(val owner: UUID, val worldId: UUID, val layoutKey: String,
+    private data class UnpaidRecoveryCursor(val owner: UUID, val worldId: UUID, val layoutKey: String,
+        val type: BuildingType, val buildingId: UUID,
         val skipPrepared: Int = 0) {
-        // The layout key includes the original full plan and actual Hall, but deliberately excludes residents/stock.
+        // The layout key includes the original full plan and every actual building, but excludes residents/stock.
         fun matches(city: Settlement): Boolean = city.owner == owner && city.worldId == worldId &&
             civsPlanBoardLayoutKey(city) == layoutKey
     }
-    private val initialRecoveryCursors = mutableMapOf<UUID, InitialRecoveryCursor>()
+    private val unpaidRecoveryCursors = mutableMapOf<UUID, UnpaidRecoveryCursor>()
     private val autonomyWarnAt = mutableMapOf<UUID, Long>()
     private val autonomousAccessChecked = mutableMapOf<UUID, List<CivBuilding>>()
     private val autonomousAccessRetryAt = mutableMapOf<UUID, Long>()
@@ -64,7 +65,7 @@ internal class CivsAutonomousDevelopment(
         autonomyRequests.remove(cityId)
         autonomyRetryAt.remove(cityId)
         autonomyProgress.remove(cityId)
-        initialRecoveryCursors.remove(cityId)
+        unpaidRecoveryCursors.remove(cityId)
     }
 
     fun reset() {
@@ -74,7 +75,7 @@ internal class CivsAutonomousDevelopment(
         autonomyProgress.clear()
         autonomyRetryAt.clear()
         autonomyPlanRetryAt.clear()
-        initialRecoveryCursors.clear()
+        unpaidRecoveryCursors.clear()
         autonomousAccessChecked.clear()
         autonomousAccessRetryAt.clear()
     }
@@ -83,7 +84,7 @@ internal class CivsAutonomousDevelopment(
         (autonomyRequests.keys + autonomyProgress.keys + autonomyRetryAt.keys).toSet().forEach(developmentFinished)
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
-        initialRecoveryCursors.clear()
+        unpaidRecoveryCursors.clear()
     }
 
     fun accessReady(city: Settlement): Boolean = city.autonomy == null ||
@@ -136,10 +137,10 @@ internal class CivsAutonomousDevelopment(
     fun pulse() {
         if (now() < nextAutonomyAt) return
         nextAutonomyAt = now() + 5_000
-        initialRecoveryCursors.entries.removeIf { (cityId, cursor) ->
+        unpaidRecoveryCursors.entries.removeIf { (cityId, cursor) ->
             val latest = cities[cityId]
             val plan = latest?.let(CivsSettlementPlans::current)
-            latest == null || plan == null || initialUnpaidBuilder(latest, plan) == null || !cursor.matches(latest)
+            latest == null || plan == null || unpaidPlot(latest, plan, cursor.type)?.building?.id != cursor.buildingId || !cursor.matches(latest)
         }
         val candidates = cities.values.filter { it.autonomy?.paused == false && CivsAutoStorageMigration.ready(it) && it.pendingDeletion == null &&
             accessReady(it) &&
@@ -228,10 +229,10 @@ internal class CivsAutonomousDevelopment(
         fun completed(blueprint: CivAutonomousDesign?, failure: Throwable?) {
             if (autonomyRequests[city.id] != request) return
             val rejection = failure?.let(CivsDiagnostics::rejection)
-            if (!infrastructure && existing == null && goal.type == BuildingType.BUILDER_HUT && adopted != null &&
-                rejection?.reason == "autonomy-no-site" && rejection.values["native-terrain"] == "true" &&
-                initialUnpaidBuilder(city, adopted) != null && now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
-                recoverInitialUnpaidBuilder(city, adopted, request, goal)
+            if (!infrastructure && existing == null && goal.targetLevel == 1 && adopted != null &&
+                rejection?.reason == "autonomy-no-site" && unpaidPlot(city, adopted, goal.type) != null &&
+                now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
+                recoverUnpaidPlot(city, adopted, request, goal)
                 return
             }
             // A blocked first-level industry must not indefinitely hide unfinished paid infrastructure.
@@ -290,49 +291,50 @@ internal class CivsAutonomousDevelopment(
         prepared.whenCompleteSync(tasks) { blueprint, failure -> completed(blueprint, failure) }
     }
 
-    private fun initialUnpaidBuilder(city: Settlement, plan: CivSettlementPlan): CivSettlementPlot? {
-        val hall = city.buildings.singleOrNull()
+    private fun unpaidPlot(city: Settlement, plan: CivSettlementPlan, type: BuildingType): CivSettlementPlot? {
         if (city.autonomy?.paused != false || !CivsAutoStorageMigration.ready(city) || city.pendingDeletion != null ||
             city.construction != null || city.constructionQueue.orEmpty().isNotEmpty() ||
             city.pendingControls.orEmpty().isNotEmpty() || CivsSettlementPlans.current(city) != plan ||
-            !CivsVillageSiteScoring.completeProfile(plan) || hall == null || hall.type != BuildingType.TOWN_HALL || hall.level != 1 ||
-            hall.phase != BuildingPhase.SITE || plan.plots.singleOrNull { it.building.id == hall.id }?.building != hall)
+            !CivsVillageSiteScoring.completeProfile(plan) || type !in CivsAutonomy.profile || type == BuildingType.TOWN_HALL ||
+            city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL } == null)
             return null
-        return CivsSettlementPlans.next(city, BuildingType.BUILDER_HUT)?.takeIf { it.building.level == 1 }
+        val next = CivsAutonomy.nextGoal(city, blueprints::maximumLevel) ?: return null
+        if (next.type != type || next.targetLevel != 1 || next.buildingId != null) return null
+        return CivsSettlementPlans.next(city, type)?.takeIf { it.building.level == 1 }
     }
 
     /** Only unpaid intent changes; native choices and the full forecast finish before one ordinary city save. */
-    private fun recoverInitialUnpaidBuilder(city: Settlement, oldPlan: CivSettlementPlan, request: UUID,
+    private fun recoverUnpaidPlot(city: Settlement, oldPlan: CivSettlementPlan, request: UUID,
         goal: CivAutonomyGoal) {
-        val oldHut = initialUnpaidBuilder(city, oldPlan) ?: return
+        val oldPlot = unpaidPlot(city, oldPlan, goal.type) ?: return
         val key = civsPlanBoardLayoutKey(city)
-        val cursor = initialRecoveryCursors[city.id]?.takeIf { it.matches(city) }
-            ?: InitialRecoveryCursor(city.owner, city.worldId, key).also { initialRecoveryCursors[city.id] = it }
+        val cursor = unpaidRecoveryCursors[city.id]?.takeIf { it.matches(city) && it.type == goal.type && it.buildingId == oldPlot.building.id }
+            ?: UnpaidRecoveryCursor(city.owner, city.worldId, key, goal.type, oldPlot.building.id).also { unpaidRecoveryCursors[city.id] = it }
         autonomyPlanRetryAt[city.id] = now() + 300_000L
         autonomyProgress[city.id] = CivsAutonomyView("planning", goal.type, goal.targetLevel)
         fun current(): Settlement {
             val latest = cities[city.id] ?: throw CivsRejection("stale-development")
             rejectIf(closed || !ready() || autonomyRequests[city.id] != request || city.id in unhealthy || isPlacing(city.id) ||
-                initialRecoveryCursors[city.id] !== cursor || !cursor.matches(latest) ||
-                initialUnpaidBuilder(latest, oldPlan) == null, "stale-development")
+                unpaidRecoveryCursors[city.id] !== cursor || !cursor.matches(latest) ||
+                unpaidPlot(latest, oldPlan, goal.type)?.building?.id != oldPlot.building.id, "stale-development")
             return latest
         }
         fun failed(failure: Throwable) {
             if (autonomyRequests[city.id] != request) return
             val latest = cities[city.id]
-            if (latest == null || !cursor.matches(latest) || initialUnpaidBuilder(latest, oldPlan) == null)
-                initialRecoveryCursors.remove(city.id)
+            if (latest == null || !cursor.matches(latest) || unpaidPlot(latest, oldPlan, goal.type)?.building?.id != oldPlot.building.id)
+                unpaidRecoveryCursors.remove(city.id)
             if (autonomyRequests.remove(city.id, request)) autonomyFailed(city.id, goal, failure)
         }
         val snapshot = runCatching { civsPlanBoardCapture(current()) }.getOrElse { failed(it); return }
-        runCatching { autonomousPlacement.search(snapshot, BuildingType.BUILDER_HUT, 1, oldHut.building.id,
+        runCatching { autonomousPlacement.search(snapshot, goal.type, 1, oldPlot.building.id,
             captureVolume = true, initialPlan = oldPlan, skipPrepared = cursor.skipPrepared) }
             .getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { design, searchFailure ->
             if (autonomyRequests[city.id] != request) return@whenCompleteSync
             if (searchFailure != null) {
                 val rejection = CivsDiagnostics.rejection(searchFailure)
                 if (rejection?.reason in setOf("autonomy-no-site", "autonomy-search-budget"))
-                    initialRecoveryCursors.remove(city.id, cursor)
+                    unpaidRecoveryCursors.remove(city.id, cursor)
                 failed(searchFailure)
                 return@whenCompleteSync
             }
@@ -344,7 +346,7 @@ internal class CivsAutonomousDevelopment(
                 if (planFailure != null) {
                     if (CivsDiagnostics.rejection(planFailure)?.reason in setOf("autonomy-layout-obstructed", "autonomy-no-site")) {
                         runCatching { current() }.getOrElse { failed(it); return@planning }
-                        initialRecoveryCursors[city.id] = cursor.copy(skipPrepared = cursor.skipPrepared + 1)
+                        unpaidRecoveryCursors[city.id] = cursor.copy(skipPrepared = cursor.skipPrepared + 1)
                     }
                     failed(planFailure)
                     return@planning
@@ -352,25 +354,25 @@ internal class CivsAutonomousDevelopment(
                 val accepted = requireNotNull(plan)
                 runCatching { mutateWhenAvailable(city.id) { fresh ->
                     current()
-                    rejectIf(initialUnpaidBuilder(fresh, oldPlan) == null || civsPlanBoardLayoutKey(fresh) != key ||
+                    rejectIf(unpaidPlot(fresh, oldPlan, goal.type)?.building?.id != oldPlot.building.id || civsPlanBoardLayoutKey(fresh) != key ||
                         accepted.revision != oldPlan.revision + 1 || accepted.halfWidth != oldPlan.halfWidth ||
                         !CivsVillageSiteScoring.completeProfile(accepted) ||
                         accepted.plots.count { it.building.type != BuildingType.DECORATION } != CivsAutonomy.completeProfile.size ||
-                        accepted.plots.singleOrNull { it.building.id == oldHut.building.id }?.building !=
+                        accepted.plots.singleOrNull { it.building.id == oldPlot.building.id }?.building !=
                             replacement.blueprint.building.copy(phase = BuildingPhase.SITE) ||
-                        accepted.routes[oldHut.building.id.toString()] != replacement.terrain?.route, "stale-development")
+                        accepted.routes[oldPlot.building.id.toString()] != replacement.terrain?.route, "stale-development")
                     CivsRules.validate(fresh.copy(revision = fresh.revision + 1,
                         autonomy = requireNotNull(fresh.autonomy).copy(plan = CivsSettlementPlans.detached(accepted))))
                 } }.getOrElse { failed(it); return@planning }.whenCompleteSync(tasks) { _, saveFailure ->
                     if (saveFailure != null) { failed(saveFailure); return@whenCompleteSync }
                     if (!autonomyRequests.remove(city.id, request)) return@whenCompleteSync
-                    initialRecoveryCursors.remove(city.id)
+                    unpaidRecoveryCursors.remove(city.id)
                     autonomyProgress.remove(city.id)
                     autonomyRetryAt.remove(city.id)
                     CivsDiagnostics.event("autonomous_unpaid_plan_recovered", "city" to city.id,
                         "old_plan_revision" to oldPlan.revision, "new_plan_revision" to accepted.revision,
-                        "old_hut" to oldHut.building.id, "new_hut" to replacement.blueprint.building.id,
-                        "old_anchor" to oldHut.building.anchor, "new_anchor" to replacement.blueprint.building.anchor)
+                        "type" to goal.type, "old_building" to oldPlot.building.id, "new_building" to replacement.blueprint.building.id,
+                        "old_anchor" to oldPlot.building.anchor, "new_anchor" to replacement.blueprint.building.anchor)
                 }
             }
         }

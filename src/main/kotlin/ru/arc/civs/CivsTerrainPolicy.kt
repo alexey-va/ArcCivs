@@ -1,7 +1,6 @@
 package ru.arc.civs
 
 import org.bukkit.Material
-import org.bukkit.Tag
 import org.bukkit.block.Block
 import org.bukkit.block.BlockFace
 import org.bukkit.block.TileState
@@ -15,22 +14,20 @@ import org.bukkit.block.data.type.Stairs
 import kotlin.math.abs
 
 
-/** Natural terrain and equivalent block states used by every bounded world operation. */
+/** Terrain eligibility and equivalent block states used by bounded world operations. */
 internal object CivsTerrainPolicy {
-    fun checkAutonomousTerrain(block: Block, ground: Int) {
-        if (block.type.isAir) return
-        if (block.isLiquid || block.state is TileState ||
-            block.type !in AUTONOMOUS_PLANTS &&
-            !(block.type in AUTONOMOUS_SOIL && block.y <= ground + 1 || block.type in TERRAFORM_GROUND && block.y <= ground))
+    fun checkAutonomousTerrain(block: Block, @Suppress("UNUSED_PARAMETER") ground: Int) {
+        if (!naturalTerraform(block))
             throw CivsRejection("autonomy-terrain", mapOf("block" to block.type.name,
                 "x" to block.x.toString(), "y" to block.y.toString(), "z" to block.z.toString()))
     }
 
     fun naturalLeaves(data: BlockData): Boolean = (data as? Leaves)?.isPersistent == false
 
-    fun naturalTerraform(block: Block, tree: Boolean = false): Boolean = block.type.isAir ||
-        (block.type in TERRAFORM_GROUND || block.type in AUTONOMOUS_PLANTS || naturalLeaves(block.blockData) ||
-            tree && Tag.LOGS.isTagged(block.type)) && !block.isLiquid &&
+    fun terraformMaterial(material: Material): Boolean = material.isBlock && material !in PROTECTED_TERRAIN &&
+        material != Material.WATER && material != Material.LAVA
+
+    fun naturalTerraform(block: Block): Boolean = block.type.isAir || terraformMaterial(block.type) && !block.isLiquid &&
         (block.blockData as? Waterlogged)?.isWaterlogged != true && block.state !is TileState
 
     fun fullTerraformSupport(block: Block): Boolean = block.type.isSolid && !block.isLiquid &&
@@ -44,8 +41,7 @@ internal object CivsTerrainPolicy {
         civsRetainedRouteStep(block.blockData)
 
     fun passableTerraform(block: Block): Boolean = block.type.isAir ||
-        block.type in AUTONOMOUS_PLANTS && !block.isLiquid &&
-        (block.blockData as? Waterlogged)?.isWaterlogged != true && block.collisionShape.boundingBoxes.isEmpty()
+        naturalTerraform(block) && block.collisionShape.boundingBoxes.isEmpty()
 
     fun requireTerrainRoute(route: List<CivPosition>, building: CivBuilding, allowManualFoundation: Boolean = false) {
         if (allowManualFoundation && route.isEmpty()) return
@@ -95,6 +91,11 @@ internal object CivsTerrainPolicy {
         Material.DIORITE, Material.ANDESITE, Material.TUFF)
     val TREE_GROUND = AUTONOMOUS_SOIL + AUTONOMOUS_ROCK
     val TERRAFORM_GROUND = TREE_GROUND + setOf(Material.SAND, Material.RED_SAND, Material.GRAVEL)
+    /** Technical blocks are never terrain inputs; this is independent of resource value. */
+    val PROTECTED_TERRAIN = setOf(Material.BEDROCK, Material.BARRIER, Material.END_PORTAL_FRAME,
+        Material.END_PORTAL, Material.NETHER_PORTAL, Material.END_GATEWAY, Material.STRUCTURE_VOID, Material.LIGHT,
+        Material.COMMAND_BLOCK, Material.CHAIN_COMMAND_BLOCK, Material.REPEATING_COMMAND_BLOCK,
+        Material.STRUCTURE_BLOCK, Material.JIGSAW, Material.MOVING_PISTON, Material.PISTON_HEAD)
     val FALLING_GROUND = setOf(Material.SAND, Material.RED_SAND, Material.GRAVEL)
     val AUTONOMOUS_PLANTS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN,
         Material.LARGE_FERN, Material.DEAD_BUSH, Material.SNOW, Material.MOSS_CARPET,
