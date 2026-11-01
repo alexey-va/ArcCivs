@@ -116,10 +116,11 @@ class CivsInitialAutonomousApproachTest : FunSpec({
         }
     }
 
-    test("an already usable initial entrance never recaptures or remints the starting supplies") {
+    for (floorMaterial in listOf(Material.DIRT, Material.OAK_LOG))
+    test("an already usable $floorMaterial initial entrance never recaptures or remints the starting supplies") {
         serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
             val initial = InitialApproach(h)
-            initial.floor.type = Material.DIRT
+            initial.floor.type = floorMaterial
             initial.feet.type = Material.AIR
             initial.head.type = Material.AIR
             h.start()
@@ -133,6 +134,36 @@ class CivsInitialAutonomousApproachTest : FunSpec({
             h.saves shouldBe emptyList()
             initial.materials() shouldBe initial.startingItems
             initial.control.type shouldBe Material.BARREL
+            initial.floor.type shouldBe floorMaterial
+        }
+    }
+
+    test("a freshly proved initial approach clears its head while retaining a full timber floor and existing barrel") {
+        serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
+            val proof = CompletableFuture<CivTerraformPlan?>()
+            val initial = InitialApproach(h, proof)
+            initial.floor.type = Material.OAK_LOG
+            initial.feet.type = Material.AIR
+            val headOnly = initial.fresh.copy(blocks = initial.fresh.blocks.filter {
+                it.position == CivPosition(initial.head.x, initial.head.y, initial.head.z)
+            }, cutCount = 1, fillCount = 0)
+            headOnly.blocks.size shouldBe 1
+            proof.complete(headOnly)
+            h.start()
+            initial.pulse()
+            h.saves.single().first.pendingControls.orEmpty().single().approach shouldBe headOnly.blocks
+            initial.floor.type shouldBe Material.OAK_LOG
+            initial.head.type shouldBe Material.OAK_LEAVES
+            h.commit()
+            initial.floor.type shouldBe Material.OAK_LOG
+            initial.head.type shouldBe Material.AIR
+            initial.control.type shouldBe Material.BARREL
+            initial.materials() shouldBe initial.startingItems
+            h.saves.size shouldBe 2
+            h.commit()
+            h.service.settlements().single().pendingControls.orEmpty() shouldBe emptyList()
+            verify(exactly = 1) { h.worldAdapter.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
 })

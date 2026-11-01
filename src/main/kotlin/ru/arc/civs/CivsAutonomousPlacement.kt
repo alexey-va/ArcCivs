@@ -78,12 +78,12 @@ internal class CivsAutonomousPlacement(
                 throw CivsRejection("stale-development")
             val oldPlan = if (seed == null) null else requireNotNull(CivsSettlementPlans.current(city))
             val oldSlot = oldPlan?.plots?.singleOrNull { it.building.id == seed?.id }?.building
-            val kept = oldPlan?.takeIf { seed != null && oldSlot != null && sameHorizontalSlot(seed, oldSlot) }?.let { intent ->
+            val sameSlotPlan = oldPlan?.takeIf { seed != null && oldSlot != null && sameHorizontalSlot(seed, oldSlot) }?.let { intent ->
                 val seedId = requireNotNull(seed).id
                 intent.copy(plots = intent.plots.filter { it.building.id != seedId }, routes = intent.routes - seedId.toString())
             }
-            val projected = if (seed == null) city else city.copy(buildings = city.buildings + seed,
-                autonomy = requireNotNull(city.autonomy).copy(plan = kept, layoutHalfWidth = requireNotNull(oldPlan).halfWidth))
+            val surveyCity = if (seed == null) city else city.copy(buildings = city.buildings + seed,
+                autonomy = requireNotNull(city.autonomy).copy(plan = sameSlotPlan, layoutHalfWidth = requireNotNull(oldPlan).halfWidth))
             val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
             val templates = CivsAutonomy.profile.associateWith { type ->
                 val id = UUID.nameUUIDFromBytes("arccivs-plan-template/${city.id}/$type".toByteArray(Charsets.UTF_8))
@@ -99,20 +99,28 @@ internal class CivsAutonomousPlacement(
                     blueprints.prepare(city.style, type, type.maxLevel, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
                 first.thenCombine(last) { x, y -> x.building to y.building }
             }
-            val frame = CivsSettlementLayout.frame(projected)
-            val fortification: CompletableFuture<CivFortificationTemplate?> = if (frame.halfWidth > 56 && projected.autonomy?.plan == null &&
-                projected.buildings.none { it.type.isInfrastructure }) blueprints.fortification(city.style)
+            val frame = CivsSettlementLayout.frame(surveyCity)
+            val fortification: CompletableFuture<CivFortificationTemplate?> = if (frame.halfWidth > 56 && surveyCity.autonomy?.plan == null &&
+                surveyCity.buildings.none { it.type.isInfrastructure }) blueprints.fortification(city.style)
                 else CompletableFuture.completedFuture(null)
-            val waterColumns = (listOf(frame.core) + frame.gates.map { it.passage }).flatMapTo(hashSetOf()) { box ->
+            val waterColumns = (listOf(frame.core) + frame.gates.map { it.passage } + oldPlan?.gates.orEmpty()).flatMapTo(hashSetOf()) { box ->
                 (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
             }
             val inputs = loadAccess(city).thenCombine(world.autonomousHeightField(city, hall, hall, waterColumns)) { access, surface -> access to surface }
                 .thenCombine(fortification) { input, template -> Triple(input.first, input.second, template) }
             CompletableFuture.allOf(*templates.values.toTypedArray()).thenCombineAsync(inputs, { _, input ->
                 if (result.isDone || closed) throw CivsRejection("world-closed")
+                val loaded = templates.mapValues { it.value.join() }
+                val kept = sameSlotPlan ?: oldPlan?.takeIf { intent ->
+                    seed != null && compatibleExteriorSlot(city, seed, unpaidSite?.terrain, intent,
+                        CivsAutonomousGeometry.union(CivsAutonomousGeometry.futureBounds(city, seed),
+                            CivsSettlementPlans.at(loaded.getValue(seed.type).second, seed.anchor, seed.rotation, seed.id).bounds))
+                }?.let { intent -> intent.copy(plots = intent.plots.filter { it.building.id != seed?.id },
+                    routes = intent.routes - requireNotNull(seed).id.toString()) }
+                val projected = if (seed == null) city else surveyCity.copy(autonomy = requireNotNull(surveyCity.autonomy).copy(plan = kept))
                 val access = if (seed == null) input.first else input.first.copy(
                     routes = input.first.routes + (seed.id to requireNotNull(seedRoute)), reservedFortificationPorts = emptyList())
-                val plan = CivsSettlementPlans.prepare(projected, templates.mapValues { it.value.join() }, input.second, access,
+                val plan = CivsSettlementPlans.prepare(projected, loaded, input.second, access,
                     fortification = input.third)
                 if (seed == null) plan else {
                     if (!CivsVillageSiteScoring.completeProfile(plan) ||
@@ -143,6 +151,23 @@ internal class CivsAutonomousPlacement(
         a.schematicId == b.schematicId && a.anchor.x == b.anchor.x && a.anchor.z == b.anchor.z && a.rotation == b.rotation &&
         a.bounds.min.x == b.bounds.min.x && a.bounds.max.x == b.bounds.max.x &&
         a.bounds.min.z == b.bounds.min.z && a.bounds.max.z == b.bounds.max.z
+
+    /** Native proof owns actual access; compatible exterior intent need not reselect an already accepted perimeter. */
+    private fun compatibleExteriorSlot(city: Settlement, seed: CivBuilding, terrain: CivTerraformPlan?, plan: CivSettlementPlan,
+        envelope: CivBox): Boolean {
+        if (seed.type !in CivsSettlementLayout.exteriorTypes || terrain == null ||
+            !civsContainsBox(envelope, seed.bounds)) return false
+        val otherPlots = plan.plots.filter { it.building.id != seed.id }.map { it.envelope }
+        val obstacles = otherPlots + plan.walls
+        if ((obstacles + plan.gates).any { CivsAutonomousGeometry.overlaps(envelope, it) } ||
+            CivsAutonomousGeometry.approach(seed).any { p -> obstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) } }) return false
+        val unpaidRoads = plan.routes.filterKeys { it != seed.id.toString() && city.building(UUID.fromString(it)) == null }
+            .values.flatten().groupBy { civsTerrainKey(it.x, it.z) }
+        if (unpaidRoads.values.flatten().any { CivsAutonomousGeometry.horizontalContains(envelope, it) } ||
+            terrain.blocks.any { cell -> obstacles.any { CivsAutonomousGeometry.horizontalContains(it, cell.position) } }) return false
+        return terrain.route.all { p -> obstacles.none { CivsAutonomousGeometry.horizontalContains(it, p) } &&
+            unpaidRoads[civsTerrainKey(p.x, p.z)].orEmpty().all { it.y == p.y } }
+    }
 
     fun reserved(city: Settlement, plot: CivSettlementPlot): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, plot.building.type, 1, plot.building.id, reservation = plot))
@@ -695,7 +720,7 @@ internal object CivsAutonomousGeometry {
     private fun rotate(p: CivPosition, turns: Int): CivPosition = when (Math.floorMod(turns, 4)) {
         0 -> p; 1 -> CivPosition(-p.z, p.y, p.x); 2 -> CivPosition(-p.x, p.y, -p.z); else -> CivPosition(p.z, p.y, -p.x)
     }
-    private fun union(a: CivBox, b: CivBox) = CivBox(
+    internal fun union(a: CivBox, b: CivBox) = CivBox(
         CivPosition(minOf(a.min.x, b.min.x), minOf(a.min.y, b.min.y), minOf(a.min.z, b.min.z)),
         CivPosition(maxOf(a.max.x, b.max.x), maxOf(a.max.y, b.max.y), maxOf(a.max.z, b.max.z)))
     private fun withField(bounds: CivBox, building: CivBuilding): CivBox =

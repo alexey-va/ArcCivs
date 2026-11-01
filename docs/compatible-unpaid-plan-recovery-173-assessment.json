@@ -1,0 +1,163 @@
+{
+  "version": 1,
+  "title": "ArcCivs173: preserve compatible full unpaid plan during one-plot recovery",
+  "plugin_version": "0.1.173",
+  "status": "before_implementation",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "owner_requirement": "Remove arbitrary construction prohibitions and fix all stalled villages; retain the complete34building profile and real native constraints.",
+  "direct_currency_delta": {
+    "Vault": 0,
+    "premium_tokens": 0,
+    "player_XP": 0
+  },
+  "ore_policy": {
+    "before": "Input terrain uses a curated whitelist of soils/rocks/plants and refuses other materials, including ordinary ores.",
+    "after": "Global material eligibility remains the active172blacklist;173 aligns initial-floor and road-maintenance consumers with that policy and actual physical support.",
+    "unchanged": "Existing ownership, native before-images, physical support/headroom, liquids, bedrock no-mutation, admitted buildings and roads, stored objects, paid batches and complete34profile checks.",
+    "drops_or_item_refunds": 0,
+    "ore_mining_rewards": "unchanged; terrain preparation does not become a mining reward",
+    "native_support_only": "Reading or retaining a support cell destroys no material. Only actually replaced cells count as world-cell removal.",
+    "output_contract": "Construction still emits its existing concrete DIRT/STONE/AIR recipe. Its output palette does not restrict input terrain and does not mint ore or valuables."
+  },
+  "progression_scope": "No world writes, currency, item reward, mining chance, supplies target or construction work rate changes during plan calculation/adoption. Recovered ordinary construction remains paid through unchanged native journals. Full34profile, geometry non-overlap, actual building and paid route protection, native volume/cell authority and physical support remain. Any throughput change is restoration of ordinary construction and production, not a new reward.",
+  "founding_reserve_unchanged": {
+    "OAK_LOG": 96,
+    "COBBLESTONE": 96,
+    "BREAD": 24,
+    "repeat_existing_ID": 0
+  },
+  "assumptions": [
+    "Assessment recorded before173implementation; accepted-plan geometry alone creates no items, workers or world blocks.",
+    "Participants1/4/5settlements and0/1/2new sites per settlement-day are planning sensitivity, not measured activity or new caps.",
+    "Existing ordinary paid construction and Auto deficit restock may resume after recovery. Actual item throughput is unknown; no zero indirect effect or self-sufficiency claim.",
+    "Founding reserve remains96OAK_LOG/96COBBLESTONE/24BREAD once per newID; existingID repeats0.",
+    "No direct Vault, premium tokens or playerXP mint/burn; no conversion of terrain, construction or producer items to invented money values.",
+    "Active SELL and future SHADOW contracts remain distinct and unchanged."
+  ],
+  "participants": [
+    1,
+    4,
+    5
+  ],
+  "currencies": {
+    "Vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "premium_tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "player_XP": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "live_verification": "After activation verify at least one new ordinary native paid construction in Village1 and2, preserving actual buildings and ordinary inventory. Source/test proof, disk delivery, loaded version and live behavior are separate.",
+  "scope": "Input policy applies to unprotected ordinary block materials, not only ores. Valuable block material alone is not an authority rule. Existing cut/fill no-drop accounting and physical budgets remain; actual modified-cell and later production throughput are not yet measured.",
+  "proposed_change": "A compatible replacement of one unpaid plot may retain all other accepted unpaid plots, their routes and the accepted perimeter. The complete existing layout validation and infrastructure forecast still run; actual buildings and paid routes cannot move. Incompatible replacements use the existing complete replan or refusal. Avoid recomputing a new separator solely because the one replacement changed horizontal position.",
+  "additional_input_policy_fixes": {
+    "before": "A native full timber floor at the initial hall approach is rejected by a separate logs check; road upkeep rejects ordinary solid support such as OBSIDIAN/STONE_BRICKS through a separate soil whitelist.",
+    "after": "Initial approach accepts ordinary physically stable full timber support through the shared terrain/physics predicate. Road maintenance uses shared blacklist eligibility plus actual stable full support, preserving explicit existing route-step/dirt-path and side-attachment safety.",
+    "economic_effect": "Restores ordinary founding/maintenance access. No new reward, material refund, free native mutation, shop change or supply target. Existing journal payments/authority/foreign buildings/data/liquid guards remain. Actual downstream items and replaced world cells are unmeasured."
+  },
+  "bounded_retry_fix": {
+    "before": "A native-proven recovery candidate whose complete forecast exhausts the deterministic dry-perimeter solver budget is retried forever; skipPrepared advances only for geometric/no-site refusal.",
+    "after": "Only a complete recovery forecast rejected with autonomy-search-budget and stage=dry-perimeter advances to the next native-proven candidate after the existing fresh-context fence. Transient world-busy/stale/save/native-search outcomes remain unchanged.",
+    "unchanged": "One complete forecast per existing five-minute retry,64native-attempt bound, full34profile, actual structures/paid routes, native proof and ordinary payment. No higher resource quotas, new reward or supply target."
+  }
+}

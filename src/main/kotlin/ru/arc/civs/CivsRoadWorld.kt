@@ -16,7 +16,7 @@ import kotlin.math.abs
 import kotlin.math.floor
 
 import ru.arc.civs.CivsTerrainPolicy.fullTerraformSupport
-import ru.arc.civs.CivsTerrainPolicy.TERRAFORM_GROUND
+import ru.arc.civs.CivsTerrainPolicy.naturalTerraform
 import ru.arc.civs.CivsTerrainPolicy.sameConstructionState
 
 /** Current native road-maintenance geometry and authority, without inventory or journal ownership. */
@@ -369,8 +369,7 @@ internal class CivsRoadWorld(
     }
 
     private fun roadUpkeepGround(block: Block): Boolean =
-        (block.type in TERRAFORM_GROUND || block.type == Material.DIRT_PATH || block.type == Material.COBBLESTONE) &&
-            block.state !is TileState && !block.isLiquid && (block.blockData as? Waterlogged)?.isWaterlogged != true
+        naturalTerraform(block) && fullTerraformSupport(block)
 
     /** These ordinary plants attach below, never to the side of the changed column. */
     private fun roadUpkeepSideSafe(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||

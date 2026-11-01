@@ -1124,7 +1124,8 @@ The current workers, items, settings and unrelated state survive that write.
 Failure preserves the original plan and uses the existing retry delay. Recovery
 neither persists the shadow nor refounds the city, grants supplies, moves actual
 buildings or writes world blocks; normal construction repeats native validation.
-After a geometric full-forecast refusal, the next scheduled recovery considers
+After a geometric full-forecast refusal or an exhausted dry-perimeter forecast,
+the next scheduled recovery considers
 the next fully native-proved choice in the same bounded search order. Earlier
 choices are proved again and consume the same 64-attempt quota before being
 skipped. One full forecast per retry and its existing delay remain unchanged.
@@ -1135,8 +1136,10 @@ Recovery first considers the unpaid plot's exact horizontal footprint, rotation 
 schematic family at the ordinary offered terrace heights. These alternatives
 consume the same 64-candidate quota. A proved terrace preserves the other unpaid
 plots and routes, replacing only that plot and its route before the one complete
-forecast; the old and raised vertical envelopes are never combined. A candidate
-elsewhere retains the detached full-layout search. Planned routes may guide route
+forecast; the old and raised vertical envelopes are never combined. A relocated
+exterior worksite can retain that full plan when its proved future envelope and
+route are compatible with the remaining plots, walls, gates and route grades.
+Other candidates retain the detached full-layout search. Planned routes may guide route
 selection, but native terraform proof is drafted against the actual city and its
 actual infrastructure; unpaid roads never become preserved world columns.
 Accepted native routes take priority over future route intent.

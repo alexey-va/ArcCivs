@@ -3,6 +3,7 @@ package ru.arc.civs
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
@@ -10,6 +11,10 @@ import io.mockk.mockk
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.block.data.Bisected
+import org.bukkit.block.data.type.Slab
+import org.bukkit.block.data.type.Stairs
+import org.bukkit.util.BoundingBox
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -439,7 +444,7 @@ class CivsRoadMaintenanceTest : FunSpec({
         probes.groupBy { it.first }.values.all { it.size <= 8 } shouldBe true
     }
 
-    test("native missing pavement needs immediate solid support and foreign blocks or body obstructions remain untouched") {
+    test("native missing pavement needs immediate solid support and forbidden blocks or body obstructions remain untouched") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = CivsWorksiteWorldFixture("upkeep-native").also(paper.server::addWorld)
             for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
@@ -461,7 +466,7 @@ class CivsRoadMaintenanceTest : FunSpec({
                     world.getBlockAt(p.x, p.y - 1, p.z).type = Material.AIR
                     shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, work) }.reason shouldBe "autonomy-no-path"
                     world.getBlockAt(p.x, p.y - 1, p.z).type = Material.STONE
-                    for (foreign in listOf(Material.CHEST, Material.STONE_BRICKS, Material.WATER)) {
+                    for (foreign in listOf(Material.CHEST, Material.BARRIER, Material.WATER)) {
                         floor.type = foreign
                         shouldThrow<CivsRejection> { native.validateRoadUpkeep(city,
                             work.copy(changes = listOf(work.changes.single().copy(before = floor.blockData.asString)))) }
@@ -838,9 +843,110 @@ class CivsRoadMaintenanceTest : FunSpec({
         }
     }
 
+    test("native road upkeep admits ordinary stable crafted ore and timber floor and support without changing payment") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("upkeep-ordinary-ground").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val city = upkeepCity().copy(worldId = world.uid)
+            val plugin = paper.createSimplePlugin("OrdinaryUpkeepGround")
+            LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                CivsWorld(plugin, tasks, { 0L }) { listOf(city) }.use { native ->
+                    val target = requireNotNull(upkeepWork(city).upkeep)
+                    val p = target.floor
+                    for (material in listOf(Material.OBSIDIAN, Material.STONE_BRICKS, Material.ANCIENT_DEBRIS, Material.OAK_LOG)) {
+                        val floor = world.getBlockAt(p.x, p.y, p.z).also { it.type = material }
+                        val support = world.getBlockAt(p.x, p.y - 1, p.z).also { it.type = material }
+                        val before = floor.blockData.asString
+                        val work = requireNotNull(native.captureRoadUpkeep(city, city.workers.single(), target))
+                        work.changes shouldBe listOf(CivPlanBlock(p, before, target.after))
+                        native.validateRoadUpkeep(city, work)
+                        val paid = CivsRoadMaintenance.complete(city, work, 3_000)
+                        paid.stock shouldBe city.stock.copy(stone = city.stock.stone - 1)
+                        floor.blockData.asString shouldBe before
+                        support.type shouldBe material
+                        world.entities.filterIsInstance<org.bukkit.entity.Item>() shouldBe emptyList()
+                    }
+                }
+            }
+        }
+    }
+
+    test("ordinary ground eligibility never authorizes removing side support from ladders vines or wall torches") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("upkeep-side-attachments").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val city = upkeepCity().copy(worldId = world.uid)
+            val plugin = paper.createSimplePlugin("UpkeepSideAttachments")
+            LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                CivsWorld(plugin, tasks, { 0L }) { listOf(city) }.use { native ->
+                    val work = upkeepWork(city)
+                    val target = requireNotNull(work.upkeep)
+                    val p = target.floor
+                    val floor = world.getBlockAt(p.x, p.y, p.z).also { it.type = Material.GRASS_BLOCK }
+                    val stairs = "minecraft:cobblestone_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
+                    val step = work.copy(changes = listOf(CivPlanBlock(p, floor.blockData.asString, stairs)),
+                        upkeep = target.copy(after = stairs))
+                    val attachment = world.getBlockAt(p.x - 1, p.y, p.z)
+                    for (data in listOf("minecraft:ladder[facing=west,waterlogged=false]",
+                        "minecraft:vine[east=true,north=false,south=false,up=false,west=false]",
+                        "minecraft:wall_torch[facing=west]")) {
+                        attachment.blockData = Bukkit.createBlockData(data)
+                        val before = attachment.blockData.asString
+                        shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, step) }.reason shouldBe "protected-terrain"
+                        attachment.blockData.asString shouldBe before
+                        floor.type shouldBe Material.GRASS_BLOCK
+                    }
+                    attachment.type = Material.STONE
+                    native.validateRoadUpkeep(city, step)
+                }
+            }
+        }
+    }
+
+    test("road upkeep admits supported sand gravel and concrete powder without changing the native support") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("upkeep-falling-support").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val city = upkeepCity().copy(worldId = world.uid)
+            val plugin = paper.createSimplePlugin("UpkeepFallingSupport")
+            LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                CivsWorld(plugin, tasks, { 0L }) { listOf(city) }.use { native ->
+                    val work = upkeepWork(city)
+                    val p = requireNotNull(work.upkeep).floor
+                    world.getBlockAt(p.x, p.y, p.z).type = Material.GRASS_BLOCK
+                    val support = world.getBlockAt(p.x, p.y - 1, p.z)
+                    for (material in listOf(Material.SAND, Material.RED_SAND, Material.GRAVEL, Material.WHITE_CONCRETE_POWDER)) {
+                        support.type = material
+                        world.getBlockAt(p.x, p.y - 2, p.z).type shouldBe Material.STONE
+                        val captured = requireNotNull(native.captureRoadUpkeep(city, city.workers.single(), requireNotNull(work.upkeep)))
+                        captured.changes shouldBe work.changes
+                        native.validateRoadUpkeep(city, captured)
+                        support.type shouldBe material
+                        world.getBlockAt(p.x, p.y, p.z).type shouldBe Material.GRASS_BLOCK
+                    }
+                }
+            }
+        }
+    }
+
     test("bank clearance of healthy path journals only real cuts and rejects physics dependencies fluids containers and deep support") {
         MockBukkitTestRuntime.open().use { paper ->
-            val world = CivsWorksiteWorldFixture("upkeep-bank").also(paper.server::addWorld)
+            val world = CivsWorksiteWorldFixture("upkeep-bank", collisionForData = { data ->
+                when {
+                    data is Stairs && data.half == Bisected.Half.BOTTOM && !data.isWaterlogged -> {
+                        // Geometry depends on facing/shape, not the stair's material family.
+                        val paving = Bukkit.createBlockData(data.asString.replace(
+                            data.material.key.toString(), "minecraft:cobblestone_stairs"))
+                        roadUpkeepBoxes(paving).map { it.at(CivPosition(0, 0, 0)) }
+                    }
+                    data is Slab -> listOf(when (data.type) {
+                        Slab.Type.BOTTOM -> BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0)
+                        Slab.Type.TOP -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, 1.0)
+                        Slab.Type.DOUBLE -> BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+                    })
+                    else -> null
+                }
+            }).also(paper.server::addWorld)
             for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
             val city = upkeepCity().copy(worldId = world.uid)
             val plugin = paper.createSimplePlugin("UpkeepBank")
@@ -909,7 +1015,10 @@ class CivsRoadMaintenanceTest : FunSpec({
                     for (foreign in listOf("minecraft:stone_brick_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]",
                         "minecraft:cobblestone_slab[type=bottom,waterlogged=false]")) {
                         block(dy = -1).blockData = Bukkit.createBlockData(foreign)
-                        shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, supportedStep) }.reason shouldBe "autonomy-no-path"
+                        withClue("nonfull native support $foreign") {
+                            CivsTerrainPolicy.fullTerraformSupport(block(dy = -1)) shouldBe false
+                            shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, supportedStep) }.reason shouldBe "autonomy-no-path"
+                        }
                     }
                 }
             }

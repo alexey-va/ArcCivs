@@ -344,7 +344,9 @@ internal class CivsAutonomousDevelopment(
                 .getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) planning@ { plan, planFailure ->
                 if (autonomyRequests[city.id] != request) return@planning
                 if (planFailure != null) {
-                    if (CivsDiagnostics.rejection(planFailure)?.reason in setOf("autonomy-layout-obstructed", "autonomy-no-site")) {
+                    val rejection = CivsDiagnostics.rejection(planFailure)
+                    if (rejection?.reason in setOf("autonomy-layout-obstructed", "autonomy-no-site") ||
+                        rejection?.reason == "autonomy-search-budget" && rejection.values["stage"] == "dry-perimeter") {
                         runCatching { current() }.getOrElse { failed(it); return@planning }
                         unpaidRecoveryCursors[city.id] = cursor.copy(skipPrepared = cursor.skipPrepared + 1)
                     }

@@ -2,7 +2,6 @@ package ru.arc.civs
 
 import org.bukkit.Bukkit
 import org.bukkit.Material
-import org.bukkit.Tag
 import org.bukkit.plugin.Plugin
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -140,7 +139,7 @@ internal class CivsControlInstallations(
     }
 
     private fun standingFloor(block: org.bukkit.block.Block): Boolean =
-        !Tag.LOGS.isTagged(block.type) && !CivsTerrainPolicy.naturalLeaves(block.blockData) &&
+        CivsTerrainPolicy.naturalTerraform(block) && !CivsTerrainPolicy.naturalLeaves(block.blockData) &&
             CivsTerrainPolicy.routeTerraformSupport(block)
 
     private fun checkApproachCell(cityId: UUID, owner: UUID, building: CivBuilding, block: org.bukkit.block.Block, after: Material) {
