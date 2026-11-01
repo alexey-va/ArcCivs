@@ -187,6 +187,9 @@ internal class CivsAutonomousDevelopment(
                     autonomyRequests.remove(city.id)
                     autonomyPlanRetryAt[city.id] = now() + if (CivsDiagnostics.rejection(failure)?.reason in
                         setOf("world-busy", "chunks-unloaded", "stale-development")) 30_000 else 300_000
+                    // Optional new reservations must not keep an existing upgrade behind another ROAD check.
+                    if (adopted == null && infrastructure && ordinary?.buildingId?.let(city::building)?.phase == BuildingPhase.ACTIVE)
+                        autonomyLayoutChecked[city.id] = city.buildings.toList() to autonomyPlanRetryAt.getValue(city.id)
                     autonomyFailed(city.id, goal, failure)
                 } else mutateWhenAvailable(city.id) { current ->
                     rejectIf(autonomyRequests[city.id] != request || civsPlanBoardLayoutKey(current) != key ||

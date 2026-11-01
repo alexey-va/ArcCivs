@@ -36,7 +36,8 @@ data class CivResidentFoodReceipt(val buildingId: UUID, val stockBefore: Stock, 
         transfer.containers.forEach { change ->
             require(change.containerType in CIVS_STORAGE_TYPES && change.slot in 0..26 && change.before != change.after)
             require(city.contains(change.container.x, change.container.z) &&
-                (change.container == building.control || building.bounds.contains(change.container.x, change.container.y, change.container.z)))
+                (change.container == building.control || building.phase == BuildingPhase.ACTIVE &&
+                    building.bounds.contains(change.container.x, change.container.y, change.container.z)))
             require(city.buildings.none { it.id != building.id && it.control == change.container })
             require(change.container != building.control || change.containerType == "BARREL")
             listOfNotNull(change.before, change.after).forEach {
@@ -70,6 +71,6 @@ internal object CivsResidentFood {
 
     fun eligible(city: Settlement, worker: CivWorker, building: CivBuilding): Boolean =
         city.pendingDeletion == null && city.autonomy?.paused != true && city.workers.any { it.id == worker.id } &&
-            building.phase == BuildingPhase.ACTIVE && (building.type in setOf(BuildingType.TOWN_HALL,
+            (building.type in setOf(BuildingType.TOWN_HALL,
                 BuildingType.TAVERN, BuildingType.WAREHOUSE) || building.id == worker.homeId || building.id == worker.assignment)
 }

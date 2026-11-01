@@ -24,6 +24,124 @@ class CivsResidentFoodReceiptTest : FunSpec({
     beforeEach { h = ResidentFoodFixture() }
     afterEach { h.close() }
 
+    for (phase in BuildingPhase.entries) test("existing hall control bread remains usable through $phase without creating food") {
+        h.foodPhase(phase)
+        h.barrel.setItem(0, ItemStack(Material.BREAD, 24))
+        val source = requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet))
+        source.container shouldBe h.point
+        val tx = h.pickup(source)
+        tx.collected!!.food!!.materialized shouldBe 0
+        tx.after.stock shouldBe Stock()
+        h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        h.barrel.getItem(0)!!.amount shouldBe 20
+        val carried = tx.after.workers.single()
+        CivsEquipment.usableCount(carried, "BREAD") shouldBe 4
+        carried.hunger shouldBe 0
+        val meal = requireNotNull(CivsResidentLife.mealPlan(tx.after, carried))
+        val fed = CivsResidentLife.finishMeal(tx.after, meal)
+        fed.workers.single().hunger shouldBe 18
+        fed.workers.single().life!!.meals shouldBe 3
+        CivsEquipment.usableCount(fed.workers.single(), "BREAD") shouldBe 1
+        fed.stock shouldBe Stock()
+        h.barrel.getItem(0)!!.amount + CivsEquipment.usableCount(fed.workers.single(), "BREAD") +
+            fed.workers.single().life!!.meals shouldBe 24L
+        shouldThrow<CivsRejection> { CivsResidentLife.finishMeal(fed, meal) }.reason shouldBe "stale-meal"
+    }
+
+    for (phase in listOf(BuildingPhase.SITE, BuildingPhase.CONSTRUCTING)) {
+        test("unfinished $phase food access excludes interior holders and forged interior receipts") {
+            h.foodPhase(phase)
+            val interior = CivPosition(0, 64, 1)
+            h.world.getBlockAt(interior.x, interior.y, interior.z).type = Material.BARREL
+            val other = (h.world.getBlockAt(interior.x, interior.y, interior.z).state as Barrel).inventory
+            other.setItem(0, ItemStack(Material.BREAD, 24))
+            h.city = h.city.copy(inventory = h.city.inventory!!.copy(containers = listOf(interior)))
+            h.storage.replaceCities(listOf(h.city))
+            h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+            val id = UUID.randomUUID()
+            h.storage.reserve(h.city, id)
+            shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id,
+                h.source.copy(container = interior), h.feet) }.reason shouldBe "worker-too-far"
+            h.storage.unlock(id)
+            h.barrel.setItem(0, ItemStack(Material.BREAD, 24))
+            val tx = h.pickup()
+            val transfer = requireNotNull(tx.collected)
+            shouldThrow<IllegalArgumentException> {
+                transfer.copy(containers = transfer.containers.map { it.copy(container = interior) }).validated(tx.after)
+            }
+            other.getItem(0)!!.amount shouldBe 24
+            h.barrel.getItem(0)!!.amount shouldBe 24
+        }
+
+        test("unfinished $phase control food retains claim and current control fences") {
+            h.foodPhase(phase)
+            h.barrel.setItem(0, ItemStack(Material.BREAD, 24))
+            h.foodAllowed = false
+            h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+            val id = UUID.randomUUID()
+            h.storage.reserve(h.city, id)
+            shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id, h.source, h.feet) }
+                .reason shouldBe "lands-denied"
+            h.storage.unlock(id)
+            h.foodAllowed = true
+            val tx = h.pickup()
+            val movedControl = tx.after.copy(buildings = tx.after.buildings.map { it.copy(control = CivPosition(1, 64, 0)) })
+            shouldThrow<IllegalArgumentException> { tx.collected!!.validated(movedControl) }
+            h.foodAllowed = false
+            shouldThrow<CivsRejection> { h.storage.seal(tx) }.reason shouldBe "lands-denied"
+            h.barrel.getItem(0)!!.amount shouldBe 24
+            h.city.stock shouldBe Stock()
+        }
+
+        test("unfinished $phase control must still be a native barrel") {
+            h.foodPhase(phase)
+            h.world.getBlockAt(0, 64, 0).type = Material.CHEST
+            shouldThrow<CivsRejection> { h.storage.residentFoodSource(h.city, h.worker, h.feet) }
+                .reason shouldBe "storage-container-invalid"
+            val id = UUID.randomUUID()
+            h.storage.reserve(h.city, id)
+            shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id, h.source, h.feet) }
+                .reason shouldBe "storage-container-invalid"
+        }
+    }
+
+    test("unfinished foreign home control does not become a public food source") {
+        h.foodPhase(BuildingPhase.SITE)
+        val home = h.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+            anchor = CivPosition(8, 64, 0), control = CivPosition(8, 64, 0), entrance = CivPosition(8, 64, -2),
+            bounds = CivBox(CivPosition(6, 64, -2), CivPosition(10, 68, 2)))
+        h.city = h.city.copy(buildings = h.city.buildings + home)
+        h.world.getBlockAt(8, 64, 0).type = Material.BARREL
+        (h.world.getBlockAt(8, 64, 0).state as Barrel).inventory.setItem(0, ItemStack(Material.BREAD, 24))
+        h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+        val id = UUID.randomUUID()
+        h.storage.reserve(h.city, id)
+        shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id,
+            CivResidentFoodSource(home.id, requireNotNull(home.control), home.entrance), h.feet) }
+            .reason shouldBe "worker-too-far"
+        h.storage.unlock(id)
+        h.barrel.setItem(0, ItemStack(Material.BREAD, 24))
+        val tx = h.pickup()
+        val transfer = requireNotNull(tx.collected)
+        shouldThrow<IllegalArgumentException> {
+            transfer.copy(food = transfer.food!!.copy(buildingId = home.id),
+                containers = transfer.containers.map { it.copy(container = requireNotNull(home.control)) }).validated(tx.after)
+        }
+    }
+
+    test("unfinished tavern control food does not enable innkeeper service") {
+        h.foodPhase(BuildingPhase.SITE)
+        val tavern = h.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.TAVERN,
+            anchor = CivPosition(8, 64, 0), control = CivPosition(8, 64, 0), entrance = CivPosition(8, 64, -2),
+            bounds = CivBox(CivPosition(6, 64, -2), CivPosition(10, 68, 2)))
+        h.city = h.city.copy(buildings = h.city.buildings + tavern)
+        h.world.getBlockAt(8, 64, 0).type = Material.BARREL
+        (h.world.getBlockAt(8, 64, 0).state as Barrel).inventory.setItem(0, ItemStack(Material.BREAD, 24))
+        h.storage.residentFoodSource(h.city, h.worker, h.feet, tavernService = true) shouldBe null
+        requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet)).buildingId shouldBe tavern.id
+    }
+
     for (automatic in listOf(false, true)) test("an unstaffed native tavern is preferred over a nearer hall and its pickup replays once Auto=$automatic") {
         val hall = h.city.buildings.single()
         val point = CivPosition(8, 64, 0)
@@ -1139,6 +1257,15 @@ private class ResidentFoodFixture : AutoCloseable {
                 check(storage.collectedBeforeState(tx) == CivInventoryApplyResult.Applied)
                 if (tx.collected!!.food!!.materialized == 0) check(civsCanReachContainer(feet, point))
             }, { _, _, _ -> null }, {}, { tx, _ -> cities.getValue(tx.cityId) }, {}, { time })
+    }
+    fun foodPhase(phase: BuildingPhase) {
+        val hall = city.buildings.single().copy(phase = phase)
+        city = CivsRules.validate(city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = listOf(hall), workers = city.workers.map { it.copy(hunger = 0, homeId = hall.id) },
+            construction = if (phase == BuildingPhase.CONSTRUCTING) CivConstruction(UUID.randomUUID(), hall.id,
+                1, 1, 0, ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = hall,
+                batches = CivConstructionBatches(1, 16), materials = emptyMap(), payment = CivConstructionPayment()) else null))
+        storage.replaceCities(listOf(city))
     }
     fun materialize(): CivInventoryTransaction = prepare { storage.prepareFoodMaterialization(city, worker.id, feet) }
     fun pickup(target: CivResidentFoodSource = source): CivInventoryTransaction = prepare { storage.prepareFoodPickup(city, worker.id, target, feet) }

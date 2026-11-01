@@ -85,7 +85,12 @@ new grants and automatic development wait for migration completion. Mode change
 invalidates worksite observations once rather than resetting their search every tick.
 
 Meals consume carried food through the same observed animation and receipt in
-both modes. Population uses the same active-minute ageing and family rules after
+both modes. Existing food in an eligible building's exact native control barrel
+remains accessible during SITE and CONSTRUCTING. Other indexed holders still
+require ACTIVE; tavern service and legacy FOOD materialization keep their active
+building rules. Native ownership, reach, slot debit and receipt validation remain
+authoritative, without another food grant.
+Population uses the same active-minute ageing and family rules after
 migration, without offline catch-up. Planning submits sites and upgrades through
 the existing schematic, control, queue, builder-credit and placement journals;
 pause preserves accepted work and blocks new activity.
@@ -331,7 +336,9 @@ at most 64 observed obstruction cells, without clearing whole chunks or policy d
 Cancellation and lifecycle
 tokens fence late results; shutdown observes the owned worker's drain.
 Edges retain a 0.6-by-1.8-block body, fractional support and the existing step
-height limit. Ladder entry, climb and exit are explicit actions: the controller
+height limit. Detached standing candidates require the same centre support row
+as packet movement. A tall shape below a carpet cannot offer a waypoint which
+the native mover will immediately reject. Ladder entry, climb and exit are explicit actions: the controller
 centres the actor before climbing. Door opening remains owner-thread movement.
 Movement revalidates live collision and support before accepting a step and
 spends a tick's remaining distance across clear waypoints, without
@@ -1130,7 +1137,10 @@ The board and runtime consume this same persisted geometry. Reserved SITE
 admission and later activation retain the adopted route and upgrade envelope while
 refreshing native before-images. Infrastructure reads the adopted walls, gates and
 roads, and retains accepted pieces unchanged. A failed full-plan attempt backs off;
-ordinary single-site growth remains available during that backoff. Paid work and
+ordinary single-site growth remains available during that backoff. When optional
+layout planning precedes an existing active building upgrade, its failure also
+defers that unchanged layout check so the upgrade can retain ordinary priority.
+Required plans for new parcels keep their admission rules. Paid work and
 production never depend on completing a distant reservation. Unadopted candidates
 are diagnostics only and are not drawn as an accepted future village.
 

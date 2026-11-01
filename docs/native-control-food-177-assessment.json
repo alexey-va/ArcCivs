@@ -1,0 +1,175 @@
+{
+  "version": 1,
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "title": "ArcCivs177: existing control food and executable courier paths",
+  "plugin_version": "0.1.177",
+  "status": "reviewed_for_implementation",
+  "baseline": "ArcCivs176 source9621be29cfa6a83581b6e9991cffe11dba96bb2f onSpawn; fresh audit2026-11-01T17:48Z",
+  "participants": [
+    1,
+    2,
+    7
+  ],
+  "currencies": {
+    "Vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "premium_tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "player_XP": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "observed_before": {
+    "Village-3": {
+      "native_hall_bread": 24,
+      "hall_phase": "CONSTRUCTING",
+      "hungry_residents": 5,
+      "accepted_meals_since176": 0,
+      "stock_food": 0
+    },
+    "Village-5": {
+      "native_hall_bread": 24,
+      "hall_phase": "SITE",
+      "hungry_residents": 5,
+      "accepted_meals_since176": 0,
+      "stock_food": 0
+    }
+  },
+  "proposed_change": "Allow eligible residents to withdraw existing food from the exact native owner control BARREL while its building is SITE/CONSTRUCTING. All other indexed holders still require ACTIVE. Keep keeper service and FOOD materialization phase rules unchanged. No relocation, grant, direct bag edit or free food.",
+  "physical_item_flow": {
+    "before_native_bread": 48,
+    "after_before_first_pickup_native_bread": 48,
+    "mint_delta": 0,
+    "maximum_transfer_per_existing_receipt": 4,
+    "transition": "Exact native slot debit equals worker bag credit; ordinary accepted meal later consumes carried food under existing hunger rule. Native repeated/late receipt conservation checks stay authoritative."
+  },
+  "direct_currency_delta": {
+    "Vault": 0,
+    "premium_tokens": 0,
+    "player_XP": 0
+  },
+  "rates_and_limits": "Existing four-item pickup batch, work/hunger periods, observed container generation, storage slot bounds and native arrival/Lands checks remain unchanged. Existing Auto supply source and target quantities unchanged; its downstream replenishment rate is not newly measured.",
+  "assumptions": [
+    "Sensitivityparticipants1/2/7 and0/1/4events/day are not measured player activity or new caps.",
+    "Unlocking food may restore ordinary work, material use and later production; total downstream throughput is unmeasured.",
+    "Current SELL and futureSHADOWcontracts remain distinct; no invented item-to-currency price."
+  ],
+  "native_acceptance": "Observe original hall BREAD24 debit through normal worker pickup, ordinary meal commits and hunger increase in V3/V5 without manual transfer, resources, arrival or world edits.",
+  "courier_repair_before_implementation": {
+    "observed_before": "Auto2 same BREAD4 shipment held since2026-11-01T15:07:39Z; native target tavern ACTIVE/controlBARREL has431empty slots. Actual solver chooses a fence/carpet step rejected by existing motion support before movement.",
+    "proposed_after": "Require detached A* surface candidates to satisfy the same captured centre-support contract as current native movement; no new terrain materials, capabilities, job quotas or cargo recreation. Prove alternate route completes before adopting repair.",
+    "item_flow": "The existing four carried bread transfer to their original destination through the same journal, without grant, teleport or bag/cargo rewrite. Source debit4, carried4, destination credit4; direct mint0.",
+    "indirect_effect": "May resume regular hauling, input consumption and production. Actual daily throughput and any downstream resale effect unmeasured; no price/rate change."
+  },
+  "development_repair_before_implementation": {
+    "observed_before": "Auto2 has no adopted complete plan, ordinary QUARRY L2 upgrade is available; infrastructure priority first requests complete forecast, fails FARM, and only plan retry clock is deferred. Optional layout priority is immediately selected again, hiding the existing upgrade.",
+    "proposed_after": "Use the existing layout-check backoff when the optional full forecast fails. Existing upgrade may proceed next ordinary tick under unchanged materials, research, placement and journal checks. Required plans for new plots and already accepted paid work remain authoritative.",
+    "direct_delta": {
+      "Vault": 0,
+      "premium_tokens": 0,
+      "player_XP": 0
+    },
+    "material_cost": "No free construction. Existing level price and native exact material payments remain unchanged.",
+    "indirect_effect": "May restore existing quarry upgrade and later ordinary production. Total daily output and resale effect unmeasured. No production rate, loot chance, reward amount or currency rule changes.",
+    "native_acceptance": "Observe the same existing QUARRY target admitted and ordinary paid material batches advancing; a successful full future34plot forecast is a separate unresolved outcome."
+  }
+}

@@ -149,6 +149,7 @@ internal class CivsResidentStorage(
     /** At most sixteen nearest indexed holders; never load chunks or invent a stock entry. */
     private fun foodSources(city: Settlement, worker: CivWorker, from: org.bukkit.Location,
         reserve: Boolean = false): Sequence<Pair<CivBuilding, Source>> {
+        // The shared selector keeps unfinished buildings control-only; resolve requires its actual BARREL.
         val positions = city.buildings.filter { CivsResidentFood.eligible(city, worker, it) &&
             (!reserve || CivsResidentFood.reserveBuilding(city, it)) }.flatMap { building ->
             containers.buildingPositions(city, building.id).map { (point, type) -> Triple(building, point, type) }
@@ -181,7 +182,7 @@ internal class CivsResidentStorage(
         if (city.inventory?.mode == CivStorageMode.VIRTUAL || feet.world?.uid != city.worldId ||
             CivsResidents.hunger(worker) > 14 || !tavernService && residentFoods().carried(city, worker) != null) return null
         for ((building, source) in foodSources(city, worker, feet)) {
-            if (tavernService && building.type != BuildingType.TAVERN) continue
+            if (tavernService && (building.type != BuildingType.TAVERN || building.phase != BuildingPhase.ACTIVE)) continue
             val material = source.inventory.storageContents.asSequence().mapNotNull(::plain).firstOrNull {
                 residentFoods().mayPickUp(city, worker, it.material) &&
                     CivsEquipment.supplyRoom(worker, Material.valueOf(it.material)) > 0

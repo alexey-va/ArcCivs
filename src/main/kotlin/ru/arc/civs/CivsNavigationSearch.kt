@@ -361,9 +361,19 @@ internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivP
             for (box in block.boxes) {
                 if (box.maxY <= 0 || box.minX > .5 || box.maxX < .5 || box.minZ > .5 || box.maxZ < .5) continue
                 val height = by + box.maxY
-                if (citizenStepHeightAllowed(node.y, height) &&
-                    blocks[CivPosition(x, floor(height + .001).toInt(), z)]?.allowed == true)
-                    result += CitizenSearchNode(x, height, z)
+                if (!citizenStepHeightAllowed(node.y, height)) continue
+                val feet = blocks[CivPosition(x, floor(height + .001).toInt(), z)] ?: continue
+                if (!feet.loaded || !feet.allowed) continue
+                // Match packet movement's centre-support row using only captured geometry.
+                if (!feet.climbable) {
+                    val supportY = citizenSupportY(height)
+                    val support = blocks[CivPosition(x, supportY, z)] ?: continue
+                    if (!support.loaded || support.liquid || support.door || support.boxes.none {
+                            abs(supportY + it.maxY - height) <= .13 &&
+                                .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ
+                        }) continue
+                }
+                result += CitizenSearchNode(x, height, z)
             }
         }
     }

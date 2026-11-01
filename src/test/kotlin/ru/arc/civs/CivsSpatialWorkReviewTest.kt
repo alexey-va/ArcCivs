@@ -1530,7 +1530,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 world.getBlockAt(upper.x, upper.y, upper.z).type = Material.GRAVEL
                 var locked = true
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> locked && point == lower })
+                    // Receipt recovery uses deterministic pulse quotas; deadline expiry has its own tests.
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> locked && point == lower },
+                        nanoTime = { 0L })
                     val workerId = city.workers.single().id
                     val originalStone = CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE")
                     val received = mutableMapOf<String, Long>()
