@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "plugin_version": "0.1.168",
+  "status": "verified_local_not_delivered",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "problem": "Full native site proofs always select the first missing ordinal. With Village-3 unsited, requested Village-4 and Village-5 never receive a full attempt.",
+  "change": "Rotate pending ordinals once per consumed shortlisted full candidate. Preserve the ordinal throughout every asynchronous check and the existing +4 retry. Keep original IDs, selected styles and canonical existing cities.",
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "search_only": {
+    "native_world_writes": 0,
+    "items_minted": 0,
+    "items_burned": 0,
+    "workers_created": 0,
+    "existing_reserves_repeated": false
+  },
+  "requested_five": {
+    "per_new_ID": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "five_total": {
+      "logs": 480,
+      "cobblestone": 480,
+      "bread": 120
+    },
+    "remaining_three": {
+      "logs": 288,
+      "cobblestone": 288,
+      "bread": 72
+    },
+    "repeat_existing_ID": 0,
+    "before_equals_after": true
+  },
+  "bounds": {
+    "requested_count": 5,
+    "candidate_positions_per_page": 192,
+    "finite_pages": 8,
+    "maximum_shortlist": 16,
+    "maximum_chunk_requests": 8192,
+    "maximum_pending_loads": 2,
+    "full_layout_plots": 34,
+    "full_proofs_per_consumed_candidate": 1,
+    "native_checks": "unchanged foundation, volume, ore, support, protection, ownership, control and full layout proof"
+  },
+  "future_effect": "Successful founding may occur earlier for a later ordinal. Ordinary once-only founding and later paid construction, normal supply grants, work, native resources and receipts keep their previous rules. No measured success rate, item throughput or self-sufficiency is inferred.",
+  "income_model": {
+    "active_SELL": "unchanged; no assumed sale price or realized income",
+    "planned_SELL_to_contract": "future/SHADOW tracked separately, not active income"
+  },
+  "verification": {
+    "causal_RED": {
+      "reported": 45,
+      "new_failures": 4,
+      "errors": 0,
+      "filtered_skips": 41,
+      "baseline_main_sha256": "8f0245f9ecf99fb671096cc9c6bdae3476f190919ad1e799a38b963aad0442b9"
+    },
+    "focused_GREEN": {
+      "classes": 7,
+      "tests": 340,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "elapsed": "31s"
+    },
+    "production_jar": "pass_ArcCore0.1.28",
+    "consumer": "pass2.7.81",
+    "delivery": "not_delivered",
+    "activation": "not_active",
+    "native_founding": "not_observed",
+    "native_client": "not_observed",
+    "mysql": "No SQL/model changes;17passedfull167CI, not rerun locally for168; full168CIwillverify"
+  }
+}

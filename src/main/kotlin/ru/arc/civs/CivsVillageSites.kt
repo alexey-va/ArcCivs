@@ -234,7 +234,15 @@ internal class CivsVillageSites(
         var unexpectedLogged = false
         var releaseFailed = false
         var point: CivPosition? = null
+        private var proofCursor = 1
         fun missing(): Int? = (1..count).firstOrNull { it !in created }
+        fun takeProofOrdinal(): Int? {
+            val pending = (1..count).filter { it !in created }
+            val ordinal = if (forcedStyle != null || pending.size <= 1) pending.firstOrNull()
+                else pending.firstOrNull { it >= proofCursor } ?: pending.firstOrNull()
+            if (ordinal != null) proofCursor = if (ordinal == count) 1 else ordinal + 1
+            return ordinal
+        }
     }
 
     private val replies = ConcurrentLinkedQueue<LoadReply>()
@@ -406,9 +414,10 @@ internal class CivsVillageSites(
 
     private fun full(search: Search) {
         if (!context(search)) return finish(search, "not-ready")
-        val ordinal = search.missing() ?: return finish(search, null)
+        if (search.missing() == null) return finish(search, null)
         while (search.nextShortlist < search.shortlist.size) {
             val candidate = search.shortlist[search.nextShortlist++]
+            val ordinal = search.takeProofOrdinal() ?: return finish(search, null)
             val city = draft(search, ordinal, candidate.point)
             search.point = city.center
             search.phase = "growth-area-candidate"

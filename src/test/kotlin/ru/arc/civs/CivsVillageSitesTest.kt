@@ -221,6 +221,158 @@ class CivsVillageSiteRejectionDetailsTest : FunSpec({
 })
 
 class CivsVillageSitesTest : FunSpec({
+    test("pending ordinals rotate three four five before retrying the first rejected town") {
+        villageScenario { s ->
+            val existing = s.seedExistingVillages()
+            val ids = (1..5).associateWith { CivsVillageSiteScoring.id(s.reference.id, "Auto-", it) }
+            s.foundationFailure = CivsRejection("autonomy-terrain", mapOf("block" to "WATER"))
+            val result = s.subject.search(s.reference, 5, "Auto-")
+            try {
+                s.until { s.fullCities.size >= 4 || result.isDone }
+                s.fullCities.take(4).map { it.id } shouldBe listOf(ids.getValue(3), ids.getValue(4), ids.getValue(5), ids.getValue(3))
+                s.fullCities.take(4).map { it.style } shouldBe listOf("birch", "original", "medievaldarkoak", "birch")
+                s.fullCities.take(4).map { it.buildings.single().anchor.let { p -> p.x to p.z } }.distinct().size shouldBe 4
+                s.siteProofs shouldBe emptyList()
+                s.admissions shouldBe emptyList()
+                s.cities shouldBe listOf(s.reference) + existing
+                s.subject.status()["requested"] shouldBe 5
+                s.subject.status()["candidates"] shouldBe 192
+                (s.peakRequests <= 8_192) shouldBe true
+                (s.peakPending <= 2) shouldBe true
+            } finally {
+                s.subject.cancel("pending-ordinal-fixture-cleanup")
+                s.until { result.isDone }
+            }
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("pending ordinal raised retries remain bound before the next style receives a candidate") {
+        villageScenario { s ->
+            val existing = s.seedExistingVillages()
+            val third = CivsVillageSiteScoring.id(s.reference.id, "Auto-", 3)
+            val fourth = CivsVillageSiteScoring.id(s.reference.id, "Auto-", 4)
+            val foundations = mutableListOf<Pair<CivBuilding, CivTerraformPlan>>()
+            s.foundationTerrain = { building ->
+                val p = building.bounds.min
+                CivTerraformPlan(CivBox(p, p), listOf(CivPlanBlock(p, "minecraft:air", "minecraft:dirt")),
+                    emptyList(), building.anchor.y, 0, 1).also { foundations += building to it }
+            }
+            s.siteProof = { proof -> if (proof.cityId == third) proof.refusedOre()
+                else CompletableFuture.failedFuture(CivsRejection("lands-denied")) }
+            val result = s.subject.search(s.reference, 5, "Auto-")
+            try {
+                s.until { s.siteProofs.size >= 3 || result.isDone }
+                val (base, raised, next) = s.siteProofs.take(3)
+                s.siteProofs.take(3).map { it.cityId } shouldBe listOf(third, third, fourth)
+                raised.building shouldBe CivsAutonomousGeometry.atHeight(base.building, base.building.anchor.y + 4)
+                raised.building.id shouldBe base.building.id
+                raised.building.schematicId shouldBe base.building.schematicId
+                raised.cells.map { it.position } shouldBe base.cells.map {
+                    ArcSchematicPoint(it.position.x, it.position.y + 4, it.position.z)
+                }
+                base.terrain shouldBe foundations[0].second
+                raised.terrain shouldBe foundations[1].second
+                next.terrain shouldBe foundations[2].second
+                s.fullCities.take(2).map { it.id } shouldBe listOf(third, fourth)
+                next.building.schematicId.split('/')[2] shouldBe "original"
+                next.building.anchor.y shouldBe base.building.anchor.y
+                (next.building.anchor.x != base.building.anchor.x || next.building.anchor.z != base.building.anchor.z) shouldBe true
+                s.admissions shouldBe emptyList()
+                s.cities shouldBe listOf(s.reference) + existing
+            } finally {
+                s.subject.cancel("pending-raised-fixture-cleanup")
+                s.until { result.isDone }
+            }
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("pending ordinal four can found before three and canonical replay never grants it again") {
+        villageScenario { s ->
+            val existing = s.seedExistingVillages()
+            val ids = (1..5).associateWith { CivsVillageSiteScoring.id(s.reference.id, "Auto-", it) }
+            s.siteProof = { proof -> if (proof.cityId == ids.getValue(4)) CompletableFuture.completedFuture(proof.plan())
+                else CompletableFuture.failedFuture(CivsRejection("lands-denied")) }
+            val first = s.subject.search(s.reference, 5, "Auto-")
+            s.until { first.isDone }
+            first.join().complete shouldBe false
+            first.join().created.map { it.city } shouldBe listOf(ids.getValue(1), ids.getValue(2), ids.getValue(4))
+            first.join().created.map { it.style } shouldBe listOf("nordic", "medievaloak", "original")
+            s.admissions.size shouldBe 1
+            val admission = s.admissions.single()
+            admission.city.id shouldBe ids.getValue(4)
+            admission.city.name shouldBe "Auto-4"
+            admission.city.style shouldBe "original"
+            admission.city.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
+            admission.city.inventory!!.materials.values.sum() shouldBe 216L
+            CivsVillageSiteScoring.completeProfile(requireNotNull(admission.city.autonomy?.plan)) shouldBe true
+            s.cities.filter { it.id in existing.map(Settlement::id) } shouldBe existing
+            val canonical = s.cities.toList()
+            val proofs = s.siteProofs.size
+            val replay = s.subject.search(s.reference, 5, "Auto-", batch = 2)
+            s.until { replay.isDone }
+            replay.join().created.single { it.city == ids.getValue(4) }.existing shouldBe true
+            s.siteProofs.drop(proofs).none { it.cityId == ids.getValue(4) } shouldBe true
+            s.admissions.size shouldBe 1
+            s.cities shouldBe canonical
+            (s.peakRequests <= 8_192) shouldBe true
+            (s.peakPending <= 2) shouldBe true
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("pending ordinal cancellation fences a held original proof and its late completion") {
+        villageScenario { s ->
+            val existing = s.seedExistingVillages()
+            val third = CivsVillageSiteScoring.id(s.reference.id, "Auto-", 3)
+            val fourth = CivsVillageSiteScoring.id(s.reference.id, "Auto-", 4)
+            var cancellations = 0
+            val held = object : CompletableFuture<CivPlacementPlan>() {
+                override fun cancel(mayInterruptIfRunning: Boolean): Boolean { cancellations++; return false }
+            }
+            s.siteProof = { proof -> if (proof.cityId == fourth) held
+                else CompletableFuture.failedFuture(CivsRejection("lands-denied")) }
+            val result = s.subject.search(s.reference, 5, "Auto-")
+            try {
+                s.until { s.siteProofs.size >= 2 || result.isDone }
+                s.siteProofs.take(2).map { it.cityId } shouldBe listOf(third, fourth)
+                val captured = s.siteProofs[1]
+                captured.owner shouldBe s.reference.owner
+                captured.worldId shouldBe s.reference.worldId
+                captured.building.schematicId.split('/')[2] shouldBe "original"
+                result.isDone shouldBe false
+                s.admissions shouldBe emptyList()
+                val loads = s.loads.size
+                val fullProofs = s.fullCities.size
+                val tickets = s.added.size
+                s.subject.cancel("pending-original-cancel")
+                s.until { result.isDone }
+                cancellations shouldBe 1
+                result.join().reason shouldBe "pending-original-cancel"
+                result.join().created.map { it.city } shouldBe existing.map { it.id }
+                s.registry.activeLeaseCount shouldBe 0
+                held.complete(captured.plan()) shouldBe true
+                s.tick(10)
+                s.siteProofs.size shouldBe 2
+                s.fullCities.size shouldBe fullProofs
+                s.loads.size shouldBe loads
+                s.added.size shouldBe tickets
+                s.admissions shouldBe emptyList()
+                s.cities shouldBe listOf(s.reference) + existing
+            } finally {
+                s.subject.cancel("pending-held-fixture-cleanup")
+                held.completeExceptionally(CancellationException("Controlled pending ordinal proof cleanup"))
+                s.tick(64)
+            }
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
     test("eight finite candidate pages preserve frozen legacy anchors and add a disjoint angular set") {
         val legacy = villageReference(UUID(0, 1)).copy(id = UUID(0, 123), center = CivPosition(-1883, 67, -2760))
         val frozenLegacyPageHashes = listOf(
@@ -1407,4 +1559,16 @@ private fun villageScenario(action: (VillageScenario) -> Unit) = failOnUnsupport
         try { unmockkObject(CivsSettlementPlans) }
         finally { clearAllMocks(currentThreadOnly = true) }
     }
+}
+
+/** Existing canonical receipts are far from every candidate; they never enter the new founding callback. */
+private fun VillageScenario.seedExistingVillages(): List<Settlement> = listOf("nordic", "medievaloak").mapIndexed { index, style ->
+    val ordinal = index + 1
+    val id = CivsVillageSiteScoring.id(reference.id, "Auto-", ordinal)
+    val hallId = UUID.nameUUIDFromBytes("arccivs-village-hall/$id".toByteArray(Charsets.UTF_8))
+    val hall = villageBlueprint("civs/v2/$style/town_hall/fixture/level1", hallId, reference.worldId,
+        CivPosition(20_000 + ordinal * 1_024, 63, 20_000), BuildingType.TOWN_HALL).building
+    val saved = CivsAutonomy.found(id, reference.owner, "Auto-$ordinal", reference.worldId, requireNotNull(hall.control),
+        128, style, hall, 1_000)
+    saved.copy(autonomy = requireNotNull(saved.autonomy).copy(plan = villageLayout(saved))).also(cities::add)
 }

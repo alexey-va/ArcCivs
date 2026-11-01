@@ -155,6 +155,10 @@ keeps its existing 8192 chunk-request and two-pending-load limits. Reference,
 prefix and ordinal still determine city identity across every page, so a partial
 result resumes without a second founding reserve. Every selected site still
 requires the complete layout and strict native foundation and volume proofs.
+Full shortlisted candidates rotate through the remaining requested styles, so
+an unsited earlier ordinal cannot monopolize every proof. Each candidate still
+receives one full proof; its ordinal remains fixed across asynchronous checks
+and the existing raised-foundation retry. Committed ordinals are skipped.
 
 An initial autonomous SITE town hall prepares its exterior entrance through the
 existing `pendingControls.approach` receipt: at most three strictly proved cells
