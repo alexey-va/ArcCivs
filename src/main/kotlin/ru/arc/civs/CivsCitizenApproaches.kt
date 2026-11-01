@@ -235,7 +235,12 @@ internal fun citizenDoorAllowed(city: Settlement, allowed: Set<UUID>, point: Civ
 
 /** A gate can overlap feet one block above its base; it has no upper half like a door. */
 internal fun citizenOpenRouteDoors(city: Settlement, allowed: Set<UUID>, at: Location, destination: Location,
-    blocked: (UUID, CivPosition) -> Boolean): Boolean {
+    blocked: (UUID, CivPosition) -> Boolean): Boolean =
+    citizenOpenRouteDoors(city, allowed, at, destination, blocked) { _, _ -> }
+
+internal fun citizenOpenRouteDoors(city: Settlement, allowed: Set<UUID>, at: Location, destination: Location,
+    blocked: (UUID, CivPosition) -> Boolean,
+    changed: (UUID, Collection<CivPosition>) -> Unit): Boolean {
     check(Bukkit.isPrimaryThread()) { "Resident passages require the server thread" }
     val world = destination.world ?: return false
     if (world.uid != city.worldId || at.world?.uid != world.uid ||
@@ -251,13 +256,18 @@ internal fun citizenOpenRouteDoors(city: Settlement, allowed: Set<UUID>, at: Loc
                     body.overlaps(it.clone().shift(point.x.toDouble(), point.y.toDouble(), point.z.toDouble()))
                 }) return@all true
         }
-        citizenOpenRouteDoor(city, allowed, at, point, blocked)
+        citizenOpenRouteDoor(city, allowed, at, point, blocked, changed)
     }
 }
 
 /** Open only a nearby path door or gate; foreign footprints and rejected native events stay intact. */
 internal fun citizenOpenRouteDoor(city: Settlement, allowed: Set<UUID>, at: Location, point: CivPosition,
-    blocked: (UUID, CivPosition) -> Boolean): Boolean {
+    blocked: (UUID, CivPosition) -> Boolean): Boolean =
+    citizenOpenRouteDoor(city, allowed, at, point, blocked) { _, _ -> }
+
+internal fun citizenOpenRouteDoor(city: Settlement, allowed: Set<UUID>, at: Location, point: CivPosition,
+    blocked: (UUID, CivPosition) -> Boolean,
+    changed: (UUID, Collection<CivPosition>) -> Unit): Boolean {
     check(Bukkit.isPrimaryThread()) { "Resident passages require the server thread" }
     val world = at.world ?: return false
     if (world.uid != city.worldId || point.y !in world.minHeight until world.maxHeight ||
@@ -283,10 +293,15 @@ internal fun citizenOpenRouteDoor(city: Settlement, allowed: Set<UUID>, at: Loca
     // A native event listener may replace a block; never open its replacement or restore captured data.
     val current = passage() ?: return false
     if (current.map { it.type } != materials || current.any { blocked(world.uid, CivPosition(it.x, it.y, it.z)) }) return false
+    val touched = mutableListOf<CivPosition>()
     for (block in current) {
         val state = citizenRouteOpenable(block.blockData) ?: return false
-        if (!state.isOpen) block.setBlockData(state.also { it.isOpen = true }, false)
+        if (!state.isOpen) {
+            block.setBlockData(state.also { it.isOpen = true }, false)
+            touched += CivPosition(block.x, block.y, block.z)
+        }
     }
+    if (touched.isNotEmpty()) changed(world.uid, touched)
     return true
 }
 

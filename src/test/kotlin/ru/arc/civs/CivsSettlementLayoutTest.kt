@@ -387,8 +387,9 @@ class CivsSettlementLayoutTest : FunSpec({
                 val facing = if (horizontal) "north" else "east"
                 val expected = "minecraft:${CivsSettlementLayout.wood(style)}_fence_gate[facing=$facing,in_wall=false,open=true,powered=false]"
                 val leaves = piece.blocks.filter { it.after.contains("_fence_gate[") }
-                leaves.size shouldBe if (horizontal) gate.passage.max.x - gate.passage.min.x + 1
+                val span = if (horizontal) gate.passage.max.x - gate.passage.min.x + 1
                     else gate.passage.max.z - gate.passage.min.z + 1
+                leaves.size shouldBe span - if (CivsGateRefit.versioned(CivsInfrastructure.building(piece))) 2 else 0
                 leaves.forEach { leaf ->
                     leaf.after shouldBe expected
                     piece.transit.any { it == leaf.position } shouldBe true

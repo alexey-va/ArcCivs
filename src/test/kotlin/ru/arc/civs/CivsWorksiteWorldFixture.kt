@@ -19,6 +19,7 @@ import org.mockbukkit.mockbukkit.ServerMock
 import org.mockbukkit.mockbukkit.block.data.BlockDataMock
 import org.mockbukkit.mockbukkit.world.Coordinate
 import org.mockbukkit.mockbukkit.world.WorldMock
+import org.mockbukkit.mockbukkit.world.ChunkMock
 
 private val MINE_TIMBER_FENCE_STATE = Regex(
     "minecraft:(oak|spruce|dark_oak)_fence\\[east=(true|false),north=(true|false)," +
@@ -34,6 +35,19 @@ internal open class CivsWorksiteWorldFixture(name: String, private val ground: M
     var rayTraces = 0
         private set
     init { setName(name) }
+
+    // Pinned MockBukkit lacks Paper's four-argument snapshot and mishandles negative local coordinates.
+    // Copy only this fixture's explicit cells and implicit ground; the result retains no native object.
+    override fun getChunkAt(x: Int, z: Int): ChunkMock {
+        super.getChunkAt(x, z)
+        return object : ChunkMock(this@CivsWorksiteWorldFixture, x, z) {
+            override fun getChunkSnapshot(height: Boolean, biome: Boolean, temperature: Boolean, light: Boolean): org.bukkit.ChunkSnapshot =
+                CivsNavigationChunkSnapshotFixture(x, z, minHeight, maxHeight, name, fullTime,
+                    org.bukkit.Bukkit.createBlockData(ground), cells.filterKeys { it.x shr 4 == x && it.z shr 4 == z }
+                        .mapKeys { CivPosition(it.key.x and 15, it.key.y, it.key.z and 15) }
+                        .mapValues { it.value.blockData.clone() })
+        }
+    }
 
     // Pinned CraftRegionAccessor defaults to MOTION_BLOCKING; WORLD_SURFACE also sees saplings and other plants.
     override fun getHighestBlockYAt(x: Int, z: Int): Int = getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING)

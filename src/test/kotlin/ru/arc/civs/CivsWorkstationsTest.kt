@@ -82,12 +82,12 @@ class CivsWorkstationsTest : FunSpec({
             }
         }
 
-    test("an open forge does not admit unfocused fallback positions or relocate a control into its unroofed floor") {
+    test("an open forge keeps workstation fallback closed and prefers authored work-floor control storage") {
         val snapshot = OpenForgeSnapshot(null)
         val building = openForgeBuilding()
         CivsWorkstations.authored(building, snapshot) shouldBe emptyList()
-        CivsWorkstations.authoredControls(building, snapshot) shouldBe emptyList()
-        CivsWorkstations.authoredControls(building, OpenForgeSnapshot("furnace")) shouldBe emptyList()
+        CivsWorkstations.authoredControls(building, snapshot).first().existing shouldBe true
+        CivsWorkstations.authoredControls(building, OpenForgeSnapshot("furnace")).first().existing shouldBe true
     }
 
     test("a valid forge never grants a pickaxe while its accepted batch is missing two iron") {
@@ -148,7 +148,8 @@ class CivsWorkstationsTest : FunSpec({
             val found = CivsWorkstations.authoredControls(rotated, withBarrel)
             found.any(CivControlCandidate::existing) shouldBe true
             val selected = found.first()
-            CivsWorkstations.authoredControls(rotated.copy(control = selected.position), withBarrel) shouldBe emptyList()
+            CivsWorkstations.authoredControls(rotated.copy(control = selected.position), withBarrel)
+                .any { it.position == selected.position } shouldBe true
         }
     }
 

@@ -88,58 +88,31 @@ internal class CivsWorkstations(
 
         /** Pure immutable-snapshot work, always invoked on the blueprint executor. */
         internal fun authored(building: CivBuilding, snapshot: ArcSchematicSnapshot): List<CivWorkstation> =
-            authored(CivsAuthoredInterior(building, snapshot, furniture), false)
+            authored(CivsAuthoredInterior(building, snapshot, furniture))
 
-        internal fun authoredControls(building: CivBuilding, snapshot: ArcSchematicSnapshot): List<CivControlCandidate> {
-            val marker = CivsBlueprintGeometry.controlMarker(snapshot)
-            val original = CivsWorksiteLayouts.point(building, CivPosition(marker.x - snapshot.origin.x,
-                marker.y - snapshot.origin.y, marker.z - snapshot.origin.z))
-            // A saved override is stable; never move an interior control again or alter the authored pivot.
-            if (building.control != original) return emptyList()
-            val interior = CivsAuthoredInterior(building, snapshot, furniture)
-            val existing = authored(interior, true).map { CivControlCandidate(requireNotNull(it.focus), it.standing, true) }
-            val avoid = authored(interior, false).flatMap { listOfNotNull(it.standing, it.focus) }
-            val possible = interior.reachable.asSequence().filter { p -> interior.interior(p) && interior.name(p) == "air" &&
-                kotlin.math.abs(p.x - interior.entrance.x) + kotlin.math.abs(p.z - interior.entrance.z) >= 4 &&
-                interior.wallScore(p) > 0 && avoid.none { work -> interior.world(p).let {
-                    kotlin.math.abs(it.y.toLong() - work.y) <= 1 && kotlin.math.abs(it.x.toLong() - work.x) + kotlin.math.abs(it.z.toLong() - work.z) < 2
-                } } }.sortedWith(compareBy({ kotlin.math.abs(it.y - interior.entrance.y) },
-                    { -interior.wallScore(it) }, { kotlin.math.abs(it.x - snapshot.origin.x) + kotlin.math.abs(it.z - (snapshot.minimum.z + snapshot.maximum.z) / 2) },
-                    { it.x }, { it.z })).take(64).toList()
-            val spare = possible.mapNotNull { point ->
-                if (!interior.connectedWithout(point)) return@mapNotNull null
-                val standing = interior.neighbors(point).firstOrNull(interior::interior)
-                    ?: return@mapNotNull null
-                CivControlCandidate(interior.world(point), interior.world(standing), false)
-            }.take(MAXIMUM_POINTS)
-            return if (spare.isEmpty()) existing else (existing.take(MAXIMUM_POINTS / 2) + spare).take(MAXIMUM_POINTS)
-        }
+        internal fun authoredControls(building: CivBuilding, snapshot: ArcSchematicSnapshot): List<CivControlCandidate> =
+            CivsBuildingControls.authored(building, snapshot)
 
-        private fun authored(interior: CivsAuthoredInterior, controlBarrels: Boolean): List<CivWorkstation> {
+        private fun authored(interior: CivsAuthoredInterior): List<CivWorkstation> {
             val building = interior.building
-            val snapshot = interior.snapshot
-            val materials = if (controlBarrels) listOf("barrel") else stations[building.type] ?: return emptyList()
+            val materials = stations[building.type] ?: return emptyList()
             val cells = interior.cells
             val entrance = interior.entrance
-            val machines = cells.filter { cell -> cell.blockData.substringBefore('[').removePrefix("minecraft:") in materials &&
-                (!controlBarrels || cell.position.let { p ->
-                    p.x > snapshot.minimum.x && p.x < snapshot.maximum.x && p.z > snapshot.minimum.z && p.z < snapshot.maximum.z &&
-                        kotlin.math.abs(p.x - entrance.x) + kotlin.math.abs(p.z - entrance.z) >= 3
-                }) }
+            val machines = cells.filter { cell -> cell.blockData.substringBefore('[').removePrefix("minecraft:") in materials }
                 .sortedWith(compareBy({ materials.indexOf(it.blockData.substringBefore('[').removePrefix("minecraft:")) },
                     { it.position.y }, { it.position.z }, { it.position.x }))
             val result = linkedSetOf<CivWorkstation>()
             // Keep several actual machines before filling the bounded list with alternate standing sides.
             val sides = machines.map { cell -> operatingOffsets.flatMap { (dx, dz) -> listOf(0, -1, 1).map { dy ->
                 cell.position.let { p -> p.copy(x = p.x + dx, y = p.y + dy, z = p.z + dz) }
-            } }.filter { if (controlBarrels) interior.interior(it) else interior.operatingFloor(it) }
+            } }.filter(interior::operatingFloor)
                 .map { CivWorkstation(interior.world(it), interior.world(cell.position), cell.blockData.substringBefore('[')) } }
-            val (forgeFallbacks, regular) = sides.partition { side -> building.type == BuildingType.BLACKSMITH && !controlBarrels &&
+            val (forgeFallbacks, regular) = sides.partition { side -> building.type == BuildingType.BLACKSMITH &&
                 side.firstOrNull()?.material in forgeFallbackMaterials }
             val preferred = regular.filter { side -> side.firstOrNull()?.material?.substringAfter(':') !in setOf(null, "crafting_table", "fletching_table") }
             for (group in listOf(preferred.ifEmpty { regular }, forgeFallbacks))
                 for (side in 0 until operatingOffsets.size * 3) for (machine in group) machine.getOrNull(side)?.let { result.add(it) }
-            if (result.isEmpty() && !controlBarrels) interior.reachable.asSequence().filter(interior::interior)
+            if (result.isEmpty()) interior.reachable.asSequence().filter(interior::interior)
                 .sortedWith(compareBy({ kotlin.math.abs(it.y - entrance.y) },
                     { (it.x - entrance.x).toLong() * (it.x - entrance.x) + (it.z - entrance.z).toLong() * (it.z - entrance.z) },
                     { it.x }, { it.z }))
@@ -164,20 +137,25 @@ internal class CivsWorkstations(
             }
         }
 
-        internal fun valid(city: Settlement, building: CivBuilding, world: World, station: CivWorkstation): Boolean {
+        internal fun valid(city: Settlement, building: CivBuilding, world: World, station: CivWorkstation,
+            standingAt: CitizenPoint? = null): Boolean {
             val p = station.standing
+            val feet = standingAt ?: p.point()
+            if (feet.x != p.x + .5 || feet.z != p.z + .5 || kotlin.math.abs(feet.y - p.y) > 1.0) return false
             if (world.uid != city.worldId || !city.contains(p.x, p.z) ||
                 !building.bounds.contains(p.x, p.y, p.z) || !building.bounds.contains(p.x, p.y + 1, p.z) ||
                 city.buildings.any { it.id != building.id && it.bounds.contains(p.x, p.y, p.z) } ||
                 !citizenControlClear(city, p) || !citizenChunkReady(world, p.x shr 4, p.z shr 4)) return false
-            val support = world.getBlockAt(p.x, p.y - 1, p.z).type
+            val support = world.getBlockAt(p.x, citizenSupportY(feet.y), p.z).type
             if (support == Material.BARREL || support == Material.CHEST || support == Material.TRAPPED_CHEST ||
-                support in CITIZEN_LEISURE_HAZARDS || !citizenStandable(world, p) || !citizenPacketBodyClear(world, p.point(), false)) return false
+                support in CITIZEN_LEISURE_HAZARDS ||
+                (if (standingAt == null) !citizenStandable(world, p) else !citizenPacketSupported(world, feet)) ||
+                !citizenPacketBodyClear(world, feet, false)) return false
             val focus = station.focus ?: return station.material == null
             return station.material != null && building.bounds.contains(focus.x, focus.y, focus.z) &&
                 citizenChunkReady(world, focus.x shr 4, focus.z shr 4) &&
                 world.getBlockAt(focus.x, focus.y, focus.z).type.key.toString() == station.material &&
-                citizenCanReachBlock(world, p.location(world).add(0.0, 1.5, 0.0), focus)
+                citizenCanReachBlock(world, org.bukkit.Location(world, feet.x, feet.y + 1.5, feet.z), focus)
         }
     }
 }

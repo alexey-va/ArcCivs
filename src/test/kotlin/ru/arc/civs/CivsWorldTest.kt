@@ -1186,6 +1186,8 @@ class CivsWorldTest : FunSpec({
 
     test("one successful native terrain write emits one optional chunk hint and unchanged replay emits none") {
         worldScenario { s ->
+            val changed = mutableListOf<CivPosition>()
+            s.subject.onTerrainChanged = { worldId, positions -> worldId shouldBe s.world.uid; changed += positions }
             val observations = mockk<ArcSceneObservationService>(relaxed = true)
             s.paper.server.servicesManager.register(ArcSceneObservationService::class.java, observations,
                 s.paper.createSimplePlugin("ArcCore"), ServicePriority.Normal)
@@ -1204,6 +1206,7 @@ class CivsWorldTest : FunSpec({
             s.subject.constructionChunkChanged(s.world.uid,
                 ArcSchematicBlock(ArcSchematicPoint(-1, 64, 32), "minecraft:air", true, false))
             verify(exactly = 1) { observations.chunkChanged(s.world.uid, -1, 2) }
+            changed shouldBe listOf(cell.position, CivPosition(-1, 64, 32))
         }
     }
 

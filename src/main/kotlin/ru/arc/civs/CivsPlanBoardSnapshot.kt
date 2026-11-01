@@ -86,7 +86,7 @@ internal fun civsPlanBoardCapture(city: Settlement): Settlement = city.copy(
     constructionQueue = city.constructionQueue?.toList(),
     research = city.research?.copy(completed = city.research.completed.toSet(), project = null),
     roadRouteOverrides = city.roadRouteOverrides?.mapValues { (_, value) ->
-        value.copy(originalRoute = value.originalRoute.toList(), route = value.route.toList())
+        value.detached()
     },
     autonomy = city.autonomy?.let { it.copy(plan = CivsSettlementPlans.detached(CivsSettlementPlans.current(city))) },
     workers = emptyList(),

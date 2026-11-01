@@ -82,24 +82,36 @@ internal class CivsNativePersistence(
     }
 
     /** The saved retirement intent remains until this fresh chunk record proves the old tile is absent. */
-    fun persistRetiredControl(city: Settlement, receipt: CivControlPlacement): CompletableFuture<Unit> {
+    fun persistRetiredControl(city: Settlement, receipt: CivControlPlacement): CompletableFuture<Unit> =
+        persistControl(city, receipt, retired = true)
+
+    /** The empty receiver must exist on disk before the exact-slot journal can credit it. */
+    fun persistStagedControl(city: Settlement, receipt: CivControlPlacement): CompletableFuture<Unit> =
+        persistControl(city, receipt, retired = false)
+
+    private fun persistControl(city: Settlement, receipt: CivControlPlacement, retired: Boolean): CompletableFuture<Unit> {
         check(Bukkit.isPrimaryThread())
         check(!closed)
         val point = requireNotNull(receipt.retire).position
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
-        require(world.isChunkLoaded(point.x shr 4, point.z shr 4) && world.getBlockAt(point.x, point.y, point.z).type.isAir)
+        require(world.isChunkLoaded(point.x shr 4, point.z shr 4))
+        fun barrelSlots(position: CivPosition): List<SlotProof> {
+            require(world.isChunkLoaded(position.x shr 4, position.z shr 4))
+            val barrel = world.getBlockAt(position.x, position.y, position.z).state as? org.bukkit.block.Barrel
+                ?: throw CivsRejection("control-obstructed")
+            return barrel.inventory.storageContents.mapIndexed { slot, item -> SlotProof(position, "BARREL", slot,
+                ItemProof(item?.takeIf { !it.type.isAir && it.amount > 0 }?.serializeAsBytes())) }.also { require(it.size == STORAGE_SLOTS) }
+        }
+        val old = if (retired) {
+            require(world.getBlockAt(point.x, point.y, point.z).type.isAir)
+            Target(point.x shr 4, point.z shr 4, false, emptyList(), emptyList(), listOf(point))
+        } else Target(point.x shr 4, point.z shr 4, false, emptyList(), barrelSlots(point))
         val replacement = receipt.position
-        require(world.isChunkLoaded(replacement.x shr 4, replacement.z shr 4))
-        val barrel = world.getBlockAt(replacement.x, replacement.y, replacement.z).state as? org.bukkit.block.Barrel
-            ?: throw CivsRejection("control-obstructed")
-        val slots = barrel.inventory.storageContents.mapIndexed { slot, item -> SlotProof(replacement, "BARREL", slot,
-            ItemProof(item?.takeIf { !it.type.isAir && it.amount > 0 }?.serializeAsBytes())) }
-        require(slots.size == STORAGE_SLOTS)
-        val targets = listOf(Target(point.x shr 4, point.z shr 4, false, emptyList(), emptyList(), listOf(point)),
-            Target(replacement.x shr 4, replacement.z shr 4, false, emptyList(), slots)).groupBy { it.x to it.z }.map { (_, group) ->
+        val targets = listOf(old, Target(replacement.x shr 4, replacement.z shr 4, false, emptyList(), barrelSlots(replacement)))
+            .groupBy { it.x to it.z }.map { (_, group) ->
             Target(group.first().x, group.first().z, false, emptyList(), group.flatMap { it.slots }, group.flatMap { it.absentContainers })
         }
-        return persistTargets(city.id, UUID.randomUUID(), world, targets, "control-retirement")
+        return persistTargets(city.id, UUID.randomUUID(), world, targets, if (retired) "control-retirement" else "control-staging")
     }
 
     private fun persistTargets(cityId: UUID, receiptId: UUID, world: World, targets: List<Target>, phase: String): CompletableFuture<Unit> {

@@ -4822,6 +4822,9 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
                 }
                 if (holdNavigation) navigationWorkers += task else task.run()
             },
+            // Only the fixture's authored static shapes; real Craft/NMS classification stays the production default.
+            navigationContextFree = { data -> data.material in ResidentRuntimeWorld.SNAPSHOT_STATIC_MATERIALS ||
+                data is Gate || data is Stairs },
             navigationClock = { navigationNow ?: System.currentTimeMillis() },
             recoveryClock = { recoveryMillis },
             workPositionFailed = { city, worker, failed ->
@@ -5268,12 +5271,19 @@ internal open class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
         super.getChunkAt(x, z, generate)
         return chunkFixtures.getOrPut(x to z) {
             object : ChunkMock(this@ResidentRuntimeWorld, x, z) {
+                override fun getChunkSnapshot(height: Boolean, biome: Boolean, temperature: Boolean, light: Boolean): org.bukkit.ChunkSnapshot =
+                    CivsNavigationChunkSnapshotFixture(x, z, minHeight, maxHeight, name, fullTime,
+                        Bukkit.createBlockData(Material.STONE), cells.filterKeys { it.x shr 4 == x && it.z shr 4 == z }
+                            .mapKeys { CivPosition(it.key.x and 15, it.key.y, it.key.z and 15) }
+                            .mapValues { it.value.blockData.clone() })
                 override fun getTileEntities(filter: Predicate<in Block>, useSnapshot: Boolean): Collection<BlockState> = emptyList()
             }
         }
     }
 
     companion object {
+        val SNAPSHOT_STATIC_MATERIALS = setOf(Material.AIR, Material.CAVE_AIR, Material.VOID_AIR,
+            Material.STONE, Material.COBBLESTONE, Material.BARREL, Material.DIRT_PATH, Material.FARMLAND, Material.LADDER)
         private fun shape(boxes: List<BoundingBox>) = object : VoxelShape {
             override fun getBoundingBoxes(): Collection<BoundingBox> = boxes
             override fun overlaps(other: BoundingBox): Boolean = boxes.any { it.overlaps(other) }

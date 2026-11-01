@@ -89,6 +89,7 @@ class CivsCitizens(
     private val recoveryClock: () -> Long = { System.nanoTime() / 1_000_000L },
     private val workStatusInputs: (Settlement, CivWorker) -> List<String> = { _, _ -> emptyList() },
     private val workstation: ((Settlement, CivWorker) -> CivWorkstation?)? = null,
+    navigationContextFree: ((org.bukkit.block.data.BlockData) -> Boolean)? = null,
 ) : Listener, AutoCloseable {
     private val runtime = CitizenRuntime(plugin, cityProvider)
     internal var residentLifeEnabled: Boolean
@@ -110,7 +111,8 @@ class CivsCitizens(
     private val packets: PaperPacketNpcs
     private val ownsNavigationTasks = navigationTasks == null
     private val residentTasks = navigationTasks ?: LifecycleTaskScope(BukkitTaskScheduler(plugin))
-    private val navigation = CivsResidentNavigation(residentTasks, navigationWork, navigationExecutor, settings = navigationSettings)
+    private val navigation = CivsResidentNavigation(residentTasks, navigationWork, navigationExecutor,
+        settings = navigationSettings, snapshotContextFree = navigationContextFree)
     private val paths = CivsPaths()
     private val threats: CivsResidentThreats
     private val life: CivsCitizenLife
@@ -834,6 +836,26 @@ class CivsCitizens(
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainForm(event: org.bukkit.event.block.BlockFormEvent) = invalidateTerrain(event.block)
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onTerrainSpread(event: org.bukkit.event.block.BlockSpreadEvent) = invalidateTerrain(event.block)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onTerrainDecay(event: org.bukkit.event.block.LeavesDecayEvent) = invalidateTerrain(event.block)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onTerrainBurn(event: org.bukkit.event.block.BlockBurnEvent) = invalidateTerrain(event.block)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onTerrainPhysics(event: org.bukkit.event.block.BlockPhysicsEvent) = invalidateTerrain(event.block)
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onTerrainRedstone(event: org.bukkit.event.block.BlockRedstoneEvent) {
+        if (event.oldCurrent != event.newCurrent) invalidateTerrain(event.block)
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onTerrainBlockExplosion(event: org.bukkit.event.block.BlockExplodeEvent) {
+        event.blockList().forEach(::invalidateTerrain)
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onTerrainEntityExplosion(event: org.bukkit.event.entity.EntityExplodeEvent) {
+        event.blockList().forEach(::invalidateTerrain)
+    }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainFade(event: org.bukkit.event.block.BlockFadeEvent) = invalidateTerrain(event.block)
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainFlow(event: org.bukkit.event.block.BlockFromToEvent) = invalidateTerrain(event.toBlock)
@@ -847,11 +869,17 @@ class CivsCitizens(
     }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainPiston(event: org.bukkit.event.block.BlockPistonExtendEvent) {
+        invalidateTerrain(event.block)
+        invalidateTerrain(event.block.getRelative(event.direction))
         event.blocks.forEach { invalidateTerrain(it); invalidateTerrain(it.getRelative(event.direction)) }
     }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainPistonRetract(event: org.bukkit.event.block.BlockPistonRetractEvent) {
-        event.blocks.forEach { invalidateTerrain(it); invalidateTerrain(it.getRelative(event.direction.oppositeFace)) }
+        invalidateTerrain(event.block)
+        // Paper's empty retract event reports facing; populated events report movement.
+        val facing = (event.block.blockData as? org.bukkit.block.data.Directional)?.facing ?: event.direction
+        invalidateTerrain(event.block.getRelative(facing))
+        event.blocks.forEach { invalidateTerrain(it); invalidateTerrain(it.getRelative(event.direction)) }
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

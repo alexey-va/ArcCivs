@@ -1,0 +1,9 @@
+# Navigation, territory maintenance and controls — 0.1.181
+
+The accepted change removes route-preparation stalls, clears natural trees inside autonomous settlement interiors and relocates functional controls to reachable interiors. This is an operational repair. It changes no production recipe, probability, output quantity, worker skill award or existing paid work terms.
+
+Direct before/after amounts remain separately 0 Vault, 0 premium tokens and 0 player XP. The evaluator uses explicit sensitivity inputs, not measured income. Natural cleanup creates no drops, saplings, inventory credits or Stock. It preserves authored structure cells, productive forester groves and accepted forestry cells. For every transferred native item and its metadata, relocation preserves the exact amount and slot receipt; an empty replacement barrel has the same 27-slot capacity. Admin gate refit has no item reward or refund. Future flat-gate material costs remain separately assessed in gate-refit-economy-20261101.json.
+
+Faster navigation may restore legitimate output per hour. Its live magnitude is unknown before activation; the old planner baseline mean is about9.16s and max236.83s across admitted jobs, not a production measurement. Keep native route latency and ordinary paid construction/cargo commits separate from a money-income claim. Existing global supply extraction caps and per-action resource/food costs remain in force. Current SELL and planned SELL-to-contract are separate flows; no item price or savings estimate is assumed.
+
+Release decision: deliver the requested repair, preserve exact inventory conservation and existing productive groves, and observe ordinary movement and commits after activation. Source/tests, delivered artifact, active version and client acceptance are recorded separately in the rollout receipt.

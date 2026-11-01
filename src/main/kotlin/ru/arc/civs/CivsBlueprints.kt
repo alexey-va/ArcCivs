@@ -180,7 +180,10 @@ class CivsBlueprints(
                     aligned.anchor.z + corners.maxOf { it.z }))
             if (aligned.anchor != building.anchor || aligned.entrance != building.entrance || bounds != building.bounds)
                 throw CivsRejection("control-location-changed")
-            aligned.control
+            // The construction marker remains immutable, but locating a repaired active control must not send it back outside.
+            if (building.phase == BuildingPhase.ACTIVE && CivsBuildingControls.supported(building.type) &&
+                CivsBuildingControls.authored(building, original).any { it.position == building.control }) requireNotNull(building.control)
+            else aligned.control
         }, executor)
 
     /** Retain only a bounded detached workstation list; Core owns the decoded source snapshot. */
@@ -193,7 +196,7 @@ class CivsBlueprints(
     internal fun interiorControls(building: CivBuilding): CompletableFuture<List<CivControlCandidate>> =
         catalogLoad.thenCompose { sourceSnapshot(building.schematicId) }.thenApplyAsync({ snapshot ->
             requireVolume(snapshot)
-            CivsWorkstations.authoredControls(building, snapshot)
+            CivsBuildingControls.authored(building, snapshot)
         }, executor)
 
     /** One reviewed optional style. Source reads, native-state transforms and the pure merge stay off Main. */

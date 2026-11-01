@@ -5,8 +5,16 @@ import kotlin.math.abs
 import org.bukkit.Bukkit
 
 /** Bounded local cuts, each checked against the immutable accepted route. */
-data class CivRoadRouteOverride(val originalRoute: List<CivPosition>, val route: List<CivPosition>) {
-    internal fun changed(): List<Int> = originalRoute.indices.filter { originalRoute[it] != route[it] }
+data class CivRoadRouteOverride(val originalRoute: List<CivPosition>, val route: List<CivPosition>,
+    val gateDetours: List<CivGateRouteDetour>? = null) {
+    internal fun detached() = copy(originalRoute = originalRoute.toList(), route = route.toList(),
+        gateDetours = gateDetours?.map { it.detached() })
+    internal fun changed(): List<Int> {
+        // Gate detours are not road-grade repairs. Their validated tail follows every old vertical cut,
+        // so the existing upkeep owner keeps those cuts and their indices unchanged.
+        val gradeEnd = gateDetours?.minOfOrNull { route.indexOf(it.after.first()) } ?: route.size
+        return originalRoute.indices.filter { it < gradeEnd && originalRoute[it] != route[it] }
+    }
 
     internal fun runs(): List<IntRange> = changed().fold(mutableListOf()) { result, index ->
         if (result.lastOrNull()?.last == index - 1) result[result.lastIndex] = result.last().first..index
@@ -46,6 +54,12 @@ data class CivRoadRouteOverride(val originalRoute: List<CivPosition>, val route:
                 points.map { civsTerrainKey(it.x, it.z) }.distinct().size == points.size)
             require(points.zipWithNext().all { (a, b) -> abs(a.x.toLong() - b.x) + abs(a.z.toLong() - b.z) == 1L &&
                 abs(a.y.toLong() - b.y) <= 1L })
+        }
+        if (gateDetours != null) {
+            require(route.first() == originalRoute.first())
+            val base = CivsGateRoutes.base(city, source, this)
+            if (base != originalRoute) CivRoadRouteOverride(originalRoute, base).validated(city, source)
+            return
         }
         require(route.size == originalRoute.size && route.first() == originalRoute.first() &&
             route.zip(originalRoute).all { (a, b) -> a.x == b.x && a.z == b.z })
@@ -509,7 +523,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 lowered[at] = lowered[at].copy(y = lowered[at].y - 1)
                 if (lowered[at + 1].y > lowered[at].y + 1)
                     lowered[at + 1] = lowered[at + 1].copy(y = lowered[at + 1].y - 1)
-                val repair = CivRoadRouteOverride(city.roadRouteOverrides?.get(source.id.toString())?.originalRoute ?: route.toList(), lowered.toList())
+                val repair = CivRoadRouteOverride(city.roadRouteOverrides?.get(source.id.toString())?.originalRoute ?: route.toList(), lowered.toList(),
+                    city.roadRouteOverrides?.get(source.id.toString())?.gateDetours)
                 if (runCatching { repair.validated(city, source) }.isSuccess) return repair
             }
             // A descending bend has the same awkward stair cluster on the opposite side:
@@ -518,7 +533,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 val lowered = route.toMutableList()
                 if (route[at].y != route[at + 1].y + 1) continue
                 lowered[at] = lowered[at].copy(y = lowered[at].y - 1)
-                val repair = CivRoadRouteOverride(city.roadRouteOverrides?.get(source.id.toString())?.originalRoute ?: route.toList(), lowered)
+                val repair = CivRoadRouteOverride(city.roadRouteOverrides?.get(source.id.toString())?.originalRoute ?: route.toList(), lowered,
+                    city.roadRouteOverrides?.get(source.id.toString())?.gateDetours)
                 if (repair.descendingTurn(at..at) && runCatching { repair.validated(city, source) }.isSuccess) return repair
             }
             return null
@@ -539,7 +555,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 val end = (at..minOf(route.lastIndex, at + 9)).firstOrNull { route[it].y <= level } ?: continue
                 if (end == at || route[end].y != level) continue
                 val lowered = route.mapIndexed { index, point -> if (index in at until end) point.copy(y = level) else point }
-                val repair = CivRoadRouteOverride(original, lowered)
+                val repair = CivRoadRouteOverride(original, lowered, city.roadRouteOverrides?.get(source.id.toString())?.gateDetours)
                 if (repair.hump(at until end) && runCatching { repair.validated(city, source) }.isSuccess) {
                     repairs += repair
                     nextStart = end // Nested elevations are the same cut, not independent alternatives.
@@ -822,7 +838,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                             val replacement = if (otherRoute[index] == beforeSection.first()) afterSection else afterSection.asReversed()
                             val next = otherRoute.toMutableList().also { replacement.forEachIndexed { i, point -> it[index + i] = point } }
                             val other = requireNotNull(city.building(id))
-                            val value = CivRoadRouteOverride(city.roadRouteOverrides?.get(id.toString())?.originalRoute ?: otherRoute, next)
+                            val value = CivRoadRouteOverride(city.roadRouteOverrides?.get(id.toString())?.originalRoute ?: otherRoute, next,
+                                city.roadRouteOverrides?.get(id.toString())?.gateDetours)
                             if (runCatching { value.validated(city, other) }.isFailure) return@candidate null
                             linked[id.toString()] = value
                         }

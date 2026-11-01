@@ -17,11 +17,153 @@ import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.io.IOException
+import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
+import java.util.concurrent.Executor
 
 class CivsControlRelocationTest : FunSpec({
+    test("a full control stages its own empty receiver and moves all 27 exact slots without another container") {
+        ControlRelocationFixture(BuildingType.TOWN_HALL).use { h ->
+            h.durable()
+            h.block(h.receiver).type = Material.AIR
+            val items = List(STORAGE_SLOTS) { slot -> ItemStack(Material.DIAMOND, slot + 1).apply {
+                itemMeta = itemMeta.apply { displayName(Component.text("Original slot $slot")) }
+            } }
+            items.forEachIndexed { slot, item -> h.oldInventory.setItem(slot, item) }
+            h.acceptIntent(staging = true)
+            h.storage.refreshBuilding(h.city, h.building)
+            val saved = h.store.load().join().single()
+            saved.building(h.original.id)!!.control shouldBe h.old
+            saved.pendingControls shouldBe h.city.pendingControls
+            h.relocations().use { owner ->
+                owner.pulse()
+                h.building.control shouldBe h.old
+                h.oldInventory.storageContents.toList() shouldBe items
+                h.replacementInventory.storageContents.toList() shouldBe List(STORAGE_SLOTS) { null }
+                h.transactions shouldBe 0
+                h.stagingBarriers shouldBe 1
+                h.stagingFence.complete(Unit)
+                h.ticks()
+                h.lastTransaction!!.containerRelocation!!.containers.map { it.position }.toSet() shouldBe setOf(h.old, h.replacement)
+                h.transactions shouldBe 1
+                h.building.control shouldBe h.replacement
+                h.block(h.old).type shouldBe Material.AIR
+                h.replacementInventory.storageContents.toList() shouldBe items
+                h.city.pendingControls!!.size shouldBe 1
+                h.fence.complete(Unit)
+                h.ticks()
+                owner.drained().join()
+            }
+            h.store.load().join().single() shouldBe h.city
+            h.city.pendingControls shouldBe emptyList()
+            h.barriers shouldBe 1
+            h.replacementInventory.storageContents.toList() shouldBe items
+        }
+    }
+
+    test("failed staging acknowledgement restarts from the same protected receiver while the old control retains its goods") {
+        ControlRelocationFixture().use { h ->
+            h.durable()
+            val item = ItemStack(Material.BREAD, 64)
+            h.oldInventory.setItem(26, item)
+            h.acceptIntent(staging = true)
+            val first = h.installations.install(h.city.id, h.building.id)
+            h.stagingFence.completeExceptionally(IOException("receiver save acknowledgement lost"))
+            shouldThrow<CompletionException> { first.join() }
+            h.oldInventory.getItem(26) shouldBe item
+            h.building.control shouldBe h.old
+            h.reload()
+            h.stagingFence = CompletableFuture.completedFuture(Unit)
+            h.fence = CompletableFuture.completedFuture(Unit)
+            h.relocations().use { owner -> owner.pulse(); h.ticks(); owner.drained().join() }
+            h.building.control shouldBe h.replacement
+            h.block(h.old).type shouldBe Material.AIR
+            h.replacementInventory.storageContents.filterNotNull() shouldBe listOf(item)
+            h.city.pendingControls shouldBe emptyList()
+            h.transactions shouldBe 1
+            h.stagingBarriers shouldBe 2
+        }
+    }
+
+    test("restart reconciles mixed old and new slots before publishing the new control and never credits twice") {
+        ControlRelocationFixture().use { h ->
+            h.durable()
+            h.oldInventory.setItem(0, ItemStack(Material.DIAMOND, 7))
+            h.oldInventory.setItem(26, ItemStack(Material.BREAD, 64))
+            h.acceptIntent(staging = true)
+            h.stagingFence = CompletableFuture.completedFuture(Unit)
+            h.installations.install(h.city.id, h.building.id).join()
+            val tx = h.prepare()
+            h.store.saveInventoryTransaction(tx).join()
+            val destination = tx.containerRelocation!!.containers.single { it.position == h.replacement }
+            h.oldInventory.setItem(0, null)
+            h.replacementInventory.setItem(0, destination.after[0]!!.stack())
+            h.storage.unlock(tx.id)
+            h.reload()
+            val bootstrap = h.journal.bootstrap()
+            h.ticks(); bootstrap.join()
+            h.journal.pending(h.city.id) shouldBe true
+            h.relocations().use { owner -> owner.pulse(); owner.drained().join() }
+            h.building.control shouldBe h.old
+            h.oldInventory.getItem(26) shouldBe ItemStack(Material.BREAD, 64)
+            h.journal.recover(); h.ticks()
+            h.journal.pending(h.city.id) shouldBe false
+            h.building.control shouldBe h.old
+            h.oldInventory.storageContents.toList() shouldBe List(STORAGE_SLOTS) { null }
+            h.replacementInventory.storageContents.map(CivResidentItem::of) shouldBe destination.after
+            // Another restart after the exact transfer, but before the control-reference commit.
+            h.reload()
+            h.fence = CompletableFuture.completedFuture(Unit)
+            h.relocations().use { owner -> owner.pulse(); h.ticks(); owner.drained().join() }
+            h.journal.recover(); h.ticks()
+            h.transactions shouldBe 0
+            h.building.control shouldBe h.replacement
+            h.city.pendingControls shouldBe emptyList()
+            h.replacementInventory.storageContents.map(CivResidentItem::of) shouldBe destination.after
+            h.store.loadInventoryTransactions().join() shouldBe emptyList()
+        }
+    }
+
+    test("staging never clears an existing native receiver and malformed staged references cannot be persisted") {
+        ControlRelocationFixture().use { h ->
+            h.oldInventory.setItem(0, ItemStack(Material.DIAMOND, 7))
+            h.acceptIntent(staging = true)
+            h.block(h.replacement).type = Material.BARREL
+            val native = ItemStack(Material.EMERALD, 5).apply {
+                itemMeta = itemMeta.apply { displayName(Component.text("Existing native goods")) }
+            }
+            h.replacementInventory.setItem(20, native)
+            h.stagingFence = CompletableFuture.completedFuture(Unit)
+            h.installations.install(h.city.id, h.building.id).join()
+            h.replacementInventory.getItem(20) shouldBe native
+            h.oldInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 7)
+            h.building.control shouldBe h.old
+            val pending = h.city.pendingControls!!.single()
+            shouldThrow<CivsRejection> { CivsRules.validate(h.city.copy(pendingControls = listOf(pending.copy(
+                position = h.old.copy(x = 30))))) }.reason shouldBe "invalid-state"
+            shouldThrow<CivsRejection> { CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
+                if (it.id == h.original.id) it.copy(control = h.receiver) else it })) }.reason shouldBe "invalid-state"
+        }
+    }
+
+    test("every functional type accepts conserved native evacuation and a recoverable control retirement") {
+        for (type in BuildingType.entries.filter(CivsBuildingControls::supported)) {
+            ControlRelocationFixture(type).use { h ->
+                h.oldInventory.setItem(0, ItemStack(Material.DIAMOND, 7))
+                val tx = h.prepare()
+                h.storage.apply(tx) shouldBe CivInventoryApplyResult.Applied
+                h.oldInventory.getItem(0) shouldBe null
+                h.receiverInventory.contents.filterNotNull().filter { it.type == Material.DIAMOND }.sumOf { it.amount } shouldBe 7
+                h.storage.unlock(tx.id)
+                h.acceptIntent()
+                h.city.pendingControls!!.single().retire!!.position shouldBe h.old
+                h.block(h.old).type shouldBe Material.BARREL
+            }
+        }
+    }
+
     test("same-level evacuation preserves exact native metadata in existing holders and never writes an uncreated control") {
         ControlRelocationFixture().use { h ->
             val named = ItemStack(Material.DIAMOND, 7).apply { itemMeta = itemMeta.apply { displayName(Component.text("Keep exact metadata")) } }
@@ -175,24 +317,38 @@ private fun controlTestOrder(building: CivBuilding): CivConstruction = CivConstr
     1, 0, ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = building.copy(phase = BuildingPhase.CONSTRUCTING),
     batches = CivConstructionBatches(1, 1), materials = emptyMap(), payment = CivConstructionPayment())
 
-private class ControlRelocationFixture : AutoCloseable {
+private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTERY) : AutoCloseable {
     val paper = MockBukkitTestRuntime.open()
     val plugin = paper.createSimplePlugin("ControlRelocationTest")
     val world = paper.addSimpleWorld("control-relocation").also { it.loadChunk(0, 0); it.loadChunk(1, 0) }
     val old = CivPosition(11, 64, 10)
     val replacement = CivPosition(4, 64, 4)
     val receiver = CivPosition(6, 64, 6)
-    val original = CivBuilding(UUID(0, 2), BuildingType.SMELTERY, 1, CivPosition(10, 63, 10), 0, "fixture/smeltery",
-        CivBox(CivPosition(0, 63, 0), CivPosition(20, 70, 10)), CivPosition(10, 64, 11), BuildingPhase.ACTIVE, old, "STONE")
-    val hall = CivBuilding(UUID(0, 3), BuildingType.TOWN_HALL, 1, CivPosition(24, 63, 12), 0, "fixture/hall",
+    val original = CivBuilding(UUID(0, 2), type, 1, CivPosition(10, 63, 10), 0, "fixture/smeltery",
+        CivBox(CivPosition(0, 63, 0), CivPosition(20, 70, 10)), CivPosition(10, 64, 11), BuildingPhase.ACTIVE, old)
+    val hall = CivBuilding(UUID(0, 3), if (type == BuildingType.TOWN_HALL) BuildingType.BUILDER_HUT else BuildingType.TOWN_HALL,
+        1, CivPosition(24, 63, 12), 0, "fixture/hall",
         CivBox(CivPosition(23, 63, 11), CivPosition(26, 68, 14)), CivPosition(24, 64, 15), BuildingPhase.ACTIVE, CivPosition(24, 64, 12))
     var city = CivsRules.validate(Settlement(UUID(0, 4), UUID(0, 5), "Controls", world.uid, CivPosition(10, 64, 10), 96,
         "fixture", Stock(), listOf(hall, original), emptyList(), inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy()))
     val building get() = requireNotNull(city.building(original.id))
     var denied: CivPosition? = null
     var fence = CompletableFuture<Unit>()
+    var stagingFence = CompletableFuture<Unit>()
     var barriers = 0
+    var stagingBarriers = 0
     var mutations = 0
+    var transactions = 0
+    var lastTransaction: CivInventoryTransaction? = null
+    private val busy = mutableSetOf<UUID>()
+    private val unhealthy = mutableSetOf<UUID>()
+    private var durableRoot: java.nio.file.Path? = null
+    val store by lazy { CivsStore(Files.createTempDirectory("control-relocation-").also { durableRoot = it }, Executor { it.run() }) }
+    val journal by lazy {
+        CivsInventoryJournal(plugin, tasks, store, storage, { mapOf(city.id to city) }, busy, unhealthy, { false },
+            { saved -> city = saved; storage.updateCity(saved); CompletableFuture.completedFuture(Unit) },
+            ::mutate, {}, {}, { _, _, _ -> null }, {}, { _, _ -> city }, {}, { 0L })
+    }
     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     val worldAdapter = mockk<CivsWorld>(relaxed = true).also { adapter -> every { adapter.canModify(any(), any(), any()) } answers {
         val block = secondArg<org.bukkit.block.Block>()
@@ -202,8 +358,9 @@ private class ControlRelocationFixture : AutoCloseable {
         .filter { it.x shr 4 == chunk.x && it.z shr 4 == chunk.z }.map(::block).filter { it.type.name in CIVS_STORAGE_TYPES }
         .map { it.state }.toTypedArray() })
     val installations = CivsControlInstallations(plugin, worldAdapter, storage, mockk(relaxed = true), { mapOf(city.id to city) },
-        emptySet(), emptySet(), { true }, ::mutate)
+        busy, unhealthy, { true }, ::mutate)
     val oldInventory get() = (block(old).state as Barrel).inventory
+    val replacementInventory get() = (block(replacement).state as Barrel).inventory
     val receiverInventory get() = (block(receiver).state as Chest).blockInventory
     init {
         block(old).type = Material.BARREL
@@ -218,21 +375,32 @@ private class ControlRelocationFixture : AutoCloseable {
             barriers++
             fence
         }
+        storage.persistControlStagingNative = { _, receipt ->
+            receipt.retire!!.position shouldBe old
+            building.control shouldBe old
+            block(old).type shouldBe Material.BARREL
+            block(replacement).type shouldBe Material.BARREL
+            stagingBarriers++
+            stagingFence
+        }
+        storage.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
         storage.replaceCities(listOf(city))
     }
     fun block(p: CivPosition) = world.getBlockAt(p.x, p.y, p.z)
     fun mutate(id: UUID, transform: (Settlement) -> Settlement): CompletableFuture<Settlement> {
         id shouldBe city.id
-        city = transform(city)
+        val next = transform(city)
+        city = if (durableRoot == null) next else store.save(next).join()
         storage.updateCity(city)
         mutations++
         return CompletableFuture.completedFuture(city)
     }
-    fun acceptIntent() {
+    fun acceptIntent(staging: Boolean = false) {
         val receipt = CivControlPlacement(original.id, replacement, "minecraft:air", retire = CivPlanBlock(old,
             block(old).blockData.asString, "minecraft:air"))
-        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == original.id) it.copy(control = replacement) else it },
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == original.id && !staging) it.copy(control = replacement) else it },
             pendingControls = listOf(receipt), revision = city.revision + 1))
+        if (durableRoot != null) store.save(city).join()
         storage.updateCity(city)
     }
     fun prepare(): CivInventoryTransaction {
@@ -242,5 +410,28 @@ private class ControlRelocationFixture : AutoCloseable {
         return CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1), emptyList(),
             containerRelocation = move).also { storage.seal(it) }
     }
-    override fun close() { tasks.close(); storage.close(); paper.close() }
+    fun durable() { store.save(city).join() }
+    fun reload() { city = store.load().join().single(); storage.updateCity(city) }
+    fun ticks() { paper.performTicks(20) }
+    fun relocations(): CivsControlRelocations = CivsControlRelocations(plugin, tasks, worldAdapter, storage, installations,
+        { CompletableFuture.completedFuture(emptyList()) }, { listOf(city) },
+        { it.id !in busy && it.id !in unhealthy && !journal.pending(it.id) }, { saved, current, from, to ->
+            val id = UUID.randomUUID()
+            storage.reserve(saved, id)
+            val move = storage.prepareControlRelocation(saved, current, from, to)
+            if (move == null) {
+                storage.unlock(id)
+                CompletableFuture.completedFuture(saved)
+            } else {
+                val tx = CivInventoryTransaction(id, saved.id, saved.revision, saved.copy(revision = saved.revision + 1),
+                    emptyList(), containerRelocation = move).also(storage::seal)
+                transactions++; lastTransaction = tx
+                busy += saved.id
+                journal.submitRelocation(saved, tx)
+            }
+        }, ::mutate, { 10_000L })
+    override fun close() {
+        tasks.close(); storage.close(); paper.close()
+        durableRoot?.let { root -> store.close(); root.toFile().deleteRecursively() }
+    }
 }

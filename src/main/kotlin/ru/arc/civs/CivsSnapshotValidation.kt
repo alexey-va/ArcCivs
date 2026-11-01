@@ -174,20 +174,22 @@ internal object CivsSnapshotValidation {
                 snapshot(approachPoints.distinct().size == approachPoints.size)
                 val retired = pending.mapNotNull { it.retire?.position }
                 snapshot(retired.distinct().size == retired.size && retired.none { it in approachPoints })
-                snapshot(pending.all { CivsRules.present(it.buildingId, it.position) && city.building(it.buildingId)?.control == it.position &&
+                snapshot(pending.all { CivsRules.present(it.buildingId, it.position) &&
+                    city.building(it.buildingId)?.control?.let { control -> control == it.position || control == it.retire?.position } == true &&
                     it.before.isNotEmpty() && it.before.length <= CivsStore.MAX_BLOCK_STATE_CHARS &&
                     it.before.startsWith("minecraft:") && it.before.none(Char::isISOControl) })
                 pending.forEach { receipt ->
                     val building = requireNotNull(city.building(receipt.buildingId))
                     receipt.retire?.let { cell ->
                         snapshot(city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
-                            building.phase == BuildingPhase.ACTIVE && building.type in CivsWorkstations.TYPES &&
+                            building.phase == BuildingPhase.ACTIVE && CivsBuildingControls.supported(building.type) &&
                             city.construction?.buildingId != building.id &&
                             cell.position != receipt.position && cell.position.y in -4_096..4_096 &&
                             city.contains(cell.position.x, cell.position.z) &&
+                            building.bounds.contains(receipt.position.x, receipt.position.y, receipt.position.z) &&
                             building.bounds.contains(cell.position.x, cell.position.y, cell.position.z) &&
-                            city.buildings.none { it.id != building.id && (it.control == cell.position ||
-                                it.bounds.contains(cell.position.x, cell.position.y, cell.position.z)) } &&
+                            city.buildings.none { it.id != building.id && listOf(cell.position, receipt.position).any { point ->
+                                it.control == point || it.bounds.contains(point.x, point.y, point.z) } } &&
                             civsRetainContainerState(cell.before) && cell.before.startsWith("minecraft:barrel[") && cell.after == "minecraft:air")
                     }
                     val approach = receipt.approach.orEmpty()
@@ -223,8 +225,9 @@ internal object CivsSnapshotValidation {
             (building.transit?.let { cells ->
                 building.type in setOf(BuildingType.ROAD, BuildingType.GATE) && cells.size in 1..256 &&
                     cells.map { civsTerrainKey(it.x, it.z) }.distinct().size == cells.size &&
-                    cells.size.toLong() == (building.bounds.max.x.toLong() - building.bounds.min.x + 1) *
-                        (building.bounds.max.z.toLong() - building.bounds.min.z + 1) && cells.all { point ->
+                    (if (CivsGateRefit.versioned(building)) CivsGateRefit.validTransit(building)
+                    else cells.size.toLong() == (building.bounds.max.x.toLong() - building.bounds.min.x + 1) *
+                        (building.bounds.max.z.toLong() - building.bounds.min.z + 1)) && cells.all { point ->
                         building.bounds.contains(point.x, point.y, point.z)
                     }
             } != false) &&

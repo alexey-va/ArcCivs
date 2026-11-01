@@ -27,7 +27,7 @@ internal class CivsCityPlans(
     fun loadAutonomousPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
         require(city.buildings.size <= CivsRules.MAX_SITES)
         val buildings = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }
-        val plans = buildings.map { store.loadPlan(it.id) }
+        val plans = buildings.map { store.loadPlan(CivsGateRefit.retainedPlanId(it)) }
         val result = authority.tracked<List<CivPlacementPlan>>()
         CompletableFuture.allOf(*plans.toTypedArray()).thenApplyAsync({
             val saved = plans.mapNotNull { it.join() }

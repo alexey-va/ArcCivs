@@ -9,10 +9,15 @@ import java.util.zip.GZIPOutputStream
  * Format: https://github.com/SpongePowered/Schematic-Specification/blob/master/versions/schematic-3.md
  */
 internal object CivsInfrastructure {
-    fun building(piece: CivSettlementPiece): CivBuilding = CivBuilding(piece.id, piece.type, 1,
-        piece.bounds.min, 0, "civs/infrastructure/v1/${piece.type.name.lowercase()}/${piece.id}",
-        piece.bounds, piece.entrance, BuildingPhase.CONSTRUCTING,
-        transit = piece.transit.takeIf { it.isNotEmpty() }?.toList())
+    fun building(piece: CivSettlementPiece): CivBuilding {
+        val gateV2 = piece.type == BuildingType.GATE && CivsGateRefit.profileAxis(piece.bounds, piece.transit) != null
+        return CivBuilding(piece.id, piece.type, 1, piece.bounds.min, 0,
+            if (gateV2) CivsGateRefit.PREFIX + piece.id else "civs/infrastructure/v1/${piece.type.name.lowercase()}/${piece.id}",
+            piece.bounds, piece.entrance, BuildingPhase.CONSTRUCTING,
+            transit = piece.transit.takeIf { it.isNotEmpty() }?.toList()).also {
+                require(!gateV2 || CivsGateRefit.validTransit(it)) { "Invalid versioned gate passage" }
+            }
+    }
 
     /** Detached, bounded encoding. Core decodes and owns the resulting snapshot and native writes. */
     fun schematic(piece: CivSettlementPiece, dataVersion: Int): ByteArray {
@@ -59,11 +64,23 @@ internal fun civsGeneratedSchematic(box: CivBox, origin: CivPosition, cells: Map
 }
 
 /** Exact public columns remain walkable; native body/headroom capture still decides passage. */
-internal fun civsPublicTransit(building: CivBuilding, x: Int, z: Int): Boolean =
-    building.phase == BuildingPhase.ACTIVE && (building.type == BuildingType.ROAD || building.type == BuildingType.GATE) &&
+internal fun civsPublicTransit(building: CivBuilding, x: Int, z: Int, allowPlanned: Boolean = false): Boolean =
+    (allowPlanned || building.phase == BuildingPhase.ACTIVE) && (building.type == BuildingType.ROAD || building.type == BuildingType.GATE) &&
         building.transit.orEmpty().any { it.x == x && it.z == z }
 
-/** Validated road/gate bounds are filled rectangles, so they are not horizontal route obstacles. */
+/** A public building has explicit transit; versioned gate posts still reserve their own columns. */
 internal fun civsPublicTransit(building: CivBuilding, allowPlanned: Boolean = false): Boolean =
     (allowPlanned || building.phase == BuildingPhase.ACTIVE) && (building.type == BuildingType.ROAD || building.type == BuildingType.GATE) &&
         !building.transit.isNullOrEmpty()
+
+internal fun civsRouteObstacles(city: Settlement, building: CivBuilding, allowPlanned: Boolean = false): List<CivBox> {
+    if (!civsPublicTransit(building, allowPlanned)) return listOf(CivsAutonomousGeometry.futureBounds(city, building))
+    if (!CivsGateRefit.versioned(building)) return emptyList()
+    require(CivsGateRefit.validTransit(building))
+    val box = building.bounds
+    return buildList {
+        for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z)
+            if (!civsPublicTransit(building, x, z, allowPlanned))
+                add(CivBox(CivPosition(x, box.min.y, z), CivPosition(x, box.max.y, z)))
+    }
+}

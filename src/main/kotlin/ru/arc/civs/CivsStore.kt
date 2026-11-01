@@ -174,6 +174,7 @@ class CivsStore(
             upkeep = transaction.upkeep?.detached(),
             cargoDropoff = transaction.cargoDropoff?.detached(),
             cargoPickup = transaction.cargoPickup?.detached(),
+            gateRefit = transaction.gateRefit?.detached(),
             autonomousVisual = transaction.autonomousVisual?.let { it.copy(
                 buildingBefore = snapshotBuilding(it.buildingBefore),
                 mineProgressBefore = it.mineProgressBefore?.toMap(),
@@ -485,7 +486,7 @@ class CivsStore(
         minePlans = city.minePlans?.mapValues { (_, state) -> CivsMineProgress.detached(state) },
         research = CivsResearch.detached(city.research),
         roadRouteOverrides = city.roadRouteOverrides?.mapValues { (_, route) ->
-            route.copy(originalRoute = route.originalRoute.toList(), route = route.route.toList())
+            route.detached()
         },
         autonomy = city.autonomy?.let { it.copy(products = it.products?.toMap(), plan = CivsSettlementPlans.detached(it.plan)) },
     )

@@ -52,6 +52,7 @@ class CivsWorld(
     private val navigationSettings: CivsNavigationSettings = CivsNavigationSettings(),
     private val cities: () -> Collection<Settlement>,
 ) : AutoCloseable {
+    internal var onTerrainChanged: (UUID, Collection<CivPosition>) -> Unit = { _, _ -> }
     private val roadWorld = CivsRoadWorld(plugin, cities, ::canModify) { closed }
     private val monitor = Any()
     private val pending = LinkedHashSet<CivsWorldScan<*>>()
@@ -244,13 +245,17 @@ class CivsWorld(
     internal fun constructionChunkChanged(worldId: UUID, cell: ArcSchematicBlock) {
         check(Bukkit.isPrimaryThread()) { "Civs construction observation requires the server thread" }
         sceneChunkChanged(worldId, cell.position.x shr 4, cell.position.z shr 4)
+        terrainChanged(worldId, listOf(CivPosition(cell.position.x, cell.position.y, cell.position.z)))
     }
 
     /** Native success precedes the optional passive hint; no observer can authorize a write. */
     private fun writeObservedBlock(block: Block, after: BlockData) {
         block.setBlockData(after, false)
         sceneChunkChanged(block.world.uid, block.x shr 4, block.z shr 4)
+        terrainChanged(block.world.uid, listOf(CivPosition(block.x, block.y, block.z)))
     }
+
+    internal fun terrainChanged(worldId: UUID, positions: Collection<CivPosition>) = onTerrainChanged(worldId, positions)
 
     private fun sceneChunkChanged(worldId: UUID, chunkX: Int, chunkZ: Int) {
         plugin.server.servicesManager.load(ArcSceneObservationService::class.java)?.chunkChanged(worldId, chunkX, chunkZ)
@@ -591,9 +596,8 @@ class CivsWorld(
         private var searching: CompletableFuture<CitizenSearchResult>? = null
         private var capture: CitizenNavigationCapture? = null
         private val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
-        private val obstacles = citySnapshot.buildings.filter { it.id != previous?.id && !civsPublicTransit(it) }
-            .map { CivsAutonomousGeometry.futureBounds(citySnapshot, it) } +
-            if (civsPublicTransit(building, allowPlanned = true)) emptyList() else listOf(building.bounds)
+        private val obstacles = citySnapshot.buildings.filter { it.id != previous?.id }
+            .flatMap { civsRouteObstacles(citySnapshot, it) } + civsRouteObstacles(citySnapshot, building, allowPlanned = true)
         private var overlayIndex = 0
         private var routeIndex = 0
         private val overlay = terraform?.blocks.orEmpty().associateBy { it.position }

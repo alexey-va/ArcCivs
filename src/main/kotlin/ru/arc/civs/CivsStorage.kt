@@ -83,6 +83,7 @@ class CivsStorage(private val plugin: Plugin,
     internal var foodCanModify: (Settlement, CivPosition) -> Boolean = { _, _ -> false }
     internal var forestryLeafCurrentCity: (UUID) -> Settlement? = { null }
     internal var relocationCurrentCity: (UUID) -> Settlement? = { null }
+    internal var terrainChanged: (UUID, Collection<CivPosition>) -> Unit = { _, _ -> }
     internal var collectedChunkLease: (PaperChunkKey) -> PaperChunkTicketLease = { error("Collection chunk leases are not wired") }
     internal var validateUpkeepNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "upkeep-authority-unavailable"))
@@ -93,6 +94,9 @@ class CivsStorage(private val plugin: Plugin,
     internal var validateMineNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "mine-authority-unavailable"))
     }
+    internal var validateGateRefitNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
+        CivInventoryApplyResult.Conflict(mapOf("reason" to "gate-refit-authority-unavailable"))
+    }
     private val nativePersistenceDelegate = lazy { CivsNativePersistence(plugin) { collectedChunkLease(it) } }
     private val nativePersistence by nativePersistenceDelegate
     internal var persistCollectedNative: (CivInventoryTransaction, Boolean) -> CompletableFuture<Unit> = { tx, before ->
@@ -100,6 +104,9 @@ class CivsStorage(private val plugin: Plugin,
     }
     internal var persistControlRetirementNative: (Settlement, CivControlPlacement) -> CompletableFuture<Unit> = { city, receipt ->
         nativePersistence.persistRetiredControl(city, receipt)
+    }
+    internal var persistControlStagingNative: (Settlement, CivControlPlacement) -> CompletableFuture<Unit> = { city, receipt ->
+        nativePersistence.persistStagedControl(city, receipt)
     }
     private val pendingPersistence = mutableSetOf<CompletableFuture<Unit>>()
     private val persistenceTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
@@ -279,6 +286,7 @@ class CivsStorage(private val plugin: Plugin,
                 resurrection.corpse.worker.id, resurrection.corpse.diedAt, resurrection.acceptedAt,
                 administrator = claim.city.autonomy != null))
         }
+        transaction.gateRefit?.let { require(it.before(transaction.after) == claim.city) }
         transaction.collected?.let { collected ->
             val worker = claim.city.workers.single { it.id == collected.workerId }
             val afterWorker = transaction.after.workers.single { it.id == worker.id }
@@ -507,11 +515,11 @@ class CivsStorage(private val plugin: Plugin,
         throw full
     }
 
-    /** Evacuate only the old control into existing holders; an uncreated replacement never receives items. */
+    /** The pending-control owner installs and persists its receiver before this exact-slot evacuation. */
     internal fun prepareControlRelocation(city: Settlement, building: CivBuilding, from: CivPosition, to: CivPosition): CivContainerRelocation? {
         checkClaim(city)
         require(city.building(building.id) == building && city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
-            building.phase == BuildingPhase.ACTIVE && building.type in CivsWorkstations.TYPES && from != to &&
+            building.phase == BuildingPhase.ACTIVE && CivsBuildingControls.supported(building.type) && from != to &&
             building.bounds.contains(from.x, from.y, from.z) && building.bounds.contains(to.x, to.y, to.z) &&
             (from == building.control || city.pendingControls.orEmpty().any { it.buildingId == building.id && it.retire?.position == from && it.position == to }))
         val target = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
@@ -530,13 +538,20 @@ class CivsStorage(private val plugin: Plugin,
         }
         val previous = capture(from)
         if (previous.before.all { it == null }) return null
+        fun plan(holders: List<CivRelocatedContainer>) = civsPlanContainerRelocation(building, building.copy(control = to),
+            holders.associate { it.position to if (it.position == from) "minecraft:air" else it.blockData }, holders)?.also { it.validated(city) }
+        // A fresh 27-slot barrel always holds the old barrel; unrelated storage is not a prerequisite.
+        if (replacement.type == Material.BARREL) try {
+            return plan(listOf(previous, capture(to)))
+        } catch (failure: CivsRejection) {
+            if (failure.reason != "storage-full") throw failure
+        }
         val receivers = (if (replacement.type == Material.BARREL) listOf(to) else emptyList()) +
             containers.buildingPositions(city, building.id).keys.filter { it != from && it != to && building.bounds.contains(it.x, it.y, it.z) }
         reject(receivers.size + 1 > CivContainerRelocation.MAX_CONTAINERS, "storage-transaction-too-large")
         reject(receivers.isEmpty(), "storage-full")
         val holders = listOf(previous) + receivers.map(::capture)
-        return civsPlanContainerRelocation(building, building.copy(control = to),
-            holders.associate { it.position to if (it.position == from) "minecraft:air" else it.blockData }, holders)?.also { it.validated(city) }
+        return plan(holders)
     }
 
     fun prepareResurrection(city: Settlement, player: Player, corpse: CivCorpse, at: Long,
@@ -810,6 +825,11 @@ class CivsStorage(private val plugin: Plugin,
             is CivInventoryApplyResult.Conflict -> return authority
             else -> Unit
         }
+        if (transaction.gateRefit != null) when (val authority = validateGateRefitNative(transaction)) {
+            is CivInventoryApplyResult.Retry -> return authority
+            is CivInventoryApplyResult.Conflict -> return authority
+            else -> Unit
+        }
         val nativeAuthorityBuilding = transaction.autoSupplyBuildingId ?: transaction.upkeep
             ?.takeIf { transaction.after.inventory?.mode == CivStorageMode.PHYSICAL }?.work?.buildingId
         if (nativeAuthorityBuilding != null) for (change in transaction.changes) {
@@ -851,7 +871,10 @@ class CivsStorage(private val plugin: Plugin,
             }
             transaction.worldChanges.orEmpty().forEach { cell ->
                 val (block, after) = worldCells.getValue(cell.position)
-                if (!worldAfterMatches(transaction, block.blockData, after, cell)) block.setBlockData(after, false)
+                if (!worldAfterMatches(transaction, block.blockData, after, cell)) {
+                    block.setBlockData(after, false)
+                    terrainChanged(transaction.after.worldId, listOf(cell.position))
+                }
             }
             transaction.collected?.let { collected ->
                 val world = requireNotNull(plugin.server.getWorld(transaction.after.worldId))
@@ -910,6 +933,20 @@ class CivsStorage(private val plugin: Plugin,
         reject(!world.getBlockAt(point.x, point.y, point.z).type.isAir, "world-changed")
         reject(!world.isChunkLoaded(receipt.position.x shr 4, receipt.position.z shr 4) ||
             world.getBlockAt(receipt.position.x, receipt.position.y, receipt.position.z).type != Material.BARREL, "control-obstructed")
+    }
+
+    internal fun persistControlStaging(city: Settlement, receipt: CivControlPlacement): CompletableFuture<Unit> = nativeBarrier({
+        persistControlStagingNative(city, receipt)
+    }) {
+        val current = relocationCurrentCity(city.id) ?: throw CivsRejection("no-city")
+        val retired = requireNotNull(receipt.retire)
+        reject(receipt !in current.pendingControls.orEmpty() || current.building(receipt.buildingId)?.control != retired.position,
+            "control-location-changed")
+        val world = plugin.server.getWorld(current.worldId) ?: throw CivsRejection("world-unavailable")
+        reject(listOf(retired.position, receipt.position).any { !world.isChunkLoaded(it.x shr 4, it.z shr 4) }, "chunk-unloaded")
+        val old = world.getBlockAt(retired.position.x, retired.position.y, retired.position.z)
+        reject(old.type != Material.BARREL || !civsSameRelocationContainerState(old.blockData.asString, retired.before), "world-changed")
+        reject(world.getBlockAt(receipt.position.x, receipt.position.y, receipt.position.z).type != Material.BARREL, "control-obstructed")
     }
 
     private fun nativeBarrier(persist: () -> CompletableFuture<Unit>, checkState: () -> Unit): CompletableFuture<Unit> {

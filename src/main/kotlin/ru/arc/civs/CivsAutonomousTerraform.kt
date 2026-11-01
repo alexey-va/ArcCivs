@@ -164,8 +164,8 @@ internal object CivsAutonomousTerraform {
         if (!building.type.isInfrastructure && standing.values.any { CivsAutonomousGeometry.horizontalContains(building.bounds, it) })
             throw CivsRejection("building-overlap")
         val obstacles = (city.buildings + listOfNotNull(city.construction?.plannedBuilding))
-            .filter { it.id != building.id && !civsPublicTransit(it) }.distinctBy { it.id }
-            .map { CivsAutonomousGeometry.futureBounds(city, it) }
+            .filter { it.id != building.id }.distinctBy { it.id }
+            .flatMap { civsRouteObstacles(city, it) }
         // Port reservations own a future five-wide wall. Ordinary three-wide approaches keep one shoulder away too.
         val portObstacles = if (building.type.isInfrastructure) emptyList() else access.reservedFortificationPorts.map {
             CivBox(it.min.copy(x = it.min.x - 1, z = it.min.z - 1), it.max.copy(x = it.max.x + 1, z = it.max.z + 1))
@@ -287,8 +287,8 @@ internal object CivsAutonomousTerraform {
     internal fun connection(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
         access: CivAutonomousAccess, additionalObstacles: List<CivBox>,
         inspectRoute: (CivRouteSearchStats) -> Unit = {}): List<CivPosition> {
-        val obstacles = city.buildings.filter { it.id != building.id && !civsPublicTransit(it) }
-            .map { CivsAutonomousGeometry.futureBounds(city, it) } + additionalObstacles
+        val obstacles = city.buildings.filter { it.id != building.id }
+            .flatMap { civsRouteObstacles(city, it) } + additionalObstacles
         return sources(city, building).asSequence().mapNotNull {
             route(city, building, surface, obstacles, access.standing(city, building.id), it, inspect = inspectRoute)
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
@@ -466,7 +466,7 @@ internal object CivsAutonomousTerraform {
         fun allowed(x: Int, y: Int, z: Int): Boolean {
             if (!city.contains(x, z) || y <= surface.minHeight || y + 2 >= surface.maxHeight) return false
             val p = CivPosition(x, y, z)
-            if ((!civsPublicTransit(building, allowPlanned = true) && CivsAutonomousGeometry.horizontalContains(building.bounds, p)) ||
+            if ((CivsAutonomousGeometry.horizontalContains(building.bounds, p) && !civsPublicTransit(building, x, z, allowPlanned = true)) ||
                 obstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }) return false
             val key = civsTerrainKey(x, z)
             if (key in goalApproach && y != target.y) return false

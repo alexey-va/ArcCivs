@@ -42,6 +42,8 @@ class CivsControlCleanupTest : FunSpec({
     afterEach { paper.close() }
 
     test("removal drops exact native contents once without granting a barrel or touching nearby storage") {
+        val changed = mutableListOf<CivPosition>()
+        cleanup.terrainChanged = { worldId, positions -> worldId shouldBe world.uid; changed += positions }
         val block = world.getBlockAt(0, 64, 0)
         val inventory = (block.state as Barrel).inventory
         val named = ItemStack(Material.DIAMOND, 3).apply {
@@ -65,6 +67,7 @@ class CivsControlCleanupTest : FunSpec({
         dropped.single { it.type == Material.OAK_LOG }.amount shouldBe 17
         cleanup.apply(city, controls) shouldBe 0
         world.entities.filterIsInstance<Item>().size shouldBe 2
+        changed shouldBe listOf(CivPosition(0, 64, 0))
     }
 
     test("denied second control prevents every write and apply rechecks changed permission") {

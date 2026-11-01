@@ -319,6 +319,8 @@ internal object CivsSettlementLayout {
         if (!building.type.isInfrastructure || plan.cityId != city.id || plan.worldId != city.worldId ||
             plan.building.type != building.type || plan.building.anchor != building.anchor ||
             plan.building.bounds != building.bounds || plan.building.rotation != building.rotation) return@mapNotNull null
+        if (CivsGateRefit.versioned(building) && (plan.id != CivsGateRefit.retainedPlanId(building) ||
+                plan.building.schematicId != building.schematicId || plan.building.transit != building.transit)) return@mapNotNull null
         CivSettlementPiece(building.id, building.type, building.bounds, building.entrance,
             plan.blocks.map { CivSettlementBlock(it.position, it.after) }, building.transit.orEmpty(),
             plan.terrain?.waterFoundations.orEmpty())
@@ -526,7 +528,17 @@ internal object CivsSettlementLayout {
                 val openGate = "minecraft:${wood}_fence_gate[facing=$facing,in_wall=false,open=true,powered=false]"
                 for (i in cells.indices) if (cells[i].position in leaves && cells[i].after == "minecraft:air")
                     cells[i] = cells[i].copy(after = openGate)
-                add(BuildingType.GATE, cells, gate.center.copy(y = level + 1), transit)
+                if (!frame.fortified && city.style == "caledonia") {
+                    val witnesses = (routes + retainedRoutes).flatten().filter { contains(gate.passage, it) }.distinct()
+                    val shaped = runCatching { CivsGateRefit.shape(CivSettlementPiece(UUID(0, 0), BuildingType.GATE,
+                        box(cells.map { it.position }), gate.center.copy(y = level + 1), cells, transit), horizontal, witnesses) }
+                    if (shaped.isFailure) {
+                        reject(CivsDiagnostics.rejection(shaped.exceptionOrNull()!!)?.reason ?: "gate-refit-unsupported", gate.center)
+                        continue
+                    }
+                    val piece = shaped.getOrThrow()
+                    add(BuildingType.GATE, piece.blocks, piece.entrance, piece.transit)
+                } else add(BuildingType.GATE, cells, gate.center.copy(y = level + 1), transit)
             }
         }
         // Keep clear 24-column orders stable; split failed dry runs without spanning paid pieces or holes.

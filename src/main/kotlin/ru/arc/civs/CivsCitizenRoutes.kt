@@ -140,16 +140,27 @@ internal class CivsCitizenRoutes(
         val corridor = actor.plan.courier?.takeIf { idleAnchor == null && it.carrying &&
             actor.cycle.phase == CitizenPhase.RETURNING && target == actor.plan.storage && waypoint == null }
             ?.let { hint?.corridor(city, it.cargo, from.point(), to.point()) }
-        val motion = navigation.request(world, from, to, { point ->
+        val origin = from.point()
+        val minimumY = world.minHeight
+        val maximumY = world.maxHeight
+        val climbable = org.bukkit.Tag.CLIMBABLE.values.toSet()
+        val leaves = org.bukkit.Tag.LEAVES.values.toSet()
+        val logs = org.bukkit.Tag.LOGS.values.toSet()
+        fun outsideSnapshot(building: CivBuilding, x: Int, z: Int) =
+            x !in building.bounds.min.x..building.bounds.max.x || z !in building.bounds.min.z..building.bounds.max.z
+        val policy = CitizenSnapshotPolicy({ point, material ->
             citizenRoutePointAllowed(city, allowed, point, routeMine) && citizenControlClear(city, point) &&
-                (!outsideWaitingMine || outside(requireNotNull(waitingMine), point.x, point.z)) &&
-                (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, from.point(), point, mealTarget) &&
-                    citizenIdleTerrain(world, point, city.buildings))
+                (!outsideWaitingMine || outsideSnapshot(requireNotNull(waitingMine), point.x, point.z)) &&
+                (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, origin, point, mealTarget) &&
+                    citizenIdleTerrain(point, minimumY, maximumY, city.buildings, material, climbable, leaves, logs))
         }, { first, second -> citizenControlStepClear(city, first, second) &&
-            (waitingMine == null || !outside(waitingMine, kotlin.math.floor(first.x).toInt(), kotlin.math.floor(first.z).toInt()) ||
-                outside(waitingMine, kotlin.math.floor(second.x).toInt(), kotlin.math.floor(second.z).toInt())) &&
-            (entrance != null || minePassage == null || minePassage.allows(second)) },
-            { ground -> routeCosts.cost(ground, surfaceSpeed) }, corridor)
+            (waitingMine == null || !outsideSnapshot(waitingMine, kotlin.math.floor(first.x).toInt(), kotlin.math.floor(first.z).toInt()) ||
+                outsideSnapshot(waitingMine, kotlin.math.floor(second.x).toInt(), kotlin.math.floor(second.z).toInt())) &&
+            (entrance != null || minePassage == null || minePassage.allows(second)) })
+        val motion = navigation.request(world, from, to, { point -> policy.allowed(point) { p ->
+            if (p.y in minimumY until maximumY && world.isChunkLoaded(p.x shr 4, p.z shr 4)) world.getBlockAt(p.x, p.y, p.z).type
+            else null
+        } }, policy.stepAllowed, { ground -> routeCosts.cost(ground, surfaceSpeed) }, corridor, policy)
         val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = CitizenRoute(from.point(), to, chunks, now, timeout,
             allowed, motion, trip, target, waypoint != null, idleAnchor)

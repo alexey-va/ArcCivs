@@ -79,12 +79,20 @@ internal fun citizenIdleRouteAllowed(anchor: CivPosition, from: CitizenPoint, po
 internal fun citizenIdleTerrain(world: World, point: CivPosition, buildings: Collection<CivBuilding> = emptyList()): Boolean {
     if (point.y <= world.minHeight || point.y + 1 >= world.maxHeight ||
         !world.isChunkLoaded(point.x shr 4, point.z shr 4)) return false
-    val feet = world.getBlockAt(point.x, point.y, point.z).type
-    val support = world.getBlockAt(point.x, point.y - 1, point.z).type
-    val head = world.getBlockAt(point.x, point.y + 1, point.z).type
+    return citizenIdleTerrain(point, world.minHeight, world.maxHeight, buildings,
+        { world.getBlockAt(it.x, it.y, it.z).type }, Tag.CLIMBABLE.values, Tag.LEAVES.values, Tag.LOGS.values)
+}
+
+/** The identical idle policy over detached chunk materials and tag sets captured on Main. */
+internal fun citizenIdleTerrain(point: CivPosition, minimumY: Int, maximumY: Int, buildings: Collection<CivBuilding>,
+    material: (CivPosition) -> Material?, climbable: Set<Material>, leaves: Set<Material>, logs: Set<Material>): Boolean {
+    if (point.y <= minimumY || point.y + 1 >= maximumY) return false
+    val feet = material(point) ?: return false
+    val support = material(point.copy(y = point.y - 1)) ?: return false
+    val head = material(point.copy(y = point.y + 1)) ?: return false
     return feet !in CITIZEN_LEISURE_HAZARDS && support !in CITIZEN_LEISURE_HAZARDS && head !in CITIZEN_LEISURE_HAZARDS &&
-        !Tag.CLIMBABLE.isTagged(feet) && !Tag.CLIMBABLE.isTagged(support) &&
-        !Tag.LEAVES.isTagged(support) && (!Tag.LOGS.isTagged(support) ||
+        feet !in climbable && support !in climbable &&
+        support !in leaves && (support !in logs ||
             buildings.any { it.phase == BuildingPhase.ACTIVE && it.bounds.contains(point.x, point.y - 1, point.z) })
 }
 

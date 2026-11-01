@@ -12,6 +12,7 @@ internal class CivsControlCleanup(
     private val plugin: Plugin,
     private val canModify: (UUID, Block) -> Boolean,
 ) {
+    internal var terrainChanged: (UUID, Collection<CivPosition>) -> Unit = { _, _ -> }
     /** Validate the whole selection before the durable intent; this method changes nothing. */
     fun prepare(city: Settlement, buildings: List<CivBuilding>): List<CivPosition> {
         require(buildings.all { city.building(it.id) == it }) { "Unregistered building control" }
@@ -33,6 +34,7 @@ internal class CivsControlCleanup(
             inventory.clear()
             try {
                 barrel.block.setType(Material.AIR, false)
+                terrainChanged(city.worldId, listOf(CivPosition(barrel.x, barrel.y, barrel.z)))
             } catch (failure: RuntimeException) {
                 if (barrel.block.type == Material.BARREL) inventory.contents = contents
                 throw failure

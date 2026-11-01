@@ -64,9 +64,13 @@ class CivsOpenDoorCornerRegressionTest : FunSpec({
             route.failure shouldBe null
             val initialDestination = route.destination
             var walked = 0.0
+            val changed = mutableListOf<CivPosition>()
             repeat(160) { tick ->
                 route.move(at, .55) { destination ->
-                    citizenOpenRouteDoors(city, allowed, at, destination) { _, _ -> false }
+                    citizenOpenRouteDoors(city, allowed, at, destination, { _, _ -> false }) { worldId, positions ->
+                        worldId shouldBe world.uid
+                        changed += positions
+                    }
                 }?.let { next ->
                     citizenPacketBodyClear(world, CitizenPoint(next.x, next.y, next.z), false) shouldBe true
                     citizenPacketSupported(world, CitizenPoint(next.x, next.y, next.z)) shouldBe true
@@ -82,6 +86,7 @@ class CivsOpenDoorCornerRegressionTest : FunSpec({
             (walked > 2.0) shouldBe true
             (world.getBlockAt(1, 64, 0).blockData as Door).isOpen shouldBe true
             (world.getBlockAt(1, 65, 0).blockData as Door).isOpen shouldBe true
+            changed shouldBe if (opened) emptyList() else listOf(CivPosition(1, 64, 0), CivPosition(1, 65, 0))
             println("Native door approach facing=$facing opened=$opened offset=$offset preparations=$preparations initial=$initialDestination walked=$walked")
         }
     }

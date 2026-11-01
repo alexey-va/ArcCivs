@@ -26,6 +26,7 @@ internal class CitizenPacketRoute(
     private val avoiding: List<BoundingBox> = emptyList(),
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
     private val corridor: CitizenSearchCorridor? = null,
+    internal val snapshotPolicy: CitizenSnapshotPolicy? = null,
 ) {
     private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true,
                            val action: CitizenRouteAction = CitizenRouteAction.WALK,
@@ -140,7 +141,8 @@ internal class CitizenPacketRoute(
     }
 
     fun replan(from: Location, bodies: List<BoundingBox>): CitizenPacketRoute =
-        CitizenPacketRoute(world, from, target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings)
+        CitizenPacketRoute(world, from, target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings,
+            snapshotPolicy = snapshotPolicy)
 
     private fun permits(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to) &&
         (bodyContactAllowed || citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
@@ -213,6 +215,35 @@ internal class CitizenPacketRoute(
     }
 
     internal fun capturePermission(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to)
+
+    internal fun snapshotCapture(probes: List<CitizenSearchProbe>, terrain: CitizenSnapshotTerrain) =
+        CitizenSnapshotCapture(probes, terrain, requireNotNull(snapshotPolicy), minimumY, maximumY,
+            settings.maximumCapturedBlocks, settings.searchNodesPerBatch, prefetchConnectedFrontier())
+
+    /** One bounded Main batch, never one queued callback for each surrounding voxel. */
+    internal fun captureSnapshots(request: CitizenSnapshotRequest, snapshots: CivsNavigationSnapshots): CitizenSnapshotInput {
+        val chunks = linkedMapOf<CitizenSnapshotKey, CitizenSnapshotChunk>()
+        val unavailable = linkedSetOf<CitizenSnapshotKey>()
+        for (key in request.chunks.take(16)) {
+            val chunk = snapshots.capture(world, key, org.bukkit.Bukkit.getCurrentTick().toLong())
+            if (chunk == null) unavailable += key else chunks[key] = chunk
+        }
+        fun requireLoaded(point: CivPosition) {
+            if (point.y !in minimumY until maximumY || !citizenChunkReady(world, point.x shr 4, point.z shr 4))
+                throw CitizenSnapshotUnavailable()
+        }
+        val states = request.states.mapValues { (data, point) -> requireLoaded(point); snapshots.state(world, data, point) }
+        val dynamics = request.dynamics.mapValues { (point, data) -> requireLoaded(point); snapshots.dynamic(world, data, point) }
+        val costs = request.costs.associateWith { point ->
+            requireLoaded(point)
+            travelCost(world.getBlockAt(point.x, point.y, point.z))
+        }
+        snapshots.supportCosts(costs.size)
+        return CitizenSnapshotInput(chunks, unavailable, states, dynamics, costs)
+    }
+
+    internal fun recordSnapshotCapture(blocks: Int) { capturedBlocks = blocks }
+    internal fun recordSnapshotNativeReads(reads: Int) { nativeShapeReads += reads }
 
     internal fun acceptSearch(result: CitizenSearchResult) {
         if (!searching) return

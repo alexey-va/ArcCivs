@@ -85,15 +85,17 @@ data class CivInventoryTransaction(
     val cargoDropoff: CivCargoDropoffReceipt? = null,
     /** Exact native depot evacuation debit; absent from historical and ordinary pickups. */
     val cargoPickup: CivCargoPickupReceipt? = null,
+    /** Versioned maintenance of one existing gate; absent from every older receipt. */
+    val gateRefit: CivGateRefitReceipt? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
         require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null ||
-            autonomousVisual != null || containerRelocation != null || after.autonomy != null && residentTransfer != null)
+            autonomousVisual != null || containerRelocation != null || gateRefit != null || after.autonomy != null && residentTransfer != null)
         require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine,
-            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup).size <= 1)
+            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup, gateRefit).size <= 1)
         containerRelocation?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -106,7 +108,11 @@ data class CivInventoryTransaction(
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
         }
-        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || upkeep != null || autonomousVisual != null || worldChanges.orEmpty().isEmpty()))
+        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || upkeep != null || autonomousVisual != null || gateRefit != null || worldChanges.orEmpty().isEmpty()))
+        gateRefit?.let {
+            require(changes.isEmpty() && worldChanges.orEmpty() == it.changes())
+            it.validated(after)
+        }
         forestry?.let {
             require(changes.isEmpty() && worldChanges.orEmpty() == it.work.changes)
             it.validated(after)

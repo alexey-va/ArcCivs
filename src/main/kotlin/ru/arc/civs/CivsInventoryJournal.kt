@@ -27,6 +27,7 @@ internal class CivsInventoryJournal(
     private val afterRetired: (CivInventoryTransaction, Boolean) -> Settlement,
     private val updateHealth: () -> Unit,
     private val clock: () -> Long,
+    private val verifyGateCaptures: (CivInventoryTransaction) -> CompletableFuture<Unit> = { CompletableFuture.completedFuture(Unit) },
 ) {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -196,7 +197,7 @@ internal class CivsInventoryJournal(
     }
 
     /** One immutable receipt covers native slots and the exact next city revision. */
-    private fun applyInventory(tx: CivInventoryTransaction, result: CompletableFuture<Settlement>?) {
+    private fun applyInventory(tx: CivInventoryTransaction, result: CompletableFuture<Settlement>?, gateVerified: Boolean = false) {
         if (closed) { result?.completeExceptionally(CivsRejection("not-ready")); return }
         fun fail(error: Throwable, retry: Boolean = false) {
             busy -= tx.cityId
@@ -204,6 +205,13 @@ internal class CivsInventoryJournal(
             if (!retry) { blockedRecovery += tx.cityId; log("reconcile inventory ${tx.id}", error, tx.cityId) }
             result?.completeExceptionally(error)
             updateHealth()
+        }
+        if (tx.gateRefit != null && !gateVerified) {
+            runCatching { verifyGateCaptures(tx) }.getOrElse { CompletableFuture.failedFuture(it) }
+                .whenCompleteSync(tasks) { _, failure ->
+                    if (failure != null) fail(failure) else applyInventory(tx, result, gateVerified = true)
+                }
+            return
         }
         runCatching {
             if (tx.collected != null || tx.containerRelocation != null || tx.cargoPickup != null) {
@@ -243,7 +251,13 @@ internal class CivsInventoryJournal(
             CivsDiagnostics.event("inventory_applied", "city" to tx.cityId, "transaction" to tx.id,
                 "revision" to tx.after.revision, "slots" to tx.changes.size)
             fun commit() {
-                val stale = runCatching { rejectIf(closed, "not-ready"); requireCollectedCity(tx) }.exceptionOrNull()
+                val stale = runCatching {
+                    rejectIf(closed, "not-ready"); requireCollectedCity(tx)
+                    tx.gateRefit?.let { receipt ->
+                        val current = cities[tx.cityId]
+                        rejectIf(current != receipt.before(tx.after) && current != tx.after, "stale-city")
+                    }
+                }.exceptionOrNull()
                 if (stale != null) return fail(stale)
                 storage.invalidateSupply(tx.cityId)
                 store.save(tx.after).whenCompleteSync(tasks) { saved, failure ->
@@ -360,6 +374,11 @@ internal class CivsInventoryJournal(
             storage.lock(tx)
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
+                if (tx.gateRefit != null) {
+                    rejectIf(city != tx.after, "stale-city")
+                    applyInventory(tx, null)
+                    return@runCatching
+                }
                 if (city.revision == tx.after.revision || tx.residentTransfer != null || tx.resurrection != null || tx.collected != null ||
                     tx.containerRelocation != null || tx.cargoDropoff != null || tx.cargoPickup != null) when (val applied = storage.reconcile(tx)) {
                     is CivInventoryApplyResult.Retry -> {

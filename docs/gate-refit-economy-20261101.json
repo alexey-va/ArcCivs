@@ -1,0 +1,480 @@
+{
+  "version": 1,
+  "title": "ArcCivs same-bounds gate profile and explicit maintenance 2026-11-01",
+  "assumptions": [
+    "Source-only flat 5x5 Caledonia gate; runtime delivery and player acceptance remain separate.",
+    "Participants represent 1/3/10 settlements, not measured players. Low/base/high assume 0/1/4 new gates per settlement-day, with 0.25/1/4 active construction hours and 0/1/1 completed gates per hour; these are sensitivity inputs, not throughput measurements.",
+    "Physical materials are counted from an empty capture. Existing matching native cells are excluded by CivsMaterials.required. Old accepted receipts retain their original conditions.",
+    "Each item type, closed Stock resource, Vault, tokens and player XP is a separate unit. No SELL value, crafting exchange rate or disposable income is inferred.",
+    "Existing-gate console maintenance has no inventory, Stock, worker-cycle, skill, XP, refund or item-drop flow; it changes only an owned authored world structure.",
+    "Vault and tokens remain zero directly. Movement throughput, material acquisition time and market effects are unmeasured. Current SELL and the planned SELL-to-contract transition remain unchanged.",
+    "Fresh economy ledger was not collected by the gate worker: native operations belong to the parent. The decision is limited to source-derived material sinks and zero direct currency/XP hooks."
+  ],
+  "participants": [
+    1,
+    3,
+    10
+  ],
+  "currencies": {
+    "item:COBBLESTONE": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_gate_cobblestone",
+          "kind": "burn",
+          "source": "src/main/kotlin/ru/arc/civs/CivsGateRefit.kt and CivsMaterials.required",
+          "basis": "Full new physical gate material debit; assumed construction frequencies only. Existing-gate maintenance is excluded.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "25",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "25",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:STONE_BRICKS": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_gate_stone_bricks",
+          "kind": "burn",
+          "source": "src/main/kotlin/ru/arc/civs/CivsGateRefit.kt and CivsMaterials.required",
+          "basis": "Full new physical gate material debit; assumed construction frequencies only. Existing-gate maintenance is excluded.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "5",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_FENCE_GATE": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_gate_dark_oak_fence_gate",
+          "kind": "burn",
+          "source": "src/main/kotlin/ru/arc/civs/CivsGateRefit.kt and CivsMaterials.required",
+          "basis": "Full new physical gate material debit; assumed construction frequencies only. Existing-gate maintenance is excluded.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "5",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_LOG": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_gate_dark_oak_log",
+          "kind": "burn",
+          "source": "src/main/kotlin/ru/arc/civs/CivsGateRefit.kt and CivsMaterials.required",
+          "basis": "Full new physical gate material debit; assumed construction frequencies only. Existing-gate maintenance is excluded.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "27",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_STAIRS": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_gate_dark_oak_stairs",
+          "kind": "burn",
+          "source": "src/main/kotlin/ru/arc/civs/CivsGateRefit.kt and CivsMaterials.required",
+          "basis": "Full new physical gate material debit; assumed construction frequencies only. Existing-gate maintenance is excluded.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "10",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_SLAB": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_gate_dark_oak_slab",
+          "kind": "burn",
+          "source": "src/main/kotlin/ru/arc/civs/CivsGateRefit.kt and CivsMaterials.required",
+          "basis": "Full new physical gate material debit; assumed construction frequencies only. Existing-gate maintenance is excluded.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "5",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "gate_direct_vault",
+          "kind": "mint",
+          "source": "CivsGateMaintenance and normal construction rules",
+          "basis": "No direct currency or player XP issuance hook in either path.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "gate_direct_tokens",
+          "kind": "mint",
+          "source": "CivsGateMaintenance and normal construction rules",
+          "basis": "No direct currency or player XP issuance hook in either path.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "gate_direct_player_xp",
+          "kind": "mint",
+          "source": "CivsGateMaintenance and normal construction rules",
+          "basis": "No direct currency or player XP issuance hook in either path.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "raw_materials_per_new_gate": {
+    "before": {
+      "COBBLESTONE": 25,
+      "STONE_BRICKS": 5,
+      "DARK_OAK_FENCE_GATE": 5,
+      "DARK_OAK_LOG": 0,
+      "DARK_OAK_STAIRS": 0,
+      "DARK_OAK_SLAB": 0
+    },
+    "after": {
+      "COBBLESTONE": 25,
+      "STONE_BRICKS": 6,
+      "DARK_OAK_FENCE_GATE": 3,
+      "DARK_OAK_LOG": 27,
+      "DARK_OAK_STAIRS": 10,
+      "DARK_OAK_SLAB": 5
+    }
+  },
+  "legacy_closed_stock_per_gate": {
+    "before": {
+      "wood": 12,
+      "stone": 16,
+      "food": 0
+    },
+    "after": {
+      "wood": 12,
+      "stone": 16,
+      "food": 0
+    }
+  },
+  "maintenance_inventory_delta": {},
+  "maintenance_stock_delta": {
+    "wood": 0,
+    "stone": 0,
+    "food": 0
+  }
+}

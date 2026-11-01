@@ -345,6 +345,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             world.getBlockAt(cell.position.x, cell.position.y, cell.position.z) to after
         }
         changes.forEach { (block, after) -> block.setBlockData(after, false) }
+        worldAccess.terrainChanged(city.worldId, work.changes.map { it.position })
     }
 
     fun validate(city: Settlement, work: CivWorldWork) {

@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import org.bukkit.Bukkit
+import org.bukkit.Material
 import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
@@ -84,10 +85,11 @@ class CivsService(
     private val physics = CivsPhysics(plugin, tasks)
     private val controlCleanup = CivsControlCleanup(plugin) { owner, block -> world.canModify(owner, block) }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)
-    private val storage = (storageAdapter ?: CivsStorage(plugin)).also {
+    private val storage: CivsStorage = (storageAdapter ?: CivsStorage(plugin)).also {
         it.beginReceiptBootstrap()
         it.validateUpkeepNative = ::validateUpkeepNative
         it.validateMineNative = ::validateMineNative
+        it.validateGateRefitNative = { tx -> gateMaintenance.validateNative(tx) }
     }
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
     private val planBoardSnapshots = CivsPlanBoardSnapshots(tasks, executor, { id ->
@@ -169,10 +171,23 @@ class CivsService(
         { city, building -> admitRoadDevelopment(city) { buildingRequests.activateBuilding(city, building) } },
         { city, order, required -> buildingRequests.payBatch(city, order, required) }, ::updateHealth, clock)
 
-    private val inventoryJournal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy,
+    private val inventoryJournal: CivsInventoryJournal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy,
         unhealthy, { closed }, { city -> publish(city) }, { id, transform -> mutate(id, transform = transform) },
         ::track, { tx -> cargoRequests.validateNativeCollected(tx) }, ::resurrectionRejection, ::requestResurrectionAdmission,
-        ::inventoryRetired, ::updateHealth, clock)
+        ::inventoryRetired, ::updateHealth, clock,
+        verifyGateCaptures = { tx -> gateMaintenance.verifyCaptures(tx) })
+
+    private val gateMaintenance: CivsGateMaintenance = CivsGateMaintenance(plugin, this, records, tasks, executor, store, blueprints,
+        world, storage, inventoryJournal, { city -> cityPlans.loadAutonomousPlans(city) }, construction::isPlacing,
+        citizens::growthBlocked)
+
+    private val vegetation = CivsVillageVegetation(plugin, tasks, planningExecutor,
+        { city -> cityPlans.loadAutonomousPlans(city).thenCombine(
+            city.construction?.let { store.loadPlan(it.id) } ?: CompletableFuture.completedFuture(null)
+        ) { retained, accepted -> retained + listOfNotNull(accepted) } },
+        { id -> cities[id]?.takeUnless { closed || id in unhealthy } },
+        { city, block -> world.canModify(city.owner, block, Material.AIR) }, storage::isWorldLocked,
+        citizens::growthBlocked, citizens::terrainChanged, clock)
 
     private val controlRelocations = CivsControlRelocations(plugin, tasks, world, storage, controlInstallations,
         blueprints::interiorControls, { cities.values }, { city -> ready() && city.id !in busy && city.id !in unhealthy &&
@@ -341,6 +356,7 @@ class CivsService(
         storage.residentFoods = residentFoods
         storage.forestryLeafCurrentCity = { cities[it] }
         storage.relocationCurrentCity = { cities[it] }
+        storage.terrainChanged = world::terrainChanged
         storage.foodCanModify = { city, position ->
             plugin.server.getWorld(city.worldId)?.takeIf { position.y in it.minHeight until it.maxHeight &&
                 it.isChunkLoaded(position.x shr 4, position.z shr 4) }
@@ -358,6 +374,8 @@ class CivsService(
         citizens.worksiteTerrainChanged = worksites::changed
         citizens.worksiteWorldUnloaded = worksites::forgetWorld
         citizens.worksiteChunkUnloaded = worksites::forgetChunk
+        world.onTerrainChanged = citizens::terrainChanged
+        controlCleanup.terrainChanged = world::terrainChanged
         plugin.server.pluginManager.registerEvents(this, plugin)
         plugin.server.pluginManager.registerEvents(protection, plugin)
         plugin.server.pluginManager.registerEvents(forestryLeafLoot, plugin)
@@ -372,6 +390,7 @@ class CivsService(
             if (ready()) supply.pulse()
             if (ready()) forestryLeafLoot.pulse()
             if (ready()) citizens.activateNavigating()
+            if (ready()) vegetation.pulse(cities.values.filter { it.id !in unhealthy })
         }
         tasks.runTimer(5, 5) {
             if (ready()) {
@@ -800,6 +819,16 @@ class CivsService(
     }
 
     private fun inventoryRetired(tx: CivInventoryTransaction, recoveryPath: Boolean): Settlement {
+        if (tx.worldChanges.orEmpty().isNotEmpty())
+            citizens.terrainChanged(tx.after.worldId, tx.worldChanges.orEmpty().map { it.position })
+        tx.gateRefit?.let { receipt ->
+            cityPlans.loadAutonomousPlans(tx.after).whenCompleteSync(tasks) { _, failure ->
+                if (failure != null) log("reload refitted gate ${receipt.beforeBuilding.id}", failure, tx.cityId)
+            }
+            CivsDiagnostics.event("gate_refit_committed", "city" to tx.cityId, "gate" to receipt.beforeBuilding.id,
+                "transaction" to tx.id, "capture" to receipt.replacement.id, "blocks" to receipt.changes().size,
+                "revision" to tx.after.revision, "recovery_path" to recoveryPath)
+        }
         tx.containerRelocation?.let { move ->
             storage.refreshBuilding(tx.after, move.building)
             CivsDiagnostics.event("upgrade_storage_relocated", "city" to tx.cityId, "transaction" to tx.id,
@@ -1228,6 +1257,7 @@ class CivsService(
         autonomousDevelopment.cancel()
         workstations.close()
         controlRelocations.close()
+        vegetation.close()
         roadMaintenance.clear()
         supply.close()
         HandlerList.unregisterAll(this)
@@ -1272,6 +1302,11 @@ class CivsService(
     internal fun deleteRecord(city: Settlement): CompletableFuture<Unit> = store.delete(city)
 
     internal fun repairBuildingStorage(cityId: UUID, buildingId: UUID): CompletableFuture<Map<String, Int>> = storageActions.repairBuildingStorage(cityId, buildingId)
+
+    internal fun refitGate(cityId: UUID, gateId: UUID, proof: String?): CompletableFuture<Map<String, Any?>> =
+        action("gate_refit", null, "city" to cityId, "gate" to gateId, "apply" to (proof != null)) {
+            gateMaintenance.request(cityId, gateId, proof)
+        }
 
     fun debugLayout(cityId: UUID, terrain: Boolean): CompletableFuture<Map<String, Any?>> = diagnostics.debugLayout(cityId, terrain)
 

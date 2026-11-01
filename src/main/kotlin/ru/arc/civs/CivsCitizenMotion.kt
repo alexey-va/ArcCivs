@@ -201,7 +201,8 @@ internal class CivsCitizenMotion(
                 .8 * surfaceSpeed(citizenMotionSurface(before, motion)) else .55
             actor.collisionResident = null
             val next = motion.move(before, speed, { from, to -> collisions.routeMoveAllowed(actor, from, to) }) { destination ->
-                citizenOpenRouteDoors(city, route.allowedBuildings, before, destination, doorBlocked).also { opened ->
+                citizenOpenRouteDoors(city, route.allowedBuildings, before, destination, doorBlocked,
+                    { worldId, points -> points.forEach { navigation.changed(worldId, it) } }).also { opened ->
                     if (!opened) route.blockedWaypoint = destination.point()
                 }
             }

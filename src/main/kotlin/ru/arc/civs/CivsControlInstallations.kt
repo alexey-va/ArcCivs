@@ -164,7 +164,7 @@ internal class CivsControlInstallations(
     }
 
     fun install(cityId: UUID, buildingId: UUID): CompletableFuture<Settlement> {
-        installing[buildingId]?.let { return it }
+        installing[buildingId]?.takeUnless { it.isDone }?.let { return it }
         val result = installOnce(cityId, buildingId)
         installing[buildingId] = result
         result.whenComplete { _, _ -> installing.remove(buildingId, result) }
@@ -179,7 +179,9 @@ internal class CivsControlInstallations(
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         rejectIf(cityId in busy || cityId in unhealthy, "city-busy")
         val point = receipt.position
-        rejectIf(building.control != point, "control-location-changed")
+        // Until exact-slot evacuation is durable, the old barrel remains the authoritative control.
+        val staging = receipt.retire != null && receipt.retire.position == building.control
+        rejectIf(building.control != point && !staging, "control-location-changed")
         val target = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
         rejectIf(point.y !in target.minHeight until target.maxHeight, "outside-world")
         rejectIf(!target.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
@@ -209,11 +211,12 @@ internal class CivsControlInstallations(
             val native = target.getBlockAt(old.x, old.y, old.z)
             rejectIf(!world.canModify(city.owner, native, Material.AIR), "lands-denied")
             rejectIf(civsControlOccupied(plugin, city.worldId, old, controlOccupied), "worksite-blocked")
+            rejectIf(staging && native.type.isAir, "world-changed")
             if (!native.type.isAir) {
                 rejectIf(native.type != Material.BARREL || !civsSameRelocationContainerState(native.blockData.asString, it.before), "world-changed")
                 val holder = native.state as? org.bukkit.block.Barrel ?: throw CivsRejection("control-obstructed")
                 holder.inventory.viewers.toList().forEach { viewer -> viewer.closeInventory() }
-                rejectIf(holder.inventory.storageContents.any { item -> item != null && !item.type.isAir && item.amount > 0 }, "storage-busy")
+                if (!staging) rejectIf(holder.inventory.storageContents.any { item -> item != null && !item.type.isAir && item.amount > 0 }, "storage-busy")
             }
             native
         }
@@ -222,13 +225,21 @@ internal class CivsControlInstallations(
         val reused = block.type == Material.BARREL
         if (receipt.retire != null) rejectIf(!reused && !block.type.isAir, "control-obstructed")
         if (!reused) rejectIf(civsControlOccupied(plugin, city.worldId, point, controlOccupied), "worksite-blocked")
-        if (!reused) block.setType(Material.BARREL, false)
-        approach.forEach { (native, after) -> if (native.blockData.asString != after.asString) native.setBlockData(after, false) }
+        val changed = mutableListOf<CivPosition>()
+        if (!reused) { block.setType(Material.BARREL, false); changed += point }
+        approach.forEach { (native, after) -> if (native.blockData.asString != after.asString) {
+            native.setBlockData(after, false); changed += CivPosition(native.x, native.y, native.z)
+        } }
+        if (changed.isNotEmpty()) world.terrainChanged(city.worldId, changed)
         if (approach.isNotEmpty()) CivsDiagnostics.event("approach_applied", "city" to city.id, "building" to building.id,
             "world" to city.worldId, "count" to approach.size, "positions" to receipt.approach!!.map { it.position })
         storage.refreshBuilding(city, building)
         CivsDiagnostics.event("control_installed", "city" to city.id, "building" to building.id, "world" to city.worldId,
             "block" to point, "reused" to reused)
+        if (staging) return storage.persistControlStaging(city, receipt).thenApply {
+            rejectIf(!ready(), "not-ready")
+            cities[cityId] ?: throw CivsRejection("no-city")
+        }
         val barrier = if (retired == null) CompletableFuture.completedFuture(Unit) else {
             val native = requireNotNull(retiringBlock)
             if (!native.type.isAir) {
@@ -236,6 +247,7 @@ internal class CivsControlInstallations(
                 val holder = native.state as? org.bukkit.block.Barrel ?: throw CivsRejection("control-obstructed")
                 rejectIf(holder.inventory.storageContents.any { it != null && !it.type.isAir && it.amount > 0 }, "storage-busy")
                 native.setType(Material.AIR, false)
+                world.terrainChanged(city.worldId, listOf(retired.position))
                 storage.refreshBuilding(city, building)
             }
             storage.persistControlRetirement(city, receipt)
