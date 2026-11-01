@@ -49,7 +49,10 @@ internal class CivsCitizenObservations(
     }
 
     /** Observed actor state only: nameplates and scene information must never run the planner. */
-    private fun activityStatus(actor: CitizenActor, city: Settlement, worker: CivWorker): String {
+    private fun activityStatus(actor: CitizenActor, city: Settlement, worker: CivWorker): String =
+        citizenObservedTravelStatus(activityIntent(actor, city, worker), actor.route, actor.residentYield != null)
+
+    private fun activityIntent(actor: CitizenActor, city: Settlement, worker: CivWorker): String {
         if (actor.workerId in runtime.pendingHarm) return "injury-pending"
         actor.combatStatus?.let { return it }
         if (actor.alarmSheltering) return "alarm-shelter"
@@ -302,3 +305,28 @@ internal fun citizenSupplyDestinationStatus(type: BuildingType?): String = when 
     BuildingType.TOWN_HALL -> "moving-to-town-hall"
     else -> "moving-to-storage"
 }
+
+/** A destination is an intent; only a ready, unblocked route may describe it as walking. */
+internal fun citizenObservedTravelStatus(activity: String, route: CitizenRoute?, yielding: Boolean = false): String {
+    if (activity !in CITIZEN_TRAVEL_STATUSES) return activity
+    if (yielding) return "route-blocked"
+    if (route == null) return "route-preparing"
+    val motion = route.motion
+    return when {
+        motion.waitingForCollision || route.nativeCollisionTicks > 0 || route.bodyBlockedSince != null -> "route-blocked"
+        motion.searching -> "route-searching"
+        route.preparationRetryAt != null -> "route-preparing"
+        motion.failure != null || route.completion?.cancelReason != null -> "route-unreachable"
+        route.completion != null || motion.finished ->
+            if (route.intermediate || motion.continuation) "route-preparing" else "route-stopped"
+        motion.turning -> "route-preparing"
+        motion.navigating -> activity
+        else -> "route-stopped"
+    }
+}
+
+private val CITIZEN_TRAVEL_STATUSES = setOf(
+    "to-work", "moving-to-work", "moving-to-storage", "moving-to-tavern", "moving-to-town-hall",
+    "returning-output", "moving-to-pickup", "carrying-cargo", "to-store", "mine-descending", "mine-returning",
+    "walking", "wandering", "meeting", "to-campfire", "to-meal", "patrolling",
+)

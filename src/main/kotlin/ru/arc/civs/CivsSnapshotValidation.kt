@@ -206,8 +206,8 @@ internal object CivsSnapshotValidation {
         } catch (error: CivsRejection) {
             if (error.reason == "invalid-state") throw error
             CivsRules.reject("invalid-state")
-        } catch (_: RuntimeException) {
-            CivsRules.reject("invalid-state")
+        } catch (error: RuntimeException) {
+            throw CivsRejection("invalid-state").also { it.initCause(error) }
         }
     }
 

@@ -153,7 +153,7 @@ class CivsCitizenFoodRouteRetentionTest : FunSpec({
                 h.workPlans shouldBe searches
                 npc.location shouldBe position
                 foodPickups shouldBe 0
-                h.owner.status(h.workerId) shouldBe "workers.status.moving-to-town-hall"
+                h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
             }
             // The ordinary arrival gate admits exactly one native pickup; planning waits for its receipt.
             npc.teleport(Location(h.world, 1.5, 64.0, .5))

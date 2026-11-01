@@ -80,6 +80,13 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.foodSource = source.id
             h.owner.pulse(3_000)
             val workPlans = h.workPlans
+            h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
+            h.owner.hologramSnapshots().single().status shouldBe "workers.status.route-searching"
+            for (tick in 1..256) {
+                h.navigate()
+                if ((h.routeProgress(h.workerId) ?: 0.0) > 0.0) break
+            }
+            ((h.routeProgress(h.workerId) ?: 0.0) > 0.0) shouldBe true
             val expected = "workers.status.${if (sourceType == BuildingType.TAVERN) "moving-to-tavern" else "moving-to-town-hall"}"
             h.owner.status(h.workerId) shouldBe expected
             h.owner.hologramSnapshots().single().status shouldBe expected
@@ -1171,13 +1178,13 @@ class CivsResidentsRuntimeTest : FunSpec({
                 }
             }
             h.city.workers.single().cargo shouldBe null
-            val travellingStatus = if (sheltering) "workers.status.sheltering" else "workers.status.moving-to-storage"
+            val preparingStatus = if (sheltering) "workers.status.sheltering" else "workers.status.route-searching"
             val arrivedStatus = if (sheltering) "workers.status.sleeping" else "workers.status.waiting-orders"
             val maximumStep = if (sheltering) .118251 else .172001
             h.navigationNow = 2_000L
             h.navigationRejections = 1
             h.owner.pulse(2_000L)
-            h.owner.status(h.workerId) shouldBe travellingStatus
+            h.owner.status(h.workerId) shouldBe preparingStatus
             val failedRoute = requireNotNull(h.routeIdentity())
             val origin = requireNotNull(h.owner.residentFeet(h.workerId))
             val teleports = h.teleports
@@ -1645,7 +1652,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 returned
             }
             h.owner.pulse(3_500)
-            h.owner.status(h.workerId) shouldBe "workers.status.returning-output"
+            h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
             h.city.workers.single().items shouldBe fullBag
             h.deliveries shouldBe 0
             actor.teleport(Location(h.world, 21.5, 64.0, .5))
@@ -2100,7 +2107,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             }
             h.navigationNow = 2_000L
             h.owner.pulse(2_000)
-            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-work"
+            h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
             if (preparationFailure) {
                 requireNotNull(h.routeMotion(h.workerId)).planningFailed("preparation-budget")
                 h.routeFailure() shouldBe "preparation-budget"
@@ -3668,7 +3675,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.courier = null
             h.pendingUnload.complete(h.city)
             h.owner.pulse(4_000)
-            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-storage"
+            h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
             var normalSteps = 0
             var normalDistance = 0.0
             var fasterDistance = 0.0

@@ -635,9 +635,9 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
     fun ladderForBacking(local: CivPosition): CivPosition =
         (if (local.x == extensionBacking.x && local.z == extensionBacking.z) extensionLadder else bottom).copy(y = local.y)
 
-    /** Resolve the same blueprint's frozen authority without reconstructing its geometry per receipt. */
+    /** V7 resolves V6 during construction, outside map updates so that lookup may safely resize the cache. */
     fun forVersion(version: Int): CivsMinePlan? = if (version !in 2..VERSION) null else
-        plans.computeIfAbsent("$schematicId:$version") { CivsMinePlan(layout, version, timber, schematicId) }
+        plans.getOrPut("$schematicId:$version") { CivsMinePlan(layout, version, timber, schematicId) }
 
     companion object {
         const val VERSION = 7
@@ -668,7 +668,7 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
                 "/caledonia/" in building.schematicId -> "dark_oak"
                 else -> "oak"
             }
-            return plans.computeIfAbsent(key) { CivsMinePlan(layout, version, timber, building.schematicId) }
+            return plans.getOrPut(key) { CivsMinePlan(layout, version, timber, building.schematicId) }
         }
 
         fun shaftContains(building: CivBuilding, world: CivPosition): Boolean {

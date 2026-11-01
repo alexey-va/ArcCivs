@@ -401,14 +401,14 @@ class CivsMineVisitTest : FunSpec({
                 every { seatedFrom } returns null
                 every { arrivedAt } returns null
             }
-            observations.status(waiting.worker.id) shouldBe "workers.status.moving-to-tavern"
+            observations.status(waiting.worker.id) shouldBe "workers.status.route-preparing"
             waiting.actor.mealVisit = null
             waiting.actor.supplyPickup = CitizenSupplyPickup(UUID.randomUUID(), h.mine.id, false)
             observations.status(waiting.worker.id) shouldBe "workers.status.loading-cargo"
             waiting.actor.supplyPickup = null
             waiting.actor.mineVisit = CitizenMineVisit(owner.key.copy(workerId = waiting.worker.id), h.standing,
                 owner.candidates, owner.passage, h.now).also { it.returning = true }
-            observations.status(waiting.worker.id) shouldBe "workers.status.mine-returning"
+            observations.status(waiting.worker.id) shouldBe "workers.status.route-preparing"
             waiting.actor.mineVisit = null
             h.runtime.actors.remove(h.worker.id)
             observations.status(waiting.worker.id) shouldBe "workers.status.waiting"
