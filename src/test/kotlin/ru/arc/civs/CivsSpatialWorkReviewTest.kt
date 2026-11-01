@@ -792,7 +792,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 world.getBlockAt(mature.x, mature.y, mature.z).blockData =
                     (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                     runtime.pulse(listOf(city))
                     runtime.plan(city, worker) shouldBe null
                     repeat(8) { runtime.pulse(listOf(city)) }
