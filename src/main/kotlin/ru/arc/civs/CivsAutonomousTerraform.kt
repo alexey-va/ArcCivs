@@ -151,11 +151,13 @@ internal object CivsAutonomousTerraform {
                 infrastructureFloors[civsTerrainKey(f.x, f.z)] != f.floorY) throw CivsRejection("autonomy-terrain")
         }
         val standing = access.standing(city, building.id)
-        val preservedDirtPaths = if (building.type != BuildingType.GATE) emptyMap() else buildMap<Long, Int> {
+        val preservedDirtPaths = buildMap<Long, Int> {
             access.routes.values.flatten().forEach { feet -> for (dx in -1..1) for (dz in -1..1) {
                 val x = feet.x + dx; val z = feet.z + dz
                 val native = surface.at(x, z)
-                if (native?.loaded == true && native.dirtPath && abs(native.groundY.toLong() - (feet.y.toLong() - 1)) <= 1)
+                if (native?.loaded == true && native.dirtPath && abs(native.groundY.toLong() - (feet.y.toLong() - 1)) <= 1 &&
+                    (building.type == BuildingType.GATE || native.topY == native.groundY &&
+                        !CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, native.groundY, z))))
                     put(civsTerrainKey(x, z), native.groundY)
             } }
         }
@@ -198,7 +200,9 @@ internal object CivsAutonomousTerraform {
             if (protected != null && ground != protected.y - 1) throw CivsRejection("autonomy-no-path",
                 mapOf("stage" to "retained-grade", "x" to "$x", "z" to "$z",
                     "floor" to "$ground", "retained" to "${protected.y - 1}"))
-            val pathFloor = preservedDirtPaths[key]?.takeIf { abs(it.toLong() - ground) <= 1 }
+            val pathFloor = preservedDirtPaths[key]?.takeIf {
+                if (building.type == BuildingType.GATE) abs(it.toLong() - ground) <= 1 else it == ground
+            }
             val retained = preserve || protected != null || pathFloor != null
             val targetGround = if (protected == null && pathFloor != null) pathFloor else ground
             val targetFloor = if (pathFloor != null) targetGround else floor

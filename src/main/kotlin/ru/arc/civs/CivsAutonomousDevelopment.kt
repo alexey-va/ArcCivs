@@ -216,6 +216,12 @@ internal class CivsAutonomousDevelopment(
         autonomyProgress[city.id] = CivsAutonomyView("searching", goal.type, goal.targetLevel)
         CivsDiagnostics.event("autonomous_goal_selected", "city" to city.id, "request" to request,
             "type" to goal.type, "level" to goal.targetLevel, "stock" to city.stock, "cost" to goal.cost)
+        val reservedPlots = if (!infrastructure && existing == null && adopted != null &&
+            unpaidPlot(city, adopted, goal.type) != null) adopted.plots.filter {
+                it.building.type == goal.type && it.building.level == 1 && city.building(it.building.id) == null
+            } else emptyList()
+        val reservedLayoutKey = if (reservedPlots.isEmpty()) null else civsPlanBoardLayoutKey(city)
+        var nextReserved = 1
         val prepared = runCatching {
             if (infrastructure) autonomousPlacement.infrastructure(city)
             else if (existing == null && adopted == null)
@@ -228,11 +234,30 @@ internal class CivsAutonomousDevelopment(
         }.getOrElse { CompletableFuture.failedFuture(it) }
         fun completed(blueprint: CivAutonomousDesign?, failure: Throwable?) {
             if (autonomyRequests[city.id] != request) return
+            val current = if (reservedLayoutKey == null) city else cities[city.id]?.takeIf { latest ->
+                !closed && ready() && latest.owner == city.owner && latest.worldId == city.worldId &&
+                    city.id !in unhealthy && !isPlacing(city.id) && settlementActive(latest) &&
+                    civsPlanBoardLayoutKey(latest) == reservedLayoutKey &&
+                    unpaidPlot(latest, requireNotNull(adopted), goal.type) != null
+            }
+            if (current == null) {
+                autonomyRequests.remove(city.id, request)
+                autonomyFailed(city.id, goal, CivsRejection("stale-development"))
+                return
+            }
             val rejection = failure?.let(CivsDiagnostics::rejection)
+            // An unusable unpaid slot must not hide another already adopted slot of the same type.
+            if (rejection?.reason == "autonomy-no-site" && nextReserved < reservedPlots.size) {
+                val alternative = reservedPlots[nextReserved++]
+                runCatching { autonomousPlacement.reserved(current, alternative) }
+                    .getOrElse { CompletableFuture.failedFuture(it) }
+                    .whenCompleteSync(tasks) { design, error -> completed(design, error) }
+                return
+            }
             if (!infrastructure && existing == null && goal.targetLevel == 1 && adopted != null &&
                 rejection?.reason == "autonomy-no-site" && unpaidPlot(city, adopted, goal.type) != null &&
                 now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
-                recoverUnpaidPlot(city, adopted, request, goal)
+                recoverUnpaidPlot(current, adopted, request, goal)
                 return
             }
             // A blocked first-level industry must not indefinitely hide unfinished paid infrastructure.

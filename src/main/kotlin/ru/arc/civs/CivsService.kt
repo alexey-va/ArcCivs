@@ -1050,9 +1050,11 @@ class CivsService(
             residentSupplies.pulseAutoSupplies()
             residentSupplies.pulseResidentFood()
             residentSupplies.pulseTestingSupplies()
-            autonomousDevelopment.pulseAccessRepair()
-            autonomousDevelopment.pulse()
             construction.pulseQueue()
+            if (!construction.queuedAdmissionPending()) {
+                autonomousDevelopment.pulseAccessRepair()
+                autonomousDevelopment.pulse()
+            }
         }
         construction.pulse()
         val visibleCities = if (ready()) cities.values.filter { it.id !in unhealthy && it.pendingDeletion == null } else emptyList()

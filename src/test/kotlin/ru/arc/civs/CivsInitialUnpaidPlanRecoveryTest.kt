@@ -630,16 +630,24 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     var selectedRoute = emptyList<CivPosition>()
     var forecastTerrain: CivTerraformPlan? = null
     val ore = oldTarget.bounds.min.copy(y = oldTarget.bounds.min.y + 1)
-    private fun nativeSurface(): CivTerrainSurface {
+    private fun nativeSurface(blockReservedAlternatives: Boolean = false): CivTerrainSurface {
         val raised = if (!preferOldTerrace) surface else surface.copy(
             columns = surface.columns + (civsTerrainKey(ore.x, ore.z) to CivTerrainSurfaceColumn(ore.y + 1, true)))
-        if (!draftRefusal) return raised
-        val blocked = CivsAutonomousGeometry.approach(oldTarget).first { point ->
-            !CivsAutonomousGeometry.horizontalContains(oldTarget.bounds, point) &&
-                civsTerrainKey(point.x, point.z) !in acceptedAccess.standing(before, oldTarget.id)
+        if (!draftRefusal && !blockReservedAlternatives) return raised
+        // These fixtures exercise relocation after every existing reservation is refused.
+        // Later-slot success is covered separately; the full forecast keeps its original captured surface.
+        val targets = listOfNotNull(oldTarget.takeIf { draftRefusal }) + if (blockReservedAlternatives)
+            oldPlan.plots.filter { it.building.type == targetType && it.building.id != oldTarget.id &&
+                before.building(it.building.id) == null }.map { it.building } else emptyList()
+        val blocked = targets.associate { building ->
+            val point = CivsAutonomousGeometry.approach(building).first {
+                !CivsAutonomousGeometry.horizontalContains(building.bounds, it) &&
+                    civsTerrainKey(it.x, it.z) !in acceptedAccess.standing(before, building.id)
+            }
+            val key = civsTerrainKey(point.x, point.z)
+            key to raised.columns.getValue(key).copy(natural = false)
         }
-        val key = civsTerrainKey(blocked.x, blocked.z)
-        return raised.copy(columns = raised.columns + (key to raised.columns.getValue(key).copy(natural = false)))
+        return raised.copy(columns = raised.columns + blocked)
     }
     private val control = requireNotNull(base.buildings.single().control)
     val beforeItems: List<ItemStack?>
@@ -703,7 +711,7 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
             } else {
                 if (recovering) unreservedSurfaces++
                 CompletableFuture.completedFuture(if (failure == "surface-only" ||
-                    failure == "no-choice" && recovering) blockedSurface() else nativeSurface())
+                    failure == "no-choice" && recovering) blockedSurface() else nativeSurface(blockReservedAlternatives = !recovering))
             }
         }
         every { world.captureTerraform(any(), any(), any(), any()) } answers {

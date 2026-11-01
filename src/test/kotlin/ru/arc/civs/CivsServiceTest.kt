@@ -3295,7 +3295,7 @@ class CivsServiceTest : FunSpec({
             document.getAsJsonObject("city")["world"].asString shouldBe h.world.uid.toString()
             document.getAsJsonObject("runtime").keySet().containsAll(listOf("citizens", "worksites", "supply", "coverage")) shouldBe true
             document["surface"].isJsonNull shouldBe true
-            verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any()) }
+            verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any(), any()) }
             h.saves shouldBe emptyList()
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.service.debugLayout(UUID.randomUUID(), false).join() })
                 ?.reason shouldBe "city-not-found"
@@ -3306,14 +3306,16 @@ class CivsServiceTest : FunSpec({
         serviceScenario { h ->
             val hall = h.city.buildings.first()
             val surface = CivTerrainSurface(-64, 320, mapOf(civsTerrainKey(0, 0) to CivTerrainSurfaceColumn(63, true)))
-            every { h.worldAdapter.autonomousHeightField(h.city, hall, hall) } returns CompletableFuture.completedFuture(surface)
+            val waterColumns = civsAutonomousWaterColumns(CivsSettlementLayout.frame(h.city),
+                CivsSettlementPlans.current(h.city)?.gates.orEmpty())
+            every { h.worldAdapter.autonomousHeightField(h.city, hall, hall, waterColumns) } returns CompletableFuture.completedFuture(surface)
             h.start()
             val receipt = h.await(h.service.debugLayout(h.city.id, true))
             val document = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(
                 h.plugin.dataFolder.toPath().resolve(receipt["path"].toString()))).asJsonObject
             document.getAsJsonObject("surface")["loaded_only"].asBoolean shouldBe true
             document.getAsJsonObject("surface")["atomic"].asBoolean shouldBe false
-            verify(exactly = 1) { h.worldAdapter.autonomousHeightField(h.city, hall, hall) }
+            verify(exactly = 1) { h.worldAdapter.autonomousHeightField(h.city, hall, hall, waterColumns) }
             h.saves shouldBe emptyList()
         }
         serviceScenario { h ->
@@ -3322,7 +3324,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.service.debugLayout(unavailable.id, true).join() })
                 ?.reason shouldBe "terrain-world-not-loaded"
-            verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any()) }
+            verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any(), any()) }
             h.saves shouldBe emptyList()
         }
     }

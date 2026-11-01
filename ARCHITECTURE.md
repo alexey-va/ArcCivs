@@ -932,6 +932,10 @@ construction. Duplicate requests are idempotent. Starting the next job reloads i
 saved plan and captures/revalidates current terrain. A failed queue head retains
 its position and exposes a concrete retry reason; it is not silently skipped.
 Upgrades retain their existing active-order contract.
+Queued activation runs before new development planning. Its asynchronous prepare
+and a loaded eligible head waiting for the shared world budget hold admission
+ahead of new speculative searches. Other queue failures release that hold;
+paused, unavailable and unhealthy queues do not stop unrelated planning.
 
 Building and city removal first persist a deletion intent in the city snapshot.
 The service loads only the exact control chunks asynchronously, then revalidates
@@ -1130,8 +1134,12 @@ ordinary single-site growth remains available during that backoff. Paid work and
 production never depend on completing a distant reservation. Unadopted candidates
 are diagnostics only and are not drawn as an accepted future village.
 
-An autonomous city may recover an infeasible reservation for its next missing
-ordinary level-one building after a site refusal. Already admitted buildings and
+After an exact site refusal, ordinary growth first tries the other unpaid adopted
+plots of the same type in their saved order, under the same request and layout
+identity. Other errors stop that attempt. These alternatives keep their existing
+IDs, geometry, native validation and paid construction; no plan reorder is saved.
+An autonomous city may then recover an infeasible reservation for its next missing
+ordinary level-one building. Already admitted buildings and
 paid work remain fixed. Ordinary guarded placement searches a detached
 plan-null shadow; native identity checks still use the actual city. One returned
 building and its exact route seed a complete 34-site forecast. Only a successful full
@@ -1160,6 +1168,11 @@ Other candidates retain the detached full-layout search. Planned routes may guid
 selection, but native terraform proof is drafted against the actual city and its
 actual infrastructure; unpaid roads never become preserved world columns.
 Accepted native routes take priority over future route intent.
+Ordinary route preparation may preserve an actual dirt-path shoulder within one
+column and one floor of its paid route. It requires a loaded, uncovered native
+surface and an exactly matching requested floor outside the building pad. This
+leaves the whole column unchanged and keeps native support, headroom and authority
+checks; future route hints alone cannot authorize the actual capture.
 Optional route shoulders leave columns reserved by another unpaid route untouched.
 The required centreline, building pad and apron are still drafted and checked at
 their exact grades; a conflict there rejects the candidate. Every emitted column

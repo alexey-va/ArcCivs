@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "direct_currency_delta": {
+    "Vault": 0,
+    "premium_tokens": 0,
+    "player_XP": 0
+  },
+  "founding_reserve_unchanged": {
+    "OAK_LOG": 96,
+    "COBBLESTONE": 96,
+    "BREAD": 24,
+    "repeat_existing_ID": 0
+  },
+  "participants": [
+    1,
+    4,
+    5
+  ],
+  "currencies": {
+    "Vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "premium_tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "player_XP": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "title": "ArcCivs176: owned road shoulder continuity and reserved construction admission",
+  "plugin_version": "0.1.176",
+  "status": "before_implementation",
+  "owner_requirement": "Fix Village-1/2 development and find fifth village, using explicitly authorized captured terrain/plans and blacklist input policy.",
+  "proposed_change": "Preserve actual owned DIRT_PATH shoulders when ordinary routes join them at their unchanged native floor; keep building pads excluded. Try existing unpaid same-type reserved plots before full recovery. Admit an already queued construction site before new speculative planning in the shared two-job world budget.",
+  "physical_item_effect": "All work keeps existing blueprint bills, paid native receipts, queues, work periods and ordinary supplies. Fewer false geometry refusals and admission starvation may restore actual item consumption and later production; throughput is unmeasured.",
+  "founding_item_effect": "No new founding or reserve change in176. Village-5 was founded once on175 with existing216-item reserve. ExistingID repeat0; no manual grants.",
+  "assumptions": [
+    "No new currency/XP reward, drop chance, shop rate or paid-work speed.",
+    "Participants1/4/5and0/1/2planningevents perday are sensitivity inputs, not measured player activity or new caps.",
+    "Existing Auto deficit restock and ordinary production remain real possible downstream item sources; no self-sufficiency or zero indirect effect claim.",
+    "Active EconomyShopGUI SELL and futureSHADOWcontracts are distinct and unchanged."
+  ],
+  "live_verification": "Observe ordinary paid V1/V2 construction and Village-5 queued builder activation after restart. No forced arrivals, world edits or manual resources to pass.",
+  "baseline": "0.1.175 f6f2634d31e1d44782bf9653ee6817dff1a76b24, Village-5 founded normally at2026-11-01T14:02:05Z",
+  "route_shoulder_repair": {
+    "before": "21 reconstructed compatible V2 routes all fail actual Terraform draft on one DIRT_PATH shoulder of the validated paid hall road; planned and native floors match.",
+    "after": "Retain only captured loaded dirt-path shoulders at actual native surface, within one column and one floor of a validated route. Ordinary route preparation requires exact requested/native floor equality and excludes the building pad. Native support/body/authority and preimage checks still run."
+  },
+  "queue_admission": {
+    "before": "The development pulse runs before construction queue admission; both use the same five-second cadence and shared two-job placement budget. Native Village-5 builder hut has remained queued with world-busy.",
+    "after": "Run ordinary queued construction admission first. While its activation future is in flight or an eligible loaded head last waited on the shared world budget, defer new access repair/development planning until admission retries. Success or a non-capacity refusal releases the hold; paused/unloaded/unhealthy queues do not hold it. Same existing two jobs and five-second retry, no additional work speed or supplies."
+  }
+}
