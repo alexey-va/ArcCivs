@@ -1079,11 +1079,22 @@ cut budget. Fortified frames, boundary-seeded routes and other failures retain
 their original refusal; all terrain, gate and infrastructure limits still apply.
 
 Infrastructure approach height prefers retained accepted transit, then exact
-transit in generated pieces that have already passed admission, then the preserved
-road/native floor. A proposed route alone cannot supply that proof. Loaded,
-natural/protected, occupied, wall and one-step height checks still run, and a
-planned neighbouring road does not prove that its blocks have been built: native
-support, path and commit captures remain authoritative.
+transit in generated pieces that have already passed admission, then a preserved
+road. An unowned natural approach may be graded to within one step of the piece
+edge, using the existing terraform cut/fill limit. Its chosen grade still requires
+the ordinary native terraform, support, route and paid commit proofs. A proposed
+route alone supplies no built-road proof. Loaded, protected, occupied and wall
+checks remain in force. Separator clearance preserves actual loaded dirt-path
+shoulders within one column of a retained route, at its native surface and within
+one step of the recorded floor, using the same predicate as infrastructure.
+
+Automatic founding first proves the ordinary complete 34-site profile. Only an
+exact HOUSE no-site refusal may try one smaller existing same-style house family
+with the same supported maximum level. The union of its real current and maximum
+envelopes must have a smaller footprint. The complete profile, infrastructure and native founding proofs
+then run again once; no partial village, alternate population rule or free
+construction is introduced. Diagnostic terrain exports survey water depth in the
+same core/current-gate/retained-gate domain as the runtime planner.
 
 New civic plots first face straight segments of retained streets inside the core,
 with the entire upgrade envelope and three-block street corridor reserved. The

@@ -42,8 +42,10 @@ internal class CivsCityDiagnostics(
         val runtime = mapOf("captured_at_ms" to authority.now(), "coverage" to "existing-bounded-owner-debug-samples-with-total-and-truncated",
             "citizens" to debugState("citizens", cityId, null), "worksites" to debugState("worksites", cityId, null),
             "supply" to debugState("supply", cityId, null))
+        val waterColumns = if (terrain) civsAutonomousWaterColumns(CivsSettlementLayout.frame(city),
+            CivsSettlementPlans.current(city)?.gates.orEmpty()) else emptySet()
         return layoutDebug.export(city, nativeWorld?.name, plugin.pluginMeta.version, runtime,
-            if (terrain) ({ world.autonomousHeightField(city, hall, hall) }) else null) { records.cities[cityId] }
+            if (terrain) ({ world.autonomousHeightField(city, hall, hall, waterColumns) }) else null) { records.cities[cityId] }
             .whenComplete { _, failure ->
                 if (failure != null && CivsDiagnostics.rejection(failure) == null &&
                     CivsDiagnostics.cause(failure) !is java.util.concurrent.CancellationException)

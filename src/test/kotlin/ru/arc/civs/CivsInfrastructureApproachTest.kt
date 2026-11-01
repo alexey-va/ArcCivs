@@ -19,7 +19,12 @@ class CivsInfrastructureApproachTest : FunSpec({
             for (x in -5..5) for (z in -5..5)
                 put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(if (unaccepted) 63 else 64, true))
             // This is a valid one-step native approach, but the house owns it; never request paving through it.
-            if (blocked) put(civsTerrainKey(0, 1), CivTerrainSurfaceColumn(65, true))
+            if (blocked) {
+                put(civsTerrainKey(0, 1), CivTerrainSurfaceColumn(65, true))
+                // Every other endpoint approach is protected; the occupied one is the only eligible ground.
+                for ((x, z) in listOf(1 to 0, 2 to 0, 1 to 2, 2 to 2, 3 to 1))
+                    put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(64, false))
+            }
         })
         // The vertical strip is partitioned first. Its last floor65 is the endpoint's only lawful floor66 approach.
         val verticalFeet = if (unaccepted) listOf(66, 66, 66, 66) else listOf(65, 65, 66, 66)
@@ -50,10 +55,11 @@ class CivsInfrastructureApproachTest : FunSpec({
         result.pieces shouldBe emptyList()
     }
 
-    test("an unaccepted future route cannot lend its proposed approach height") {
+    test("unowned natural ground uses its own minimum grading instead of an unaccepted future route height") {
         val (result, _) = roadApproach(unaccepted = true)
-        result.rejected shouldBe mapOf("infrastructure-no-approach" to 2)
-        result.pieces shouldBe emptyList()
+        result.rejected shouldBe emptyMap()
+        result.pieces.map { it.type } shouldBe listOf(BuildingType.ROAD, BuildingType.ROAD)
+        result.pieces.first().entrance shouldBe CivPosition(-1, 65, 0)
     }
 
     test("an occupied approach stays blocked even when its proposed route has a one-step grade") {
@@ -61,6 +67,44 @@ class CivsInfrastructureApproachTest : FunSpec({
         result.rejected shouldBe mapOf("infrastructure-no-approach" to 1)
         result.pieces.map { it.type } shouldBe listOf(BuildingType.ROAD)
         result.pieces.single().transit shouldBe route.take(3)
+    }
+
+    fun gradedWall(outsideGround: Int = 64): Triple<Settlement, CivTerrainSurface, CivSettlementInfrastructure> {
+        val city = settlementPlanCity()
+        val strip = CivBox(CivPosition(10, 66, 10), CivPosition(10, 66, 12))
+        val frame = CivsSettlementLayout.frame(city, 24).copy(wallObstacles = listOf(strip), gates = emptyList())
+        val surface = settlementPlanSurface(city).let { flat -> flat.copy(columns = flat.columns.mapValues { (key, value) ->
+            val ground = if ((key shr 32).toInt() == 10 && key.toInt() in 10..12) 66 else outsideGround
+            value.copy(groundY = ground, topY = ground)
+        }) }
+        return Triple(city, surface, CivsSettlementLayout.infrastructure(city, frame, surface, emptyList()))
+    }
+
+    test("a natural approach is graded through the same Terraform draft as its infrastructure order") {
+        val (city, surface, result) = gradedWall()
+        result.rejected shouldBe emptyMap()
+        val piece = result.pieces.single()
+        piece.entrance shouldBe CivPosition(9, 66, 10)
+        val floors = piece.blocks.groupBy { civsTerrainKey(it.position.x, it.position.z) }
+            .mapValues { (_, blocks) -> blocks.minOf { it.position.y } }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(CivsInfrastructure.building(piece), 0), surface,
+            infrastructureFloors = floors)
+        draft.route.last() shouldBe piece.entrance
+        val approach = draft.columns.single { it.x == piece.entrance.x && it.z == piece.entrance.z }
+        approach.groundY shouldBe 65
+        approach.floorY shouldBe 65
+        approach.preserve shouldBe false
+        surface.at(approach.x, approach.z)!!.groundY shouldBe 64
+    }
+
+    test("natural approach grading retains the existing cut and fill limit") {
+        for (ground in listOf(41, 91)) gradedWall(ground).third.rejected shouldBe emptyMap()
+        for (ground in listOf(40, 92)) {
+            val result = gradedWall(ground).third
+            result.pieces shouldBe emptyList()
+            result.rejected.keys shouldBe setOf("infrastructure-no-approach")
+            (result.rejected.getValue("infrastructure-no-approach") > 0) shouldBe true
+        }
     }
 
 })

@@ -1,0 +1,153 @@
+{
+  "version": 1,
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "direct_currency_delta": {
+    "Vault": 0,
+    "premium_tokens": 0,
+    "player_XP": 0
+  },
+  "founding_reserve_unchanged": {
+    "OAK_LOG": 96,
+    "COBBLESTONE": 96,
+    "BREAD": 24,
+    "repeat_existing_ID": 0
+  },
+  "participants": [
+    1,
+    4,
+    5
+  ],
+  "currencies": {
+    "Vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "premium_tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "player_XP": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unpaid_plan_adoption_no_direct_reward",
+          "kind": "mint",
+          "source": "Existing unpaid plan validation and save",
+          "basis": "Plan adoption grants no currency/XP; ordinary item-consuming construction is separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "title": "ArcCivs175: captured-terrain growth repair and complete fifth-village planning",
+  "plugin_version": "0.1.175",
+  "status": "before_implementation",
+  "owner_requirement": "Fix Village-1/2 development and find fifth village, using explicitly authorized captured terrain/plans and blacklist input policy.",
+  "proposed_change": "After exact founding full34 HOUSE no-site failure, try one smaller same-style HOUSE family with validated real maximum envelope, existing catalog and existing full34/native proof. Repair existing growth only at replay-proven terrain/perimeter failures; reuse captured owned land and paid native construction.",
+  "physical_item_effect": "Compact family changes future blueprint block/material bill under existing paid construction. Resident/bed/production rules, work rates and supplies targets remain unchanged. Resuming ordinary growth may change actual item throughput; unmeasured.",
+  "founding_item_effect": "A newly founded fifth canonicalID receives existing one-time96OAK_LOG+96COBBLESTONE+24BREAD=216items. ExistingID repeat0. This reserve is not spendable currency or a repeatable reward.",
+  "assumptions": [
+    "No new currency/XP reward, drop chance, shop rate or paid-work speed.",
+    "Participants1/4/5and0/1/2planningevents perday are sensitivity inputs, not measured player activity or new caps.",
+    "Existing Auto deficit restock and ordinary production remain real possible downstream item sources; no self-sufficiency or zero indirect effect claim.",
+    "Active EconomyShopGUI SELL and futureSHADOWcontracts are distinct and unchanged."
+  ],
+  "live_verification": "Verify next ordinary paid construction for V1/V2 and fifth complete native founding. Preserve actual buildings/paidroutes/material accounting. No manualgrants/forcedarrivals/QA world edits to pass.",
+  "perimeter_repair": {
+    "before": "Retained centrelines were admitted but their actual dirt-path shoulders were excluded by separator clearance; an existing three-wide road can block its own planned gate.",
+    "after": "Use existing infrastructure shoulder predicate: actual loaded dirtPath within1 of retainedroute, top==ground and grade\u00b11. No change to paid/world authority, slopeproof or solverbudgets.",
+    "direct_currency_and_rewards": "unchanged; pure forecast repair only"
+  },
+  "diagnostic_fix": "Terrain export captures same water depth domain as existing runtime planner (core/gates/retainedgates); loaded-only bounded sampler unchanged.",
+  "approach_grading_repair": {
+    "before": "Captured full34 plan has one rejected seven-column ROAD despite nine loaded natural unoccupied exterior approaches; their raw ground is more than one step below the already graded road.",
+    "after": "Only unowned natural approaches may choose a floor within one step of the road edge and within existing Terraform.MAXIMUM_CHANGE of native ground. Accepted/generated/preserved route grades remain authoritative; occupied columns remain unavailable. The existing native terraform and paid construction journal must execute this grade.",
+    "economic_effect": "May change future paid earthwork and material consumption for an otherwise blocked road. No free world edits, supplies, work speed or direct currency/reward changes. Actual downstream throughput remains unmeasured."
+  }
+}

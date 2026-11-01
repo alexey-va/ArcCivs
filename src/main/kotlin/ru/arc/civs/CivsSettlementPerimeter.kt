@@ -56,7 +56,20 @@ internal object CivsSettlementPerimeter {
         val externalFootprints = mutableMapOf<Long, MutableList<CivPosition>>()
         if (frame.fortified) for (p in externalPoints) for (dx in -2..2) for (dz in -2..2)
             externalFootprints.getOrPut(civsTerrainKey(p.x + dx, p.z + dz)) { mutableListOf() } += p
-        val retainedFloors = retainedRoutes.flatten().associate { civsTerrainKey(it.x, it.z) to it.y - 1 }
+        val retainedFloors = buildMap<Long, Int> {
+            for (feet in retainedRoutes.flatten()) {
+                val floor = feet.y - 1
+                surface.at(feet.x, feet.z)?.takeIf { it.loaded && it.groundY == floor && it.topY == floor }
+                    ?.let { putIfAbsent(civsTerrainKey(feet.x, feet.z), floor) }
+                // A retained centreline also owns its captured dirt-path shoulders, as infrastructure does.
+                for (dx in -1..1) for (dz in -1..1) {
+                    val x = feet.x + dx; val z = feet.z + dz
+                    val column = surface.at(x, z) ?: continue
+                    if (column.loaded && column.dirtPath && column.topY == column.groundY && abs(column.groundY - floor) <= 1)
+                        putIfAbsent(civsTerrainKey(x, z), column.groundY)
+                }
+            }
+        }
         fun clear(p: CivPosition) = surface.at(p.x, p.z)?.let { it.loaded &&
             (it.natural || it.waterTopY != null && it.waterBottomY != null && it.topY == it.waterTopY &&
                 it.groundY == it.waterTopY && it.waterTopY.toLong() - it.waterBottomY in 1L..CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH.toLong() ||

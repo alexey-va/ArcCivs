@@ -11,6 +11,12 @@ import kotlin.math.sin
 
 internal data class CivAutonomousDesign(val blueprint: CivBlueprint, val terrain: CivTerraformPlan? = null)
 
+/** The planner and its diagnostic export capture the same water-foundation domain. */
+internal fun civsAutonomousWaterColumns(frame: CivSettlementFrame, retainedGates: List<CivBox>): Set<Long> =
+    (listOf(frame.core) + frame.gates.map { it.passage } + retainedGates).flatMapTo(hashSetOf()) { box ->
+        (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
+    }
+
 /** Detached earthworks selection; the service owns durable SITE admission and construction. */
 internal class CivsAutonomousPlacement(
     private val blueprints: CivsBlueprints,
@@ -103,9 +109,7 @@ internal class CivsAutonomousPlacement(
             val fortification: CompletableFuture<CivFortificationTemplate?> = if (frame.halfWidth > 56 && surveyCity.autonomy?.plan == null &&
                 surveyCity.buildings.none { it.type.isInfrastructure }) blueprints.fortification(city.style)
                 else CompletableFuture.completedFuture(null)
-            val waterColumns = (listOf(frame.core) + frame.gates.map { it.passage } + oldPlan?.gates.orEmpty()).flatMapTo(hashSetOf()) { box ->
-                (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
-            }
+            val waterColumns = civsAutonomousWaterColumns(frame, oldPlan?.gates.orEmpty())
             val inputs = loadAccess(city).thenCombine(world.autonomousHeightField(city, hall, hall, waterColumns)) { access, surface -> access to surface }
                 .thenCombine(fortification) { input, template -> Triple(input.first, input.second, template) }
             CompletableFuture.allOf(*templates.values.toTypedArray()).thenCombineAsync(inputs, { _, input ->
