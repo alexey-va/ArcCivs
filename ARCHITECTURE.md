@@ -155,6 +155,9 @@ keeps its existing 8192 chunk-request and two-pending-load limits. Reference,
 prefix and ordinal still determine city identity across every page, so a partial
 result resumes without a second founding reserve. Every selected site still
 requires the complete layout and strict native foundation and volume proofs.
+Default style preference is nordic, medievaloak, birch, original, acacia, then
+medievaldarkoak and the remaining supported themes. Existing city styles are
+retained on continuation; an uncreated ordinal prefers an unused supported theme.
 Full shortlisted candidates rotate through the remaining requested styles, so
 an unsited earlier ordinal cannot monopolize every proof. Each candidate still
 receives one full proof; its ordinal remains fixed across asynchronous checks

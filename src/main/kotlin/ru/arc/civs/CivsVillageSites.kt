@@ -252,7 +252,7 @@ internal class CivsVillageSites(
     private val timer = tasks.runTimer(1, 1, ::pulse)
 
     fun supportedStyles(): List<String> {
-        val preferred = listOf("nordic", "medievaloak", "birch", "original", "medievaldarkoak")
+        val preferred = listOf("nordic", "medievaloak", "birch", "original", "acacia", "medievaldarkoak")
         return blueprints.availableStyles(BuildingType.TOWN_HALL).filter { style ->
             style !in setOf("underwater", "cavern", "spacewars") &&
                 THEME_TYPES.all { style in blueprints.availableStyles(it) }

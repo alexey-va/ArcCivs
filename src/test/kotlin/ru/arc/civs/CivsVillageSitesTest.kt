@@ -221,6 +221,57 @@ class CivsVillageSiteRejectionDetailsTest : FunSpec({
 })
 
 class CivsVillageSitesTest : FunSpec({
+    test("a fifth default village retry prefers supported acacia and preserves the four existing towns") {
+        villageScenario { s ->
+            every { s.blueprints.availableStyles(any()) } returns
+                listOf("medievaldarkoak", "original", "birch", "acacia", "medievaloak", "nordic")
+            val existing = s.seedExistingVillages(listOf("nordic", "medievaloak", "birch", "original"))
+            val fifth = CivsVillageSiteScoring.id(s.reference.id, "Auto-", 5)
+            val result = s.subject.search(s.reference, 5, "Auto-", batch = 2)
+            s.until { result.isDone }
+            result.join().complete shouldBe true
+            result.join().created.take(4).map { it.city } shouldBe existing.map { it.id }
+            result.join().created.take(4).map { it.style } shouldBe existing.map { it.style }
+            result.join().created.take(4).all { it.existing } shouldBe true
+            val receipt = result.join().created.last()
+            receipt.city shouldBe fifth
+            receipt.name shouldBe "Auto-5"
+            receipt.style shouldBe "acacia"
+            receipt.existing shouldBe false
+            s.fullCities.map { it.id } shouldBe listOf(fifth)
+            s.fullCities.single().style shouldBe "acacia"
+            s.siteProofs.single().cityId shouldBe fifth
+            s.admissions.size shouldBe 1
+            val founded = s.admissions.single().city
+            founded.id shouldBe fifth
+            founded.owner shouldBe s.reference.owner
+            founded.worldId shouldBe s.reference.worldId
+            founded.style shouldBe "acacia"
+            founded.settings shouldBe CivSettlementSettings(chunkLoading = true, immortalResidents = true,
+                autoConstructionMaterials = false)
+            founded.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
+            founded.inventory!!.materials.values.sum() shouldBe 216L
+            CivsVillageSiteScoring.completeProfile(requireNotNull(founded.autonomy?.plan)) shouldBe true
+            s.cities.filter { it.id in existing.map(Settlement::id) } shouldBe existing
+            val canonical = s.cities.toList()
+            val proofs = s.siteProofs.size
+            val surveys = s.surveys
+            val replay = s.subject.search(s.reference, 5, "Auto-", batch = 3)
+            s.until { replay.isDone }
+            replay.join().complete shouldBe true
+            replay.join().created.all { it.existing } shouldBe true
+            replay.join().created.map { it.style } shouldBe listOf("nordic", "medievaloak", "birch", "original", "acacia")
+            s.admissions.size shouldBe 1
+            s.siteProofs.size shouldBe proofs
+            s.surveys shouldBe surveys
+            s.cities shouldBe canonical
+            (s.peakRequests <= 8_192) shouldBe true
+            (s.peakPending <= 2) shouldBe true
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
     test("pending ordinals rotate three four five before retrying the first rejected town") {
         villageScenario { s ->
             val existing = s.seedExistingVillages()
@@ -1562,7 +1613,7 @@ private fun villageScenario(action: (VillageScenario) -> Unit) = failOnUnsupport
 }
 
 /** Existing canonical receipts are far from every candidate; they never enter the new founding callback. */
-private fun VillageScenario.seedExistingVillages(): List<Settlement> = listOf("nordic", "medievaloak").mapIndexed { index, style ->
+private fun VillageScenario.seedExistingVillages(styles: List<String> = listOf("nordic", "medievaloak")): List<Settlement> = styles.mapIndexed { index, style ->
     val ordinal = index + 1
     val id = CivsVillageSiteScoring.id(reference.id, "Auto-", ordinal)
     val hallId = UUID.nameUUIDFromBytes("arccivs-village-hall/$id".toByteArray(Charsets.UTF_8))

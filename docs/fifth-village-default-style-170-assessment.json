@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "plugin_version": "0.1.170",
+  "status": "verified_local_not_delivered",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "problem": "Four additional villages are developing. Repeated bounded searches for the fifth default theme medievaldarkoak have not found a fully eligible site. The owner requested five developing villages with immortal residents, without specifying their styles.",
+  "change": "Prefer the already supported acacia theme before medievaldarkoak. The first four preferences and existing settlement identities, styles, state and founding receipts remain unchanged. Every new site must still pass the full native proofs.",
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "search_before_equals_after": {
+    "items_minted": 0,
+    "items_burned": 0,
+    "building_block_writes_before_admission": 0,
+    "native_chunk_generation": "existing bounded native loading/generation is unchanged",
+    "maximum_requested_villages": 5,
+    "full_layout_plots": 34,
+    "finite_pages": 8,
+    "positions_per_page": 192,
+    "chunk_requests_per_explicit_search": 8192,
+    "pending_chunk_loads": 2,
+    "ore_support_volume_route_ownership_and_protection_guards": "unchanged"
+  },
+  "founding_reserve_before_equals_after": {
+    "per_new_ID": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "five_total": {
+      "logs": 480,
+      "cobblestone": 480,
+      "bread": 120
+    },
+    "repeat_existing_ID": 0,
+    "remaining_one": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    }
+  },
+  "economic_limits": "No price, payout, chance, production rate, work duration, supply allowance or starting reserve changes. Native material requirements and ordinary construction work depend on the accepted existing blueprint. Their realized totals and subsequent normal supply grants are not measured before founding; zero indirect item impact and self-sufficiency are not claimed.",
+  "income_model": {
+    "active_SELL": "unchanged; no invented item price or realized income",
+    "planned_SELL_to_contract": "future/SHADOW, separate from active income"
+  },
+  "acceptance": "Local style-selection and continuation checks, production JAR and consumer verification, then a native fifth founding with immortal residents and ordinary paid construction. Source, delivery, activation, native behavior and client visuals remain separate.",
+  "verification": {
+    "causal_RED": {
+      "tests": 46,
+      "expected_failures": 1,
+      "other_passed": 45,
+      "errors": 0,
+      "skipped": 0
+    },
+    "focused_GREEN": {
+      "tests": 341,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "source_review": "clean_exact_ae66ff9b_a5fd1531",
+    "production_jar": "pass_ArcCore0.1.28",
+    "consumer": "pass2.7.81",
+    "full_CI": "not_started",
+    "delivery": "not_delivered",
+    "activation": "not_active",
+    "fifth_native_founding": "not_observed",
+    "native_client": "not_observed"
+  }
+}
