@@ -24,6 +24,146 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsControlRelocationTest : FunSpec({
+    test("completed asynchronous sources survive more than 64 current control identities") {
+        ControlRelocationFixture().use { h ->
+            val cities = List(67) { index ->
+                CivsRules.validate(h.city.copy(id = UUID(182, index.toLong()), buildings = listOf(
+                    h.hall.copy(id = UUID(183, index.toLong())))))
+            }
+            val requests = mutableMapOf<UUID, Int>()
+            val observed = mutableSetOf<UUID>()
+            val outstanding = mutableListOf<Pair<CivBuilding, CompletableFuture<List<CivControlCandidate>>>>()
+            var now = 0L
+            CivsControlRelocations(h.plugin, h.tasks, h.worldAdapter, h.storage, h.installations, { building ->
+                requests.merge(building.id, 1, Int::plus)
+                object : CompletableFuture<List<CivControlCandidate>>() {
+                    override fun getNow(valueIfAbsent: List<CivControlCandidate>): List<CivControlCandidate> {
+                        observed += building.id
+                        return super.getNow(valueIfAbsent)
+                    }
+                }.also { outstanding += building to it }
+            }, { cities }, { true }, { _, _, _, _ -> error("An existing interior marker must stay") },
+                { _, _ -> error("An existing interior marker must stay") }, { now }).use { owner ->
+                repeat(cities.size * 3) {
+                    owner.pulse()
+                    // Decoding finishes after this pulse, before the next one. No native arrival is simulated.
+                    outstanding.forEach { (building, future) -> future.complete(listOf(CivControlCandidate(
+                        building.control!!, building.control!!.copy(z = building.control!!.z + 1), existing = true))) }
+                    outstanding.clear()
+                    now += 5_000L
+                }
+                requests.values.maxOrNull() shouldBe 1
+                observed shouldBe cities.map { it.buildings.single().id }.toSet()
+            }
+        }
+    }
+
+    test("a selected async source starts its real relocation on the next pulses and keeps one active lifecycle") {
+        ControlRelocationFixture().use { h ->
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.original, h.hall)))
+            h.storage.updateCity(h.city)
+            h.durable()
+            val item = ItemStack(Material.DIAMOND, 7).apply {
+                itemMeta = itemMeta.apply { displayName(Component.text("Original selected control")) }
+            }
+            h.oldInventory.setItem(0, item)
+            val decoded = CompletableFuture<List<CivControlCandidate>>()
+            var requests = 0
+            var now = 0L
+            h.relocations(candidates = { building ->
+                building.id shouldBe h.original.id
+                requests++
+                decoded
+            }, clock = { now }).use { owner ->
+                owner.pulse()
+                val standing = h.replacement.copy(z = h.replacement.z + 1)
+                decoded.complete(listOf(CivControlCandidate(h.replacement, standing, existing = false,
+                    route = listOf(standing.copy(z = standing.z + 1), standing))))
+                now = 1_000L; owner.pulse()
+                h.mutations shouldBe 0
+                now = 2_000L; owner.pulse()
+                // The native proof may yield after its first step at the existing 2 ms budget.
+                if (h.stagingBarriers == 0) { now = 3_000L; owner.pulse() }
+                h.stagingBarriers shouldBe 1
+                h.city.pendingControls!!.size shouldBe 1
+                h.building.control shouldBe h.old
+                repeat(10) { now += 1_000L; owner.pulse() }
+                requests shouldBe 1
+                h.stagingBarriers shouldBe 1
+                h.transactions shouldBe 0
+                h.oldInventory.getItem(0) shouldBe item
+                h.stagingFence.complete(Unit); h.ticks()
+                h.fence.complete(Unit); h.ticks()
+                owner.drained().join()
+                h.transactions shouldBe 1
+                h.building.control shouldBe h.replacement
+                h.block(h.old).type shouldBe Material.AIR
+                h.replacementInventory.getItem(0) shouldBe item
+                h.city.pendingControls shouldBe emptyList()
+            }
+        }
+    }
+
+    test("unfinished source work does not stall other buildings and is retired only when its identity disappears") {
+        ControlRelocationFixture().use { h ->
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.original, h.hall)))
+            val sources = mutableMapOf<CivBuilding, CompletableFuture<List<CivControlCandidate>>>()
+            var now = 0L
+            h.relocations(candidates = { building ->
+                CompletableFuture<List<CivControlCandidate>>().also { sources[building] = it }
+            }, clock = { now }).use { owner ->
+                owner.pulse()
+                now = 1_000L; owner.pulse()
+                sources.keys shouldBe setOf(h.original, h.hall)
+                val changed = h.original.copy(schematicId = "fixture/replaced-source")
+                h.city = CivsRules.validate(h.city.copy(buildings = listOf(changed, h.hall)))
+                now = 2_000L; owner.pulse()
+                sources.getValue(h.original).isCancelled shouldBe true
+                sources.getValue(h.hall).isCancelled shouldBe false
+                sources.containsKey(changed) shouldBe true
+                h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.hall)))
+                now = 3_000L; owner.pulse()
+                sources.getValue(changed).isCancelled shouldBe true
+                sources.getValue(h.hall).isCancelled shouldBe false
+                h.mutations shouldBe 0
+            }
+            sources.getValue(h.hall).isCancelled shouldBe true
+        }
+    }
+
+    test("a busy retirement commit waits five seconds then resumes the same receipt without transferring again") {
+        ControlRelocationFixture().use { h ->
+            h.durable()
+            val item = ItemStack(Material.DIAMOND, 7)
+            h.oldInventory.setItem(0, item)
+            h.acceptIntent(staging = true)
+            h.stagingFence = CompletableFuture.completedFuture(Unit)
+            h.fence = CompletableFuture.completedFuture(Unit)
+            h.rejectRetirementOnce = true
+            var now = 0L
+            h.relocations(candidates = { building -> CompletableFuture.completedFuture(listOf(CivControlCandidate(
+                building.control!!, building.control!!.copy(z = building.control!!.z + 1), existing = true)))
+            }, clock = { now }).use { owner ->
+                owner.pulse(); h.ticks()
+                h.rejectRetirementOnce shouldBe false
+                h.city.pendingControls!!.size shouldBe 1
+                h.building.control shouldBe h.replacement
+                h.block(h.old).type shouldBe Material.AIR
+                h.replacementInventory.getItem(0) shouldBe item
+                h.transactions shouldBe 1
+                val attempts = h.retirementAttempts
+                for (time in 1_000L..4_000L step 1_000L) { now = time; owner.pulse(); h.ticks() }
+                h.retirementAttempts shouldBe attempts
+                h.city.pendingControls!!.size shouldBe 1
+                now = 5_000L; owner.pulse(); h.ticks(); owner.drained().join()
+                h.city.pendingControls shouldBe emptyList()
+                h.retirementAttempts shouldBe attempts + 1
+                h.transactions shouldBe 1
+                h.replacementInventory.getItem(0) shouldBe item
+            }
+        }
+    }
+
     test("a full control stages its own empty receiver and moves all 27 exact slots without another container") {
         ControlRelocationFixture(BuildingType.TOWN_HALL).use { h ->
             h.durable()
@@ -320,7 +460,8 @@ private fun controlTestOrder(building: CivBuilding): CivConstruction = CivConstr
 private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTERY) : AutoCloseable {
     val paper = MockBukkitTestRuntime.open()
     val plugin = paper.createSimplePlugin("ControlRelocationTest")
-    val world = paper.addSimpleWorld("control-relocation").also { it.loadChunk(0, 0); it.loadChunk(1, 0) }
+    val world = CivsWorksiteWorldFixture("control-relocation").also(paper.server::addWorld)
+        .also { it.loadChunk(0, 0); it.loadChunk(1, 0) }
     val old = CivPosition(11, 64, 10)
     val replacement = CivPosition(4, 64, 4)
     val receiver = CivPosition(6, 64, 6)
@@ -339,6 +480,8 @@ private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTER
     var stagingBarriers = 0
     var mutations = 0
     var transactions = 0
+    var rejectRetirementOnce = false
+    var retirementAttempts = 0
     var lastTransaction: CivInventoryTransaction? = null
     private val busy = mutableSetOf<UUID>()
     private val unhealthy = mutableSetOf<UUID>()
@@ -390,6 +533,13 @@ private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTER
     fun mutate(id: UUID, transform: (Settlement) -> Settlement): CompletableFuture<Settlement> {
         id shouldBe city.id
         val next = transform(city)
+        if (city.pendingControls.orEmpty().isNotEmpty() && next.pendingControls.orEmpty().isEmpty()) {
+            retirementAttempts++
+            if (rejectRetirementOnce) {
+                rejectRetirementOnce = false
+                return CompletableFuture.failedFuture(CivsRejection("city-busy"))
+            }
+        }
         city = if (durableRoot == null) next else store.save(next).join()
         storage.updateCity(city)
         mutations++
@@ -413,8 +563,9 @@ private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTER
     fun durable() { store.save(city).join() }
     fun reload() { city = store.load().join().single(); storage.updateCity(city) }
     fun ticks() { paper.performTicks(20) }
-    fun relocations(): CivsControlRelocations = CivsControlRelocations(plugin, tasks, worldAdapter, storage, installations,
-        { CompletableFuture.completedFuture(emptyList()) }, { listOf(city) },
+    fun relocations(candidates: (CivBuilding) -> CompletableFuture<List<CivControlCandidate>> = { CompletableFuture.completedFuture(emptyList()) },
+        clock: () -> Long = { 10_000L }): CivsControlRelocations = CivsControlRelocations(plugin, tasks, worldAdapter, storage, installations,
+        candidates, { listOf(city) },
         { it.id !in busy && it.id !in unhealthy && !journal.pending(it.id) }, { saved, current, from, to ->
             val id = UUID.randomUUID()
             storage.reserve(saved, id)
@@ -429,7 +580,7 @@ private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTER
                 busy += saved.id
                 journal.submitRelocation(saved, tx)
             }
-        }, ::mutate, { 10_000L })
+        }, ::mutate, clock)
     override fun close() {
         tasks.close(); storage.close(); paper.close()
         durableRoot?.let { root -> store.close(); root.toFile().deleteRecursively() }

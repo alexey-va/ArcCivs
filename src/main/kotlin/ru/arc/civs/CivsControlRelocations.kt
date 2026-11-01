@@ -20,7 +20,7 @@ internal fun civsControlOccupied(plugin: Plugin, worldId: UUID, point: CivPositi
         point.x + 1.0, point.y + 1.0, point.z + 1.0))
 }
 
-/** One bounded relocation every five seconds; accepted inventory and pending-control receipts own recovery. */
+/** One bounded proof or relocation at a time; accepted inventory and pending-control receipts own recovery. */
 internal class CivsControlRelocations(
     private val plugin: Plugin,
     private val tasks: LifecycleTaskScope,
@@ -36,8 +36,10 @@ internal class CivsControlRelocations(
     private val blocked: (UUID, CivPosition) -> Boolean = { _, _ -> false },
 ) : AutoCloseable {
     private val sources = linkedMapOf<CivBuilding, CompletableFuture<List<CivControlCandidate>>>()
+    private val awaiting = linkedSetOf<CivBuilding>()
     private val active = linkedSetOf<CompletableFuture<Settlement>>()
-    private val failures = mutableMapOf<UUID, String>()
+    private data class Failure(val reason: String, val after: Long)
+    private val failures = mutableMapOf<UUID, Failure>()
     private var cursor = 0
     private var after = 0L
     private var closed = false
@@ -54,10 +56,20 @@ internal class CivsControlRelocations(
         if (closed || active.isNotEmpty()) return
         proof?.let { pending -> prove(pending); return }
         if (now < after) return
-        after = now + 5_000L
-        val choices = cityProvider().filter { it.autonomy != null && it.inventory?.mode == CivStorageMode.PHYSICAL &&
+        after = now + 1_000L
+        val cities = cityProvider()
+        // Keep completed source work until its exact live building changes or disappears. A fixed
+        // FIFO smaller than the settlement set can evict every answer before the next rotation.
+        val current = cities.flatMap { it.buildings }.toSet()
+        sources.entries.removeIf { (building, source) ->
+            (building !in current).also { removed -> if (removed) source.cancel(false) }
+        }
+        awaiting.retainAll(current)
+        failures.keys.retainAll(current.map { it.id }.toSet())
+        val choices = cities.filter { it.autonomy != null && it.inventory?.mode == CivStorageMode.PHYSICAL &&
             it.pendingDeletion == null && available(it) }.flatMap { city ->
             city.buildings.filter { it.phase == BuildingPhase.ACTIVE && CivsBuildingControls.supported(it.type) &&
+                now >= (failures[it.id]?.after ?: 0L) &&
                 it.control?.let { p -> it.bounds.contains(p.x, p.y, p.z) } == true &&
                 city.construction?.buildingId != it.id &&
                 city.pendingControls.orEmpty().none { pending -> pending.buildingId == it.id && pending.retire == null }
@@ -66,7 +78,11 @@ internal class CivsControlRelocations(
         if (choices.isEmpty()) return
         val recovering = choices.filter { (city, building) -> city.pendingControls.orEmpty().any { it.buildingId == building.id && it.retire != null } }
         val queue = recovering.ifEmpty { choices }
-        val (city, building) = queue[Math.floorMod(cursor++, queue.size)]
+        // A decode finishing between pulses is consumed promptly. An unfinished decode does not
+        // stall other buildings, and already checked sources do not monopolize this priority.
+        val (city, building) = queue.firstOrNull { (_, building) ->
+            building in awaiting && sources[building]?.isDone == true
+        } ?: queue[Math.floorMod(cursor++, queue.size)]
         runCatching {
             val pending = city.pendingControls.orEmpty().firstOrNull { it.buildingId == building.id && it.retire != null }
             if (pending != null) track(city, building, resume(city, building, pending))
@@ -106,11 +122,12 @@ internal class CivsControlRelocations(
     private fun select(city: Settlement, building: CivBuilding): List<CivControlCandidate>? {
         var source = sources[building]
         if (source == null) {
-            if (sources.size >= 64) sources.entries.first().let { sources.remove(it.key); it.value.cancel(false) }
             source = candidates(building)
             sources[building] = source
+            awaiting += building
         }
         if (!source.isDone) return null
+        awaiting -= building
         val points = try { source.getNow(emptyList()) } catch (failure: CompletionException) {
             sources.remove(building)
             throw failure
@@ -208,7 +225,7 @@ internal class CivsControlRelocations(
 
     private fun report(city: Settlement, building: CivBuilding, failure: Throwable) {
         val reason = CivsDiagnostics.rejection(failure)?.reason ?: failure.javaClass.name
-        if (failures.put(building.id, reason) != reason) CivsDiagnostics.record(Level.WARNING, city.id,
+        if (failures.put(building.id, Failure(reason, clock() + 5_000L))?.reason != reason) CivsDiagnostics.record(Level.WARNING, city.id,
             "ArcCivs control relocation waiting building=${building.id} schematic=${building.schematicId} reason=$reason retry_ms=5000", plugin.logger, failure)
     }
 
@@ -219,6 +236,7 @@ internal class CivsControlRelocations(
         proof = null
         sources.values.forEach { it.cancel(false) }
         sources.clear()
+        awaiting.clear()
     }
     private fun reject(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason) }
 }
