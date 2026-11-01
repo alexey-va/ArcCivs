@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "title": "ArcCivs179: occupancy-aware physical food stance and upkeep input diagnostics",
+  "plugin_version": "0.1.179",
+  "status": "reviewed_for_implementation",
+  "baseline": "ArcCivs178 source266f689a1327eeecf0a60b5c377610758a0433a9 activeSpawn19:10:14UTC; nativefoodstancecontention19:15-19:17UTC",
+  "participants": [
+    1,
+    2,
+    7
+  ],
+  "currencies": {
+    "Vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "premium_tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "player_XP": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "existing_food_control_pickup",
+          "kind": "mint",
+          "source": "Native owner control inventory food pickup",
+          "basis": "Transfers and consumes already present ordinary food; no direct currency or XP reward.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "proposed_change": "Use existing live occupancy/arrival reservations when selecting among existing supported native-reachable food stances, keep exact native container reach/body/pickup receipts. Extend existing bounded cached supply debug withCOBBLESTONE/store and matching upkeep worker requests before truncation. No new item source, inventory scan budget, price, reward, capacity, permission or collider rule. If confirmed that requested-input routing only accepts warehouses, allow existing producer output stock to fulfill the same accepted native input request through ordinary cargo transfer and existing output/input slot roles, source availability, destination capacity and journal checks. No warehouse expansion, item deletion, teleport or free materials. Living-worker container/ground pickup uses the same full-body/hazard/liquid/nine-sample support checks with existing packet .13 tolerance; corpse placement/resurrection retain .02. Retain already reachable actual food pickup before selecting another occupied-side alternative. No ray/collision/quantity/quota relaxation.",
+  "physical_item_flow": {
+    "mint_delta": 0,
+    "food": "Same existing native slot debit and bag credit, pickup batch4, normalbreadmeal3; selecting a free supported side adds no food.",
+    "upkeep": "Diagnostics do not transfer items. Existing input1COBBLESTONE and16-itembuffer remain unchanged.",
+    "producer_to_input": "Existing producer outputCOBBLESTONE → same physical courier cargo → accepted builder-hut input request, under unchanged per-trip/request/buffer limits. Native source debit=carried credit=destination credit, mint0. Earlier warehouse intermediary can be full; no items are discarded or duplicated."
+  },
+  "direct_currency_delta": {
+    "Vault": 0,
+    "premium_tokens": 0,
+    "player_XP": 0
+  },
+  "rates_and_limits": "Existing work quotas, delays, hunger periods, pickup batch4, upkeep buffer16, prices and rewards unchanged. Restoring legal supply/work journeys may change downstream production; measured daily throughput unknown. Restoring direct use of existing producer output for an accepted input request may change routing/throughput; neither production rate nor reward probability/quantity changes. Exact accepted request quantity remains authoritative.",
+  "assumptions": [
+    "Sensitivityparticipants1/2/7 and0/1/4events/day are not measured player activity or new caps.",
+    "Unlocking food may restore ordinary work, material use and later production; total downstream throughput is unmeasured.",
+    "Current SELL and futureSHADOWcontracts remain distinct; no invented item-to-currency price."
+  ],
+  "native_acceptance": "Observe actualV5builderonlegalDIRT_PATH supportedfeetpickexistingbread withbodyclear+native3ray, acceptedmeal thenordinarysamewarehouseprogress; observeAuto2existingCOBBLEproducer→acceptedhutnativecargo, consumedrepairinputs andordinaryQUARRY2admission. Corpse.02unchanged, no grants/forcedarrival/teleport/worldedit.",
+  "observed_before": {
+    "Village-5": "Multiple real residents share first statically valid food stance. Builder reaches its centre, but arrivalBodyClear forbids pickup while another resident occupies it; same target selected after5sretry, originalwarehousebatch571pending.",
+    "Auto2": "Builders now enter ordinary native pickup correctly but hutpickupreturnsno-opCOBBLE0. Other couriers complete5shipments; noCOBBLEshipmentseen. CurrentdebugstoreviewonlyIRON_PICKAXE andtruncatedrequestprefix omitsupkeeprequest; globalfunds/acceptedrequestunknown.",
+    "Auto2_native_input_read": "2026-11-01T19:21:51/56Z direct native control reads: QUARRY L3 COBBLESTONE1091 and L1 COBBLESTONE704; warehouse controls0/0, builder hut0. Existing warehouses full. Thus physical input exists in producer controls, not hut/warehouse controls; full holder breakdown still requires existing slot-role guards.",
+    "Village-5_fractional_support": "Exact native891cell capture: original stance supported/body-clear, floorDIRT_PATH top64.9375, actorfeet65. Container access reused corpse .02 support tolerance while packet motion admits .13, so actuallegalfractionalfeet rejected. Onlyone staticcanonicalstance observed; no free alternate is asserted."
+  },
+  "cargo_admission": "NewdirectInputdefaultfalse marker admits only PHYSICAL ordinary accepted input from producer surplus when assigned depot has no room; unpicked native proof and currentrequest checked, carried receipt ownership remains. Existing0/oldmarker behavior unchanged; downgrade requires ordinary unload and journal retirement, no cargo clearing.",
+  "resident_profession_effect": "Each ordinary native unload still grants its existing oneWAREHOUSE profession point under its existing cap. A direct accepted input trip can replace an otherwise blockedtwo-hop route; no playerXP reward is added. Aggregate resident training/production throughput is unmeasured."
+}

@@ -50,15 +50,20 @@ internal fun civsCorpsePlacementValid(geometry: CivsCorpseGeometry): Boolean {
 }
 
 /** Recheck an already accepted resurrection point without moving it or loading chunks. */
-internal fun civsCorpseStandingSafe(location: Location): Boolean {
+internal fun civsCorpseStandingSafe(location: Location): Boolean = civsStandingSafe(location, .02)
+
+/** Living packet residents retain their native walking support tolerance at inventory endpoints. */
+internal fun civsResidentStandingSafe(location: Location): Boolean = civsStandingSafe(location, .13)
+
+private fun civsStandingSafe(location: Location, supportTolerance: Double): Boolean {
     val world = location.world ?: return false
     val body = BoundingBox(location.x - .299, location.y + .001, location.z - .299,
         location.x + .299, location.y + 1.799, location.z + .299)
-    return citizenSleepClear(world, body) && corpseBodySupported(world, body, location.y)
+    return citizenSleepClear(world, body) && corpseBodySupported(world, body, location.y, supportTolerance)
 }
 
 /** Head, torso and legs have real support across the body width, including fractional collision tops. */
-private fun corpseBodySupported(world: World, body: BoundingBox, floorY: Double): Boolean {
+private fun corpseBodySupported(world: World, body: BoundingBox, floorY: Double, tolerance: Double = .02): Boolean {
     val inset = minOf(.1, body.widthX / 4, body.widthZ / 4)
     val xs = listOf(body.minX + inset, body.centerX, body.maxX - inset)
     val zs = listOf(body.minZ + inset, body.centerZ, body.maxZ - inset)
@@ -68,7 +73,7 @@ private fun corpseBodySupported(world: World, body: BoundingBox, floorY: Double)
         val bx = floor(x).toInt(); val bz = floor(z).toInt()
         if (!citizenChunkReady(world, bx shr 4, bz shr 4)) false
         else world.getBlockAt(bx, y, bz).let { block -> !block.isLiquid && block.type !in corpseUnsafeSupport && block.collisionShape.boundingBoxes.any {
-            abs(y + it.maxY - floorY) <= .02 && x - bx in it.minX..it.maxX && z - bz in it.minZ..it.maxZ
+            abs(y + it.maxY - floorY) <= tolerance && x - bx in it.minX..it.maxX && z - bz in it.minZ..it.maxZ
         } }
     } }
 }

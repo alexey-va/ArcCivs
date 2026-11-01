@@ -308,6 +308,16 @@ body occupancy and route reservations when choosing a supported hall barrel side
 an unadmitted route cannot leave the actor claiming to travel to food.
 Food route arrival also requires the same exact native container reach as motion
 and pickup; the coarse standing radius alone cannot finish that detour.
+Living-worker pickup retains the full body, liquid, hazard and nine-point support
+checks with the same 0.13-block floor tolerance as packet movement. Legal path
+heights must not be rejected as floating; corpse placement and resurrection keep
+their existing 0.02-block support tolerance.
+Physical food first accepts an already supported, body-clear native pickup in reach.
+A new route uses the same bounded supported-side candidates with live body
+occupancy and arrival reservations. A free selected side stays stable; an occupied
+side is replaced before routing. If every candidate is occupied, the normal
+blocked route retains existing resident separation; pickup still requires
+actual supported, body-clear feet and native reach.
 An interrupted work detour returns to its existing target without earning travel
 time or losing already observed work. Child lessons likewise require four fresh
 seconds after interruption and grant at most ten education points before adulthood.
@@ -771,7 +781,15 @@ room, destination room and actual arrival before the existing durable receipt. T
 reservations end only before pickup or at a definitive receipt outcome; unknown commits remain
 under recovery authority. Carried cargo remains durable even if its destination becomes full.
 Source-to-destination entrances must be within the existing
-88-block work-route bound. Warehouses use their own indexed native containers;
+88-block work-route bound. When the assigned warehouse has no native room for a
+requested input, an ordinary accepted input request may receive existing producer
+surplus directly. The same pickup rechecks demand, source desired/craft/construction
+reserves, native stock, capacity and arrival; construction requests and closed stock
+keep their existing routes. The backward-compatible `directInput=false` cargo marker
+identifies new direct trips. Accepted carried cargo keeps its ownership when demand
+or a producer later changes. Downgrading below this support requires every direct
+batch to unload normally and every before/after journal containing it to retire;
+removing a marker or clearing cargo is not a rollback. Warehouses use their own indexed native containers;
 ordinary producer sources and destinations are strictly their control barrels.
 Worksite orders include one spare IRON_HOE, IRON_AXE or IRON_PICKAXE per assigned
 worker, according to job; FARM requests only its selected seed type.

@@ -305,7 +305,7 @@ class CivsSupplyDispatcherTest : FunSpec({
         }
     }
 
-    test("focused supply diagnostics expose accepted tool stock capacity shipments and target craft without recapture") {
+    test("focused supply diagnostics expose accepted tool and upkeep stock requests before truncation without recapture") {
         MockBukkitTestRuntime.open().use { paper ->
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SupplyDiagnostics")))
             val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0L })
@@ -320,7 +320,7 @@ class CivsSupplyDispatcherTest : FunSpec({
                 stock = mapOf("IRON_PICKAXE" to 1L))
             val quarry = base.stores.getValue(SUPPLY_TARGET).copy(type = BuildingType.QUARRY,
                 stock = mapOf("COBBLESTONE" to 32L), desiredStock = mapOf("IRON_PICKAXE" to 1L),
-                outputMaterial = "COBBLESTONE", capacity = CivSupplyCapacity(1, emptyMap(), outputEmptySlots = 0))
+                outputMaterial = "COBBLESTONE", capacity = CivSupplyCapacity(1, mapOf("COBBLESTONE" to 12L), outputEmptySlots = 0))
             val sources = (0..7).map { n -> warehouse.copy(id = UUID(0, 200L + n), type = BuildingType.SMELTERY,
                 control = CivPosition(20 + n, 64, 0), outputMaterial = "IRON_INGOT") }
             fun observed(value: CivSupplySnapshot, startedAt: Long): CivSupplySnapshot {
@@ -333,7 +333,8 @@ class CivsSupplyDispatcherTest : FunSpec({
                     startedAtMillis = startedAt, complete = true)))
             }
             val requests = (listOf(warehouse) + sources).map { CivSupplyRequest(it.id, "DIRT", 1, 0) } +
-                CivSupplyRequest(quarry.id, "IRON_PICKAXE", 1, 0)
+                CivSupplyRequest(quarry.id, "IRON_PICKAXE", 1, 0) +
+                CivSupplyRequest(quarry.id, "COBBLESTONE", 16, 4)
             var input = observed(base.copy(stores = (listOf(warehouse) + sources + quarry).associateBy { it.id },
                 requests = requests, couriers = base.couriers.take(1).map { it.copy(bagRoom = mapOf("IRON_PICKAXE" to 1L)) },
                 stackSizes = base.stackSizes + mapOf("IRON_PICKAXE" to 1, "DIRT" to 64)), 100)
@@ -365,17 +366,27 @@ class CivsSupplyDispatcherTest : FunSpec({
                 rows.size shouldBe 8
                 val focus = rows.first() as Map<*, *>
                 focus["building"] shouldBe quarry.id.toString()
-                focus["plainStock"] shouldBe mapOf("IRON_PICKAXE" to 0L)
-                focus["desiredStock"] shouldBe mapOf("IRON_PICKAXE" to 1L)
-                focus["capacity"] shouldBe mapOf("emptySlots" to 1, "partialRoom" to mapOf("IRON_PICKAXE" to 0L),
+                focus["plainStock"] shouldBe mapOf("IRON_PICKAXE" to 0L, "COBBLESTONE" to 32L)
+                focus["desiredStock"] shouldBe mapOf("IRON_PICKAXE" to 1L, "COBBLESTONE" to 0L)
+                focus["capacity"] shouldBe mapOf("emptySlots" to 1,
+                    "partialRoom" to mapOf("IRON_PICKAXE" to 0L, "COBBLESTONE" to 12L),
                     "outputEmptySlots" to 0, "virtualRoom" to null)
                 val relay = rows.map { it as Map<*, *> }.single { it["building"] == warehouse.id.toString() }
-                relay["plainStock"] shouldBe mapOf("IRON_PICKAXE" to 1L)
+                relay["plainStock"] shouldBe mapOf("IRON_PICKAXE" to 1L, "COBBLESTONE" to 0L)
                 relay["upgradingOrder"] shouldBe upgrade.toString()
-                (first["acceptedRequests"] as Map<*, *>)["total"] shouldBe 1
+                val focusedRequests = first["acceptedRequests"] as Map<*, *>
+                focusedRequests["total"] shouldBe 2
+                ((focusedRequests["entries"] as List<*>).first() as Map<*, *>) shouldBe mapOf(
+                    "building" to quarry.id.toString(), "material" to "COBBLESTONE", "needed" to 16L,
+                    "inTransit" to 4L, "construction" to false)
                 (first["assignments"] as Map<*, *>)["total"] shouldBe 1 // Physical-container cargo has no source worker ID.
                 val unfiltered = entry(false)
-                (unfiltered["acceptedRequests"] as Map<*, *>)["total"] shouldBe 10
+                val unfilteredRequests = unfiltered["acceptedRequests"] as Map<*, *>
+                unfilteredRequests["total"] shouldBe 11
+                unfilteredRequests["truncated"] shouldBe true
+                ((unfilteredRequests["entries"] as List<*>).first() as Map<*, *>)["material"] shouldBe "COBBLESTONE"
+                val unfilteredStores = unfiltered["acceptedStores"] as Map<*, *>
+                ((unfilteredStores["entries"] as List<*>).first() as Map<*, *>)["building"] shouldBe quarry.id.toString()
                 val smith = sources.first().copy(type = BuildingType.BLACKSMITH, stock = emptyMap())
                 input = observed(input.copy(stores = input.stores.mapValues { (_, store) ->
                     if (store.id == smith.id) smith else store.copy(stock = store.stock - "IRON_PICKAXE" +

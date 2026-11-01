@@ -53,20 +53,27 @@ internal class CivsCitizenLogistics(
             now < actor.supplyRetryAt) return false
         if (world.time !in 12_000L..23_000L && worker.cargo == null && CivsResidents.hunger(worker) <= 14 &&
             residentFoods.carried(city, worker) == null) {
-            val physical = actor.foodPickupSource ?: residentFoodSource(city, worker)
-            if (physical != null) {
-                if (actor.foodPickupSource != physical) {
+            val candidate = actor.foodPickupSource ?: residentFoodSource(city, worker)
+            if (candidate != null) {
+                if (actor.foodPickupSource != candidate) {
                     workRuntime.rememberWorkDetour(actor)
                     routes.cancelRoute(actor)
                     leisure.stopCamp(actor, "food")
-                    actor.foodPickupSource = physical
-                    actor.foodSource = physical.buildingId
+                    actor.foodPickupSource = candidate
+                    actor.foodSource = candidate.buildingId
                 }
                 actor.cycle.deferWork(now)
-                if (civsCanReachContainer(actor.npc.location, physical.container) && routes.arrivalBodyClear(actor)) {
+                if (civsCanReachContainer(actor.npc.location, candidate.container) && routes.arrivalBodyClear(actor)) {
                     routes.cancelRoute(actor)
-                    beginSupplies(actor, physical.buildingId, now, false)
+                    beginSupplies(actor, candidate.buildingId, now, false)
                 } else {
+                    // A shared sole approach keeps its ordinary route so existing body separation can make progress.
+                    val standing = routes.foodStanding(actor, city, candidate) ?: candidate.standing
+                    val physical = candidate.copy(standing = standing)
+                    if (actor.foodPickupSource != physical) {
+                        routes.cancelRoute(actor)
+                        actor.foodPickupSource = physical
+                    }
                     runtime.statuses[worker.id] = "moving-to-storage"
                     if (actor.route?.let { it.completion != null || it.timedOut(now) } == true) {
                         routes.cancelRoute(actor)

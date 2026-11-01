@@ -74,7 +74,7 @@ internal fun civsCollectionHome(city: Settlement, worker: CivWorker): CivBuildin
 
 internal fun civsCanReachContainer(feet: Location, point: CivPosition): Boolean {
     val world = feet.world ?: return false
-    return civsCorpseStandingSafe(feet) && citizenChunkReady(world, point.x shr 4, point.z shr 4) &&
+    return civsResidentStandingSafe(feet) && citizenChunkReady(world, point.x shr 4, point.z shr 4) &&
         citizenCanReachBlock(world, feet.clone().add(0.0, 1.5, 0.0), point, 3.0)
 }
 
@@ -87,7 +87,7 @@ internal fun civsGroundItemAvailable(item: Item, workerId: UUID): Boolean = item
 internal fun civsCanCollect(feet: Location, item: Item, workerId: UUID, reach: Double = 2.0): Boolean {
     val world = feet.world ?: return false
     if (item.world.uid != world.uid || !civsGroundItemAvailable(item, workerId) ||
-        feet.distanceSquared(item.location) > reach * reach || !civsCorpseStandingSafe(feet)) return false
+        feet.distanceSquared(item.location) > reach * reach || !civsResidentStandingSafe(feet)) return false
     val eye = feet.clone().add(0.0, 1.5, 0.0)
     val target = item.location.clone().add(0.0, .1, 0.0)
     val direction = target.toVector().subtract(eye.toVector())

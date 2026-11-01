@@ -159,7 +159,7 @@ internal class CivsCargoRequests(
                 }
                 val accepted = courierPlan(city, worker)?.takeUnless { it.carrying }?.cargo ?: throw CivsRejection("stale-delivery")
                 rejectIf(accepted.id != requested.id || accepted.sourceEntrance != requested.sourceEntrance ||
-                    accepted.redistribution != requested.redistribution, "stale-delivery")
+                    accepted.redistribution != requested.redistribution || accepted.directInput != requested.directInput, "stale-delivery")
                 if (accepted.redistribution) {
                     rejectIf(accepted != requested, "stale-delivery")
                     return@afterCityAvailable pickupRedistribution(city, worker, accepted)
@@ -184,6 +184,7 @@ internal class CivsCargoRequests(
                     }
                 }
                 rejectIf(accepted.sourceWorkerId != null, "stale-delivery")
+                rejectIf(accepted.directInput && !CivsLogistics.directInputAllowed(city, accepted), "stale-delivery")
                 val sourceCount = storage.buildingAvailable(city, accepted.sourceBuildingId)[accepted.material] ?: 0L
                 val available = run {
                     val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else {
@@ -196,10 +197,11 @@ internal class CivsCargoRequests(
                     }
                     (sourceCount - reserve).coerceAtLeast(0)
                 }
-                val needed = if (accepted.sourceBuildingId != accepted.warehouseId) CivsLogistics.MAX_CARGO else {
+                val needed = if (accepted.sourceBuildingId != accepted.warehouseId && !accepted.directInput) CivsLogistics.MAX_CARGO else {
                     val local = residentSupplies.localStocks(city)
                     (CivsLogistics.requests(city, local) + residentSupplies.workSupplyRequests(city, local)).firstOrNull { request ->
-                        request.material == accepted.material && (request.buildingId == accepted.targetBuildingId ||
+                        (!accepted.directInput || !request.construction) && request.material == accepted.material &&
+                            (request.buildingId == accepted.targetBuildingId ||
                             request.construction && city.construction?.let { order ->
                                 CivsRules.constructionStores(city, order.buildingId).any { it.id == accepted.targetBuildingId }
                             } == true)

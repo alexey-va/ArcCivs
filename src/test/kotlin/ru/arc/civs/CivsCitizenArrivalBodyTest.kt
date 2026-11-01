@@ -81,7 +81,8 @@ class CivsCitizenArrivalBodyTest : FunSpec({
             val receipt = CompletableFuture<Settlement>()
             var pickups = 0
             h.physicalFoodPickup = { selected ->
-                selected shouldBe food
+                selected shouldBe requireNotNull(actor.foodPickupSource)
+                selected.copy(standing = food.standing) shouldBe food
                 h.owner.requireStorageArrival(h.city.id, h.workerId, food.buildingId)
                 pickups++
                 receipt
@@ -92,7 +93,7 @@ class CivsCitizenArrivalBodyTest : FunSpec({
                 h.navigationNow = 2_000
                 h.owner.pulse(2_000)
                 actor.bodyContactToken shouldBe null
-                actor.foodPickupSource shouldBe food
+                actor.foodPickupSource?.copy(standing = food.standing) shouldBe food
                 actor.supplyPickup shouldBe null
                 pickups shouldBe 0
                 h.observedWork() shouldBe 0L

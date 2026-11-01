@@ -59,14 +59,19 @@ internal fun citizenCollectionIdle(plan: CitizenPlan, phase: CitizenPhase): Bool
     plan.idleReason in setOf("unassigned", "waiting-orders", "waiting-growth", "no-construction", "building-unavailable")
 
 /** A route ends beside the real container; the final native ray remains authoritative at deposit time. */
-internal fun citizenCollectedHomeTarget(city: Settlement, home: CivBuilding, world: World, target: CivPosition): CivPosition? {
+internal fun citizenCollectedHomeTarget(city: Settlement, home: CivBuilding, world: World, target: CivPosition,
+    preferred: CivPosition? = null, safe: (CivPosition) -> Boolean = { true }): CivPosition? {
     if (!citizenChunkReady(world, target.x shr 4, target.z shr 4)) return null
     val levels = listOf(home.entrance.y, target.y, target.y - 1, target.y + 1, target.y - 2, target.y - 3).distinct()
-    for (y in levels) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
-        val point = target.copy(x = target.x + dx, y = y, z = target.z + dz)
+    val candidates = buildList {
+        preferred?.let(::add)
+        for (y in levels) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1))
+            add(target.copy(x = target.x + dx, y = y, z = target.z + dz))
+    }
+    for (point in candidates) {
         if (city.contains(point.x, point.z) && citizenControlClear(city, point) && citizenStandable(world, point) &&
             city.buildings.none { it.id != home.id && it.bounds.contains(point.x, point.y, point.z) } &&
-            citizenCanReachBlock(world, point.location(world).add(0.0, 1.5, 0.0), target, 3.0)) return point
+            citizenCanReachBlock(world, point.location(world).add(0.0, 1.5, 0.0), target, 3.0) && safe(point)) return point
     }
     return null
 }

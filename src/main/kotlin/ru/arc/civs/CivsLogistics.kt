@@ -22,6 +22,8 @@ data class CivCargo(
     val deliveryBuildingId: UUID? = null,
     /** Only new native Auto evacuation trips use this proof; historical shipments default to false. */
     val redistribution: Boolean = false,
+    /** Native producer output accepted directly by a requested input; the courier still owns its warehouse. */
+    val directInput: Boolean = false,
 )
 
 data class CivCourierPlan(val cargo: CivCargo, val destinationBuildingId: UUID,
@@ -51,7 +53,10 @@ object CivsLogistics {
             cargo.sourceEntrance, cargo.material).all { it != null })
         require(cargo.amount in 1..MAX_CARGO && MATERIAL.matches(cargo.material) && cargo.material !in setOf("AIR", "CAVE_AIR", "VOID_AIR"))
         require(cargo.sourceBuildingId != cargo.targetBuildingId &&
-            (cargo.sourceBuildingId == cargo.warehouseId || cargo.targetBuildingId == cargo.warehouseId))
+            (cargo.sourceBuildingId == cargo.warehouseId || cargo.targetBuildingId == cargo.warehouseId || cargo.directInput))
+        require(!cargo.directInput || city.inventory?.mode == CivStorageMode.PHYSICAL &&
+            cargo.sourceBuildingId != cargo.warehouseId && cargo.targetBuildingId != cargo.warehouseId &&
+            cargo.sourceWorkerId == null && cargo.stockResource == null && !cargo.redistribution)
         require(cargo.sourceWorkerId == null || cargo.sourceBuildingId != cargo.warehouseId && cargo.targetBuildingId == cargo.warehouseId)
         require(cargo.deliveryBuildingId == null || city.inventory?.mode == CivStorageMode.PHYSICAL &&
             cargo.inventoryBacked && cargo.stockResource == null)
@@ -59,6 +64,18 @@ object CivsLogistics {
             cargo.sourceWorkerId == null && cargo.stockResource == null)
         require(city.contains(cargo.sourceEntrance.x, cargo.sourceEntrance.z) && cargo.sourceEntrance.y in -4_096..4_096)
     }.isSuccess
+
+    /** Admission only: a picked-up batch keeps its durable ownership if either endpoint later retires. */
+    internal fun directInputAllowed(city: Settlement, cargo: CivCargo): Boolean {
+        if (!cargo.directInput || cargo.inventoryBacked || !validCargo(city, cargo)) return false
+        val source = city.building(cargo.sourceBuildingId) ?: return false
+        val target = city.building(cargo.targetBuildingId) ?: return false
+        val warehouse = city.building(cargo.warehouseId) ?: return false
+        return source.phase == BuildingPhase.ACTIVE && source.control != null && !CivsRules.isBuilder(city, source) &&
+            CivsProduction.material(source) == cargo.material && target.phase == BuildingPhase.ACTIVE && target.control != null &&
+            warehouse.type == BuildingType.WAREHOUSE && warehouse.phase == BuildingPhase.ACTIVE && warehouse.control != null &&
+            withinRoute(city, source.control, target.control)
+    }
 
     fun requests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> {
         if (city.inventory == null || city.pendingDeletion != null) return emptyList()
@@ -328,7 +345,7 @@ object CivsLogistics {
         reject(city.pendingDeletion != null || worker.cargo != null || worker.assignment != cargo.warehouseId || warehouse.type != BuildingType.WAREHOUSE ||
             warehouse.phase != BuildingPhase.ACTIVE || cargo.sourceWorkerId == null && source.entrance != cargo.sourceEntrance ||
             cargo.id != shipmentId(city.id, workerId, worker.completedCycles, cargo.sourceBuildingId, cargo.targetBuildingId, cargo.material, cargo.sourceWorkerId) ||
-            !validCargo(city, cargo), "stale-delivery")
+            !validCargo(city, cargo) || cargo.directInput && !directInputAllowed(city, cargo), "stale-delivery")
         val supplied = CivsEquipment.collectSupplies(worker, mapOf(cargo.material to cargo.amount))
             .copy(cargo = cargo.copy(inventoryBacked = true))
         return CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) supplied else it },

@@ -182,16 +182,26 @@ internal class CivsCitizenRoutes(
     private fun storageStanding(actor: CitizenActor, city: Settlement, world: World, target: CivPosition,
                                 storage: CivBuilding, allowCached: Boolean): CivPosition? {
         val control = requireNotNull(storage.control)
-        val safe: (CivPosition) -> Boolean = { point ->
-            citizenStandable(world, point) && citizenControlClear(city, point) &&
-                citizenPacketBodyClear(world, point.point(), false) && point.location(world).let { destination ->
-                    collisions.residentMoveAllowed(actor, destination, destination)
-                }
-        }
+        val safe: (CivPosition) -> Boolean = { storagePointClear(actor, city, world, it) }
         val cached = actor.targets[target]?.takeIf { allowCached && citizenAtStorage(world, it.point(), control) && safe(it) }
         return cached ?: citizenStorageTarget(city, storage, world, safe)
             ?: storage.takeIf { !citizenStorageReady(world, control) && it.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == it.id }
                 ?.entrance?.takeIf { citizenStandable(world, it) }
+    }
+
+    private fun storagePointClear(actor: CitizenActor, city: Settlement, world: World, point: CivPosition): Boolean =
+        citizenStandable(world, point) && citizenControlClear(city, point) &&
+            citizenPacketBodyClear(world, point.point(), false) && point.location(world).let { destination ->
+                collisions.residentMoveAllowed(actor, destination, destination)
+            }
+
+    /** Keep a clear food approach stable; other residents' bodies and arrival goals retain their existing reservations. */
+    fun foodStanding(actor: CitizenActor, city: Settlement, source: CivResidentFoodSource): CivPosition? {
+        val building = city.building(source.buildingId) ?: return null
+        val world = actor.npc.world
+        return citizenCollectedHomeTarget(city, building, world, source.container, source.standing) { point ->
+            storagePointClear(actor, city, world, point) && collisions.idleDestinationFree(actor, point.location(world))
+        }
     }
 
     /** Called only after the owner's ordinary arrival proof, before cancelling its route. */
