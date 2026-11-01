@@ -14,6 +14,42 @@ import org.bukkit.Bukkit
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("reserved optional shoulders never omit mandatory centerline body or apron guards") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val option = CivTerraformOption(building, 0)
+        val surface = terraceSurface { _, _ -> 64 }
+        val baseline = CivsAutonomousTerraform.draft(city, option, surface)
+        val targets = listOf(baseline.route[4], building.bounds.min.copy(y = building.anchor.y),
+            building.entrance.copy(x = building.entrance.x + 1))
+        val reserved = targets.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val guarded = CivsAutonomousTerraform.draft(city, option, surface,
+            reservedRoute = baseline.route, reservedShoulders = reserved)
+        targets.forEach { feet ->
+            val column = guarded.columns.single { it.x == feet.x && it.z == feet.z }
+            column shouldBe baseline.columns.single { it.x == feet.x && it.z == feet.z }
+            column.preserve shouldBe false
+            val position = CivPosition(column.x, column.groundY, column.z)
+            val cells = terraceCapture(guarded, surface).toMutableMap()
+            cells[position] = CivTerraformCell(position, "minecraft:coal_ore", safe = false,
+                solid = true, passable = false, supportSafe = false)
+            val rejection = shouldThrow<CivsRejection> { CivsAutonomousTerraform.materialize(guarded, cells) }
+            rejection.reason shouldBe "autonomy-terrain"
+            rejection.values["x"] shouldBe "${position.x}"
+            rejection.values["y"] shouldBe "${position.y}"
+            rejection.values["z"] shouldBe "${position.z}"
+        }
+        listOf(targets.first(), targets.last()).forEach { feet ->
+            val retained = CivAutonomousAccess(routes = mapOf(city.buildings.single().id to listOf(feet.copy(y = feet.y + 1))))
+            val rejection = shouldThrow<CivsRejection> {
+                CivsAutonomousTerraform.draft(city, option, surface, retained,
+                    reservedRoute = baseline.route, reservedShoulders = reserved)
+            }
+            rejection.reason shouldBe "autonomy-no-path"
+            rejection.values["stage"] shouldBe "retained-grade"
+        }
+    }
+
     test("a mild graded detour around a long barrier stays within a small expanded-state budget") {
         val fixture = mildBarrierFixture()
         val searches = mutableListOf<CivRouteSearchStats>()

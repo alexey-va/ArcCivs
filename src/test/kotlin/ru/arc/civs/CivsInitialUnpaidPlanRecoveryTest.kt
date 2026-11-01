@@ -19,6 +19,38 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
+    test("unpaid road shoulder grade conflicts still admit the coherent raised old hut") {
+        initialRecoveryScenario(v2 = true, preferOldTerrace = true, shoulderConflicts = true) { s ->
+            s.shoulderGrades.size shouldBe 1
+            s.start(); s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
+            val plan = requireNotNull(s.city.autonomy?.plan)
+            val selected = requireNotNull(s.selected)
+            val draft = s.preferredDrafts.single()
+            selected.anchor shouldBe s.oldHut.anchor.copy(y = s.oldHut.anchor.y + 4)
+            selected.rotation shouldBe s.oldHut.rotation
+            selected.schematicId shouldBe s.defaultFamily
+            plan.plots.filter { it.building.id != s.oldHut.id } shouldBe s.oldPlan.plots.filter { it.building.id != s.oldHut.id }
+            plan.routes - s.oldHut.id.toString() shouldBe s.oldPlan.routes - s.oldHut.id.toString()
+            plan.walls shouldBe s.oldPlan.walls
+            plan.gates shouldBe s.oldPlan.gates
+            plan.gateSides shouldBe s.oldPlan.gateSides
+            plan.plots.single { it.building.id == s.oldHut.id }.envelope.min.y shouldBe s.oldHut.bounds.min.y + 4
+            draft.columns.none { civsTerrainKey(it.x, it.z) in s.shoulderGrades } shouldBe true
+            draft.access shouldBe CivAutonomousAccess()
+            draft.columns.filter { it.preserve }.map { CivPosition(it.x, it.groundY + 1, it.z) }
+                .toSet() shouldBe setOf(s.before.buildings.single().entrance)
+            s.unreservedDrafts shouldBe emptyList()
+            s.forecasts shouldBe 1
+            s.volumeCaptures shouldBe listOf(selected)
+            plan.plots.size shouldBe 34
+            plan.routes.size shouldBe 33
+            CivsVillageSiteScoring.completeProfile(plan) shouldBe true
+            s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+
     test("a protected old hut body recovers on its raised terrace with the other unpaid outline intact") {
         initialRecoveryScenario(v2 = true, preferOldTerrace = true) { s ->
             s.oldHut.bounds.contains(s.ore.x, s.ore.y, s.ore.z) shouldBe true
@@ -51,7 +83,8 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
                 .toSet() shouldBe setOf(s.before.buildings.single().entrance)
             val unpaidRoads = (s.oldPlan.routes - s.oldHut.id.toString()).values.flatten()
                 .mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) } - civsTerrainKey(draft.route.first().x, draft.route.first().z)
-            draft.columns.any { civsTerrainKey(it.x, it.z) in unpaidRoads } shouldBe true
+            val mandatoryCrossings = draft.route.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }.intersect(unpaidRoads)
+            draft.columns.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }.intersect(unpaidRoads) shouldBe mandatoryCrossings
             draft.columns.filter { civsTerrainKey(it.x, it.z) in unpaidRoads }.all { !it.preserve } shouldBe true
             s.volumeCaptures shouldBe listOf(selected)
             s.forecasts shouldBe 1
@@ -242,7 +275,7 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
 
 /** Real development/placement/terraform/full34 planner, with the native read boundary controlled explicitly. */
 private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private val v2: Boolean,
-    halfWidth: Int, legacyWidth: Boolean, private val preferOldTerrace: Boolean) : AutoCloseable {
+    halfWidth: Int, legacyWidth: Boolean, private val preferOldTerrace: Boolean, shoulderConflicts: Boolean) : AutoCloseable {
     val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler, true)
     private val plugin = paper.createSimplePlugin("InitialUnpaidRecoveryTest")
@@ -265,8 +298,9 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
             settings = CivSettlementSettings(immortalResidents = true))
     }
     val surface = settlementPlanSurface(base.copy(radius = 127))
+    val shoulderGrades = linkedMapOf<Long, Int>()
     val oldPlan = CivsSettlementPlans.prepare(base.copy(autonomy = base.autonomy!!.copy(layoutHalfWidth = halfWidth)),
-        templates, surface, CivAutonomousAccess())
+        templates, surface, CivAutonomousAccess()).let { if (shoulderConflicts) withShoulderConflicts(it) else it }
     val before = CivsRules.validate(base.copy(autonomy = base.autonomy!!.copy(plan = oldPlan,
         layoutHalfWidth = if (legacyWidth) null else oldPlan.halfWidth)))
     var city = before
@@ -432,6 +466,38 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     fun reserveItems(): List<ItemStack?> = (nativeWorld.getBlockAt(control.x, control.y, control.z).state as Barrel)
         .inventory.contents.map { it?.clone() }
     fun searchDebug(): Map<*, *> = (planner.debug(city.id)["last"] as List<*>).last() as Map<*, *>
+    /** A legitimate unpaid road bump sits beside the future hut route, outside its mandatory corridor. */
+    private fun withShoulderConflicts(plan: CivSettlementPlan): CivSettlementPlan {
+        val hut = plan.plots.single { it.building.type == BuildingType.BUILDER_HUT }
+        val others = plan.plots.filter { it.building.id != hut.building.id && base.building(it.building.id) == null }
+        val shadow = base.copy(autonomy = base.autonomy!!.copy(plan = null, layoutHalfWidth = plan.halfWidth))
+        val virtual = shadow.copy(buildings = base.buildings + others.map { it.building.copy(bounds = it.envelope, phase = BuildingPhase.SITE) })
+        val access = CivAutonomousAccess(routes = (plan.routes - hut.building.id.toString()).mapKeys { UUID.fromString(it.key) })
+        val option = CivsAutonomousTerraform.options(shadow, listOf(CivsAutonomousCandidate(hut.building.copy(bounds = hut.envelope))), surface)
+            .single { it.building.anchor.y == hut.building.anchor.y + 4 }
+        val planned = CivsAutonomousTerraform.draft(virtual, option, surface, access, plan.walls)
+        val actual = CivsAutonomousTerraform.draft(shadow, option, surface, CivAutonomousAccess(),
+            plan.walls + others.map { it.envelope }, reservedRoute = planned.route)
+        val hinted = access.standing(virtual, hut.building.id)
+        val plannedKeys = planned.columns.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val mandatory = (planned.route + CivsAutonomousGeometry.approach(option.building)).mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val entrances = others.mapTo(hashSetOf()) { civsTerrainKey(it.building.entrance.x, it.building.entrance.z) }
+        actual.columns.filter { column ->
+            val key = civsTerrainKey(column.x, column.z)
+            key in hinted && key !in plannedKeys && key !in mandatory && key !in entrances &&
+                !CivsAutonomousGeometry.horizontalContains(option.building.bounds, CivPosition(column.x, column.groundY, column.z))
+        }.take(1).forEach { column ->
+            val key = civsTerrainKey(column.x, column.z)
+            hinted.getValue(key).y - 1 shouldBe column.groundY
+            shoulderGrades[key] = hinted.getValue(key).y
+        }
+        check(shoulderGrades.size == 1) { "Fixture needs one offcenterline unpaid road shoulder, found ${shoulderGrades.size}" }
+        val changed = plan.copy(routes = plan.routes.mapValues { (id, route) -> if (id == hut.building.id.toString()) route else route.map { feet ->
+            shoulderGrades[civsTerrainKey(feet.x, feet.z)]?.let { feet.copy(y = it + 1) } ?: feet
+        } })
+        CivsSettlementPlans.validate(base, changed)
+        return changed
+    }
     private fun sameOldSlot(building: CivBuilding) = building.anchor.x == oldHut.anchor.x && building.anchor.z == oldHut.anchor.z &&
         building.rotation == oldHut.rotation && building.schematicId == oldHut.schematicId
     private fun nativeTerrain(draft: CivTerraformDraft): CivTerraformPlan {
@@ -482,7 +548,7 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
 }
 
 private fun initialRecoveryScenario(v2: Boolean = false, halfWidth: Int = 74, legacyWidth: Boolean = false,
-    preferOldTerrace: Boolean = false,
+    preferOldTerrace: Boolean = false, shoulderConflicts: Boolean = false,
     action: (InitialRecoveryScenario) -> Unit) = failOnUnsupportedMockBukkitOperation {
-    MockBukkitTestRuntime.open().use { paper -> InitialRecoveryScenario(paper, v2, halfWidth, legacyWidth, preferOldTerrace).use(action) }
+    MockBukkitTestRuntime.open().use { paper -> InitialRecoveryScenario(paper, v2, halfWidth, legacyWidth, preferOldTerrace, shoulderConflicts).use(action) }
 }

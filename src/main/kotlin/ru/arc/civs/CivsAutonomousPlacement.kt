@@ -533,9 +533,10 @@ internal class CivsAutonomousPlacement(
             val roads = hinted.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
             val planned = CivsAutonomousTerraform.draft(virtual, option, surface, hinted, intent.walls, preferredRoads = roads)
             // Only this second draft reaches native capture: unpaid intent never claims an already-built road.
-            val actual = CivsAutonomousTerraform.draft(city, option, surface, access,
-                intent.walls + otherPlots.map { it.envelope }, reservedRoute = planned.route, preferredRoads = roads)
             val standing = hinted.standing(virtual, buildingId)
+            val actual = CivsAutonomousTerraform.draft(city, option, surface, access,
+                intent.walls + otherPlots.map { it.envelope }, reservedRoute = planned.route, preferredRoads = roads,
+                reservedShoulders = standing.keys)
             if (actual.columns.any { column -> standing[civsTerrainKey(column.x, column.z)]?.let {
                     column.groundY != it.y - 1
                 } == true }) throw CivsRejection("autonomy-no-path", mapOf("stage" to "retained-grade"))

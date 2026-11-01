@@ -1,0 +1,152 @@
+{
+  "schema": 1,
+  "version": "0.1.166",
+  "status": "verified_local_not_delivered",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "problem": "Exact captured Village-2 witness passes virtual and actual route drafts, but two additional optional shoulders from the actual-only draft conflict with future unpaid road grades; the unchanged retained-grade guard correctly refuses all three terraces.",
+  "change": "Let only optional shoulder and bank-easing loops skip future reserved route columns. Mandatory centreline/body/apron and final retained-grade guard remain unchanged; the actual city/access and strict native capture still prove every emitted column. No plan, stock, world or funding write occurs at drafting. Eight finite search pages from165 remain unchanged.",
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "at_atomic_plan_adoption": {
+    "item_minted": 0,
+    "item_burned": 0,
+    "workers_created": 0,
+    "initial_reserve_repeated": false,
+    "native_world_blocks_written": 0,
+    "initial_reserve_before_after": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24,
+      "note": "Nominal once per newly founded ID; never restored on existing cities."
+    },
+    "holders_and_receipts": "preserved exactly from fresh current state; native initial216 already materialized once"
+  },
+  "future_effect": "Safe first-hut construction may resume. Skipped optional shoulder columns receive no native write, bill or work credit; every remaining mandatory column keeps normal funding and strict native proof. Concrete future item consumption follows actual geometry and can differ, with production rates, grants and supply caps unchanged. No stock self-sufficiency or zero indirect item effect claimed.",
+  "bounds": {
+    "eligibility": "only pristine actual initial L1townhall SITE; no other building/road/paid construction/queue/pending control/deletion; original plan/hall rechecked at adoption",
+    "search": "At most64 candidates including preferred terraces, one complete34 forecast per existing retry/backoff; raw search batches0..31 select eight finite192-position pages.",
+    "layout": "same accepted width (newtown74; legacy72/nullhint retained), routes88,192 infrastructure and262144 codec limits",
+    "failure": "no adoption or item/world mutation; old intent retained",
+    "concurrent_updates": "preserve fresh workers, hunger, inventory, settings and unrelated fields",
+    "native": "Ore, exact before-images, volume, route, permissions, width, perimeter and protection rules unchanged; no native proof from virtual unpaid roads.",
+    "loader": "8192 chunk requests and two pending loads per explicit search;6144 loaded-chunk and196 NPC limits unchanged."
+  },
+  "income_model": {
+    "active_SELL": "unchanged; no conversion rate assumed",
+    "planned_SELL_to_contract": "future/SHADOW kept separate and not counted active"
+  },
+  "native_red_evidence": {
+    "city": "04067946-4637-3373-b723-572623b1581f",
+    "cube_sha256": "ad0153712f31b2f25f7ede0ff2c8b32bce08d9b3bc38d6a401480cacf63e7118",
+    "inside_hut_ore_cells": 14,
+    "actual_schematic_replacements": {
+      "cobblestone": 13,
+      "dirt": 1
+    },
+    "ore_preserved": true,
+    "development_accepted_before": false,
+    "preferred_draft_guard": "post-actual-retained-grade",
+    "optional_shoulder_conflicts": [
+      {
+        "x": 384,
+        "z": -338,
+        "actual_ground_y": 65,
+        "future_ground_y": 66
+      },
+      {
+        "x": 384,
+        "z": -337,
+        "actual_ground_y": 66,
+        "future_ground_y": 67
+      }
+    ],
+    "both_drafts_pass": true,
+    "centerline_or_body_conflicts_observed": 0,
+    "native_world_changed": false
+  },
+  "verification": {
+    "source_and_focused_tests": {
+      "status": "all410_case_ids_passed_union",
+      "first_run": {
+        "tests": 410,
+        "passed": 409,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 0,
+        "failure": "stale optional shoulder assertion in oldpositive"
+      },
+      "targeted_test_only_oracle_fix": {
+        "tests_reported": 20,
+        "executed_passed": 1,
+        "filter_skipped": 19,
+        "failures": 0,
+        "errors": 0,
+        "build_seconds": 10,
+        "test_sha256": "1ef64168dd798cb445f8c563028335050ab73085db7379a3ee1aec11e1af36dd"
+      },
+      "production_sources_unchanged_between_runs": true,
+      "passed_case_ids_union": 410,
+      "not_a_new_full410_run": true
+    },
+    "production_jar": "pass_ArcCore0.1.28",
+    "consumer": "pass2.7.81",
+    "delivery": "not_delivered",
+    "activation": "not_active",
+    "native_recovery": "not_verified",
+    "native_client": "not_observed",
+    "captured_witness": {
+      "native_world_proven": false,
+      "scope": "same saved city/surface/catalog exact166 draft + full prepare + codec",
+      "all_three_preferred_drafts": true,
+      "retained_grade_mismatches": 0,
+      "actual_preserved_columns": "actual Hall only",
+      "positive_raised_full_plan": {
+        "plots": 34,
+        "routes": 33,
+        "infrastructure": 175,
+        "perimeter_closed": true,
+        "codec_bytes": 84036,
+        "other_intent_unchanged": true
+      },
+      "ordinary_fresh_repack_control": "rejected no-dry-perimeter",
+      "private_tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "requested_five_village_reserve": {
+    "per_new_ID": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "five_total": {
+      "logs": 480,
+      "cobblestone": 480,
+      "bread": 120
+    },
+    "remaining_three_maximum": {
+      "logs": 288,
+      "cobblestone": 288,
+      "bread": 72
+    },
+    "repeat_existing_ID": 0,
+    "scope": "Same five requested villages before and after; search success controls delivery, no extra village or grant authority."
+  }
+}

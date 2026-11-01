@@ -1106,6 +1106,10 @@ forecast; the old and raised vertical envelopes are never combined. A candidate
 elsewhere retains the detached full-layout search. Planned routes may guide route
 selection, but native terraform proof is drafted against the actual city and its
 actual infrastructure; unpaid roads never become preserved world columns.
+Optional route shoulders leave columns reserved by another unpaid route untouched.
+The required centreline, building pad and apron are still drafted and checked at
+their exact grades; a conflict there rejects the candidate. Every emitted column
+still receives the ordinary strict native proof and paid construction receipt.
 
 Infrastructure is encoded as bounded entity-free Sponge v3, decoded by the existing
 Core schematic provider, and built through ordinary immutable plans and payment

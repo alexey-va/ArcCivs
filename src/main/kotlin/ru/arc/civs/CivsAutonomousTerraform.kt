@@ -138,6 +138,7 @@ internal object CivsAutonomousTerraform {
         access: CivAutonomousAccess = CivAutonomousAccess(), additionalObstacles: List<CivBox> = emptyList(),
         infrastructureFloors: Map<Long, Int> = emptyMap(), reservedRoute: List<CivPosition>? = null,
         preferredRoads: Set<Long> = emptySet(), waterFoundations: List<CivWaterFoundation> = emptyList(),
+        reservedShoulders: Set<Long> = emptySet(),
         inspectRoute: (CivRouteSearchStats) -> Unit = {}): CivTerraformDraft {
         val building = option.building
         if (!building.type.isInfrastructure && access.reservedFortificationPorts.any {
@@ -219,7 +220,7 @@ internal object CivsAutonomousTerraform {
                 if (dx == 0 && dz == 0) continue
                 val x = point.x + dx; val z = point.z + dz
                 val key = civsTerrainKey(x, z)
-                if (key in centerline || key in columns || key in standing ||
+                if (key in centerline || key in columns || key in standing || key in reservedShoulders ||
                     CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, ground, z)) ||
                     routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, ground, z)) }) continue
                 // Unavailable shoulder terrain does not invalidate a safe centre corridor. It is
@@ -250,7 +251,7 @@ internal object CivsAutonomousTerraform {
                     val x = route[index].x + dx; val z = route[index].z + dz
                     val key = civsTerrainKey(x, z)
                     val shoulder = ground + (maxOf(abs(dx), abs(dz)) - 2).coerceAtLeast(0)
-                    if (key in profile || key in standing || !city.contains(x, z) ||
+                    if (key in profile || key in standing || key in reservedShoulders || !city.contains(x, z) ||
                         CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, shoulder, z)) ||
                         routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, shoulder, z)) }) continue
                     val native = surface.at(x, z)
