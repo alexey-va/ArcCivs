@@ -10,7 +10,7 @@ commands:
   civs:
     aliases: [city]
     description: Manage your settlement
-    usage: /civs [preview|status|reload]
+    usage: /civs [villages|preview|status|reload]
     permission: arccivs.use
 permissions:
   arccivs.use:

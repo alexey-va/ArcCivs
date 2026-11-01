@@ -958,6 +958,12 @@ confirmation revalidate current city revision and authority; async callbacks
 cannot open a stale preview. Menus use Core tables/frames, light body text,
 plain untrusted placeholders and RU/EN locale resources. Admin status/recovery
 is permission gated. Suggestions reflect the exact argument only.
+**Деревни** and `/city villages` list local autonomous villages for public visits.
+Selecting a destination travels to a safe point beside its town hall;
+personal membership and management context stay unchanged. The travel owner
+revalidates the live destination and native landing after asynchronous chunk
+loading. Deleted villages and unsafe or unavailable landings report a failure
+in the same list; visiting never grants management rights.
 Founding failures lead with a DANGER heading and concrete reason above the style
 table, preserve the draft and offer a working retry. Runtime DOWN is shown as an
 explicit storage failure rather than indefinite loading. Diagnostics use Core

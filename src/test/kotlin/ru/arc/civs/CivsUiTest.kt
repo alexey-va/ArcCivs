@@ -53,6 +53,54 @@ import java.util.UUID
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
+class CivsVillageVisitUiTest : FunSpec({
+    test("public village visits keep the personal city and target the selected village once") {
+        for (language in listOf("ru", "en")) withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            val personal = settlement(h.player)
+            val first = autonomousSettlement(h.player, "Village-1")
+            val second = first.copy(id = UUID.randomUUID(), name = "Village-2")
+            val deleting = first.copy(id = UUID.randomUUID(), name = "Deleted", pendingDeletion = CivDeletion(null))
+            h.city = personal
+            every { h.host.settlements() } returns listOf(personal, second, deleting, first)
+            val pending = CompletableFuture<Unit>()
+            every { h.host.visitVillage(h.player, second.id) } returns pending
+            h.ui.open(h.player)
+            h.paper.performTicks(2)
+            h.click("visit_villages")
+            h.screen.id shouldBe "civs.villages"
+            h.screen.buttons.map { plainText(it.label) } shouldBe listOf("Village-1", "Village-2")
+            val selected = h.screen.buttons.single { it.id.value == "visit_1" }
+            h.click("visit_1")
+            selected.onClick.handle(mockk(relaxed = true) { every { player } returns h.player })
+            verify(exactly = 1) { h.host.visitVillage(h.player, second.id) }
+            pending.complete(Unit)
+            h.paper.performTicks(2)
+            h.ui.showingDialog(h.player) shouldBe false
+            h.city shouldBe personal
+            verify(exactly = 0) { h.host.assign(any(), any(), any()); h.host.setAutonomousPaused(any(), any(), any()) }
+        }
+    }
+
+    test("village entry handles empty lists and returns a failed visit to the same list") {
+        withUi(realHistory = true) { h ->
+            every { h.host.settlements() } returns emptyList()
+            h.ui.openVillages(h.player)
+            h.screen.id shouldBe "civs.villages"
+            h.screen.buttons shouldBe emptyList()
+            val village = autonomousSettlement(h.player, "Village-1")
+            every { h.host.settlements() } returns listOf(village)
+            every { h.host.visitVillage(h.player, village.id) } returns CompletableFuture.failedFuture(CivsRejection("world-unavailable"))
+            h.ui.openVillages(h.player)
+            h.click("visit_0"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.villages"
+            h.body() shouldContain plainText(h.ui.text.reason(h.player, "world-unavailable"))
+            h.screen.buttons.map { it.id.value } shouldBe listOf("visit_0")
+        }
+    }
+})
+
 class CivsBuildingStatusUiTest : FunSpec({
     test("building inspection uses the existing worker label for active mine and travel states") {
         for (language in listOf("ru", "en")) for (status in listOf("securing-mine", "returning-output", "defending", "retreating", "no-research", "research-paused", "research-unfunded", "mine-descending", "mine-returning")) {
@@ -3141,7 +3189,7 @@ class CivsUiTest : FunSpec({
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             h.city = settlement(h.player)
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "upgrade", "hall_inventory", "guide")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "upgrade", "hall_inventory", "guide", "visit_villages")
             plainText(h.screen.buttons.first().label) shouldBe "Управление поселением ›"
             h.click("management")
             h.screen.id shouldBe "civs.management"

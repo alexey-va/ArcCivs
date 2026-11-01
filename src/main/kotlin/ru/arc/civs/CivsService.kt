@@ -60,6 +60,7 @@ class CivsService(
     private var geometryGeneration = 0L
     private val records = CivsCityRecords({ cities }, busy, unhealthy, { closed }, { loading },
         { loadFailure }, { geometryGeneration }, { completions.size })
+    private val villageTravel = CivsVillageTravel(plugin, tasks, records, ::ready)
     private val world = worldAdapter ?: CivsWorld(plugin, tasks, navigationSettings = settings.navigation) { cities.values.toList() }
     private val workstations = CivsWorkstations(blueprints::workstations, plugin.logger)
     private val roadMaintenance = CivsRoadMaintenance(world,
@@ -1283,6 +1284,12 @@ class CivsService(
     override fun refreshCity(player: Player): CompletableFuture<Unit> = membership.refreshCity(player)
 
     override fun transferHome(player: Player): CompletableFuture<Unit> = membership.transferHome(player)
+
+    override fun visitVillage(player: Player, cityId: UUID): CompletableFuture<Unit> =
+        action("visit_village", player, "city" to cityId) {
+            requireReady(player)
+            villageTravel.visit(player, cityId).also(::track)
+        }
 
     override fun workerStatus(workerId: UUID): String = diagnostics.workerStatus(workerId)
 

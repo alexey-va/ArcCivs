@@ -99,6 +99,15 @@ class CivsUi internal constructor(
 
     fun showingDialog(player: Player): Boolean = player.uniqueId in visits
 
+    fun openVillages(player: Player) {
+        if (closed || !player.isOnline) return
+        equipment.dismiss(player)
+        host.cancelSelection(player, "menu-reopened")
+        runtime.beginFlow(player)
+        roots[player.uniqueId] = "civs.villages"
+        showVillages(player)
+    }
+
     /** Administrative village flow is independent of the player's personal settlement. */
     fun openAutonomous(player: Player, cityId: UUID? = null) {
         if (closed || !player.isOnline) return
@@ -389,7 +398,7 @@ class CivsUi internal constructor(
         "civs.stock", "civs.warehouse", "civs.materials", "civs.building-materials", "civs.builder-materials", "civs.logistics",
         "civs.containers", "civs.container", "civs.industry", "civs.industry-building" -> STOCK
         "civs.management", "civs.upgrades", "civs.upgrade", "civs.worker-skills", "civs.production", "civs.carpentry-recipes", "civs.storage-mode", "civs.testing-settings", "civs.research", "civs.research-detail" -> PERSONAL
-        "civs.guide", "civs.remote" -> NAVIGATION
+        "civs.guide", "civs.remote", "civs.villages" -> NAVIGATION
         "civs.delete-city", "civs.delete-building" -> DANGER
         else -> LAND
     }

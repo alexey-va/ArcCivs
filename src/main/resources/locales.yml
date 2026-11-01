@@ -1,4 +1,11 @@
 ru:
+  villages:
+    open: 'Деревни ›'
+    title: 'Посетить деревню'
+    help: 'Выберите деревню, чтобы переместиться ко входу в её ратушу.'
+    empty: 'На этом сервере пока нет деревень для посещения.'
+    destination: '<value>'
+    travelling: 'Перемещаемся в деревню…'
   resurrection:
     item-name: 'Свиток воскрешения'
     item-purpose: 'Возвращает погибшего жителя к жизни.'
@@ -97,7 +104,7 @@ ru:
     change: '<before> → <after>'
     coordinates: '<x>, <y>, <z>'
     player-only: 'Откройте это меню в игре.'
-    command-help: 'Поселение: <white>/city</white> — меню; <white>/city preview</white> — перенести предпросмотр туда, куда вы смотрите.'
+    command-help: 'Поселение: <white>/city</white> — меню; <white>/city villages</white> — посетить деревню; <white>/city preview</white> — перенести предпросмотр.'
   label:
     control: 'Блок управления'
     entrance: 'Вход'
@@ -855,6 +862,9 @@ ru:
     confirm: 'Удалить поселение'
     success: 'Поселение «<name>» удалено. Постройки и предметы остались в мире.'
   reason:
+    visit-unavailable: 'У входа в ратушу пока нет свободного безопасного места. Попробуйте позже.'
+    visit-failed: 'Переместиться не удалось. Попробуйте ещё раз.'
+    chunk-unavailable: 'Не удалось загрузить место прибытия. Попробуйте ещё раз.'
     blueprint-unavailable: 'Этот вариант постройки пока недоступен.'
     no-research: 'Выберите проект исследования.'
     waiting-reassignment: 'Житель меняет рабочее место.'
@@ -1385,6 +1395,13 @@ ru:
     recipe-output: 'Результат: <item> × <amount> на склад здания. Без сырья работник ждёт и продолжает после пополнения.'
     recipe-tooltip: 'На партию: <inputs>'
 en:
+  villages:
+    open: 'Villages ›'
+    title: 'Visit a village'
+    help: 'Choose a village to travel to its town hall entrance.'
+    empty: 'There are no villages to visit on this server yet.'
+    destination: '<value>'
+    travelling: 'Travelling to the village…'
   resurrection:
     item-name: 'Resurrection scroll'
     item-purpose: 'Returns a deceased resident to life.'
@@ -1483,7 +1500,7 @@ en:
     change: '<before> → <after>'
     coordinates: '<x>, <y>, <z>'
     player-only: 'Open this menu in game.'
-    command-help: 'Settlement: <white>/city</white> opens the menu; <white>/city preview</white> moves the preview to where you are looking.'
+    command-help: 'Settlement: <white>/city</white> opens the menu; <white>/city villages</white> visits a village; <white>/city preview</white> moves the preview.'
   label:
     control: 'Control block'
     entrance: 'Entrance'
@@ -2241,6 +2258,9 @@ en:
     confirm: 'Delete settlement'
     success: 'Settlement “<name>” deleted. Buildings and items remain in the world.'
   reason:
+    visit-unavailable: 'There is no clear, safe place at the town hall entrance yet. Try again later.'
+    visit-failed: 'Travel failed. Try again.'
+    chunk-unavailable: 'The destination could not be loaded. Try again.'
     blueprint-unavailable: 'This building variant is not available yet.'
     no-research: 'Choose a research project.'
     waiting-reassignment: 'The resident is changing workplaces.'

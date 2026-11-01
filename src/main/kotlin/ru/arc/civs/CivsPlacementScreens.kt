@@ -31,6 +31,7 @@ internal fun CivsUi.showWelcome(player: Player): Unit { present(player, "civs.we
     listOfNotNull(body(player, if (host.foundingAllowed()) "founding.intro" else "network.view-only"), body(player, "city.sleep-rule"),
         if (host.styles().isEmpty()) body(player, "founding.unavailable") else null), buildList {
         if (host.foundingAllowed() && host.styles().isNotEmpty()) add(button(player, "found", "founding.begin", PERSONAL, appearance = Action.FOUND) { showStyles(player) })
+        add(button(player, "visit_villages", "villages.open", NAVIGATION) { showVillages(player) })
         if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
     }, reopen = { showEntry(player) }) }
 
@@ -56,6 +57,7 @@ internal fun CivsUi.showRemote(player: Player, feedback: Component? = null) {
                 success = { showRemote(player, tr(player, "network.transfer-requested", "server" to remote.server.value)) },
                 failure = { showRemote(player, it) }, workingKey = "network.connecting")
         },
+        button(player, "visit_villages", "villages.open", NAVIGATION) { showVillages(player) },
     ), reopen = { showRemote(player) }, cityId = city.id)
 }
 

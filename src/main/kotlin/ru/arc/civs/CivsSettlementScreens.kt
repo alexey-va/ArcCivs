@@ -109,6 +109,7 @@ internal fun CivsUi.showOverview(player: Player, feedback: Component? = null) {
             add(button(player, "hall_inventory", "city.hall-inventory", STOCK) { openIntake(player, hall.id) }
                 .copy(tooltip = tr(player, "city.hall-inventory-help")))
         add(button(player, "guide", "guide.open", NAVIGATION) { showGuide(player) })
+        add(button(player, "visit_villages", "villages.open", NAVIGATION) { showVillages(player) })
     }, reopen = { showOverview(player) }, cityId = city.id)
 }
 
@@ -293,6 +294,33 @@ internal fun CivsUi.autonomousCity(player: Player, cityId: UUID): Settlement? {
     return city
 }
 
+
+internal fun CivsUi.showVillages(player: Player, page: Int = 0, feedback: Component? = null) {
+    val villages = if (host.ready()) host.settlements().filter {
+        it.autonomy != null && it.pendingDeletion == null
+    }.sortedBy { it.name } else emptyList()
+    val current = page.coerceIn(0, lastPage(villages.size))
+    present(player, "civs.villages", "villages.title", listOfNotNull(
+        presentation.paragraph(tr(player, "villages.help")),
+        if (!host.ready()) body(player, "common.starting") else if (villages.isEmpty()) body(player, "villages.empty") else
+            body(tr(player, "autonomy.count", "count" to villages.size)),
+        feedback?.let(::body),
+    ), buildList {
+        villages.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, city ->
+            add(valueButton(player, "visit_$index", "villages.destination", text.literal(city.name), NAVIGATION,
+                tr(player, "autonomy.population", "buildings" to CivsRules.buildingCount(city),
+                    "workers" to city.workers.size, "assigned" to city.workers.count { it.assignment != null })) {
+                perform(player, "civs.villages", "villages.title", { host.visitVillage(player, city.id) },
+                    success = {
+                        visits.remove(player.uniqueId)
+                        roots.remove(player.uniqueId)
+                        runtime.close(player)
+                    }, failure = { showVillages(player, current, it) }, workingKey = "villages.travelling")
+            })
+        }
+        pages(player, current, villages.size) { showVillages(player, it) }
+    }, reopen = { showVillages(player, current) })
+}
 
 internal fun CivsUi.showAutonomous(player: Player, page: Int = 0) {
     if (!isAdmin(player)) return autonomyDenied(player)

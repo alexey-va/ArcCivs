@@ -82,7 +82,7 @@ class CivsRoadHumpAlternativesTest : FunSpec({
         CivsRoadMaintenance.prepare(city, retained + plan).targets.none { it.floor == SECOND_HUMP && it.routeOverride != null } shouldBe true
     }
 
-    test("a native planks support refusal leaves the later shared hill available and all twenty one columns finish") {
+    test("a native bedrock support refusal leaves the later shared hill available and all twenty one columns finish") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = CivsWorksiteWorldFixture("forester-hump-alternatives", collisionForData = { data ->
                 if (CivsRoadMaintenance.surface(data.asString)) roadUpkeepBoxes(data).map { it.at(CivPosition(0, 0, 0)) } else null
@@ -102,7 +102,8 @@ class CivsRoadHumpAlternativesTest : FunSpec({
                     CivsSettlementLayout.pathPavement(floor, levels, city.style))
             }
             val blockedSupport = CivPosition(-1867, 63, -2745)
-            world.getBlockAt(blockedSupport.x, blockedSupport.y, blockedSupport.z).type = Material.DARK_OAK_PLANKS
+            // Bedrock remains blacklisted even though its collision provides full support.
+            world.getBlockAt(blockedSupport.x, blockedSupport.y, blockedSupport.z).type = Material.BEDROCK
             world.getBlockAt(blockedSupport.x, blockedSupport.y + 1, blockedSupport.z).type = Material.AIR
             val corner = CivPosition(-1869, 64, -2709)
             world.getBlockAt(corner.x, corner.y, corner.z).type = Material.DIRT_PATH
@@ -155,7 +156,7 @@ class CivsRoadHumpAlternativesTest : FunSpec({
                         world.getBlockAt(x, 63, z).type shouldBe Material.DIRT_PATH
                         for (y in 64..67) world.getBlockAt(x, y, z).type.isAir shouldBe true
                     }
-                    world.getBlockAt(blockedSupport.x, blockedSupport.y, blockedSupport.z).type shouldBe Material.DARK_OAK_PLANKS
+                    world.getBlockAt(blockedSupport.x, blockedSupport.y, blockedSupport.z).type shouldBe Material.BEDROCK
                     Gson().toJson(plans) shouldBe savedPlans
                 }
             }

@@ -687,7 +687,7 @@ class CivsCommandTest : FunSpec({
 
     test("suggestions stay within exact syntax and never request Bukkit player fallback") {
         CivsCommand.completions(false, true, arrayOf("")) shouldBe emptyList()
-        CivsCommand.completions(true, false, arrayOf("")) shouldBe listOf("preview")
+        CivsCommand.completions(true, false, arrayOf("")) shouldBe listOf("preview", "villages")
         CivsCommand.completions(true, true, arrayOf("r")) shouldBe listOf("reload")
         CivsCommand.completions(true, true, arrayOf("status", "")) shouldBe emptyList()
         CivsCommand.completions(true, true, arrayOf("unknown")) shouldBe emptyList()
@@ -707,5 +707,14 @@ class CivsCommandTest : FunSpec({
             router.onTabComplete(sender, mockk(), "civs", arrayOf("debug", "")) shouldBe
                 if (use && admin) systems else emptyList()
         }
+    }
+
+    test("the village visit command is public and never opens autonomous management") {
+        val ui = mockk<CivsUi>(relaxed = true)
+        val player = mockk<Player> { every { hasPermission("arccivs.use") } returns true }
+        val router = CivsCommand(mockk(), ui, mockk(), mockk())
+        router.onCommand(player, mockk(), "city", arrayOf("villages")) shouldBe true
+        verify(exactly = 1) { ui.openVillages(player) }
+        verify(exactly = 0) { ui.openAutonomous(any(), any()) }
     }
 })

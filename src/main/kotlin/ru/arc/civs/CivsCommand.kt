@@ -241,6 +241,7 @@ class CivsCommand(
         }
         when {
             args.isEmpty() -> ui.open(player)
+            args.contentEquals(arrayOf("villages")) -> ui.openVillages(player)
             args.firstOrNull() == "autonomous" && player.hasPermission("arccivs.admin") -> {
                 if (args.size == 1) ui.openAutonomous(player)
                 else if (args.size >= 3) host.beginAutonomousSelection(player, args.drop(2).joinToString(" "), args[1])
@@ -285,7 +286,7 @@ class CivsCommand(
             if (admin && args.size == 2 && args[0] == "autonomous")
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
-            return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
+            return (listOf("preview", "villages") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
                 (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "village-search-status", "village-search-cancel") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
