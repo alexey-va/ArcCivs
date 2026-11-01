@@ -19,6 +19,102 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
+    test("recovery continuation forecasts the next native proven choice after a complete layout refusal") {
+        initialRecoveryScenario(continuation = true) { s ->
+            val declined = s.rejectFirstForecast("autonomy-layout-obstructed")
+            s.subject.progress(s.city.id)?.reason shouldBe "autonomy-layout-obstructed"
+            s.city shouldBe s.before
+            s.saves shouldBe emptyList()
+            s.nativeProofs shouldBe listOf(declined)
+            s.forecasts shouldBe 1
+            s.reserveItems() shouldBe s.beforeItems
+
+            s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
+            s.finish { s.subject.debug(s.city.id)["request"] == null }
+            s.forecasts shouldBe 1
+            s.saves shouldBe emptyList()
+
+            s.time += 270_001; s.subject.pulse(); s.scheduler.tick()
+            s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
+            val replacement = s.forecastDesigns.last()
+            (replacement == declined) shouldBe false
+            s.forecastDesigns shouldBe listOf(declined, replacement)
+            // A skipped choice is proved again; no native acceptance is cached across retries.
+            s.nativeProofs.takeLast(2) shouldBe listOf(declined, replacement)
+            s.forecasts shouldBe 2
+            (s.searchDebug()["attempted"] as Int <= 64) shouldBe true
+            s.searchDebug()["preferred_terraces_attempted"] shouldBe 3
+            val plan = requireNotNull(s.city.autonomy?.plan)
+            plan.plots.size shouldBe 34
+            plan.routes.size shouldBe 33
+            CivsVillageSiteScoring.completeProfile(plan) shouldBe true
+            plan.revision shouldBe s.oldPlan.revision + 1
+            plan.plots.single { it.building.id == s.oldHut.id }.building shouldBe replacement.copy(phase = BuildingPhase.SITE)
+            s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+
+    test("recovery continuation does not advance after a transient forecast failure") {
+        initialRecoveryScenario(continuation = true) { s ->
+            val candidate = s.rejectFirstForecast("world-busy")
+            s.city shouldBe s.before
+            s.saves shouldBe emptyList()
+            s.time += 300_001; s.subject.pulse(); s.scheduler.tick()
+            s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
+            s.forecastDesigns shouldBe listOf(candidate, candidate)
+            s.nativeProofs shouldBe listOf(candidate, candidate)
+            s.forecasts shouldBe 2
+            CivsVillageSiteScoring.completeProfile(requireNotNull(s.city.autonomy?.plan)) shouldBe true
+            s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+
+    test("recovery continuation discards declined choices when the owner context changes") {
+        initialRecoveryScenario(continuation = true) { s ->
+            val candidate = s.rejectFirstForecast("autonomy-layout-obstructed")
+            val current = s.city.copy(owner = UUID(169, 9))
+            s.city = current
+            s.time += 300_001; s.subject.pulse(); s.scheduler.tick()
+            s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
+            s.forecastDesigns shouldBe listOf(candidate, candidate)
+            s.nativeProofs shouldBe listOf(candidate, candidate)
+            s.forecasts shouldBe 2
+            s.city.copy(revision = current.revision, autonomy = current.autonomy) shouldBe current
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+
+    test("recovery continuation reruns native guards within sixty four attempts and resets on exhaustion") {
+        initialRecoveryScenario(continuation = true) { s ->
+            val candidate = s.rejectFirstForecast("autonomy-layout-obstructed")
+            s.failure = "native-quota"
+            s.time += 300_001; s.subject.pulse(); s.scheduler.tick()
+            s.finish { s.subject.debug(s.city.id)["request"] == null }
+            s.searchDebug()["attempted"] shouldBe 64
+            s.searchDebug()["preferred_terraces_attempted"] shouldBe 3
+            s.nativeProofs shouldBe listOf(candidate)
+            s.forecasts shouldBe 1
+            s.saves shouldBe emptyList()
+            s.city shouldBe s.before
+            s.reserveItems() shouldBe s.beforeItems
+
+            s.failure = null
+            s.time += 300_001; s.subject.pulse(); s.scheduler.tick()
+            s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
+            s.forecastDesigns shouldBe listOf(candidate, candidate)
+            s.nativeProofs shouldBe listOf(candidate, candidate)
+            s.forecasts shouldBe 2
+            s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+
     test("unpaid road shoulder grade conflicts still admit the coherent raised old hut") {
         initialRecoveryScenario(v2 = true, preferOldTerrace = true, shoulderConflicts = true) { s ->
             s.shoulderGrades.size shouldBe 1
@@ -275,7 +371,8 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
 
 /** Real development/placement/terraform/full34 planner, with the native read boundary controlled explicitly. */
 private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private val v2: Boolean,
-    halfWidth: Int, legacyWidth: Boolean, private val preferOldTerrace: Boolean, shoulderConflicts: Boolean) : AutoCloseable {
+    halfWidth: Int, legacyWidth: Boolean, private val preferOldTerrace: Boolean, shoulderConflicts: Boolean,
+    private val continuation: Boolean) : AutoCloseable {
     val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler, true)
     private val plugin = paper.createSimplePlugin("InitialUnpaidRecoveryTest")
@@ -315,6 +412,8 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     var reservedCaptures = 0
     var unreservedSurfaces = 0
     var forecasts = 0
+    val forecastDesigns = mutableListOf<CivBuilding>()
+    val nativeProofs = mutableListOf<CivBuilding>()
     var nativeOreRejections = 0
     private var recovering = false
     val preferredDrafts = mutableListOf<CivTerraformDraft>()
@@ -385,6 +484,7 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
             actual.autonomy?.plan shouldBe city.autonomy?.plan
             if (arg<CivBuilding>(1).type == BuildingType.TOWN_HALL) {
                 forecasts++
+                if (continuation) forecastDesigns += requireNotNull(selected)
                 if (holdForecast) forecast else CompletableFuture.completedFuture(
                     if (failure == "no-full-forecast") blockedSurface() else nativeSurface())
             } else {
@@ -413,8 +513,11 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
                     CompletableFuture.failedFuture(rejection)
                 }
             } else if (sameOldSlot(draft.building) || failure == "native-quota" ||
-                recovering && unreservedDrafts.size == 1 && !preferred) {
-                if (recovering && !preferred && unreservedDrafts.size == 1) rejectedAlternative = draft.building
+                if (continuation) {
+                    if (recovering && !preferred && rejectedAlternative == null) rejectedAlternative = draft.building
+                    draft.building == rejectedAlternative
+                } else recovering && unreservedDrafts.size == 1 && !preferred) {
+                if (!continuation && recovering && !preferred && unreservedDrafts.size == 1) rejectedAlternative = draft.building
                 CompletableFuture.failedFuture(CivsRejection("autonomy-terrain", mapOf(
                     "x" to draft.building.bounds.min.x.toString(), "y" to (draft.building.bounds.min.y - 1).toString(),
                     "z" to draft.building.bounds.min.z.toString(), "block" to "minecraft:coal_ore", "stage" to "support")))
@@ -442,13 +545,18 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
             volumeCells += cells
             val overwritesOre = preferOldTerrace && cells.any { it.position == ArcSchematicPoint(ore.x, ore.y, ore.z) &&
                 it.blockData != "minecraft:coal_ore" }
-            if (overwritesOre || (!preferOldTerrace && volumeCaptures.size == 1) || failure == "payload-only") {
+            val rejectedFirstPayload = !preferOldTerrace && if (continuation) {
+                if (rejectedPayload == null) rejectedPayload = building
+                building == rejectedPayload
+            } else volumeCaptures.size == 1
+            if (overwritesOre || rejectedFirstPayload || failure == "payload-only") {
                 rejectedPayload = building
                 CompletableFuture.failedFuture(CivsRejection("autonomy-terrain", mapOf("block" to "COAL_ORE",
                     "x" to building.bounds.min.x.toString(), "y" to building.bounds.min.y.toString(),
                     "z" to building.bounds.min.z.toString())))
             } else {
                 selected = building
+                if (continuation) nativeProofs += building
                 CompletableFuture.completedFuture(mockk<CivPlacementPlan>(relaxed = true))
             }
         }
@@ -458,6 +566,18 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         subject.pulseAccessRepair(); scheduler.tick()
         subject.accessReady(city) shouldBe true
         subject.pulse(); scheduler.tick()
+    }
+    fun rejectFirstForecast(reason: String): CivBuilding {
+        holdForecast = true
+        start(); finish { forecasts == 1 }
+        val candidate = requireNotNull(selected)
+        holdForecast = false
+        // The existing asynchronous forecast boundary supplies a controlled refusal for A.
+        // Subsequent choices still run the real complete-profile planner on the flat fixture.
+        forecast.completeExceptionally(CivsRejection(reason,
+            if (reason == "autonomy-layout-obstructed") mapOf("stage" to "no-dry-perimeter") else emptyMap()))
+        finish { subject.debug(city.id)["request"] == null }
+        return candidate
     }
     fun finish(done: () -> Boolean) {
         repeat(100) { if (!done()) scheduler.tick() }
@@ -548,7 +668,8 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
 }
 
 private fun initialRecoveryScenario(v2: Boolean = false, halfWidth: Int = 74, legacyWidth: Boolean = false,
-    preferOldTerrace: Boolean = false, shoulderConflicts: Boolean = false,
+    preferOldTerrace: Boolean = false, shoulderConflicts: Boolean = false, continuation: Boolean = false,
     action: (InitialRecoveryScenario) -> Unit) = failOnUnsupportedMockBukkitOperation {
-    MockBukkitTestRuntime.open().use { paper -> InitialRecoveryScenario(paper, v2, halfWidth, legacyWidth, preferOldTerrace, shoulderConflicts).use(action) }
+    MockBukkitTestRuntime.open().use { paper -> InitialRecoveryScenario(paper, v2, halfWidth, legacyWidth, preferOldTerrace,
+        shoulderConflicts, continuation).use(action) }
 }

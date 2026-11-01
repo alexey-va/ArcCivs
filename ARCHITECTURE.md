@@ -1101,6 +1101,12 @@ The current workers, items, settings and unrelated state survive that write.
 Failure preserves the original plan and uses the existing retry delay. Recovery
 neither persists the shadow nor refounds the city, grants supplies, moves actual
 buildings or writes world blocks; normal construction repeats native validation.
+After a geometric full-forecast refusal, the next scheduled recovery considers
+the next fully native-proved choice in the same bounded search order. Earlier
+choices are proved again and consume the same 64-attempt quota before being
+skipped. One full forecast per retry and its existing delay remain unchanged.
+This continuation belongs only to the captured owner and initial layout; it is
+cleared on context changes, successful adoption or an exhausted sweep.
 
 Recovery first considers the old hut's exact horizontal footprint, rotation and
 schematic family at the ordinary offered terrace heights. These alternatives

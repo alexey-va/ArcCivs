@@ -31,15 +31,17 @@ internal class CivsAutonomousPlacement(
     private var closed = false
 
     fun search(city: Settlement, type: BuildingType, level: Int, buildingId: UUID,
-        captureVolume: Boolean = false, initialPlan: CivSettlementPlan? = null): CompletableFuture<CivAutonomousDesign> {
-        if (initialPlan != null && (!captureVolume || type != BuildingType.BUILDER_HUT || level != 1 ||
+        captureVolume: Boolean = false, initialPlan: CivSettlementPlan? = null,
+        skipPrepared: Int = 0): CompletableFuture<CivAutonomousDesign> {
+        if (skipPrepared !in 0..MAXIMUM_OPTIONS || skipPrepared > 0 && initialPlan == null ||
+            initialPlan != null && (!captureVolume || type != BuildingType.BUILDER_HUT || level != 1 ||
             city.autonomy?.plan != initialPlan || city.building(buildingId) != null ||
             city.buildings.singleOrNull()?.let { it.type == BuildingType.TOWN_HALL && it.level == 1 &&
                 it.phase == BuildingPhase.SITE } != true)) return CompletableFuture.failedFuture(CivsRejection("stale-development"))
         val planningCity = if (initialPlan == null) city else city.copy(autonomy = requireNotNull(city.autonomy).copy(
             plan = null, layoutHalfWidth = initialPlan.halfWidth))
         return admit(Search(planningCity, type, level, buildingId, captureVolume = captureVolume,
-            nativeCity = city, initialPlan = initialPlan))
+            nativeCity = city, initialPlan = initialPlan, skipPrepared = skipPrepared))
     }
 
     fun decoration(city: Settlement, entryId: String, buildingId: UUID): CompletableFuture<CivAutonomousDesign> =
@@ -190,7 +192,7 @@ internal class CivsAutonomousPlacement(
         private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null,
         private val pinnedWaterFoundations: List<CivWaterFoundation> = emptyList(),
         private val captureVolume: Boolean = false, private val nativeCity: Settlement = city,
-        private val initialPlan: CivSettlementPlan? = null) {
+        private val initialPlan: CivSettlementPlan? = null, skipPrepared: Int = 0) {
         private val adopted = CivsSettlementPlans.current(city)
         @Volatile private var resolvedCatalogEntry: String? = catalogEntry
         @Volatile private var familiesTried = emptyList<String>()
@@ -218,6 +220,7 @@ internal class CivsAutonomousPlacement(
         @Volatile private var routeRefreshed = false
         @Volatile private var nativeTerrainRejected = false
         private var preferredPending = initialPlan != null
+        private var remainingPrepared = skipPrepared
         private var preferredTerrace = false
         private var preferredAttempts = 0
         val rejections = java.util.concurrent.ConcurrentHashMap<String, Int>()
@@ -513,7 +516,11 @@ internal class CivsAutonomousPlacement(
                             phase = "capture"
                             await(world.captureAutonomousSite(city.id, city.owner, city.worldId, blueprint.building,
                                 blueprint.cells, terrain), ::retry) {
-                                result.complete(CivAutonomousDesign(blueprint, terrain))
+                                if (remainingPrepared > 0) {
+                                    // A prior full forecast declined this ordinal; all native proofs still ran again.
+                                    remainingPrepared--
+                                    attempt()
+                                } else result.complete(CivAutonomousDesign(blueprint, terrain))
                             }
                         } else result.complete(CivAutonomousDesign(blueprint, terrain))
                     }

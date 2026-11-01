@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "plugin_version": "0.1.169",
+  "status": "verified_local_not_delivered",
+  "inventory": "ruscrafting-ops/docs/knowledge/economy-inventory.md",
+  "problem": "Village-3 repeatedly selects the same native-safe hut whose complete forecast fails no-dry-perimeter. Native candidate search stops before the full forecast, so its position is lost between the existing five-minute retries.",
+  "change": "Remember only the ordinal of fully native-proved choices rejected by a geometric full forecast for the captured initial owner/layout. A later existing retry rechecks and skips those choices within the same64attemptquota before returning its next fully proved choice. No actual later Village-3 candidate is claimed valid before observation.",
+  "direct_currencies": {
+    "Vault": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "premium_tokens": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    },
+    "player_XP": {
+      "before": 0,
+      "after": 0,
+      "delta": 0
+    }
+  },
+  "at_search_or_plan_adoption": {
+    "items_minted": 0,
+    "items_burned": 0,
+    "workers_created": 0,
+    "native_world_writes": 0,
+    "repeat_initial_reserve": false,
+    "actual_Hall_workers_items_settings_preserved": true
+  },
+  "founding_reserve_before_equals_after": {
+    "per_new_ID": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    },
+    "five_total": {
+      "logs": 480,
+      "cobblestone": 480,
+      "bread": 120
+    },
+    "repeat_existing_ID": 0,
+    "remaining_one": {
+      "logs": 96,
+      "cobblestone": 96,
+      "bread": 24
+    }
+  },
+  "bounds": {
+    "native_attempts_per_recovery": 64,
+    "preferred_terraces": 3,
+    "full_forecasts_per_recovery": 1,
+    "recovery_retry_milliseconds": 300000,
+    "placement_and_planning_jobs": 2,
+    "full_layout_plots": 34,
+    "native_guards": "unchanged ore, support, route, headroom, ownership, protection, control, full layout and perimeter checks",
+    "cursor": "in-memory context-bound only, bounded and reset on exhausted sweep; no stored field or migration",
+    "skip_boundary": "only after current full native proof; skipped choices still consume native quota",
+    "advance_boundary": "only current deterministic geometric full-forecast refusal; no advance on transient, stale, cancelled or failed-save results"
+  },
+  "future_effect": "A later unpaid plan can become available for ordinary paid construction. Real materials, native work, normal supply grants, depths, mine staffing/drop probabilities and all earning rates keep their existing rules. No measured item throughput, zero indirect economic effect or self-sufficiency is claimed.",
+  "income_model": {
+    "active_SELL": "unchanged, no invented item price or income",
+    "planned_SELL_to_contract": "future/SHADOW tracked separately, not active income"
+  },
+  "native_evidence_before": {
+    "city": "dec66805-7c29-330b-9530-4ac9442fc09f",
+    "version": "0.1.168",
+    "native_terraform_route_and_body_capture": "passed03:46:05..03:46:06UTC",
+    "full_forecast_refusal": "2026-11-01T03:46:18.420Z",
+    "reason": "autonomy-layout-obstructed",
+    "stage": "no-dry-perimeter",
+    "paid_committed_reserved_in_two_samples": 0,
+    "normal_supply_grants_in_two_samples": 0,
+    "repeat_initial_materialization_in_two_samples": 0,
+    "no_claim_all_alternatives_invalid": true
+  },
+  "verification": {
+    "causal_RED": {
+      "reported": 24,
+      "new_failures": 1,
+      "new_guard_passes": 3,
+      "filtered_skips": 20,
+      "errors": 0
+    },
+    "focused_GREEN": {
+      "unique_passed": 418,
+      "first_run": 412,
+      "clean_final_run": 51,
+      "overlap": 45,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "runtime_sources_unchanged": true,
+      "not_single418_run": true
+    },
+    "source_review": "clean_exact_e166e444_5583d8a4_f3d76261",
+    "production_jar": "pass_ArcCore0.1.28;cleanbuildbyteidentical",
+    "consumer": "pass2.7.81",
+    "delivery": "not_delivered",
+    "activation": "not_active",
+    "native_development": "not_observed",
+    "native_client": "not_observed",
+    "clean_jar_sha256": "e38d6a755ea057c12fff1ae39cb423d56f050d6f292d984eb03e69ef73482720"
+  }
+}
