@@ -29,6 +29,13 @@ internal object CivsGateRoutes {
     fun refit(city: Settlement, old: CivBuilding, target: CivBuilding, original: List<CivPosition>): CivRoadRouteOverride? {
         val prior = city.roadRouteOverrides?.get(old.id.toString())
         require(prior == null || prior.originalRoute == original)
+        if (prior != null && !prior.gateDetours.isNullOrEmpty()) {
+            prior.validated(city, old)
+            require(CivsGateRefit.versioned(old) && target.bounds == old.bounds && target.transit == old.transit)
+            return prior.detached().copy(gateDetours = prior.gateDetours!!.map {
+                it.detached().copy(captureId = CivsGateRefit.retainedPlanId(target))
+            })
+        }
         val route = prior?.route ?: original
         if (route.isEmpty()) return null
         require(route.last() == old.entrance && route.size <= CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH)

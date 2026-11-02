@@ -119,7 +119,7 @@ internal class CivsControlRelocations(
         }.onFailure { proof = null; report(city, pending.building, it) }
     }
 
-    private fun select(city: Settlement, building: CivBuilding): List<CivControlCandidate>? {
+    private fun sourcePoints(building: CivBuilding): List<CivControlCandidate>? {
         var source = sources[building]
         if (source == null) {
             source = candidates(building)
@@ -132,10 +132,20 @@ internal class CivsControlRelocations(
             sources.remove(building)
             throw failure
         }
+        return points
+    }
+
+    private fun select(city: Settlement, building: CivBuilding): List<CivControlCandidate>? {
+        val points = sourcePoints(building) ?: return null
         if (points.isEmpty()) throw CivsRejection("control-no-interior")
         if (points.any { it.position == building.control }) return null
-        // Stable source order makes the same permanent location win after every construction/restart.
-        return points.take(8).filter { usable(city, building, it) }.takeIf { it.isNotEmpty() }
+        val native = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+        val old = requireNotNull(building.control)
+        reject(!native.isChunkLoaded(old.x shr 4, old.z shr 4), "chunk-unloaded")
+        val occupied = (native.getBlockAt(old.x, old.y, old.z).state as? Barrel)?.inventory?.isEmpty == false
+        // A fresh receiver holds all 27 exact source slots; authored furniture must not crowd it out.
+        val legal = points.take(CivsWorkstations.MAXIMUM_POINTS).filter { usable(city, building, it) }
+        return (if (occupied) legal.sortedBy { it.existing } else legal).take(8).takeIf { it.isNotEmpty() }
             ?: throw CivsRejection("control-interior-blocked")
     }
 
@@ -192,16 +202,41 @@ internal class CivsControlRelocations(
             return installations.install(city.id, building.id)
         }
         reject(block.type != Material.BARREL || !civsSameRelocationContainerState(block.blockData.asString, pending.retire.before), "world-changed")
-        if (building.control == old) return installations.install(city.id, building.id).thenCompose { staged ->
-            if (closed) CompletableFuture.completedFuture(staged)
-            else transfer(staged, requireNotNull(staged.building(building.id)), old, pending.position).thenCompose { evacuated ->
-                if (closed) CompletableFuture.completedFuture(evacuated)
-                else publish(evacuated, pending).thenCompose { installations.install(it.id, building.id) }
+        if (building.control == old) {
+            replanFullReceiver(city, building, pending)?.let { return it }
+            return installations.install(city.id, building.id).thenCompose { staged ->
+                if (closed) CompletableFuture.completedFuture(staged)
+                else transfer(staged, requireNotNull(staged.building(building.id)), old, pending.position).thenCompose { evacuated ->
+                    if (closed) CompletableFuture.completedFuture(evacuated)
+                    else publish(evacuated, pending).thenCompose { installations.install(it.id, building.id) }
+                }
             }
         }
         reject(building.control != pending.position, "control-location-changed")
         // Receipts saved by the earlier implementation already published the new control.
         return transfer(city, building, old, pending.position).thenCompose { installations.install(it.id, building.id) }
+    }
+
+    /** An unchanged authored receiver created no new barrel: only its failed intent may be retired. */
+    private fun replanFullReceiver(city: Settlement, building: CivBuilding, pending: CivControlPlacement): CompletableFuture<Settlement>? {
+        if (failures[building.id]?.reason != "storage-full" || !available(city) ||
+            pending.before.substringBefore('[') != "minecraft:barrel" || !pending.approach.isNullOrEmpty()) return null
+        val old = requireNotNull(pending.retire)
+        val native = plugin.server.getWorld(city.worldId) ?: return null
+        fun unchanged(point: CivPosition, before: String): Boolean = native.isChunkLoaded(point.x shr 4, point.z shr 4) &&
+            native.getBlockAt(point.x, point.y, point.z).let {
+                it.type == Material.BARREL && civsSameRelocationContainerState(it.blockData.asString, before)
+            }
+        if (building.control != old.position || !unchanged(old.position, old.before) || !unchanged(pending.position, pending.before)) return null
+        val points = sourcePoints(building) ?: return null
+        if (points.none { it.position == building.control } &&
+            points.take(CivsWorkstations.MAXIMUM_POINTS).none { !it.existing && usable(city, building, it) }) return null
+        return mutate(city.id) { fresh ->
+            reject(closed || fresh != city || !available(fresh) || fresh.building(building.id)?.control != old.position ||
+                pending !in fresh.pendingControls.orEmpty() || !unchanged(old.position, old.before) ||
+                !unchanged(pending.position, pending.before), "control-location-changed")
+            CivsRules.validate(fresh.copy(pendingControls = fresh.pendingControls.orEmpty() - pending, revision = fresh.revision + 1))
+        }
     }
 
     private fun publish(city: Settlement, receipt: CivControlPlacement): CompletableFuture<Settlement> {

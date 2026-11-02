@@ -123,6 +123,21 @@ internal class CivsNavigationSnapshots(
     val shapeReads: Long get() { checkOwner(); return paletteReads + dynamicReads }
     fun supportCosts(count: Int) { checkOwner(); supportCostReads += count }
 
+    /** Failed physical frontiers also discover plugin edits that emit no native block event. */
+    fun refreshObstacles(worldId: UUID, points: List<CivPosition>) {
+        checkOwner()
+        require(points.size <= 64)
+        val world = Bukkit.getWorld(worldId) ?: return
+        for (point in points) {
+            val key = CitizenSnapshotKey(point.x shr 4, point.z shr 4)
+            val captured = chunks[Key(worldId, key)]?.chunk ?: continue
+            if (point.y !in world.minHeight until world.maxHeight || !citizenChunkReady(world, key.x, key.z)) continue
+            // A denied route alone must not restart neighbours using unchanged chunks.
+            if (captured.data(point) != world.getBlockAt(point.x, point.y, point.z).blockData)
+                changed(worldId, point)
+        }
+    }
+
     /** Invalidate immediately, but copy the post-event native state once after the whole batch settles. */
     fun changed(world: UUID, point: CivPosition) {
         checkOwner()

@@ -20,6 +20,25 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsGateRefitJournalTest : FunSpec({
+    test("clean arch recovery removes only the remaining panels and rebinds the identical route after a mixed restart") {
+        for (published in listOf(false, true)) GateJournalFixture(variant = true, cleanUpgrade = true).use { h ->
+            val beforeRoute = h.f.before.roadRouteOverrides!!.getValue(h.f.gate.id.toString())
+            if (published) { h.city = h.f.after; h.storage.updateCity(h.city) }
+            h.f.receipt.changes().take(1).forEach { h.put(it.position, it.after) }
+            h.await(h.journal.bootstrap()); h.journal.recover(); h.ticks()
+            h.city shouldBe h.f.after
+            h.states() shouldBe h.afterStates()
+            h.goods() shouldBe h.originalGoods
+            val saved = h.city.roadRouteOverrides!!.getValue(h.f.gate.id.toString())
+            saved.route shouldBe beforeRoute.route
+            saved.originalRoute shouldBe beforeRoute.originalRoute
+            saved.gateDetours!!.single().captureId shouldBe h.f.receipt.replacement.id
+            h.journal.recover(); h.ticks()
+            h.publications shouldBe 1
+            h.journal.pendingCount shouldBe 0
+        }
+    }
+
     test("stepped gate publishes its route detour only with the verified geometry and preserves native goods") {
         GateJournalFixture(variant = true).use { h ->
             h.captureFence = CompletableFuture()
@@ -173,12 +192,13 @@ class CivsGateRefitJournalTest : FunSpec({
     }
 })
 
-private class GateJournalFixture(variant: Boolean = false) : AutoCloseable {
+private class GateJournalFixture(variant: Boolean = false, cleanUpgrade: Boolean = false) : AutoCloseable {
     val paper = MockBukkitTestRuntime.open()
     val world = CivsWorksiteWorldFixture("gate-refit").also(paper.server::addWorld)
     val plugin = paper.createSimplePlugin("GateRefitTest")
     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-    val f = if (variant) gateVariantFixture(reroute = true, worldId = world.uid) else gateRefitFixture(worldId = world.uid)
+    val f = if (cleanUpgrade) cleanGateFixture(gateVariantFixture(reroute = true, worldId = world.uid, profileVersion = 2))
+        else if (variant) gateVariantFixture(reroute = true, worldId = world.uid) else gateRefitFixture(worldId = world.uid)
     private val cities = mutableMapOf(f.before.id to f.before)
     var city: Settlement
         get() = cities.getValue(f.before.id)

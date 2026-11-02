@@ -122,7 +122,7 @@ class CivsGateRefitTest : FunSpec({
             }))
             price(old) shouldBe mapOf("COBBLESTONE" to 25L, "STONE_BRICKS" to 5L, "DARK_OAK_FENCE_GATE" to 5L)
             price(next) shouldBe mapOf("COBBLESTONE" to 25L, "STONE_BRICKS" to 6L, "DARK_OAK_LOG" to 27L,
-                "DARK_OAK_STAIRS" to 10L, "DARK_OAK_SLAB" to 5L, "DARK_OAK_FENCE_GATE" to 3L)
+                "DARK_OAK_STAIRS" to 10L, "DARK_OAK_SLAB" to 5L)
             CivsMaterials.required(f.receipt.replacement)["COBBLESTONE"] shouldBe null
             CivsInfrastructure.building(next).schematicId shouldBe CivsGateRefit.PREFIX + f.gate.id
         }
@@ -133,7 +133,7 @@ internal data class GateRefitFixture(val before: Settlement, val gate: CivBuildi
     val receipt: CivGateRefitReceipt, val after: Settlement, val transaction: CivInventoryTransaction,
     val sourceBytes: ByteArray, val replacementBytes: ByteArray)
 
-internal fun gateRefitFixture(alongX: Boolean = true, worldId: UUID = UUID(181, 4)): GateRefitFixture {
+internal fun gateRefitFixture(alongX: Boolean = true, worldId: UUID = UUID(181, 4), profileVersion: Int = 3): GateRefitFixture {
     val box = CivBox(CivPosition(20, 64, 20), CivPosition(24, 69, 24))
     val id = UUID(181, 1)
     val gate = CivBuilding(id, BuildingType.GATE, 1, box.min, 0, "civs/infrastructure/v1/gate/$id", box,
@@ -156,7 +156,7 @@ internal fun gateRefitFixture(alongX: Boolean = true, worldId: UUID = UUID(181, 
         capturedSha256 = CivsGateRefit.sha256(sourceBytes))
     val witnesses = ((20..24).map { if (alongX) CivPosition(22, 65, it) else CivPosition(it, 65, 22) } +
         (20..24).map { if (alongX) CivPosition(it, 65, 20) else CivPosition(20, 65, it) }).distinct()
-    val draft = CivsGateRefit.proposal(before, source, witnesses, UUID(181, 2))
+    val draft = CivsGateRefit.proposal(before, source, witnesses, UUID(181, 2), profileVersion)
     val replacementBytes = bytes(draft.blocks, draft.building.transit!!)
     val replacement = draft.copy(capturedSha256 = CivsGateRefit.sha256(replacementBytes))
     val receipt = CivGateRefitReceipt(gate, source, replacement, witnesses)

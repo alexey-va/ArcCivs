@@ -148,6 +148,15 @@ class CivsSettlementFortificationsTest : FunSpec({
         val oldFrame = CivsSettlementLayout.frame(saved)
         val old = CivsSettlementLayout.infrastructure(saved.copy(buildings = legacy.plots.map { it.building.copy(bounds = it.envelope) }),
             oldFrame, surface, legacy.routes.values.toList())
+        old.rejected shouldBe emptyMap()
+        old.perimeterClosed shouldBe true
+        val compactGates = old.pieces.filter { it.type == BuildingType.GATE }
+        compactGates.size shouldBe 3
+        compactGates.all { it.bounds.max.x - it.bounds.min.x == 2 && it.bounds.max.z - it.bounds.min.z == 2 &&
+            it.transit.size == 7 && CivsGateRefit.validTransit(CivsInfrastructure.building(it)) } shouldBe true
+        compactGates.all { gate -> legacy.routes.values.flatten().filter {
+            CivsAutonomousGeometry.horizontalContains(gate.bounds, it)
+        }.all { it in gate.transit } } shouldBe true
         old.pieces.filter { it.type == BuildingType.WALL }.flatMap { it.blocks }.all { it.position.y <= 68 } shouldBe true
     }
 })

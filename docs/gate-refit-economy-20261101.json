@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "title": "ArcCivs same-bounds gate profile and explicit maintenance 2026-11-01",
+  "title": "ArcCivs clean posted gates and versioned maintenance 2026-11-02",
   "assumptions": [
     "Source-only flat 5x5 Caledonia gate; runtime delivery and player acceptance remain separate.",
     "Participants represent 1/3/10 settlements, not measured players. Low/base/high assume 0/1/4 new gates per settlement-day, with 0.25/1/4 active construction hours and 0/1/1 completed gates per hour; these are sensitivity inputs, not throughput measurements.",
@@ -8,7 +8,9 @@
     "Each item type, closed Stock resource, Vault, tokens and player XP is a separate unit. No SELL value, crafting exchange rate or disposable income is inferred.",
     "Existing-gate console maintenance has no inventory, Stock, worker-cycle, skill, XP, refund or item-drop flow; it changes only an owned authored world structure.",
     "Vault and tokens remain zero directly. Movement throughput, material acquisition time and market effects are unmeasured. Current SELL and the planned SELL-to-contract transition remain unchanged.",
-    "Fresh economy ledger was not collected by the gate worker: native operations belong to the parent. The decision is limited to source-derived material sinks and zero direct currency/XP hooks."
+    "Fresh economy ledger was not collected by the gate worker: native operations belong to the parent. The decision is limited to source-derived material sinks and zero direct currency/XP hooks.",
+    "Current cleanV3 profile removes free-standing fence gate panels: flat width5 after3\u21920, width6 after4\u21920; every other material and floor unchanged. FrozenV2 plans/receipts retain their original recipe and exact replay semantics. Existing admin cleanup removes3+4 panels without native drops/refunds.",
+    "The compact generated-only 3x3 alternative is assessed separately in compact-gate-economy-20261102.json, avoiding cumulative charges across alternative shapes. Its 13-15 logs depend on admitted real support heights. Native maintenance stays restricted to existing 5/6x5 captures."
   ],
   "participants": [
     1,
@@ -145,7 +147,7 @@
           "after": {
             "enabled": true,
             "amount_per_event": {
-              "value": "3",
+              "value": "0",
               "unit": "major"
             },
             "events_per_player_day": [
@@ -453,7 +455,7 @@
     "after": {
       "COBBLESTONE": 25,
       "STONE_BRICKS": 6,
-      "DARK_OAK_FENCE_GATE": 3,
+      "DARK_OAK_FENCE_GATE": 0,
       "DARK_OAK_LOG": 27,
       "DARK_OAK_STAIRS": 10,
       "DARK_OAK_SLAB": 5
@@ -476,5 +478,27 @@
     "wood": 0,
     "stone": 0,
     "food": 0
+  },
+  "compact_generated_gate": {
+    "scope": "Generated ordinary construction only; excluded from native maintenance proposals. Flat 3x3 geometry from Fortifications regression. Existing BARRIER floor remains KEEP_NATIVE and excluded from payment.",
+    "before": {
+      "COBBLESTONE": 9,
+      "STONE_BRICKS": 3,
+      "DARK_OAK_FENCE": 3
+    },
+    "after": {
+      "COBBLESTONE": 9,
+      "STONE_BRICKS": 2,
+      "DARK_OAK_LOG": 13,
+      "DARK_OAK_STAIRS": 6,
+      "DARK_OAK_SLAB": 3
+    },
+    "stepped_dark_oak_log_range": [
+      13,
+      15
+    ],
+    "direct_vault": 0,
+    "direct_tokens": 0,
+    "direct_player_xp": 0
   }
 }

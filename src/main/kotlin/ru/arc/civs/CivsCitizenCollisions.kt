@@ -299,14 +299,18 @@ internal class CivsCitizenCollisions(
 
     /** Existing overlaps separate by ordinary bounded steps, without teleport recovery or work credit. */
     fun separateResident(actor: CitizenActor): Boolean? {
-        if (!travelling(actor) || routes.navigationHeld(actor) || passingBodies(actor)) return null
+        val awaitingArrival = actor.route?.let {
+            it.completion == null && it.motion.finished && it.motion.failure == null && it.bodyBlockedSince != null
+        } == true
+        if ((!travelling(actor) && !awaitingArrival) || routes.navigationHeld(actor) ||
+            passingBodies(actor) && !awaitingArrival) return null
         // Pair checks use the configured actor cap (at most CivsSettings.MAXIMUM_NPCS); admission is shared by four actors per frame.
         val npc = actor.npc
         val at = npc.location
         val body = citizenStandingBounds(at, npc.scale)
         val other = runtime.actors.values.firstOrNull { it !== actor && it.worldId == actor.worldId && it.npc.isValid &&
             !it.sleeping && citizenStandingBounds(it.npc.location, it.npc.scale).overlaps(body) } ?: return null
-        if (passingBodies(other)) return null
+        if (passingBodies(other) && !awaitingArrival) return null
         val away = at.toVector().subtract(other.npc.location.toVector()).setY(0.0)
         if (away.lengthSquared() < .000001) away.x = if (actor.workerId < other.workerId) -1.0 else 1.0
         away.normalize().multiply(.05)

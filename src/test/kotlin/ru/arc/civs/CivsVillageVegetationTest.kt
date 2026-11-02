@@ -35,6 +35,21 @@ class CivsVillageVegetationTest : FunSpec({
         civsVillageVegetationCandidates(found, mapOf(stump.position to "minecraft:birch_log[axis=y]")) shouldBe emptyList()
     }
 
+    test("a detached stump capture rechecks newly attached support geometry before removal") {
+        VillageVegetationFixture().use { h ->
+            val stump = CivPosition(-5, 64, -5)
+            h.put(stump.copy(y = 63), Material.DIRT)
+            h.put(stump, Material.OAK_LOG)
+            h.startCapture()
+            h.finishCapture()
+            h.put(stump.copy(y = 65), Material.BARREL)
+            h.drain()
+            h.type(stump) shouldBe Material.OAK_LOG
+            h.type(stump.copy(y = 65)) shouldBe Material.BARREL
+            h.notifications shouldBe emptySet()
+        }
+    }
+
     test("village scope covers spatial plan and outlying buildings while respecting its territory") {
         val building = CivBuilding(UUID(0, 1), BuildingType.TOWN_HALL, 1, CivPosition(0, 64, 0), 0, "test",
             CivBox(CivPosition(-3, 63, -3), CivPosition(3, 68, 3)), CivPosition(0, 64, 4), BuildingPhase.ACTIVE)
@@ -129,6 +144,17 @@ class CivsVillageVegetationTest : FunSpec({
             val authored = CivPosition(1, 64, 1)
             val placedLeaf = CivPosition(3, 66, 0)
             val denied = listOf(CivPosition(4, 64, 4), CivPosition(4, 65, 4), CivPosition(4, 66, 4))
+            val stump = CivPosition(-5, 64, 3)
+            val cherryStump = CivPosition(-5, 64, 5)
+            val strippedTimber = CivPosition(-3, 64, 5)
+            val support = CivPosition(-5, 64, 0)
+            val timberOnStone = CivPosition(-5, 64, -3)
+            listOf(stump, support, timberOnStone).forEach { put(it, Material.OAK_LOG) }
+            put(cherryStump, Material.CHERRY_LOG)
+            put(strippedTimber, Material.STRIPPED_OAK_LOG)
+            listOf(stump, cherryStump, strippedTimber, support, authored).forEach { put(it.copy(y = it.y - 1), Material.DIRT) }
+            put(support.copy(y = support.y + 1), Material.BARREL)
+            put(timberOnStone.copy(y = timberOnStone.y - 1), Material.STONE)
             (trunk + authored + denied.take(2)).forEach { put(it, Material.OAK_LOG) }
             listOf(crown, placedLeaf, denied.last()).forEach { put(it, Material.OAK_LEAVES) }
             world.getBlockAt(placedLeaf.x, placedLeaf.y, placedLeaf.z).let { block ->
@@ -157,13 +183,16 @@ class CivsVillageVegetationTest : FunSpec({
                 background.isAlive shouldBe false
                 paper.server.scheduler.performOneTick()
                 repeat(30) { owner.pulse(listOf(city)); paper.server.scheduler.performOneTick() }
-                (trunk + crown).forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.AIR }
+                (trunk + crown + stump + cherryStump).forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.AIR }
+                world.getBlockAt(strippedTimber.x, strippedTimber.y, strippedTimber.z).type shouldBe Material.STRIPPED_OAK_LOG
+                world.getBlockAt(support.x, support.y, support.z).type shouldBe Material.OAK_LOG
+                world.getBlockAt(timberOnStone.x, timberOnStone.y, timberOnStone.z).type shouldBe Material.OAK_LOG
                 world.getBlockAt(authored.x, authored.y, authored.z).blockData.asString shouldBe authoredData
                 world.getBlockAt(placedLeaf.x, placedLeaf.y, placedLeaf.z).type shouldBe Material.OAK_LEAVES
                 denied.forEachIndexed { index, p -> world.getBlockAt(p.x, p.y, p.z).type shouldBe
                     if (index == 2) Material.OAK_LEAVES else Material.OAK_LOG }
                 inventory.storageContents.toList() shouldBe original
-                notifications shouldBe (trunk + crown).toSet()
+                notifications shouldBe (trunk + crown + stump + cherryStump).toSet()
                 city.revision shouldBe 0
                 city.stock shouldBe Stock()
                 pending.size shouldBe 0
@@ -208,6 +237,8 @@ private class VillageVegetationFixture : AutoCloseable {
     } }
 
     fun type(p: CivPosition): Material = world.getBlockAt(p.x, p.y, p.z).type
+
+    fun put(p: CivPosition, material: Material) { world.getBlockAt(p.x, p.y, p.z).type = material }
 
     fun startCapture() { owner.pulse(listOf(city)); paper.server.scheduler.performOneTick() }
 

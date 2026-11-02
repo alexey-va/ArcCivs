@@ -239,7 +239,7 @@ open class ArcCivsPlugin : JavaPlugin() {
                 service::repairBuildingStorage, service::retryConstruction, service::debugLayout,
                 this::prepareHotload, this::hotloadStatus, service::debugTerrainAt,
                 CivsTerrainDebugFile(dataRoot, executor)::save, CivsSettlementDebugFile(dataRoot, executor)::save,
-                service::foundVillages, service::cancelVillageSearch, service::villageSearchStatus, service::refitGate)
+                service::foundVillages, service::cancelVillageSearch, service::villageSearchStatus, service::refitGate, service::infillWall)
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)

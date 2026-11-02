@@ -530,7 +530,7 @@ internal object CivsSettlementLayout {
                     cells[i] = cells[i].copy(after = openGate)
                 if (!frame.fortified && city.style == "caledonia") {
                     val witnesses = (routes + retainedRoutes).flatten().filter { contains(gate.passage, it) }.distinct()
-                    val shaped = runCatching { CivsGateRefit.shape(CivSettlementPiece(UUID(0, 0), BuildingType.GATE,
+                    val shaped = runCatching { CivsGateRefit.generatedShape(CivSettlementPiece(UUID(0, 0), BuildingType.GATE,
                         box(cells.map { it.position }), gate.center.copy(y = level + 1), cells, transit), horizontal, witnesses) }
                     if (shaped.isFailure) {
                         reject(CivsDiagnostics.rejection(shaped.exceptionOrNull()!!)?.reason ?: "gate-refit-unsupported", gate.center)

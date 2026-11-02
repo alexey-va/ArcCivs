@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "title": "ArcCivs Auto2 gate flank normal WALL infill",
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "assumptions": [
+    "One requested existing Auto2 flank gap, six columns, exactly once. Low/base/high all represent that one known repair; repeated deterministic piece ID cannot issue another wall. This is not a recurring earning flow.",
+    "Raw structural candidate from the existing normal wall recipe is26STONE_BRICKS and2DARK_OAK_FENCE. This is the source-derived structural bill; fresh native admission determines any additional ordinary approach/foundation material and the complete exact paid bill before apply. No new rate or free wall path is introduced.",
+    "The new WALL uses existing infrastructure capture, immutable plan and queued paid construction. Current construction and old gate/wall captures remain intact. A preview does not admit, pay or build anything. Native path/owner/height/occupancy guards still decide admission.",
+    "Direct currency and player XP remain separately0Vault,0premiumtokens,0playerXP. Physical materials and legacy Stock are alternative normal accounting modes; current Auto2 isPHYSICAL. No item grant, refund, free drops, world edit or forced builder arrival is allowed.",
+    "Current SELL/AutoSell and planned SELL-to-contract remain separate. No item-to-money conversion or production throughput is inferred."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "maintenance_direct_vault",
+          "kind": "mint",
+          "source": "Existing CivsSettlementLayout WALL recipe, CivsAutonomousPlacement infrastructure admission, CivsBuildingRequests paid construction",
+          "basis": "One ordinary paid structural infill; native complete material bill must be reviewed before apply",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "maintenance_direct_tokens",
+          "kind": "mint",
+          "source": "Existing CivsSettlementLayout WALL recipe, CivsAutonomousPlacement infrastructure admission, CivsBuildingRequests paid construction",
+          "basis": "One ordinary paid structural infill; native complete material bill must be reviewed before apply",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "maintenance_direct_player_xp",
+          "kind": "mint",
+          "source": "Existing CivsSettlementLayout WALL recipe, CivsAutonomousPlacement infrastructure admission, CivsBuildingRequests paid construction",
+          "basis": "One ordinary paid structural infill; native complete material bill must be reviewed before apply",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "item:STONE_BRICKS": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "single_wall_stone_bricks",
+          "kind": "burn",
+          "source": "Existing normal3x2WALL recipe; source native-ground candidate",
+          "basis": "Exactly one structural candidate; any native-admitted extra materials need separate readback before apply",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "26",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_FENCE": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "single_wall_dark_oak_fence",
+          "kind": "burn",
+          "source": "Existing normal3x2WALL recipe; source native-ground candidate",
+          "basis": "Exactly one structural candidate; any native-admitted extra materials need separate readback before apply",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

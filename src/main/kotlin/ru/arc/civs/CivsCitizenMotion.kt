@@ -190,6 +190,7 @@ internal class CivsCitizenMotion(
                     routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor)
                     continue
                 }
+                if (waitForArrivalBody(actor, route)) continue
                 route.trip?.let { paths.complete(city, it) }
                 route.completion = CitizenNavigationCompletion(null)
                 continue
@@ -278,6 +279,7 @@ internal class CivsCitizenMotion(
                     routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor)
                     continue
                 }
+                if (waitForArrivalBody(actor, route)) continue
                 route.trip?.let { paths.complete(city, it) }
                 route.completion = CitizenNavigationCompletion(null)
             }
@@ -303,6 +305,15 @@ internal class CivsCitizenMotion(
             }
         }
         threats.gravity(runtime.actors.values.filter { it.npc.isSeated || it.sleeping || it.route?.motion?.navigating == true }.mapTo(hashSetOf()) { it.workerId })
+    }
+
+    /** The last waypoint inside another body retains its route until an ordinary clear-body exit. */
+    private fun waitForArrivalBody(actor: CitizenActor, route: CitizenRoute): Boolean {
+        if (routes.arrivalBodyClear(actor)) return false
+        route.completion = null
+        route.nativeCollisionTicks = 40
+        if (route.bodyBlockedSince == null) route.bodyBlockedSince = runtime.navigationTick
+        return true
     }
 }
 

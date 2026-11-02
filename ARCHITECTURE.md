@@ -782,10 +782,14 @@ reservations end only before pickup or at a definitive receipt outcome; unknown 
 under recovery authority. Carried cargo remains durable even if its destination becomes full.
 Source-to-destination entrances must be within the existing
 88-block work-route bound. When the assigned warehouse has no native room for a
-requested input, an ordinary accepted input request may receive existing producer
-surplus directly. The same pickup rechecks demand, source desired/craft/construction
-reserves, native stock, capacity and arrival; construction requests and closed stock
-keep their existing routes. The backward-compatible `directInput=false` cargo marker
+requested input, an accepted input request may receive existing producer surplus
+directly, including a current paid construction request delivered to its legal
+builder hut. Builders still collect those real items from the hut before placement.
+Construction may collect any unreserved plain surplus already eligible for ordinary
+producer or town-hall collection; ordinary recipe inputs require the producer's advertised output.
+The same pickup rechecks current demand, source desired/craft/construction reserves,
+native stock, capacity and arrival; closed stock keeps its existing routes.
+The backward-compatible `directInput=false` cargo marker
 identifies new direct trips. Accepted carried cargo keeps its ownership when demand
 or a producer later changes. Downgrading below this support requires every direct
 batch to unload normally and every before/after journal containing it to retire;

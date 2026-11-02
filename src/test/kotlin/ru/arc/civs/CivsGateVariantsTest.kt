@@ -169,7 +169,7 @@ class CivsGateVariantsTest : FunSpec({
 })
 
 internal fun gateVariantFixture(width: Int = 5, alongX: Boolean = true, reroute: Boolean = false,
-    worldId: UUID = UUID(182, 4)): GateRefitFixture {
+    worldId: UUID = UUID(182, 4), profileVersion: Int = 3): GateRefitFixture {
     val box = CivBox(CivPosition(20, 64, 20), CivPosition(if (alongX) 19 + width else 24, 70, if (alongX) 24 else 19 + width))
     fun p(across: Int, y: Int, depth: Int) = if (alongX) CivPosition(20 + across, y, 20 + depth) else CivPosition(20 + depth, y, 20 + across)
     val id = UUID(182, 1)
@@ -206,10 +206,10 @@ internal fun gateVariantFixture(width: Int = 5, alongX: Boolean = true, reroute:
     val sourceBytes = bytes(raw)
     val source = raw.copy(capturedSha256 = CivsGateRefit.sha256(sourceBytes))
     val captureId = UUID(182, 2)
-    val shape = CivsGateRefit.proposal(before, source, emptyList(), captureId)
+    val shape = CivsGateRefit.proposal(before, source, emptyList(), captureId, profileVersion)
     val override = CivsGateRoutes.refit(before, gate, shape.building, originalRoute)
     val witnesses = (override?.route ?: currentRoute).filter { CivsAutonomousGeometry.horizontalContains(box, it) }
-    val draft = CivsGateRefit.proposal(before, source, witnesses, captureId)
+    val draft = CivsGateRefit.proposal(before, source, witnesses, captureId, profileVersion)
     val replacementBytes = bytes(draft)
     val replacement = draft.copy(capturedSha256 = CivsGateRefit.sha256(replacementBytes))
     val receipt = CivGateRefitReceipt(gate, source, replacement, witnesses, override?.let { mapOf(id.toString() to it) },

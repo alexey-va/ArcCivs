@@ -1308,6 +1308,79 @@ class CivsService(
             gateMaintenance.request(cityId, gateId, proof)
         }
 
+    internal fun infillWall(cityId: UUID, gateId: UUID, wallId: UUID, proof: String?): CompletableFuture<Map<String, Any?>> =
+        action("wall_infill", null, "city" to cityId, "gate" to gateId, "wall" to wallId, "apply" to (proof != null)) {
+            checkMain()
+            rejectIf(!ready(), "not-ready")
+            rejectIf(cityId in busy || cityId in unhealthy || inventoryJournal.pending(cityId) || construction.isPlacing(cityId), "city-busy")
+            val city = cities[cityId] ?: throw CivsRejection("no-city")
+            rejectIf(city.autonomy?.paused != false || city.pendingDeletion != null, "stale-development")
+            rejectIf(proof != null && !proof.matches(Regex("[0-9a-f]{64}")), "wall-infill-invalid-proof")
+            val target = CivsWallInfill.target(city, gateId, wallId)
+            val result = tracked<Map<String, Any?>>()
+            reserveCity(cityId)
+            var reserved = true
+            fun release() { if (reserved) { reserved = false; releaseCity(cityId) } }
+            fun current() { rejectIf(!ready() || cities[cityId] != city || construction.isPlacing(cityId), "stale-city") }
+            fun fail(error: Throwable) { release(); result.completeExceptionally(error); updateHealth() }
+            val pendingIds = (city.buildings.filter { it.phase == BuildingPhase.SITE }.map { it.id } +
+                listOfNotNull(city.construction?.id) + city.constructionQueue.orEmpty().mapNotNull { id ->
+                    city.building(id)?.takeIf { it.phase == BuildingPhase.ACTIVE }?.let(::queuedDesignId)
+                }).distinct()
+            val pending = pendingIds.map(store::loadPlan)
+            val preparation = CompletableFuture.allOf(*pending.toTypedArray()).thenApply {
+                pending.mapIndexed { index, loaded ->
+                    val plan = loaded.join() ?: throw CivsRejection("wall-infill-source-missing")
+                    rejectIf(plan.id != pendingIds[index] || plan.cityId != city.id || plan.worldId != city.worldId,
+                        "wall-infill-source-missing")
+                    plan
+                }
+            }.thenCompose { accepted -> autonomousPlacement.wallInfill(city, gateId, wallId, accepted) }
+            preparation.whenCompleteSync(tasks) prepared@ { design, failure ->
+                if (failure != null) { fail(failure); return@prepared }
+                runCatching {
+                    current()
+                    val proposal = requireNotNull(design)
+                    val b = proposal.blueprint
+                    world.captureAutonomousSite(city.id, city.owner, city.worldId, b.building, b.cells, proposal.terrain)
+                        .whenCompleteSync(tasks) captured@ { native, captureFailure ->
+                            if (captureFailure != null) { fail(captureFailure); return@captured }
+                            runCatching {
+                                current()
+                                val plan = requireNotNull(native).copy(id = b.building.id, capturedSha256 = b.snapshot.fileSha256)
+                                val actualProof = CivsWallInfill.proof(city, target, plan)
+                                val summary = linkedMapOf<String, Any?>("city" to cityId, "gate" to gateId, "wall" to wallId,
+                                    "building" to b.building.id, "bounds" to b.building.bounds, "entrance" to b.building.entrance,
+                                    "proof" to actualProof, "source_sha256" to b.snapshot.fileSha256,
+                                    "materials" to CivsMaterials.required(plan).toSortedMap(), "structural_materials" to b.materials.toSortedMap(),
+                                    "route_cells" to plan.terrain?.route.orEmpty().size,
+                                    "terrain_changed_cells" to plan.terrain?.blocks.orEmpty().count { it.before != it.after },
+                                    "current_order" to city.construction?.id, "existing_order_unchanged" to true,
+                                    "queued" to false, "phase" to "unaccepted", "revision" to city.revision)
+                                if (proof == null) {
+                                    release(); result.complete(summary + ("state" to "preview")); return@captured
+                                }
+                                rejectIf(proof != actualProof, "wall-infill-stale-preview")
+                                // The ordinary owner recaptures and saves this exact paid SITE. It never marks it built.
+                                release()
+                                admitRoadDevelopment(city) { buildingRequests.commitAutonomousDesign(city, proposal, plan) }
+                                    .whenCompleteSync(tasks) { _, commitFailure ->
+                                        if (commitFailure != null) fail(commitFailure)
+                                        else {
+                                            val saved = requireNotNull(cities[cityId])
+                                            result.complete(summary + mapOf("state" to "queued", "queued" to true,
+                                                "phase" to saved.building(b.building.id)?.phase?.name,
+                                                "revision" to saved.revision,
+                                                "existing_order_unchanged" to (saved.construction == city.construction)))
+                                        }
+                                    }
+                            }.onFailure(::fail)
+                        }
+                }.onFailure(::fail)
+            }
+            result
+        }
+
     fun debugLayout(cityId: UUID, terrain: Boolean): CompletableFuture<Map<String, Any?>> = diagnostics.debugLayout(cityId, terrain)
 
     internal fun debugTerrainAt(cityId: UUID, workerId: UUID, origin: CivPosition): Map<String, Any?> = diagnostics.debugTerrainAt(cityId, workerId, origin)

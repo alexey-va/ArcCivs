@@ -142,7 +142,9 @@ internal class CivsCitizenLeisure(
             other.npc.isValid && other.npc.world == world && !other.sleeping &&
             !other.sheltering && other.attacker == null && other.foodSource == null && other.supplyPickup == null &&
             !logistics.collectedPending(other) && other.collectionSeek == null && other.collectionHome == null &&
-            !other.returningToWarehouse && other.workerId !in runtime.pendingHarm && other.route == null &&
+            !other.returningToWarehouse && other.workerId !in runtime.pendingHarm &&
+            other.mealVisit == null && other.tavernService == null &&
+            (other.route == null || other.route?.idleAnchor != null) &&
             other.plan.idleReason in setOf("unassigned", "no-construction", "waiting-growth", "waiting-tool", "construction-paused") &&
             citizenCampEligible(other.plan, other.cycle.phase, world.time) &&
             city.workers.firstOrNull { it.id == other.workerId }?.let { !CivsResidents.isChild(it) && it.cargo == null } == true &&
@@ -174,6 +176,8 @@ internal class CivsCitizenLeisure(
             if (!safe(actor, home, first) || !safe(partner, otherHome, second) ||
                 !threats.visible(first.location(world).add(0.0, actor.npc.eyeHeight, 0.0),
                     second.location(world).add(0.0, partner.npc.eyeHeight, 0.0))) continue
+            // Optional walks need not finish in the same pulse for nearby adults to meet.
+            routes.cancelRoute(partner)
             actor.social.startMeeting(partner.workerId, first, tick)
             partner.social.startMeeting(actor.workerId, second, tick)
             if (!routes.startRoute(actor, world, first, now, idleAnchor = home.entrance) ||

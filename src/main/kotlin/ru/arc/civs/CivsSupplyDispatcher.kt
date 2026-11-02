@@ -501,7 +501,9 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         if (++checks > 100_000) throw CivSupplyBudget()
     }
     fun deliveryTask(plan: CivCourierPlan): CivSupplyTask? = requests.keys.firstOrNull {
-        (!plan.cargo.directInput || !it.construction) && it.material == plan.cargo.material && (it.target == plan.destinationBuildingId ||
+        (!plan.cargo.directInput || !it.construction || snapshot.constructionId != null &&
+            stores[plan.destinationBuildingId]?.type == BuildingType.BUILDER_HUT) &&
+            it.material == plan.cargo.material && (it.target == plan.destinationBuildingId ||
             it.construction && plan.destinationBuildingId in snapshot.constructionTargets.values)
     }
     fun redistributionFree(source: UUID, material: String): Long {
@@ -574,7 +576,8 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             cargo.sourceWorkerId?.let { sources[it]?.buildingId != cargo.sourceBuildingId } == true ||
             cargo.sourceWorkerId in busySources || !cargo.redistribution && key != null && (demand[key] ?: 0) < cargo.amount ||
             (cargo.sourceBuildingId == cargo.warehouseId || cargo.directInput) && key == null ||
-            cargo.directInput && (snapshot.autonomousStock || source == null || source.outputMaterial != cargo.material ||
+            cargo.directInput && (snapshot.autonomousStock || source == null || source.outputMaterial == null ||
+                key?.construction != true && source.outputMaterial != cargo.material ||
                 source.capacity.virtualRoom != null || stores[cargo.warehouseId]?.capacity?.virtualRoom != null ||
                 stores[plan.destinationBuildingId]?.capacity?.virtualRoom != null) ||
             cargo.redistribution && !redistributionReady(plan)) continue
@@ -641,11 +644,13 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             val target = stores[targetId] ?: continue
             offer(warehouse, target, key.material, minOf(needed, stock[warehouse.id]?.get(key.material) ?: 0), key)
             // A full depot must not strand a real producer's surplus while an accepted input has room.
-            if (!key.construction && !snapshot.autonomousStock && target.id != warehouse.id && warehouse.capacity.virtualRoom == null &&
+            if ((!key.construction || snapshot.constructionId != null && target.type == BuildingType.BUILDER_HUT) &&
+                !snapshot.autonomousStock && target.id != warehouse.id && warehouse.capacity.virtualRoom == null &&
                 target.capacity.virtualRoom == null && roomFor(warehouse.id, key.material) == 0L)
                 for (source in stores.values) {
                     checkBudget()
-                    if (source.id != warehouse.id && source.outputMaterial == key.material && source.capacity.virtualRoom == null) {
+                    if (source.id != warehouse.id && source.outputMaterial != null &&
+                        (key.construction || source.outputMaterial == key.material) && source.capacity.virtualRoom == null) {
                         val available = ((stock[source.id]?.get(key.material) ?: 0L) -
                             (source.desiredStock[key.material] ?: 0L)).coerceAtLeast(0)
                         offer(source, target, key.material, minOf(needed, available), key, directInput = true)

@@ -1,0 +1,474 @@
+{
+  "version": 1,
+  "title": "ArcCivs compact generated gate material debit 2026-11-02",
+  "assumptions": [
+    "Alternative generated-only 3x3 gate, not an additional payment for a 5x5 gate.",
+    "Participants 1/3/10 settlements; assumed 0/1/4 new compact gates per settlement-day. Sensitivity inputs are not measured throughput.",
+    "Flat source counts price every authored cell from air. Existing matching native cells and KEEP_NATIVE floor are excluded from the real ordinary construction bill.",
+    "Admitted one-block stepped profile varies only logs 13-15. Flat13 is used by the evaluator.",
+    "No direct Vault, premium token, player XP, refund or drop issuance. Current SELL and future SELL-to-contract remain separate and unchanged."
+  ],
+  "participants": [
+    1,
+    3,
+    10
+  ],
+  "currencies": {
+    "item:COBBLESTONE": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "compact_generated_cobblestone",
+          "kind": "burn",
+          "source": "CivsGateRefit generated compact helper and CivsSettlementFortificationsTest",
+          "basis": "Alternative generated compact gate from air; same hypothetical construction frequencies, not an additional charge on large gates.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "9",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "9",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:STONE_BRICKS": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "compact_generated_stone_bricks",
+          "kind": "burn",
+          "source": "CivsGateRefit generated compact helper and CivsSettlementFortificationsTest",
+          "basis": "Alternative generated compact gate from air; same hypothetical construction frequencies, not an additional charge on large gates.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_LOG": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "compact_generated_dark_oak_log",
+          "kind": "burn",
+          "source": "CivsGateRefit generated compact helper and CivsSettlementFortificationsTest",
+          "basis": "Alternative generated compact gate from air; same hypothetical construction frequencies, not an additional charge on large gates.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "13",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_STAIRS": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "compact_generated_dark_oak_stairs",
+          "kind": "burn",
+          "source": "CivsGateRefit generated compact helper and CivsSettlementFortificationsTest",
+          "basis": "Alternative generated compact gate from air; same hypothetical construction frequencies, not an additional charge on large gates.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_SLAB": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "compact_generated_dark_oak_slab",
+          "kind": "burn",
+          "source": "CivsGateRefit generated compact helper and CivsSettlementFortificationsTest",
+          "basis": "Alternative generated compact gate from air; same hypothetical construction frequencies, not an additional charge on large gates.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "gate_direct_vault",
+          "kind": "mint",
+          "source": "CivsGateMaintenance and normal construction rules",
+          "basis": "No direct currency or player XP issuance hook in either path.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "gate_direct_tokens",
+          "kind": "mint",
+          "source": "CivsGateMaintenance and normal construction rules",
+          "basis": "No direct currency or player XP issuance hook in either path.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "gate_direct_player_xp",
+          "kind": "mint",
+          "source": "CivsGateMaintenance and normal construction rules",
+          "basis": "No direct currency or player XP issuance hook in either path.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    },
+    "item:DARK_OAK_FENCE": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "compact_generated_dark_oak_fence",
+          "kind": "burn",
+          "source": "CivsGateRefit generated compact helper and CivsSettlementFortificationsTest",
+          "basis": "Alternative generated compact gate from air; same hypothetical construction frequencies, not an additional charge on large gates.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "raw_materials_per_new_gate": {
+    "before": {
+      "COBBLESTONE": 9,
+      "STONE_BRICKS": 3,
+      "DARK_OAK_FENCE": 3
+    },
+    "after": {
+      "COBBLESTONE": 9,
+      "STONE_BRICKS": 2,
+      "DARK_OAK_LOG": 13,
+      "DARK_OAK_STAIRS": 6,
+      "DARK_OAK_SLAB": 3
+    }
+  },
+  "legacy_closed_stock_per_gate": {
+    "before": {
+      "wood": 12,
+      "stone": 16,
+      "food": 0
+    },
+    "after": {
+      "wood": 12,
+      "stone": 16,
+      "food": 0
+    }
+  },
+  "maintenance_inventory_delta": {},
+  "maintenance_stock_delta": {
+    "wood": 0,
+    "stone": 0,
+    "food": 0
+  }
+}

@@ -256,7 +256,8 @@ internal class CitizenPacketRoute(
                 floor(it.x) == floor(origin.x) && floor(it.z) == floor(origin.z) && it.y == origin.y
             }) {
             val next = steps[1].point
-            if (next.y == origin.y && permits(origin, next) && citizenPacketStepClear(world, origin, next, true)) steps.removeAt(0)
+            if (next.y == origin.y && permits(origin, next) && flatSupportClear(origin, next) &&
+                citizenPacketStepClear(world, origin, next, true)) steps.removeAt(0)
         }
         // Detached paths omit their root. An offset pose can need its own cell centre
         // before crossing an open panel, or before opening rotates a closed panel.
@@ -266,9 +267,10 @@ internal class CitizenPacketRoute(
             val cell = CivPosition(floor(first.point.x).toInt(), floor(first.point.y).toInt(), floor(first.point.z).toInt())
             val opening = cell.y in minimumY until maximumY && citizenChunkReady(world, cell.x shr 4, cell.z shr 4) &&
                 citizenRouteOpenable(world.getBlockAt(cell.x, cell.y, cell.z).blockData)?.isOpen == false
-            if ((opening || !citizenPacketStepClear(world, origin, first.point, false)) &&
+            if ((opening || !flatSupportClear(origin, first.point) || !citizenPacketStepClear(world, origin, first.point, false)) &&
                 allowed(CivPosition(floor(centre.x).toInt(), floor(centre.y).toInt(), floor(centre.z).toInt())) &&
                 citizenPacketSupported(world, centre) && permits(origin, centre) && permits(centre, first.point) &&
+                flatSupportClear(origin, centre) && flatSupportClear(centre, first.point) &&
                 citizenPacketStepClear(world, origin, centre, false) &&
                 citizenPacketStepClear(world, centre, first.point, opening))
                 steps.add(0, CitizenPlannedStep(centre, CitizenRouteAction.WALK))
@@ -407,11 +409,17 @@ internal class CitizenPacketRoute(
             if (point.distanceSquared(candidate) < .000000000001) break
             val a = CitizenPoint(point.x, point.y, point.z)
             val b = CitizenPoint(candidate.x, candidate.y, candidate.z)
+            // An accepted flat edge can lose its intermediate floor after capture.
+            // Waypoint support alone cannot authorize a packet step over that hole.
+            if (entry.action == CitizenRouteAction.WALK && entry.start.y == next.y && a.y == next.y && b.y == next.y && profile == null &&
+                !flatSupportClear(a, b)) { fail("path-changed"); break }
             if (!permits(a, b) || !(if (descending || profile != null) citizenPacketSegmentClear(world, a, b, false, a, null)
                     else citizenPacketStepClear(world, a, b, false))) {
                 fail("movement-blocked"); break
             }
             val origin = CitizenPoint(from.x, from.y, from.z)
+            if (moved && !usedGravity && !stair && !steppedStair && origin.y == next.y && b.y == next.y &&
+                !flatSupportClear(origin, b)) break
             // Native players lift, then sweep horizontally across a stair riser. Preserve that
             // body/ceiling check at a straight stair join; other corners retain the packet chord.
             if ((stair || steppedStair) && abs(b.y - origin.y) > .562501) break
@@ -456,6 +464,24 @@ internal class CitizenPacketRoute(
         }
         point.pitch = pitch
         return point
+    }
+
+    /** Inspect each crossed column's interior; touching a grid corner does not cross its diagonal cell. */
+    private fun flatSupportClear(from: CitizenPoint, to: CitizenPoint): Boolean {
+        val boundaries = sortedSetOf(0.0, 1.0)
+        for ((start, end) in listOf(from.x to to.x, from.z to to.z)) {
+            if (start == end) continue
+            for (edge in floor(min(start, end)).toInt() + 1..floor(max(start, end)).toInt()) {
+                val fraction = (edge - start) / (end - start)
+                if (fraction > 0.0 && fraction < 1.0) boundaries += fraction
+            }
+        }
+        return citizenPacketSupported(world, to) && boundaries.zipWithNext().all { (first, second) ->
+            val fraction = (first + second) / 2
+            // The two axes can report the same grid corner a few floating-point units apart.
+            second - first <= .000000001 || citizenPacketSupported(world, CitizenPoint(from.x + (to.x - from.x) * fraction, from.y,
+                from.z + (to.z - from.z) * fraction))
+        }
     }
 
     private fun gravityStep(entry: Waypoint, y: Double): Boolean = entry.profileTerrain == null && entry.point.y < y - .0001 &&
@@ -564,7 +590,7 @@ internal class CitizenPacketRoute(
         if (length < .2) return
         // The eventual packets follow this whole chord. A policy boundary touched at
         // a sample join must not disappear when the ray is split into shorter pieces.
-        if (!permits(from, target) || !citizenPacketStepClear(world, from, target, false)) return
+        if (!flatSupportClear(from, target) || !permits(from, target) || !citizenPacketStepClear(world, from, target, false)) return
         // One candidate and at most twenty-five short chords per admitted segment.
         val count = kotlin.math.ceil(length / .2).toInt()
         var previous = from
@@ -616,7 +642,7 @@ internal class CitizenPacketRoute(
             for (x in floor(point.x - .299).toInt()..floor(point.x + .299).toInt())
                 for (z in floor(point.z - .299).toInt()..floor(point.z + .299).toInt())
                     if (!allowed(CivPosition(x, floor(point.y + .001).toInt(), z))) return
-            if (!citizenPacketSupported(world, point) || !permits(previous, point) ||
+            if (!flatSupportClear(previous, point) || !permits(previous, point) ||
                 !citizenPacketStepClear(world, previous, point, false) ||
                 travelCost(world.getBlockAt(floor(point.x).toInt(), citizenSupportY(point.y), floor(point.z).toInt())) > cost) return
             previous = point

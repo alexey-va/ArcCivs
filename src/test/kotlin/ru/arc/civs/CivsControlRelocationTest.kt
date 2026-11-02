@@ -131,6 +131,123 @@ class CivsControlRelocationTest : FunSpec({
         }
     }
 
+    test("full authored receivers cannot crowd a spare air control out of the bounded native selection") {
+        ControlRelocationFixture().use { h ->
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.original, h.hall)))
+            h.storage.updateCity(h.city)
+            h.durable()
+            val items = List(STORAGE_SLOTS) { slot -> ItemStack(Material.DIAMOND, slot + 1).apply {
+                itemMeta = itemMeta.apply { displayName(Component.text("Crowded source slot $slot")) }
+            } }
+            items.forEachIndexed { slot, item -> h.oldInventory.setItem(slot, item) }
+            val authored = (2..9).map { CivPosition(it, 64, 2) }
+            authored.forEach { point ->
+                h.block(point).type = Material.BARREL
+                val inventory = (h.block(point).state as Barrel).inventory
+                repeat(STORAGE_SLOTS) { inventory.setItem(it, ItemStack(Material.STONE, 64)) }
+            }
+            val fullBefore = authored.map { (h.block(it).state as Barrel).inventory.storageContents.toList() }
+            var now = 0L
+            h.relocations(candidates = { building -> CompletableFuture.completedFuture(
+                if (building.id == h.original.id) authored.map { h.candidate(it, true) } + h.candidate(h.replacement, false)
+                else listOf(h.candidate(building.control!!, true))) }, clock = { now }).use { owner ->
+                repeat(4) { owner.pulse(); now += 1_000L }
+                h.city.pendingControls!!.single().position shouldBe h.replacement
+                h.oldInventory.storageContents.toList() shouldBe items
+                h.transactions shouldBe 0
+                h.stagingFence.complete(Unit); h.ticks()
+                h.fence.complete(Unit); h.ticks(); owner.drained().join()
+                h.building.control shouldBe h.replacement
+                h.replacementInventory.storageContents.toList() shouldBe items
+                h.block(h.old).type shouldBe Material.AIR
+                h.transactions shouldBe 1
+                authored.map { (h.block(it).state as Barrel).inventory.storageContents.toList() } shouldBe fullBefore
+            }
+        }
+    }
+
+    test("a persisted full authored receiver replans metadata before the same exact-slot transfer") {
+        ControlRelocationFixture().use { h ->
+            h.durable()
+            val items = List(STORAGE_SLOTS) { slot -> ItemStack(Material.DIAMOND, slot + 1).apply {
+                itemMeta = itemMeta.apply { displayName(Component.text("Pending source slot $slot")) }
+            } }
+            items.forEachIndexed { slot, item -> h.oldInventory.setItem(slot, item) }
+            h.block(h.replacement).type = Material.BARREL
+            repeat(STORAGE_SLOTS) { h.replacementInventory.setItem(it, ItemStack(Material.STONE, 64)) }
+            h.block(h.receiver).type = Material.AIR
+            h.storage.refreshBuilding(h.city, h.building)
+            val fullBefore = h.replacementInventory.storageContents.toList()
+            h.acceptIntent(staging = true, existingReceiver = true)
+            h.reload()
+            h.stagingFence = CompletableFuture.completedFuture(Unit)
+            h.fence = CompletableFuture.completedFuture(Unit)
+            var now = 0L
+            val choices: (CivBuilding) -> CompletableFuture<List<CivControlCandidate>> = { building ->
+                CompletableFuture.completedFuture(if (building.id == h.original.id)
+                    listOf(h.candidate(h.replacement, true), h.candidate(h.receiver, false))
+                else listOf(h.candidate(building.control!!, true)))
+            }
+            h.relocations(candidates = choices, clock = { now }).use { owner ->
+                owner.pulse(); h.ticks()
+                h.city.pendingControls!!.single().position shouldBe h.replacement
+                h.transactions shouldBe 0
+                now = 5_000L; owner.pulse(); h.ticks()
+                h.city.pendingControls shouldBe emptyList()
+                h.building.control shouldBe h.old
+                h.oldInventory.storageContents.toList() shouldBe items
+                h.replacementInventory.storageContents.toList() shouldBe fullBefore
+                h.block(h.receiver).type shouldBe Material.AIR
+            }
+            h.reload()
+            h.relocations(candidates = choices, clock = { now }).use { owner ->
+                repeat(4) { now += 1_000L; owner.pulse(); h.ticks() }
+                owner.drained().join()
+            }
+            h.building.control shouldBe h.receiver
+            (h.block(h.receiver).state as Barrel).inventory.storageContents.toList() shouldBe items
+            h.replacementInventory.storageContents.toList() shouldBe fullBefore
+            h.block(h.old).type shouldBe Material.AIR
+            h.city.pendingControls shouldBe emptyList()
+            h.transactions shouldBe 1
+        }
+    }
+
+    for (condition in listOf("created-receiver", "changed-authored-receiver", "approach"))
+    test("a blocked $condition intent retains its protected receiver and all original items") {
+        ControlRelocationFixture().use { h ->
+            h.durable()
+            h.oldInventory.setItem(0, ItemStack(Material.DIAMOND, 64))
+            h.block(h.replacement).type = Material.BARREL
+            h.block(h.replacement).blockData = org.bukkit.Bukkit.createBlockData("minecraft:barrel[facing=north,open=false]")
+            repeat(STORAGE_SLOTS) { h.replacementInventory.setItem(it, ItemStack(Material.STONE, 64)) }
+            repeat(STORAGE_SLOTS) { h.receiverInventory.setItem(it, ItemStack(Material.STONE, 64)) }
+            h.acceptIntent(staging = true, existingReceiver = condition != "created-receiver")
+            if (condition == "approach") {
+                val pending = h.city.pendingControls!!.single()
+                h.city = CivsRules.validate(h.city.copy(pendingControls = listOf(pending.copy(approach = listOf(
+                    CivPlanBlock(h.original.entrance, "minecraft:stone", "minecraft:air"))))))
+            }
+            h.stagingFence = CompletableFuture.completedFuture(Unit)
+            val spare = CivPosition(8, 64, 8)
+            var now = 0L
+            h.relocations(candidates = { CompletableFuture.completedFuture(listOf(h.candidate(spare, false))) },
+                clock = { now }).use { owner ->
+                owner.pulse(); h.ticks()
+                if (condition == "changed-authored-receiver") h.block(h.replacement).blockData =
+                    org.bukkit.Bukkit.createBlockData("minecraft:barrel[facing=south,open=false]")
+                val pending = h.city.pendingControls
+                now = 5_000L; owner.pulse(); h.ticks()
+                h.city.pendingControls shouldBe pending
+                h.building.control shouldBe h.old
+                h.oldInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 64)
+                h.replacementInventory.storageContents.filterNotNull().sumOf { it.amount } shouldBe STORAGE_SLOTS * 64
+                h.block(spare).type shouldBe Material.AIR
+                h.transactions shouldBe 0
+            }
+        }
+    }
+
     test("a busy retirement commit waits five seconds then resumes the same receipt without transferring again") {
         ControlRelocationFixture().use { h ->
             h.durable()
@@ -545,8 +662,8 @@ private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTER
         mutations++
         return CompletableFuture.completedFuture(city)
     }
-    fun acceptIntent(staging: Boolean = false) {
-        val receipt = CivControlPlacement(original.id, replacement, "minecraft:air", retire = CivPlanBlock(old,
+    fun acceptIntent(staging: Boolean = false, existingReceiver: Boolean = false) {
+        val receipt = CivControlPlacement(original.id, replacement, if (existingReceiver) block(replacement).blockData.asString else "minecraft:air", retire = CivPlanBlock(old,
             block(old).blockData.asString, "minecraft:air"))
         city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == original.id && !staging) it.copy(control = replacement) else it },
             pendingControls = listOf(receipt), revision = city.revision + 1))
@@ -563,13 +680,18 @@ private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTER
     fun durable() { store.save(city).join() }
     fun reload() { city = store.load().join().single(); storage.updateCity(city) }
     fun ticks() { paper.performTicks(20) }
+    fun candidate(point: CivPosition, existing: Boolean): CivControlCandidate {
+        val standing = point.copy(z = point.z + 1)
+        return CivControlCandidate(point, standing, existing, route = listOf(standing.copy(z = standing.z + 1), standing))
+    }
     fun relocations(candidates: (CivBuilding) -> CompletableFuture<List<CivControlCandidate>> = { CompletableFuture.completedFuture(emptyList()) },
         clock: () -> Long = { 10_000L }): CivsControlRelocations = CivsControlRelocations(plugin, tasks, worldAdapter, storage, installations,
         candidates, { listOf(city) },
         { it.id !in busy && it.id !in unhealthy && !journal.pending(it.id) }, { saved, current, from, to ->
             val id = UUID.randomUUID()
             storage.reserve(saved, id)
-            val move = storage.prepareControlRelocation(saved, current, from, to)
+            val move = try { storage.prepareControlRelocation(saved, current, from, to) }
+                catch (failure: Throwable) { storage.unlock(id); return@CivsControlRelocations CompletableFuture.failedFuture(failure) }
             if (move == null) {
                 storage.unlock(id)
                 CompletableFuture.completedFuture(saved)

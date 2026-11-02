@@ -71,8 +71,13 @@ object CivsLogistics {
         val source = city.building(cargo.sourceBuildingId) ?: return false
         val target = city.building(cargo.targetBuildingId) ?: return false
         val warehouse = city.building(cargo.warehouseId) ?: return false
+        val targetAvailable = if (target.type == BuildingType.BUILDER_HUT)
+            city.construction?.takeIf { it.payment != null }?.let { order ->
+                CivsRules.constructionStores(city, order.buildingId).any { it.id == target.id }
+            } == true else target.phase == BuildingPhase.ACTIVE
+        val output = CivsProduction.material(source)
         return source.phase == BuildingPhase.ACTIVE && source.control != null && !CivsRules.isBuilder(city, source) &&
-            CivsProduction.material(source) == cargo.material && target.phase == BuildingPhase.ACTIVE && target.control != null &&
+            output != null && (target.type == BuildingType.BUILDER_HUT || output == cargo.material) && targetAvailable && target.control != null &&
             warehouse.type == BuildingType.WAREHOUSE && warehouse.phase == BuildingPhase.ACTIVE && warehouse.control != null &&
             withinRoute(city, source.control, target.control)
     }

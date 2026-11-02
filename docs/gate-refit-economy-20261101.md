@@ -3,8 +3,9 @@
 The new Caledonia gate has grounded supports, a three- or four-block-wide opening
 and a shallow timber cap. The profile accepts exact older level-one gate captures
 five or six columns across, five columns deep, and six or seven blocks high, with
-the saved flat or one-block-stepped transit floor. Existing open dark-oak leaves
-remain in the clear opening. Six support columns cease to be public transit,
+the saved flat or one-block-stepped transit floor. The clean V3 opening has no
+freestanding fence-gate panels; frozen V2 receipts retain their original recipe
+for exact recovery. Six support columns cease to be public transit,
 leaving 19 or 24 walkable columns inside the unchanged paid bounds.
 
 All four supplied Auto2 captures pass the source audit. One gate's own approach
@@ -28,7 +29,7 @@ Amounts for distinct item types are not combined into a currency.
 |---|---:|---:|
 | Cobblestone | 25 | 25 |
 | Stone bricks | 5 | 6 |
-| Dark oak fence gates | 5 | 3 |
+| Dark oak fence gates | 5 | 0 |
 | Dark oak logs | 0 | 27 |
 | Dark oak stairs | 0 | 10 |
 | Dark oak slabs | 0 | 5 |
@@ -51,7 +52,7 @@ neither a fixed bill nor an upper bound for every possible stepped profile.
 |---|---:|---:|---:|
 | Cobblestone | 25 → 25 | 9 → 9 | 6 → 6 |
 | Stone bricks | 5 → 6 | 5 → 6 | 6 → 6 |
-| Dark oak fence gates | 0 → 0 | 5 → 3 | 6 → 4 |
+| Dark oak fence gates | 0 → 0 | 5 → 0 | 6 → 0 |
 | Dark oak logs | 0 → 33 | 0 → 28 | 0 → 32 |
 | Dark oak stairs | 0 → 10 | 0 → 10 | 0 → 12 |
 | Dark oak slabs | 0 → 5 | 0 → 5 | 0 → 6 |
@@ -63,15 +64,41 @@ support samples agree with every explicitly captured cobblestone floor cell.
 Support sampling is not proof that a refit has been applied or is traversable.
 The frequency sensitivity calculation below remains the flat 5×5 example.
 
+## Compact generated gate
+
+Fallback settlement layout also generates a 3×3 gate. Its ordinary construction
+uses the same grounded timber arch at the existing bounds, with a clear centre
+column and corner bypasses. It cannot enter the native maintenance operation.
+
+| Item | Previous compact generator | New compact profile |
+|---|---:|---:|
+| Cobblestone | 9 | 9 |
+| Stone bricks | 3 | 2 |
+| Dark oak fence | 3 | 0 |
+| Dark oak logs | 0 | 13 |
+| Dark oak stairs | 0 | 6 |
+| Dark oak slabs | 0 | 3 |
+
+An admitted one-block step changes only the log count to 13–15. Existing native
+floor cells remain excluded from payment. These are alternative gate shapes,
+not cumulative charges. The separate `compact-gate-economy-20261102.json` assessment records compact
+item burns at the same hypothetical frequencies; they are not added to the
+large-gate totals. Currency and player XP issuance stay zero.
+
 ## Existing-gate maintenance
 
 The explicit console operation repairs one already-owned authored structure. The
-four audited variants have 48, 49, 54 or 56 native cell changes. These changes add
+initial four audited V2 variants have 48, 49, 54 or 56 native cell changes. The V3
+cleanup leaves the already-clean first two gates unchanged and removes exactly
+three and four panels from the stepped gates; their floors, transit and route
+points stay unchanged. Gate12's saved detour changes only its capture reference.
+These changes add
 no inventory items, do not refund the removed lintel, do not
 simulate production, and do not alter Stock, workers, cycles or skills. It uses the
 existing exact world-change journal and a fresh immutable capture, retaining the
 original plan and schematic. Replaying an accepted receipt cannot issue resources.
-The versioned capture reference prevents reapplying the legacy-only migration.
+The versioned capture reference preserves old replay and makes an already-clean
+gate a no-op without another capture or world write.
 
 Direct before/after issuance is 0 Vault, 0 premium tokens and 0 player XP. No
 rewards, sale rates, crafting prices or auto-supply policy change. Current SELL

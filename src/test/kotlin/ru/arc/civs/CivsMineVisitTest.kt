@@ -1335,8 +1335,9 @@ private class MineVisitFixture(paper: MockBukkitTestRuntime, maximumAttempts: In
     fun nativeWorkOwner(): Pair<CivsCitizenWork, CivsCitizenRoutes> {
         lateinit var work: CivsCitizenWork
         val navigation = mockk<CivsResidentNavigation> {
-            every { request(any(), any(), any(), any(), any(), any(), any()) } answers {
-                CitizenPacketRoute(arg(0), arg(1), arg(2), arg(3), arg(4), arg(5), corridor = arg(6))
+            every { request(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                CitizenPacketRoute(arg(0), arg(1), arg(2), arg(3), arg(4), arg(5),
+                    corridor = arg(6), snapshotPolicy = arg(7))
             }
         }
         val shelter = mockk<CivsCitizenShelters>(relaxed = true) {

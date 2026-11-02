@@ -3885,6 +3885,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                     h.city = CivsRules.finishAutonomousVisual(h.city, visual)
                     visual.changes.forEach { cell -> h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
                         .blockData = Bukkit.createBlockData(cell.after) }
+                    h.owner.terrainChanged(h.world.uid, visual.changes.map { it.position })
                     lastWorkedAt = visual.standing
                     native++
                     h.autoCrop(farm, native, duration = 5_000)
@@ -4001,6 +4002,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                             h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
                             h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)
                         }
+                        h.owner.terrainChanged(h.world.uid, ack.work.changes.map { it.position })
                         h.city = after
                         h.city.workers shouldBe original.workers
                         h.city.stock shouldBe original.stock
@@ -5126,6 +5128,8 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
         world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
         // The second pass observes ordinary native growth; the receipt only applies the subsequent care action.
         world.getBlockAt(crop.x, crop.y, crop.z).blockData = Bukkit.createBlockData(before)
+        // Native work/growth notifies the same batched owner after changing the fixture world.
+        owner.terrainChanged(world.uid, listOf(soil, crop))
         return CivWorldWork(workerId, city.workers.first { it.id == workerId }.completedCycles, farm.id,
             soil.copy(z = soil.z - 1), listOf(CivPlanBlock(crop, before,
                 if (watering) "minecraft:wheat[age=4]" else "minecraft:wheat[age=0]")), durationMillis = duration,

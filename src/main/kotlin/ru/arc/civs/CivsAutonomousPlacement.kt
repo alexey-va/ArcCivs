@@ -61,6 +61,11 @@ internal class CivsAutonomousPlacement(
     fun infrastructure(city: Settlement): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
 
+    fun wallInfill(city: Settlement, gateId: UUID, wallId: UUID,
+        acceptedWork: List<CivPlacementPlan>): CompletableFuture<CivAutonomousDesign> =
+        admit(Search(city, BuildingType.WALL, 1, UUID.randomUUID(), infrastructure = true,
+            wallInfill = CivsWallInfill.target(city, gateId, wallId), acceptedWork = acceptedWork.toList()))
+
     /** One adopted plan, using the same detached height field, catalogue and finite solvers. */
     fun plan(city: Settlement, unpaidSite: CivAutonomousDesign? = null): CompletableFuture<CivSettlementPlan> {
         val result = CompletableFuture<CivSettlementPlan>()
@@ -237,7 +242,9 @@ internal class CivsAutonomousPlacement(
         private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null,
         private val pinnedWaterFoundations: List<CivWaterFoundation> = emptyList(),
         private val captureVolume: Boolean = false, private val nativeCity: Settlement = city,
-        private val initialPlan: CivSettlementPlan? = null, skipPrepared: Int = 0) {
+        private val initialPlan: CivSettlementPlan? = null, skipPrepared: Int = 0,
+        private val wallInfill: CivWallInfillTarget? = null,
+        private val acceptedWork: List<CivPlacementPlan> = emptyList()) {
         private val adopted = CivsSettlementPlans.current(city)
         @Volatile private var resolvedCatalogEntry: String? = catalogEntry
         @Volatile private var familiesTried = emptyList<String>()
@@ -306,6 +313,16 @@ internal class CivsAutonomousPlacement(
                 }
                 await(world.autonomousHeightField(city, hall, hall, waterColumns)) { field ->
                     surface = field; columns = field.columns.size
+                    if (wallInfill != null) {
+                        val (piece, buildable) = CivsWallInfill.prepare(city, wallInfill, field, access, acceptedWork)
+                        surface = buildable
+                        pieces = mapOf(piece.id to piece)
+                        candidates = listOf(CivsAutonomousCandidate(CivsInfrastructure.building(piece)))
+                        options = candidates.map { CivTerraformOption(it.building, 0) }
+                        candidateSource = "gate-wall-infill"
+                        attempt()
+                        return@await
+                    }
                     val pavingRoutes = (access.routes.filterKeys { id -> city.building(id)?.type?.isInfrastructure == false }.values +
                         adopted?.routes.orEmpty().values).distinct()
                     val reservedCity = city.copy(buildings = city.buildings + adopted?.plots.orEmpty()
@@ -453,7 +470,7 @@ internal class CivsAutonomousPlacement(
             phase = "surface"
             val waterColumns = pinnedWaterFoundations.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
             await(world.autonomousHeightField(nativeCity, first.building, previous, waterColumns)) { field ->
-                surface = field
+                surface = if (infrastructure && pinned != null) CivsWallInfill.acceptedSurface(city, pinned.building, field, access) else field
                 columns = field.columns.size
                 gradeSurface()
             }

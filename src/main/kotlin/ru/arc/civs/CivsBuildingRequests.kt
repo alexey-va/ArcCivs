@@ -622,7 +622,8 @@ internal class CivsBuildingRequests(
         authority.updateHealth()
     }
 
-    fun commitAutonomousDesign(city: Settlement, design: CivAutonomousDesign): CompletableFuture<Unit> {
+    fun commitAutonomousDesign(city: Settlement, design: CivAutonomousDesign,
+        expectedCapture: CivPlacementPlan? = null): CompletableFuture<Unit> {
         val blueprint = design.blueprint
         val previous = city.building(blueprint.building.id)
         val result = authority.tracked<Unit>()
@@ -636,6 +637,10 @@ internal class CivsBuildingRequests(
             if (captureFailure != null) { authority.releaseCity(city.id); result.completeExceptionally(captureFailure); return@whenCompleteSync }
             runCatching {
                 rejectIf(!authority.ready() || records.cities[city.id] != city || city.autonomy?.paused != false, "stale-development")
+                expectedCapture?.let { expected ->
+                    rejectIf(requireNotNull(captured).copy(id = expected.id, capturedSha256 = expected.capturedSha256) != expected ||
+                        expected.capturedSha256 != blueprint.snapshot.fileSha256, "wall-infill-stale-preview")
+                }
                 val control = if (previous == null && !blueprint.building.type.isInfrastructure && blueprint.building.type != BuildingType.DECORATION)
                     controlInstallations.prepare(city.id, city.worldId, city.owner, blueprint.building,
                         prepareApproach = design.terrain == null) else null

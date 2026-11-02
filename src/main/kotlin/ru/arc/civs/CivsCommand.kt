@@ -42,6 +42,8 @@ class CivsCommand(
     private val villageSearchStatus: () -> Map<String, Any?> = { mapOf("state" to "unavailable") },
     private val refitGate: (UUID, UUID, String?) -> CompletableFuture<Map<String, Any?>> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
+    private val infillWall: (UUID, UUID, UUID, String?) -> CompletableFuture<Map<String, Any?>> = { _, _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (args.firstOrNull() in setOf("found-villages", "village-search-status", "village-search-cancel")) {
@@ -182,6 +184,27 @@ class CivsCommand(
             }
             return true
         }
+        if (args.firstOrNull() == "infill-wall") {
+            val mode = args.getOrNull(1)
+            fun id(index: Int) = args.getOrNull(index)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val city = id(2); val gate = id(3); val wall = id(4); val proof = args.getOrNull(5)
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                mode !in setOf("preview", "apply") || city == null || gate == null || wall == null ||
+                    mode == "preview" && args.size != 5 || mode == "apply" && (args.size != 6 || proof == null) -> "invalid-wall-infill-arguments"
+                else -> null
+            }
+            fun reply(value: Map<String, Any?>) = sender.sendMessage("ARCCIVS_WALL_INFILL " + Gson().toJson(value))
+            if (error != null) reply(mapOf("state" to "failed", "reason" to error))
+            else runCatching { infillWall(requireNotNull(city), requireNotNull(gate), requireNotNull(wall), proof) }
+                .getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { value, failure ->
+                    if (failure == null && value != null) reply(value)
+                    else reply(mapOf("state" to "failed", "city" to city, "gate" to gate, "wall" to wall,
+                        "reason" to (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "wall-infill-failed"),
+                        "details" to failure?.let { CivsDiagnostics.rejection(it)?.values }))
+                }
+            return true
+        }
         if (args.firstOrNull() == "refit-gate") {
             val mode = args.getOrNull(1)
             val city = args.getOrNull(2)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
@@ -301,7 +324,7 @@ class CivsCommand(
             if (!use) return emptyList()
             if (console && admin && args.size == 2 && args[0] == "hotload")
                 return listOf("prepare", "status").filter { it.startsWith(args[1], true) }
-            if (console && admin && args.size == 2 && args[0] == "refit-gate")
+            if (console && admin && args.size == 2 && args[0] in setOf("refit-gate", "infill-wall"))
                 return listOf("preview", "apply").filter { it.startsWith(args[1], true) }
             if (console && admin && args.size == 5 && args[0] == "found-villages")
                 return (0..CivsVillageSites.MAXIMUM_BATCH).map { it.toString() }.filter { it.startsWith(args[4]) }
@@ -313,7 +336,7 @@ class CivsCommand(
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
             return (listOf("preview", "villages") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
-                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "village-search-status", "village-search-cancel", "refit-gate") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
+                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "village-search-status", "village-search-cancel", "refit-gate", "infill-wall") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         private fun settlementFileLine(path: Path? = null, failure: Throwable? = null): String =

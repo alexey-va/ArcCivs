@@ -200,7 +200,7 @@ internal class CivsCargoRequests(
                 val needed = if (accepted.sourceBuildingId != accepted.warehouseId && !accepted.directInput) CivsLogistics.MAX_CARGO else {
                     val local = residentSupplies.localStocks(city)
                     (CivsLogistics.requests(city, local) + residentSupplies.workSupplyRequests(city, local)).firstOrNull { request ->
-                        (!accepted.directInput || !request.construction) && request.material == accepted.material &&
+                        request.material == accepted.material &&
                             (request.buildingId == accepted.targetBuildingId ||
                             request.construction && city.construction?.let { order ->
                                 CivsRules.constructionStores(city, order.buildingId).any { it.id == accepted.targetBuildingId }

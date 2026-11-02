@@ -32,14 +32,26 @@ internal fun civsVillageVegetationColumn(city: Settlement, x: Int, z: Int): Bool
 internal data class CivVegetationCell(val position: CivPosition, val before: String, val log: Boolean, val leaf: Boolean)
 
 private data class CivVegetationSelection(val cells: List<CivVegetationCell>,
-    val proofParents: Map<CivPosition, CivPosition>)
+    val proofParents: Map<CivPosition, CivPosition>, val stumps: Set<CivPosition> = emptySet())
+
+/** A bare, upright, unowned root on natural soil; attached timber and supports remain intact. */
+internal fun civsVillageVegetationStump(cell: CivVegetationCell, typeAt: (CivPosition) -> Material?): Boolean {
+    val material = CivsForestry.material(cell.before)
+    if (!cell.log || !material.endsWith("_LOG") || material.startsWith("STRIPPED_") || "axis=y" !in cell.before) return false
+    val p = cell.position
+    if (typeAt(p.copy(y = p.y - 1))?.name !in CivsForestry.soils ||
+        typeAt(p.copy(y = p.y + 1))?.isAir != true || typeAt(p.copy(y = p.y + 2))?.isAir != true) return false
+    return (-1..1).all { dx -> (-1..1).all { dz ->
+        dx == 0 && dz == 0 || typeAt(p.copy(x = p.x + dx, z = p.z + dz))?.isSolid == false
+    } }
+}
 
 private fun civsVegetationProtectionMatches(before: Settlement, after: Settlement): Boolean =
     before.worldId == after.worldId && before.center == after.center && before.radius == after.radius &&
         before.buildings == after.buildings && before.construction?.id == after.construction?.id &&
         before.construction?.plannedBuilding == after.construction?.plannedBuilding &&
         before.autonomy?.plan == after.autonomy?.plan && before.autonomy?.layoutHalfWidth == after.autonomy?.layoutHalfWidth &&
-        before.roadRouteOverrides == after.roadRouteOverrides
+        before.roadRouteOverrides == after.roadRouteOverrides && before.pendingControls == after.pendingControls
 
 /** No drops, resource credits, player data or city revisions. Repeating an interrupted sweep is idempotent. */
 internal class CivsVillageVegetation(
@@ -102,6 +114,18 @@ internal class CivsVillageVegetation(
             val reserved = retained.filter { it.id == current.construction?.id }.flatMap {
                 (it.blocks + it.terrain?.blocks.orEmpty()).map { block -> block.position }
             }.toHashSet()
+            // The initial approach owner must publish its exact preimages before changing a SITE.
+            // Its entrance can lie outside the building box, including a temporary leaf support.
+            civsProtectedBuildings(current).filter { it.phase != BuildingPhase.ACTIVE }.forEach { building ->
+                CivsAutonomousGeometry.approach(building).forEach { feet ->
+                    for (dy in -1..2) reserved += feet.copy(y = feet.y + dy)
+                }
+            }
+            current.pendingControls.orEmpty().forEach { pending ->
+                reserved += pending.position
+                pending.retire?.let { reserved += it.position }
+                reserved += pending.approach.orEmpty().map { it.position }
+            }
             val streets = (retained.flatMap { it.terrain?.route.orEmpty() } + current.buildings.flatMap {
                 CivsAutonomousGeometry.approach(it) + it.transit.orEmpty()
             }).flatMap { p -> (-2..2).flatMap { dx -> (-2..2).map { dz -> p.x + dx to p.z + dz } } }.toHashSet()
@@ -173,7 +197,11 @@ internal class CivsVillageVegetation(
                 if (leaf || material in logs) found[p] = CivVegetationCell(p, state, material in logs, leaf)
             }
         }
-        val selection = civsVillageVegetationSelection(found, previousNatural)
+        val stumps = found.values.filter { cell -> civsVillageVegetationStump(cell) { p ->
+            if (p.y !in frame.minimumY until frame.maximumY) null
+            else frame.chunks[(p.x shr 4) to (p.z shr 4)]?.getBlockType(p.x and 15, p.y, p.z and 15)
+        } }.mapTo(hashSetOf()) { it.position }
+        val selection = civsVillageVegetationSelection(found, previousNatural, stumps)
         return selection.copy(cells = selection.cells.take(MAXIMUM_CELLS))
     }
 
@@ -211,6 +239,10 @@ internal class CivsVillageVegetation(
                     p.x + 1.0, p.y + 2.8, p.z + 1.0)).any { it is LivingEntity }) { skip(cell); continue }
             val block = world.getBlockAt(p.x, p.y, p.z)
             if (block.blockData.asString != cell.before || !canModify(settlement, block)) { skip(cell); continue }
+            if (p in current.selection.stumps && !civsVillageVegetationStump(cell) { near ->
+                if (!world.isChunkLoaded(near.x shr 4, near.z shr 4)) null
+                else world.getBlockAt(near.x, near.y, near.z).type
+            }) { skip(cell); continue }
             block.setType(Material.AIR, false)
             touched += p
             current.removed++
@@ -235,7 +267,7 @@ internal fun civsVillageVegetationCandidates(found: Map<CivPosition, CivVegetati
     civsVillageVegetationSelection(found, previousNatural).cells
 
 private fun civsVillageVegetationSelection(found: Map<CivPosition, CivVegetationCell>,
-    previousNatural: Map<CivPosition, String>): CivVegetationSelection {
+    previousNatural: Map<CivPosition, String>, stumps: Set<CivPosition> = emptySet()): CivVegetationSelection {
     val logs = found.values.filter { it.log }.associateBy { it.position }
     val proofs = mutableMapOf<CivPosition, CivPosition>()
     val reached = hashSetOf<CivPosition>()
@@ -248,8 +280,8 @@ private fun civsVillageVegetationSelection(found: Map<CivPosition, CivVegetation
     }
     for ((p, log) in logs) {
         val leaf = neighbors(p).firstOrNull { found[it]?.leaf == true }
-        if (previousNatural[p] == log.before || leaf != null) {
-            if (previousNatural[p] != log.before) proofs[p] = requireNotNull(leaf)
+        if (previousNatural[p] == log.before || p in stumps || leaf != null) {
+            if (previousNatural[p] != log.before && p !in stumps) proofs[p] = requireNotNull(leaf)
             reached += p
             todo += p
         }
@@ -266,5 +298,5 @@ private fun civsVillageVegetationSelection(found: Map<CivPosition, CivVegetation
     }
     // Remove away from the proof first: every remaining log keeps a path to its crown
     // even when a per-tick limit, a blocker or a restart interrupts the sweep.
-    return CivVegetationSelection(trunks.asReversed() + found.values.filter { it.leaf }, proofs)
+    return CivVegetationSelection(trunks.asReversed() + found.values.filter { it.leaf }, proofs, stumps)
 }

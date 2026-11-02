@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "title": "ArcCivs183 construction delivery and full receiver recovery",
+  "participants": [
+    1,
+    7,
+    16
+  ],
+  "assumptions": [
+    "PHYSICAL construction may receive already ordinary-collectable own-city surplus directly into a legal builder HUT when the courier warehouse has no room. Current paid construction, remaining bill, source reserves, incoming cargo, native capacity, real arrival and exact inventory receipts remain required. Ordinary recipe fallback still uses advertised primary output only.",
+    "Illustrative full-warehouse sensitivity: before0 construction-direct trips; after one64-unit maximum trip at0/1/16 trips per settlement-day and1/7/16 settlements. These are input assumptions, not measured throughput or new resources. A smaller current deficit, in-transit cargo and available native surplus reduce each trip.",
+    "COBBLESTONE is modeled in its own item unit. The same route can move existing incidental DIRT or ANDESITE; no item is minted, no extra loot roll or refund is issued, and every exact native pickup debit is paired with the courier bag credit and destination receipt. Building payment still burns only the existing exact accepted per-batch material bill.",
+    "Control receiver recovery chooses a reachable interior AIR slot when a filled old marker cannot fit into a filled authored barrel. It preserves27native slots and metadata, retains existing authored containers and retires only the old empty marker. An already-BARREL unchanged receiver intent may be cancelled metadata-only; a newly staged AIR receiver cannot be abandoned.",
+    "No direct Vault, premium-token or player-XP changes. Prices, resource chances, quantities per production action and builder supply caps remain unchanged. Faster legitimate construction is unmeasured before activation. Current SELL/AutoSell and planned SELL-to-contract remain separate and no conversion rate is assumed.",
+    "Gate cleanup preserves oldV2receipt recipes for recovery and removes only legacy freestanding panels on already owned gates. The current new gate profile has no free fence-gate panels; its separate gate assessment records the changed raw block sink. Admin maintenance creates no inventory drops or currency/XP grants."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "maintenance_direct_vault",
+          "kind": "mint",
+          "source": "CivsLogistics/CivsSupplyDispatcher/CivsCargoRequests and CivsControlRelocations native receipts",
+          "basis": "Explicit zero direct currency/XP hooks; different direct-route trip counts are sensitivity inputs only",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              16
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "maintenance_direct_tokens",
+          "kind": "mint",
+          "source": "CivsLogistics/CivsSupplyDispatcher/CivsCargoRequests and CivsControlRelocations native receipts",
+          "basis": "Explicit zero direct currency/XP hooks; different direct-route trip counts are sensitivity inputs only",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              16
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "maintenance_direct_player_xp",
+          "kind": "mint",
+          "source": "CivsLogistics/CivsSupplyDispatcher/CivsCargoRequests and CivsControlRelocations native receipts",
+          "basis": "Explicit zero direct currency/XP hooks; different direct-route trip counts are sensitivity inputs only",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              16
+            ]
+          }
+        }
+      ]
+    },
+    "item:COBBLESTONE": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "construction_direct_existing_surplus",
+          "kind": "transfer",
+          "source": "CivsSupplyDispatcher.allocateCivSupplies + CivsCargoRequests.pickup/dropoff",
+          "basis": "Full-warehouse sensitivity bounded by MAX_CARGO64, current remaining bill, native surplus and destination capacity; no item mint",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "64",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              16
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

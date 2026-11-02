@@ -81,18 +81,26 @@ internal class CivsGateMaintenance(
                 val prepared = requireNotNull(value)
                 val receipt = prepared.receipt
                 val after = after(city, receipt)
-                receipt.validated(after)
                 requireNative(checkNative(city, receipt, initial = true))
                 val summary = linkedMapOf<String, Any?>("city" to cityId, "gate" to gateId,
                     "proof" to prepared.proof, "changed_cells" to receipt.changes().size,
                     "transit_before" to gate.transit.orEmpty().size, "transit_after" to receipt.replacement.building.transit.orEmpty().size,
                     "clear_width" to (maxOf(gate.bounds.max.x - gate.bounds.min.x, gate.bounds.max.z - gate.bounds.min.z) - 1),
                     "clear_height" to 3, "bounds_changed" to false,
-                    "rerouted_owners" to receipt.routeOverrides.orEmpty().size,
+                    "rerouted_owners" to receipt.routeOverrides.orEmpty().count { (id, route) ->
+                        route.route != (receipt.previousRouteOverrides?.get(id)?.route ?: sourceRoute(receipt)) },
+                    "route_references_updated" to receipt.routeOverrides.orEmpty().size,
                     "route_cells_before" to (receipt.previousRouteOverrides?.get(gate.id.toString())?.route ?: sourceRoute(receipt)).size,
                     "route_cells_after" to (receipt.routeOverrides?.get(gate.id.toString())?.route ?: sourceRoute(receipt)).size,
                     "route_witnesses" to receipt.witnesses.size, "source_sha256" to receipt.source.capturedSha256,
                     "replacement_sha256" to receipt.replacement.capturedSha256)
+                if (receipt.changes().isEmpty()) {
+                    rejectGate(applyProof != null && applyProof != prepared.proof, "gate-refit-stale-preview")
+                    release()
+                    result.complete(summary + mapOf("state" to "current", "capture" to receipt.source.id, "revision" to city.revision))
+                    return@prepared
+                }
+                receipt.validated(after)
                 if (applyProof == null) {
                     release(); result.complete(summary + ("state" to "preview")); return@prepared
                 }
