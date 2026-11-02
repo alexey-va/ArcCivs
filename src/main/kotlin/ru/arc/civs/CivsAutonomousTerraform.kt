@@ -1,5 +1,8 @@
 package ru.arc.civs
 
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import java.util.PriorityQueue
 import kotlin.math.abs
 
@@ -430,6 +433,7 @@ internal object CivsAutonomousTerraform {
 
     private data class Node(val x: Int, val y: Int, val z: Int, val direction: Int = -1, val climbed: Boolean = false)
     private data class Open(val node: Node, val cost: Int, val score: Int, val ordinal: Int)
+    private data class HorizontalOpen(val key: Long, val distance: Int)
 
     private fun route(city: Settlement, building: CivBuilding, surface: CivTerrainSurface, obstacles: List<CivBox>,
         standing: Map<Long, CivPosition>, from: CivPosition, preferredRoads: Set<Long> = emptySet(),
@@ -440,10 +444,16 @@ internal object CivsAutonomousTerraform {
         val start = Node(from.x, from.y - 1, from.z)
         val to = destination
         val target = Node(to.x, to.y - 1, to.z)
-        val goalApproach = if (to == building.entrance)
-            CivsAutonomousGeometry.approach(building).map { civsTerrainKey(it.x, it.z) }.toSet()
-            else setOf(civsTerrainKey(to.x, to.z))
-        val discounted = preferredRoads.mapNotNull { key -> standing[key] }
+        // Packed x/z keys have heavily colliding Long.hashCode values on a two-dimensional grid.
+        // Keep primitive, mixed-hash lookups local to this detached search.
+        val columns = Long2ObjectOpenHashMap<CivTerrainSurfaceColumn>(surface.columns)
+        val retained = Long2ObjectOpenHashMap<CivPosition>(standing)
+        val preferred = LongOpenHashSet(preferredRoads)
+        val goalApproach = LongOpenHashSet()
+        if (to == building.entrance) CivsAutonomousGeometry.approach(building).forEach {
+            goalApproach.add(civsTerrainKey(it.x, it.z))
+        } else goalApproach.add(civsTerrainKey(to.x, to.z))
+        val discounted = preferredRoads.mapNotNull { key -> retained.get(key) }
         val discountedBounds = discounted.takeIf { it.isNotEmpty() }?.let { points ->
             CivBox(CivPosition(points.minOf { it.x }, 0, points.minOf { it.z }),
                 CivPosition(points.maxOf { it.x }, 0, points.maxOf { it.z }))
@@ -469,45 +479,61 @@ internal object CivsAutonomousTerraform {
             if ((CivsAutonomousGeometry.horizontalContains(building.bounds, p) && !civsPublicTransit(building, x, z, allowPlanned = true)) ||
                 obstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }) return false
             val key = civsTerrainKey(x, z)
-            if (key in goalApproach && y != target.y) return false
-            val native = surface.at(x, z) ?: return false
-            standing[key]?.let { return native.loaded && y == it.y - 1 }
+            if (goalApproach.contains(key) && y != target.y) return false
+            val native = columns.get(key) ?: return false
+            retained.get(key)?.let { return native.loaded && y == it.y - 1 }
             return native.loaded && native.natural && abs(native.groundY - y) <= MAXIMUM_CHANGE
         }
         // Relax only height/history constraints: static footprints and retained road costs still bound every valid route.
         // The reverse edge charges its forward destination. This leaves the actual grading and safety checks unchanged.
         val horizontalDistances by lazy {
-            if (surface.columns.size > MAXIMUM_SURFACE_COLUMNS) return@lazy emptyMap<Long, Int>()
-            val floors = surface.columns.mapNotNull { (key, native) ->
+            val distances = Long2IntOpenHashMap()
+            if (columns.size > MAXIMUM_SURFACE_COLUMNS) return@lazy distances
+            val floors = Long2IntOpenHashMap()
+            for (entry in columns.long2ObjectEntrySet()) {
+                val key = entry.longKey
+                val native = entry.value
                 val x = (key shr 32).toInt(); val z = key.toInt()
-                val y = standing[key]?.y?.minus(1) ?: if (key in goalApproach) target.y
+                val y = retained.get(key)?.y?.minus(1) ?: if (goalApproach.contains(key)) target.y
                     else native.groundY.coerceIn(surface.minHeight + 1, surface.maxHeight - 3)
-                if (allowed(x, y, z)) key to y else null
-            }.toMap()
+                if (allowed(x, y, z)) floors.put(key, y)
+            }
             val targetKey = civsTerrainKey(target.x, target.z)
-            val distances = hashMapOf<Long, Int>()
-            val pending = PriorityQueue(compareBy<Pair<Long, Int>> { it.second }.thenBy { it.first })
-            if (targetKey in floors) { distances[targetKey] = 0; pending += targetKey to 0 }
+            val pending = PriorityQueue<HorizontalOpen> { a, b ->
+                val distance = a.distance.compareTo(b.distance)
+                if (distance != 0) distance else a.key.compareTo(b.key)
+            }
+            if (floors.containsKey(targetKey)) {
+                distances.put(targetKey, 0)
+                pending += HorizontalOpen(targetKey, 0)
+            }
             while (pending.isNotEmpty()) {
                 val (key, distance) = pending.remove()
-                if (distances[key] != distance) continue
+                if (!distances.containsKey(key) || distances.get(key) != distance) continue
                 val x = (key shr 32).toInt(); val z = key.toInt()
-                val entering = if (key in preferredRoads && key in standing) 6
-                    else 10 + abs(surface.columns.getValue(key).groundY - floors.getValue(key)) * 2
+                val entering = if (preferred.contains(key) && retained.containsKey(key)) 6
+                    else 10 + abs(requireNotNull(columns.get(key)).groundY - floors.get(key)) * 2
                 for ((dx, dz) in DIRECTIONS) {
                     val previous = civsTerrainKey(x + dx, z + dz)
                     val cost = distance + entering
-                    if (previous in floors && cost < distances.getOrDefault(previous, Int.MAX_VALUE)) {
-                        distances[previous] = cost
-                        pending += previous to cost
+                    if (floors.containsKey(previous) && cost < distances.getOrDefault(previous, Int.MAX_VALUE)) {
+                        distances.put(previous, cost)
+                        pending += HorizontalOpen(previous, cost)
                     }
                 }
             }
             distances
         }
-        fun distance(n: Node): Int = maxOf(baseDistance(n),
-            horizontalDistances[civsTerrainKey(n.x, n.z)]?.plus(abs(n.y - target.y) * 8) ?: 0)
-        val open = PriorityQueue(compareBy<Open> { it.score }.thenBy { it.ordinal })
+        fun distance(n: Node): Int {
+            val key = civsTerrainKey(n.x, n.z)
+            val distances = horizontalDistances
+            return maxOf(baseDistance(n),
+                if (distances.containsKey(key)) distances.get(key) + abs(n.y - target.y) * 8 else 0)
+        }
+        val open = PriorityQueue<Open> { a, b ->
+            val score = a.score.compareTo(b.score)
+            if (score != 0) score else a.ordinal.compareTo(b.ordinal)
+        }
         val costs = hashMapOf(start to 0)
         val parents = hashMapOf<Node, Node>()
         val closed = hashSetOf<Node>()
@@ -523,7 +549,7 @@ internal object CivsAutonomousTerraform {
         }
         if (start == target) return finish(listOf(from), "found")
         if (!allowed(target.x, target.y, target.z)) return finish(null, "route-target-blocked")
-        val ancestorColumns = hashSetOf<Long>()
+        val ancestorColumns = LongOpenHashSet()
         while (open.isNotEmpty() && expanded < MAXIMUM_ROUTE_NODES) {
             val current = open.remove()
             if (costs[current.node] != current.cost || !closed.add(current.node)) continue
@@ -550,10 +576,10 @@ internal object CivsAutonomousTerraform {
                 val candidate = Node(n.x + dx, n.y + rise, n.z + dz, direction, rise > 0)
                 if (candidate in closed || !allowed(candidate.x, candidate.y, candidate.z) ||
                     candidate.x == start.x && candidate.z == start.z) continue
-                val native = requireNotNull(surface.at(candidate.x, candidate.z))
+                val native = requireNotNull(columns.get(civsTerrainKey(candidate.x, candidate.z)))
                 // A brief hummock or hollow should be cut/filled instead of adding two gratuitous climbs.
                 val column = civsTerrainKey(candidate.x, candidate.z)
-                val shared = column in preferredRoads && column in standing
+                val shared = preferred.contains(column) && retained.containsKey(column)
                 val cost = current.cost + (if (shared) 6 else 10) + abs(candidate.y - n.y) * 8 +
                     if (shared) 0 else abs(native.groundY - candidate.y) * 2
                 if (cost >= costs.getOrDefault(candidate, Int.MAX_VALUE)) continue
@@ -564,12 +590,12 @@ internal object CivsAutonomousTerraform {
                     ancestorColumns.clear()
                     var ancestor: Node? = n
                     while (ancestor != null) {
-                        ancestorColumns += civsTerrainKey(ancestor.x, ancestor.z)
+                        ancestorColumns.add(civsTerrainKey(ancestor.x, ancestor.z))
                         ancestor = parents[ancestor]
                     }
                     ancestorsReady = true
                 }
-                if (column in ancestorColumns) continue
+                if (ancestorColumns.contains(column)) continue
                 costs[candidate] = cost; parents[candidate] = n
                 open += Open(candidate, cost, cost + distance(candidate), ordinal++)
                 peakQueue = maxOf(peakQueue, open.size)

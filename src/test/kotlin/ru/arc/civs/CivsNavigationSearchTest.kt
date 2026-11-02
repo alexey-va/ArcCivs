@@ -6,10 +6,44 @@ import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.util.BoundingBox
+import org.bukkit.util.Vector
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import java.util.UUID
 import kotlin.math.floor
+import kotlin.random.Random
 
 class CivsNavigationSearchTest : FunSpec({
+    test("control broad phase preserves the original ray predicate at corners boundaries and occupied starts") {
+        val random = Random(190)
+        for (control in listOf(CivPosition(0, 64, 0), CivPosition(-1814, 65, -2762), CivPosition(1226, 73, -3993))) {
+            val city = controlSearchCity(control)
+            fun point(x: Double, y: Double, z: Double) = CitizenPoint(control.x + x, control.y + y, control.z + z)
+            val samples = buildList {
+                add(point(.5, 0.0, .5))
+                for (edge in listOf(-.3, 1.3)) for (offset in listOf(-.0000001, 0.0, .0000001)) {
+                    add(point(edge + offset, 0.0, -2.0)); add(point(edge + offset, 0.0, 2.0))
+                    add(point(-2.0, 0.0, edge + offset)); add(point(2.0, 0.0, edge + offset))
+                }
+                for (height in listOf(-1.8, 1.01)) for (offset in listOf(-.0000001, 0.0, .0000001)) {
+                    add(point(-2.0, height + offset, .5)); add(point(2.0, height + offset, .5))
+                }
+                // The construction's new control must protect its own diagonal and endpoint too.
+                add(point(3.0, 0.0, 3.0)); add(point(4.5, 0.0, 4.5)); add(point(6.0, 0.0, 6.0))
+            }
+            fun compare(from: CitizenPoint, to: CitizenPoint) {
+                withClue("control=$control from=$from to=$to") {
+                    citizenControlStepClear(city, from, to) shouldBe originalControlStepClear(city, from, to)
+                }
+            }
+            for (from in samples) for (to in samples) compare(from, to)
+            repeat(512) {
+                fun next() = point(random.nextDouble(-8.0, 8.0), random.nextDouble(-3.0, 3.0), random.nextDouble(-8.0, 8.0))
+                compare(next(), next())
+            }
+        }
+    }
+
     test("prefetched exact neighbourhoods advance the graph without another native request per step") {
         val target = CitizenPoint(3.5, 64.0, .5)
         val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), target, 0, 256, emptyList())
@@ -170,6 +204,32 @@ class CivsNavigationSearchTest : FunSpec({
     }
 
 })
+
+private fun controlSearchCity(control: CivPosition): Settlement {
+    fun building(index: Long, at: CivPosition) = CivBuilding(UUID(0, index), BuildingType.TOWN_HALL, 1,
+        at, 0, "control-search-test", CivBox(at, at), at, BuildingPhase.ACTIVE, control = at)
+    val buildings = listOf(building(1, control)) + (0..63).map { index ->
+        building(index + 2L, control.copy(x = control.x + 50 + index * 2, z = control.z + 80))
+    } + building(66, control).copy(control = null)
+    val planned = building(67, control.copy(x = control.x + 4, z = control.z + 4)).copy(phase = BuildingPhase.CONSTRUCTING)
+    return Settlement(UUID(1, 1), UUID(1, 2), "Control search", UUID(1, 3), control, 256, "test", Stock(),
+        buildings, emptyList(), construction = CivConstruction(UUID(1, 4), planned.id, 1, 1, 0,
+            ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = planned))
+}
+
+/** Frozen pre-optimization oracle: keep Bukkit's exact endpoint and ray boundary behavior. */
+private fun originalControlStepClear(city: Settlement, from: CitizenPoint, to: CitizenPoint): Boolean {
+    val origin = Vector(from.x, from.y, from.z)
+    val destination = Vector(to.x, to.y, to.z)
+    val delta = destination.clone().subtract(origin)
+    val distance = delta.length()
+    return civsProtectedBuildings(city).none { building ->
+        val p = building.control ?: return@none false
+        val obstacle = BoundingBox(p.x - .3, p.y - 1.8, p.z - .3, p.x + 1.3, p.y + 1.01, p.z + 1.3)
+        obstacle.contains(destination) || !obstacle.contains(origin) && distance > 0 &&
+            obstacle.rayTrace(origin, delta.clone().normalize(), distance) != null
+    }
+}
 
 private fun CitizenPacketRoute.prepareSnapshot() {
     val limit = CitizenNavigationCapture.MAXIMUM_BLOCKS + CitizenNavigationSearch.MAXIMUM_NODES * 64

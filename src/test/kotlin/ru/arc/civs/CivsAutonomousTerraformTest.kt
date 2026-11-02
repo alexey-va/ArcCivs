@@ -60,6 +60,37 @@ class CivsAutonomousTerraformTest : FunSpec({
         withClue(searches.single()) { (searches.single().expanded <= 4_096) shouldBe true }
     }
 
+    test("collision heavy translated height fields preserve the exact route and search counters including zero floors") {
+        val fixture = mildBarrierFixture()
+        val baselineSearches = mutableListOf<CivRouteSearchStats>()
+        val baseline = CivsAutonomousTerraform.connection(fixture.city, fixture.target, fixture.surface,
+            CivAutonomousAccess(), listOf(fixture.barrier), baselineSearches::add)
+        checkMildBarrierRoute(fixture, baseline)
+        for ((offset, vertical) in listOf(128 to 0, -128 to -64)) {
+            fun translate(p: CivPosition) = p.copy(x = p.x + offset, y = p.y + vertical, z = p.z + offset)
+            fun translateBox(box: CivBox) = CivBox(translate(box.min), translate(box.max))
+            fun translateBuilding(b: CivBuilding) = b.copy(anchor = translate(b.anchor), bounds = translateBox(b.bounds),
+                entrance = translate(b.entrance), control = b.control?.let { translate(it) })
+            val city = fixture.city.copy(center = translate(fixture.city.center),
+                buildings = fixture.city.buildings.map { translateBuilding(it) })
+            val surface = CivTerrainSurface(-64 + vertical, 320 + vertical, buildMap {
+                for (x in -128..127) for (z in -128..127) put(civsTerrainKey(x + offset, z + offset),
+                    CivTerrainSurfaceColumn(64 + vertical + (x.coerceAtLeast(0) / 4).coerceAtMost(2), true))
+            })
+            surface.columns.size shouldBe CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS
+            // Both quadrants contain 65,536 columns but only 256 distinct ordinary Long hash codes.
+            surface.columns.keys.map { it.hashCode() }.distinct().size shouldBe 256
+            val searches = mutableListOf<CivRouteSearchStats>()
+            val route = CivsAutonomousTerraform.connection(city, translateBuilding(fixture.target), surface,
+                CivAutonomousAccess(), listOf(translateBox(fixture.barrier)), searches::add)
+            route shouldBe baseline.map { translate(it) }
+            route.map { civsTerrainKey(it.x, it.z) }.distinct().size shouldBe route.size
+            val expected = baselineSearches.single()
+            searches.single() shouldBe expected.copy(elapsedMillis = searches.single().elapsedMillis,
+                from = translate(expected.from), to = translate(expected.to))
+        }
+    }
+
     test("an oversized height field retains the original bounded search instead of truncating its route domain") {
         val fixture = mildBarrierFixture()
         val smallSearches = mutableListOf<CivRouteSearchStats>()

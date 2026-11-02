@@ -28,11 +28,18 @@ internal fun citizenControlStepClear(city: Settlement, from: CitizenPoint, to: C
     val destination = Vector(to.x, to.y, to.z)
     val delta = destination.clone().subtract(origin)
     val distance = delta.length()
+    if (distance > 0) delta.normalize()
+    val minX = minOf(from.x, to.x); val maxX = maxOf(from.x, to.x)
+    val minY = minOf(from.y, to.y); val maxY = maxOf(from.y, to.y)
+    val minZ = minOf(from.z, to.z); val maxZ = maxOf(from.z, to.z)
     return civsProtectedBuildings(city).none { building ->
         val p = building.control ?: return@none false
+        // Keep touching boundaries in the exact predicate; distant furniture needs no box or ray.
+        if (maxX < p.x - .3 || minX > p.x + 1.3 || maxY < p.y - 1.8 || minY > p.y + 1.01 ||
+            maxZ < p.z - .3 || minZ > p.z + 1.3) return@none false
         val obstacle = BoundingBox(p.x - 0.3, p.y - 1.8, p.z - 0.3, p.x + 1.3, p.y + 1.01, p.z + 1.3)
         obstacle.contains(destination) || !obstacle.contains(origin) && distance > 0 &&
-            obstacle.rayTrace(origin, delta.clone().normalize(), distance) != null
+            obstacle.rayTrace(origin, delta, distance) != null
     }
 }
 
