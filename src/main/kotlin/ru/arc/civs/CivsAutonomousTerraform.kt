@@ -380,6 +380,22 @@ internal object CivsAutonomousTerraform {
         return owners.mapValues { (key, point) -> CivPosition((key shr 32).toInt(), point.y - 1, key.toInt()) }
     }
 
+    /** Matches one floor without materializing the three-wide road profile. */
+    internal fun roadProfileContains(route: List<CivPosition>, floor: CivPosition): Boolean {
+        var nearestDistance = 3
+        var nearestY = 0
+        for (point in route) {
+            val dx = floor.x - point.x; val dz = floor.z - point.z
+            if (dx !in -1..1 || dz !in -1..1) continue
+            val distance = abs(dx) + abs(dz)
+            if (distance < nearestDistance || distance == nearestDistance && point.y < nearestY) {
+                nearestDistance = distance
+                nearestY = point.y
+            }
+        }
+        return nearestDistance < 3 && nearestY - 1 == floor.y
+    }
+
     /** Exact shared prefix plus a short facing connector, through the existing grade solver. */
     private fun frontageRoute(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
         access: CivAutonomousAccess, obstacles: List<CivBox>, standing: Map<Long, CivPosition>,

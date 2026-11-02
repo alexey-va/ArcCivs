@@ -59,6 +59,18 @@ internal class CivsCitizenWork(
     }
     fun clear() { constructionWorkplaces.clear(); mineVisits.clear() }
 
+    private fun leaveShelter(actor: CitizenActor, now: Long) {
+        if (actor.residentYield != null || !shelter.wake(actor)) { actor.cycle.deferWork(now); return }
+        routes.cancelRoute(actor)
+        actor.sheltering = false
+        actor.shelter = null
+        actor.shelterPose = null
+        if (actor.workDetour == null) {
+            actor.cycle.close()
+            actor.cycle = actor.plan.cycle()
+        } else actor.cycle.deferWork(now)
+    }
+
     fun update(actor: CitizenActor, city: Settlement, world: World, now: Long) {
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
         if (!routes.canResetNightShelter(actor)) actor.nightHomeProgress.clear()
@@ -98,6 +110,10 @@ internal class CivsCitizenWork(
             return
         }
         if (logistics.collectedPending(actor)) { runtime.statuses[actor.workerId] = "loading-cargo"; return }
+        if (world.time !in 12_000L..23_000L && actor.sheltering) {
+            leaveShelter(actor, now)
+            return
+        }
         if (life.serveTavernGuest(actor, city, worker, world, now)) return
         if (world.time !in 12_000L..23_000L && life.eatMeal(actor, city, worker, world, now)) return
         if (logistics.supplyFood(actor, city, worker, world, now)) {
@@ -122,14 +138,7 @@ internal class CivsCitizenWork(
         if (!couriers.trackCourierSource(actor, city, now)) return
         val cycle = actor.cycle
         if (actor.sheltering) {
-            routes.cancelRoute(actor)
-            actor.sheltering = false
-            actor.shelter = null
-            actor.shelterPose = null
-            if (actor.workDetour == null) {
-                actor.cycle.close()
-                actor.cycle = actor.plan.cycle()
-            } else actor.cycle.deferWork(now)
+            leaveShelter(actor, now)
             return
         }
         if (actor.mineVisit != null && mineVisits.update(actor, city, worker, world, now)) return

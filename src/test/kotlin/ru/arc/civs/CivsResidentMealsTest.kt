@@ -60,6 +60,45 @@ class CivsResidentMealsTest : FunSpec({
         }
     }
 
+    test("a hungry resident retires night shelter before completing one carried meal at dawn") {
+        residentRuntime { h ->
+            h.owner.pulse(2_000)
+            h.owner.collisionActors().single().teleport(Location(h.world, 6.5, 64.0, 4.5))
+            h.prepareHallMeals(setOf(h.workerId))
+            h.world.time = 13_000
+            h.owner.pulse(3_000)
+            fun shelterState() = ((h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>)
+                .single() as Map<*, *>)["shelter"] as Map<*, *>
+            shelterState()["seeking"] shouldBe true
+            shelterState()["sleeping"] shouldBe false
+            var meals = 0
+            h.owner.finishResidentMeal = { cityId, plan ->
+                h.owner.validateResidentMeal(cityId, plan)
+                h.city = CivsResidentLife.finishMeal(h.city, plan)
+                meals++
+                CompletableFuture.completedFuture(h.city)
+            }
+            h.world.time = 1_000
+            val tickets = mutableSetOf<Any>()
+            for (now in 4_000L..12_000L step 1_000) {
+                h.navigationNow = now
+                h.owner.pulse(now)
+                h.mealState()["ticket"]?.let(tickets::add)
+            }
+            withClue(h.owner.debug(h.city.id, h.workerId)) {
+                meals shouldBe 1
+                tickets.size shouldBe 1
+                shelterState()["seeking"] shouldBe false
+                h.city.workers.single().hunger shouldBe 20
+                h.city.workers.single().life!!.meals shouldBe 1L
+                CivsEquipment.usableCount(h.city.workers.single(), "BREAD") shouldBe 3
+                h.city.stock.food shouldBe 306L
+                h.mealState()["last_outcome"] shouldBe "accepted"
+                h.deliveries shouldBe 0
+            }
+        }
+    }
+
     test("two hungry residents eat their own carried food without competing for hall routes") {
         residentRuntime { h ->
             val actors = h.startSocialPair()

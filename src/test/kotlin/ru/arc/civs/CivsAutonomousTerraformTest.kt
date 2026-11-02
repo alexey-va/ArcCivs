@@ -544,6 +544,36 @@ class CivsAutonomousTerraformTest : FunSpec({
         profile.getValue(civsTerrainKey(1, 1)).y shouldBe 64
     }
 
+    test("single floor membership matches the full road profile including ties and integer boundaries") {
+        val cases = listOf(
+            "empty" to emptyList(),
+            "single" to listOf(CivPosition(0, 65, 0)),
+            "straight" to listOf(CivPosition(0, 65, 0), CivPosition(0, 66, 1), CivPosition(0, 67, 2)),
+            "bend" to listOf(CivPosition(0, 65, 0), CivPosition(0, 66, 1), CivPosition(0, 66, 2),
+                CivPosition(1, 65, 2), CivPosition(2, 65, 2)),
+            "nearest before lower" to listOf(CivPosition(0, 80, 0), CivPosition(1, 20, 0)),
+            "equal distance lower grade" to listOf(CivPosition(-1, 90, 0), CivPosition(1, 65, 0)),
+            "equal distance and grade" to listOf(CivPosition(-1, 65, 0), CivPosition(1, 65, 0)),
+            "duplicate columns" to listOf(CivPosition(0, 65, 0), CivPosition(0, 64, 0),
+                CivPosition(0, 64, 0), CivPosition(0, 66, 0)),
+            "negative coordinates" to listOf(CivPosition(-7, 80, -3), CivPosition(-7, 79, -2), CivPosition(-6, 78, -2)),
+            "integer boundaries" to listOf(CivPosition(Int.MIN_VALUE, Int.MIN_VALUE, Int.MAX_VALUE),
+                CivPosition(Int.MAX_VALUE, Int.MAX_VALUE, Int.MIN_VALUE), CivPosition(Int.MIN_VALUE + 1, 0, Int.MAX_VALUE - 1)),
+            "extreme height tie" to listOf(CivPosition(-1, Int.MAX_VALUE, 0), CivPosition(1, Int.MIN_VALUE, 0)),
+        )
+        for ((name, route) in cases) for (ordered in listOf(route, route.reversed())) {
+            val profile = CivsAutonomousTerraform.roadProfile(ordered)
+            for (point in ordered.ifEmpty { listOf(CivPosition(0, 0, 0)) })
+                for (dx in -2..2) for (dz in -2..2) for (dy in -1..1) {
+                    val floor = CivPosition(point.x + dx, point.y - 1 + dy, point.z + dz)
+                    withClue("$name route=$ordered floor=$floor") {
+                        CivsAutonomousTerraform.roadProfileContains(ordered, floor) shouldBe
+                            (profile[civsTerrainKey(floor.x, floor.z)] == floor)
+                    }
+                }
+        }
+    }
+
     test("real 13 by 13 builder footprint receives supported cut and fill on a twelve block hillside") {
         val city = terraceCity()
         val building = terraceBuilder(city)

@@ -223,7 +223,7 @@ data class CivRoadUpkeep(
         } else {
             require(!source.type.isInfrastructure && route.size in 1..CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH &&
                 route.last() == source.entrance &&
-                CivsAutonomousTerraform.roadProfile(route)[civsTerrainKey(floor.x, floor.z)] == floor)
+                CivsAutonomousTerraform.roadProfileContains(route, floor))
             require(route.all { city.contains(it.x, it.z) && it.y in -4_093..4_094 } &&
                 route.map { civsTerrainKey(it.x, it.z) }.distinct().size == route.size)
             require(route.zipWithNext().all { (a, b) ->
