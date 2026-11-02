@@ -1382,7 +1382,8 @@ class CivsService(
                                 rejectIf(proof != actualProof, "wall-infill-stale-preview")
                                 // The ordinary owner recaptures and saves this exact paid SITE. It never marks it built.
                                 release()
-                                admitRoadDevelopment(city) { buildingRequests.commitAutonomousDesign(city, proposal, plan) }
+                                // Explicit queue admission preserves upkeep priority at the existing queue activation guard.
+                                buildingRequests.commitAutonomousDesign(city, proposal, plan)
                                     .whenCompleteSync(tasks) { _, commitFailure ->
                                         if (commitFailure != null) fail(commitFailure)
                                         else {

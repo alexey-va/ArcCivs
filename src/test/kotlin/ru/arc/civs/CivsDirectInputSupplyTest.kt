@@ -7,6 +7,7 @@ import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
+import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.block.Barrel
 import org.bukkit.inventory.ItemStack
@@ -169,6 +170,88 @@ class CivsDirectInputSupplyTest : FunSpec({
             warehouse.contents.filterNotNull().all { it.type == Material.STONE && it.amount == 64 } shouldBe true
             h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId).isCompletedExceptionally shouldBe true
             transactions.size shouldBe 2
+        }
+    }
+
+    test("a selected road repair receives sixteen direct cobblestone through native journals without construction") {
+        directInputService(upkeep = true) { h, city, source, hut, warehouse ->
+            val transactions = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
+            every { h.store.saveInventoryTransaction(any()) } answers {
+                CompletableFuture<CivInventoryTransaction>().also { transactions += firstArg<CivInventoryTransaction>() to it }
+            }
+            startDirectInputUpkeep(h, city)
+            city.construction shouldBe null
+            val courier = city.workers.first()
+            val builder = city.workers[2]
+            h.service.upkeepRequirements(city) shouldBe mapOf(builder.id to mapOf("COBBLESTONE" to 1L))
+            val plan = upkeepDirectInputPlan(h, courier.id)
+            plan.cargo.directInput shouldBe true
+            plan.cargo.amount shouldBe 16L
+            plan.destinationBuildingId shouldBe builder.assignment
+            CivsLogistics.directInputAllowed(city, plan.cargo) shouldBe true
+            val depotBefore = warehouse.contents.map { it?.clone() }
+            val pickup = h.service.pickupCargo(city.id, courier.id, plan.cargo)
+            h.tickUntil("upkeep cargo pickup journal") { transactions.size == 1 }
+            source.storageContents.filterNotNull().sumOf { it.amount } shouldBe 80
+            h.service.settlements().single().workers.first().cargo shouldBe null
+            transactions.single().let { it.second.complete(it.first) }
+            val picked = h.await(pickup)
+            source.storageContents.filterNotNull().sumOf { it.amount } shouldBe 64
+            CivsEquipment.plainCount(picked.workers.first(), "COBBLESTONE") shouldBe 16
+            picked.workers.first().cargo shouldBe plan.cargo.copy(inventoryBacked = true)
+            h.await(h.service.pickupCargo(city.id, courier.id, plan.cargo)) shouldBe picked
+            transactions.size shouldBe 1
+            val dropoff = h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId)
+            h.tickUntil("upkeep cargo dropoff journal") { transactions.size == 2 }
+            hut.isEmpty shouldBe true
+            transactions.last().let { it.second.complete(it.first) }
+            val saved = h.await(dropoff)
+            saved.workers.first().cargo shouldBe null
+            CivsEquipment.plainCount(saved.workers.first(), "COBBLESTONE") shouldBe 0
+            hut.storageContents.filterNotNull().sumOf { it.amount } shouldBe 16
+            source.storageContents.filterNotNull().sumOf { it.amount } + hut.storageContents.filterNotNull().sumOf { it.amount } shouldBe 80
+            saved.stock shouldBe city.stock
+            saved.construction shouldBe null
+            saved.constructionQueue shouldBe city.constructionQueue
+            warehouse.contents.toList() shouldBe depotBefore
+            h.service.upkeepSupplyRequests(saved) { if (it == builder.assignment) mapOf("COBBLESTONE" to 16L) else emptyMap() } shouldBe emptyList()
+            h.service.upkeepRequirements(saved) shouldBe mapOf(builder.id to mapOf("COBBLESTONE" to 1L))
+            h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId).isCompletedExceptionally shouldBe true
+            transactions.size shouldBe 2
+        }
+    }
+
+    for (condition in listOf("no-current-upkeep", "fulfilled-upkeep", "inactive-producer", "foreign-producer", "stale-shipment"))
+    test("upkeep direct pickup rechecks $condition without moving native items") {
+        directInputService(upkeep = true) { h, city, source, hut, warehouse ->
+            val maintenance = startDirectInputUpkeep(h, city)
+            val courier = city.workers.first()
+            val plan = upkeepDirectInputPlan(h, courier.id)
+            plan.cargo.amount shouldBe 16L
+            val dispatcher = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
+                .get(h.service) as CivsSupplyDispatcher
+            mockkObject(dispatcher)
+            try {
+                every { dispatcher.plan(city.id, courier.id) } returns plan
+                val current = h.service.settlements().single()
+                when (condition) {
+                    "no-current-upkeep" -> maintenance.invalidate(city.workers[2].id)
+                    "fulfilled-upkeep" -> hut.setItem(0, ItemStack(Material.COBBLESTONE, 16))
+                    "inactive-producer" -> replaceDirectInputCity(h, current.copy(buildings = current.buildings.map {
+                        if (it.id == plan.cargo.sourceBuildingId) it.copy(phase = BuildingPhase.SITE) else it },
+                        workers = current.workers.map { if (it.assignment == plan.cargo.sourceBuildingId) it.copy(assignment = null) else it }))
+                    "foreign-producer" -> replaceDirectInputCity(h, current.copy(
+                        buildings = current.buildings.filterNot { it.id == plan.cargo.sourceBuildingId },
+                        workers = current.workers.map { if (it.assignment == plan.cargo.sourceBuildingId) it.copy(assignment = null) else it }))
+                }
+                val before = listOf(source, hut, warehouse).map { inventory -> inventory.contents.map { it?.clone() } }
+                val requested = if (condition == "stale-shipment") plan.cargo.copy(id = UUID.randomUUID()) else plan.cargo
+                val rejected = shouldThrow<CompletionException> { h.await(h.service.pickupCargo(city.id, courier.id, requested)) }
+                CivsDiagnostics.rejection(rejected)?.reason shouldBe "stale-delivery"
+                listOf(source, hut, warehouse).map { it.contents.toList() } shouldBe before
+                h.service.settlements().single().workers.first().cargo shouldBe null
+                h.service.settlements().single().stock shouldBe city.stock
+            } finally { unmockkObject(dispatcher) }
         }
     }
 
@@ -353,6 +436,7 @@ private fun replaceDirectInputCity(h: ServiceScenario, city: Settlement) {
 }
 
 private fun directInputService(construction: Boolean = false, material: String = "COBBLESTONE", sourceType: BuildingType = BuildingType.QUARRY,
+    upkeep: Boolean = false,
     action: (ServiceScenario, Settlement, org.bukkit.inventory.Inventory,
     org.bukkit.inventory.Inventory, org.bukkit.inventory.Inventory) -> Unit) =
     serviceScenario(storageFactory = { plugin -> CivsStorage(plugin) { emptyArray() }.also {
@@ -364,15 +448,19 @@ private fun directInputService(construction: Boolean = false, material: String =
         val warehouse = building(10, BuildingType.WAREHOUSE)
         val secondWarehouse = building(50, BuildingType.WAREHOUSE)
         val source = building(20, sourceType)
-        val target = building(30, if (construction) BuildingType.BUILDER_HUT else BuildingType.QUARRY)
+        val target = building(30, if (construction || upkeep) BuildingType.BUILDER_HUT else BuildingType.QUARRY)
         val site = building(70, BuildingType.QUARRY).copy(phase = BuildingPhase.CONSTRUCTING)
+        val floor = CivPosition(60, 63, 0)
+        val road = CivBuilding(UUID.randomUUID(), BuildingType.ROAD, 1, floor, 0, "civs/infrastructure/test-road",
+            CivBox(floor, floor.copy(y = 65)), floor.copy(y = 64), BuildingPhase.ACTIVE,
+            transit = listOf(floor.copy(y = 64)))
         val order = if (construction) CivConstruction(UUID.randomUUID(), site.id, 1, 2, 0, ConstructionPhase.PAUSED, Stock(),
             failure = "fixture-paused", plannedBuilding = site, batches = CivConstructionBatches(2, 16),
             materials = mapOf(material to 3L), payment = CivConstructionPayment(awaiting = mapOf(material to 3L))) else null
         val city = CivsRules.validate(h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
             buildings = listOfNotNull(h.city.buildings.first().takeUnless { sourceType == BuildingType.TOWN_HALL },
-                warehouse, source, target, secondWarehouse) + listOfNotNull(site.takeIf { construction }),
-            construction = order,
+                warehouse, source, target, secondWarehouse) + listOfNotNull(site.takeIf { construction }, road.takeIf { upkeep }),
+            construction = order, autonomy = CivAutonomy().takeIf { upkeep },
             workers = h.city.workers.mapIndexed { index, worker -> worker.copy(assignment =
                 listOf(warehouse.id, source.id, target.id, null)[index], nextDeliveryAt = 1) }))
         every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
@@ -392,3 +480,34 @@ private fun directInputService(construction: Boolean = false, material: String =
         output.setItem(0, ItemStack(Material.valueOf(material), 64)); output.setItem(1, ItemStack(Material.valueOf(material), 16))
         action(h, city, output, inventory(target), depot)
     }
+
+private fun startDirectInputUpkeep(h: ServiceScenario, city: Settlement): CivsRoadMaintenance {
+    val builder = city.workers[2]
+    val road = city.buildings.single { it.type == BuildingType.ROAD }
+    val floor = road.anchor
+    val changes = listOf(CivPlanBlock(floor, "minecraft:dirt", "minecraft:cobblestone"))
+    val work = CivWorldWork(builder.id, builder.completedCycles, requireNotNull(builder.assignment), floor.copy(x = floor.x - 1, y = floor.y + 1),
+        changes, inputs = mapOf("COBBLESTONE" to 1L), status = "repairing-road", focus = floor,
+        upkeep = CivRoadUpkeep(city.id, city.worldId, city.owner, road.id, road, floor, "minecraft:cobblestone", null, emptyList()))
+    every { h.worldAdapter.captureRoadUpkeep(any(), builder, any(), any()) } returns work
+    every { h.worldAdapter.roadUpkeepPending(any(), work) } returns true
+    h.paper.addPlayer("UpkeepSupplyWitness").teleport(Location(h.world, 1.5, 65.0, .5))
+    h.start()
+    val maintenance = CivsService::class.java.getDeclaredField("roadMaintenance").also { it.isAccessible = true }
+        .get(h.service) as CivsRoadMaintenance
+    maintenance.publish(city, CivsRoadMaintenance.prepare(city, listOf(CivPlacementPlan(road.id, city.id, city.worldId, road, changes))))
+    maintenance.plan(city, builder) shouldBe work
+    h.time += CivsSupplyDispatcher.REFRESH_MILLIS
+    (CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }.get(h.service) as CivsSupplyDispatcher).request(city.id)
+    return maintenance
+}
+
+private fun upkeepDirectInputPlan(h: ServiceScenario, workerId: UUID): CivCourierPlan {
+    var plan: CivCourierPlan? = null
+    h.tickUntil("accepted upkeep courier plan") {
+        val current = h.service.settlements().single()
+        plan = h.service.courierPlan(current, current.workers.first { it.id == workerId })
+        plan != null
+    }
+    return requireNotNull(plan)
+}

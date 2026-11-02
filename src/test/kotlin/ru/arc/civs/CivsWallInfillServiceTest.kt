@@ -80,6 +80,69 @@ class CivsWallInfillServiceTest : FunSpec({
         }
     }
 
+    test("explicit wall queues behind the old SITE while actual activation still waits for admitted road work") {
+        serviceScenario { h ->
+            val road = roadAdmissionCity()
+            val hut = road.buildings[1]
+            val oldSite = CivBuilding(UUID(188, 1), BuildingType.WALL, 1, CivPosition(-20, 63, 20), 0,
+                "civs/infrastructure/v1/wall/${UUID(188, 1)}", CivBox(CivPosition(-21, 63, 20), CivPosition(-19, 67, 22)),
+                CivPosition(-20, 64, 19), BuildingPhase.SITE)
+            val f = installWallInfill(h, cityTransform = { city -> CivsRules.validate(city.copy(
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = city.buildings + hut + road.buildings.last() + oldSite,
+                workers = road.workers, constructionQueue = listOf(oldSite.id))) })
+            val roadBuilding = road.buildings.last()
+            val roadPlan = CivPlacementPlan(roadBuilding.id, f.city.id, f.city.worldId, roadBuilding,
+                listOf(CivPlanBlock(roadBuilding.anchor, "minecraft:dirt", "minecraft:cobblestone")))
+            val oldPlan = CivPlacementPlan(oldSite.id, f.city.id, f.city.worldId, oldSite.copy(phase = BuildingPhase.CONSTRUCTING),
+                listOf(CivPlanBlock(oldSite.anchor, "minecraft:air", "minecraft:stone_bricks")), "a".repeat(64))
+            val hutPlan = CivPlacementPlan(hut.id, f.city.id, f.city.worldId, hut, emptyList(), terrain = CivTerraformPlan(
+                hut.bounds.copy(max = hut.bounds.max.copy(z = hut.entrance.z)), emptyList(), listOf(hut.entrance), 63, 0, 0))
+            every { h.store.loadPlan(roadPlan.id) } returns CompletableFuture.completedFuture(roadPlan)
+            every { h.store.loadPlan(oldPlan.id) } returns CompletableFuture.completedFuture(oldPlan)
+            every { h.store.loadPlan(hutPlan.id) } returns CompletableFuture.completedFuture(hutPlan)
+            every { h.worldAdapter.captureRoadUpkeep(any(), any(), any(), any()) } answers {
+                roadAdmissionWork(firstArg(), thirdArg())
+            }
+            h.start()
+            val preview = h.await(h.service.infillWall(f.city.id, f.gate.id, f.wall.id, null))
+            val maintenance = CivsService::class.java.getDeclaredField("roadMaintenance").also { it.isAccessible = true }
+                .get(h.service) as CivsRoadMaintenance
+            val worker = f.city.workers.single()
+            // The existing SITE was queued after this column had already been selected.
+            val work = requireNotNull(maintenance.plan(f.city.copy(constructionQueue = null), worker))
+            work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+            maintenance.admitDevelopment(f.city) shouldBe false
+
+            val applied = h.service.infillWall(f.city.id, f.gate.id, f.wall.id, preview["proof"] as String)
+            h.tickUntil("explicit wall queued without starting its repair or build") { h.saves.isNotEmpty() || applied.isDone }
+            if (applied.isDone) applied.join()
+            val queued = h.saves.single().first
+            queued.constructionQueue shouldBe listOf(oldSite.id, preview["building"] as UUID)
+            queued.construction shouldBe f.city.construction
+            queued.stock shouldBe f.city.stock
+            queued.inventory shouldBe f.city.inventory
+            queued.workers shouldBe f.city.workers
+            queued.buildings.filter { it.id != preview["building"] } shouldBe f.city.buildings
+            queued.building(preview["building"] as UUID)!!.phase shouldBe BuildingPhase.SITE
+            h.commit()
+            h.await(applied)["state"] shouldBe "queued"
+
+            val runtime = CivsService::class.java.getDeclaredField("construction").also { it.isAccessible = true }
+                .get(h.service) as CivsConstructionRuntime
+            @Suppress("UNCHECKED_CAST")
+            val activate = CivsConstructionRuntime::class.java.getDeclaredField("activateBuilding").also { it.isAccessible = true }
+                .get(runtime) as (Settlement, CivBuilding) -> CompletableFuture<Unit>
+            val failure = shouldThrow<CompletionException> { h.await(activate(queued, oldSite)) }
+            (CivsDiagnostics.rejection(failure) ?: throw failure).reason shouldBe "city-busy"
+            maintenance.requirements(queued) shouldBe mapOf(worker.id to work.inputs)
+            h.service.settlements().single() shouldBe queued
+            h.saves.size shouldBe 1
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
     test("preview and paid SITE admission wait for an unaccepted search without waiting for city commit") {
         serviceScenario { h ->
             val f = installWallInfill(h)
@@ -142,9 +205,10 @@ class CivsWallInfillServiceTest : FunSpec({
     }
 })
 
-private fun installWallInfill(h: ServiceScenario, driftAtCapture: Int = Int.MAX_VALUE): WallInfillFixture {
+private fun installWallInfill(h: ServiceScenario, driftAtCapture: Int = Int.MAX_VALUE,
+    cityTransform: (Settlement) -> Settlement = { it }): WallInfillFixture {
     val raw = wallInfillFixture()
-    val city = raw.city.copy(owner = h.owner, worldId = h.world.uid)
+    val city = cityTransform(raw.city.copy(owner = h.owner, worldId = h.world.uid))
     val f = raw.copy(city = city, gatePlan = raw.gatePlan.copy(worldId = city.worldId), wallPlan = raw.wallPlan.copy(worldId = city.worldId))
     every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
     every { h.store.loadPlan(f.gatePlan.id) } returns CompletableFuture.completedFuture(f.gatePlan)
