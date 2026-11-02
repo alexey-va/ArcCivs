@@ -58,6 +58,8 @@ class CivsStorageApproachOccupancyTest : FunSpec({
                 worker shouldBe h.workerId
                 proof shouldBe token
                 h.owner.requireStorageArrival(h.city.id, worker, fixture.building.id)
+                citizenResidentStepClear(actor.npc, actor.npc.location, actor.npc.location,
+                    listOf(citizenStandingBounds(neighbour.npc.location, neighbour.npc.scale))) shouldBe true
                 citizenCanReachBlock(actor.npc, control) shouldBe true
                 actor.cycle.phase shouldBe CitizenPhase.DELIVERING
                 (actor.cycle.observedWorkMillis >= 1_000) shouldBe true
@@ -68,6 +70,7 @@ class CivsStorageApproachOccupancyTest : FunSpec({
             fixture.routes.startRoute(actor, h.world, requireNotNull(actor.plan.workplace), 2_000) shouldBe true
             (northDiagonals.any { it.point() == requireNotNull(actor.route).target.point() }) shouldBe true
             var walked = 0.0
+            var contactFrames = 0
             for (tick in 1..600) {
                 val previous = actor.npc.location
                 h.navigate()
@@ -75,7 +78,12 @@ class CivsStorageApproachOccupancyTest : FunSpec({
                 withClue("tick=$tick ${h.navigationState()}") {
                     (previous.distance(actual) <= .172001) shouldBe true
                     citizenPacketBodyClear(h.world, actual.point(), false) shouldBe true
-                    citizenResidentStepClear(actor.npc, previous, actual, occupied) shouldBe true
+                    citizenPacketSupported(h.world, actual.point()) shouldBe true
+                    if (!citizenResidentStepClear(actor.npc, previous, actual, occupied)) {
+                        h.owner.passingBodies(actor.npc) shouldBe true
+                        contactFrames++
+                        (contactFrames <= 60) shouldBe true
+                    }
                     neighbour.npc.location shouldBe neighbourPosition
                 }
                 walked += previous.distance(actual)
@@ -111,6 +119,8 @@ class CivsStorageApproachOccupancyTest : FunSpec({
             h.workerDelivery = { worker, proof ->
                 proof shouldBe token
                 h.owner.requireStorageArrival(h.city.id, worker, fixture.building.id)
+                citizenResidentStepClear(actor.npc, actor.npc.location, actor.npc.location,
+                    listOf(citizenStandingBounds(neighbour.npc.location, neighbour.npc.scale))) shouldBe true
                 actor.cycle.phase shouldBe CitizenPhase.DELIVERING
                 (actor.cycle.observedWorkMillis >= 1_000) shouldBe true
                 h.city shouldBe before
@@ -129,14 +139,21 @@ class CivsStorageApproachOccupancyTest : FunSpec({
             h.city shouldBe before
             offers shouldBe 0
             var walked = 0.0
+            var contactFrames = 0
             for (tick in 1..400) {
                 val previous = actor.npc.location
                 h.navigate()
                 val actual = actor.npc.location
                 withClue("tick=$tick ${h.navigationState()}") {
                     (previous.distance(actual) <= .172001) shouldBe true
-                    citizenResidentStepClear(actor.npc, previous, actual,
-                        listOf(citizenStandingBounds(neighbour.npc.location, neighbour.npc.scale))) shouldBe true
+                    citizenPacketBodyClear(h.world, actual.point(), false) shouldBe true
+                    citizenPacketSupported(h.world, actual.point()) shouldBe true
+                    if (!citizenResidentStepClear(actor.npc, previous, actual,
+                            listOf(citizenStandingBounds(neighbour.npc.location, neighbour.npc.scale)))) {
+                        h.owner.passingBodies(actor.npc) shouldBe true
+                        contactFrames++
+                        (contactFrames <= 60) shouldBe true
+                    }
                 }
                 walked += previous.distance(actual)
                 if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))

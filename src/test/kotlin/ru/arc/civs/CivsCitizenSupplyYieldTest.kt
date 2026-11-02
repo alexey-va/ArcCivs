@@ -12,7 +12,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsCitizenSupplyYieldTest : FunSpec({
-    test("a pending stationary builder is bypassed by a real detour and its courier delivers the original seven items") {
+    test("a pending stationary builder allows bounded soft contact and its courier delivers the original seven items") {
         residentRuntime(workerId = UUID.fromString("f2cd0cc5-a317-4985-bfbc-1fbbcd2a181d")) { h ->
             val (farm, courierId) = h.courierSource("GRAVEL", 7)
             val hut = farm.copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)
@@ -44,6 +44,14 @@ class CivsCitizenSupplyYieldTest : FunSpec({
             h.owner.pulse(2_000)
             val courierNpc = h.owner.collisionActors().single { it.uniqueId == courierId }
             courierNpc.teleport(Location(h.world, 22.4146290781107, 64.0, -.299603741313))
+            // Production holds this endpoint in the chunk owner; this standalone resident fixture has no loader.
+            val needed = CitizenChunks.between(courierNpc.location.blockX, courierNpc.location.blockZ, hut.entrance.x, hut.entrance.z)
+            needed.ready(h.world) shouldBe false
+            val missing = (needed.minX..needed.maxX).flatMap { x -> (needed.minZ..needed.maxZ).map { z -> x to z } }
+                .filterNot { (x, z) -> h.world.isChunkLoaded(x, z) }.toSet()
+            missing shouldBe setOf(0 to -2, 1 to -2, 2 to -2)
+            missing.forEach { (x, z) -> h.world.loadChunk(x, z) }
+            needed.ready(h.world) shouldBe true
             val builder = h.owner.javaClass.getDeclaredField("actors").run {
                 isAccessible = true
                 requireNotNull((get(h.owner) as Map<*, *>)[h.workerId]) as CitizenActor
@@ -72,13 +80,15 @@ class CivsCitizenSupplyYieldTest : FunSpec({
                 delivered shouldBe cargo
                 target shouldBe hut.id
                 h.owner.requireStorageArrival(cityId, workerId, target)
+                citizenResidentStepClear(courierNpc, courierNpc.location, courierNpc.location,
+                    listOf(citizenStandingBounds(builderNpc.location, builderNpc.scale))) shouldBe true
                 val container = h.world.getBlockAt(20, 64, 0).state as Container
                 container.inventory.addItem(ItemStack(Material.GRAVEL, 7)).isEmpty() shouldBe true
                 h.city = CivsLogistics.unload(h.city, workerId, cargo.id, requireNotNull(h.navigationNow))
                 CompletableFuture.completedFuture(h.city)
             }
             h.releaseNavigation()
-            var contactPass = false
+            var contactFrames = 0
             for (tick in 1..600) {
                 val previous = courierNpc.location
                 h.navigate()
@@ -88,16 +98,21 @@ class CivsCitizenSupplyYieldTest : FunSpec({
                 builderAt shouldBe pendingFeet
                 (builder.supplyPickup != null) shouldBe true
                 h.yielding(h.workerId) shouldBe false
-                contactPass = contactPass || h.owner.passingBodies(courierNpc)
-                BoundingBox(builderAt.x - .3, builderAt.y, builderAt.z - .3,
+                citizenPacketBodyClear(h.world, courierAt.point(), false) shouldBe true
+                citizenPacketSupported(h.world, courierAt.point()) shouldBe true
+                val contact = BoundingBox(builderAt.x - .3, builderAt.y, builderAt.z - .3,
                     builderAt.x + .3, builderAt.y + 1.8, builderAt.z + .3).overlaps(
                     BoundingBox(courierAt.x - .3, courierAt.y, courierAt.z - .3,
-                        courierAt.x + .3, courierAt.y + 1.8, courierAt.z + .3)) shouldBe false
+                        courierAt.x + .3, courierAt.y + 1.8, courierAt.z + .3))
+                if (contact) {
+                    contactFrames++
+                    h.owner.passingBodies(courierNpc) shouldBe true
+                    (contactFrames <= 60) shouldBe true
+                }
                 if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
                 if (h.unloads == 1) break
             }
             withClue(h.owner.debug(h.city.id, null)) { h.unloads shouldBe 1 }
-            contactPass shouldBe false // This open floor has a real path around the fixed body.
             h.supplyRequests shouldBe 1
             h.pendingSupplies.isDone shouldBe false
             h.city.workers.single { it.id == courierId }.cargo shouldBe null

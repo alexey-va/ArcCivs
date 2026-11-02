@@ -1618,9 +1618,12 @@ class CivsRecoveryChunkAdmissionTest : FunSpec({
                 every { h.worldAdapter.validateRoadUpkeep(any(), upkeep.work) } throws CivsRejection("lands-denied")
                 var loadRecovery = false
                 var demand = emptySet<PaperChunkKey>()
+                var ordinaryDemand = emptyMap<UUID, Collection<CivPosition>>()
                 val loader = CivsService::class.java.getDeclaredField("chunkLoading").also { it.isAccessible = true }
                     .get(h.service) as CivsChunkLoading
-                every { loader.pulse(any(), any()) } answers {
+                every { loader.pulse(any(), any(), any()) } answers {
+                    ordinaryDemand = thirdArg<Map<UUID, Collection<CivPosition>>>()
+                    ordinaryDemand.keys shouldBe firstArg<Collection<Settlement>>().mapTo(hashSetOf()) { it.id }
                     val receipts = secondArg<Collection<Set<PaperChunkKey>>>()
                     demand = receipts.flatten().toSet()
                     if (receipts.isNotEmpty()) {
@@ -1637,7 +1640,7 @@ class CivsRecoveryChunkAdmissionTest : FunSpec({
                 journal.pendingNativeChunks().flatten().toSet() shouldBe setOf(PaperChunkKey(h.world.uid, 0, 0),
                     PaperChunkKey(h.world.uid, 1, 0), PaperChunkKey(h.world.uid, 1, -1))
                 h.tickUntil("quarantined road receipt chunk demand after startup") { demand.isNotEmpty() }
-                verify(atLeast = 1) { loader.pulse(any(), any()) }
+                verify(atLeast = 1) { loader.pulse(any(), any(), any()) }
                 h.world.isChunkLoaded(0, 0) shouldBe false
                 h.world.isChunkLoaded(1, 0) shouldBe false
                 demand shouldBe setOf(PaperChunkKey(h.world.uid, 0, 0),
@@ -1649,6 +1652,8 @@ class CivsRecoveryChunkAdmissionTest : FunSpec({
                 }
                 h.tick()
                 demand shouldBe emptySet()
+                // Quarantine has ended: the ordinary city envelope resumes, with no extra actors or retained routes in this fixture.
+                ordinaryDemand shouldBe mapOf(before.id to emptyList<CivPosition>())
                 h.service.settlements().single() shouldBe after
                 h.saves shouldBe emptyList()
                 h.world.getBlockAt(20, 63, 0).type shouldBe Material.COBBLESTONE
@@ -1698,9 +1703,12 @@ class CivsRecoveryChunkAdmissionTest : FunSpec({
                 h.world.unloadChunk(leaf.x shr 4, leaf.z shr 4)
                 var loadRecovery = false
                 var demand = emptySet<PaperChunkKey>()
+                var ordinaryDemand = emptyMap<UUID, Collection<CivPosition>>()
                 val loader = CivsService::class.java.getDeclaredField("chunkLoading").also { it.isAccessible = true }
                     .get(h.service) as CivsChunkLoading
-                every { loader.pulse(any(), any()) } answers {
+                every { loader.pulse(any(), any(), any()) } answers {
+                    ordinaryDemand = thirdArg<Map<UUID, Collection<CivPosition>>>()
+                    ordinaryDemand.keys shouldBe firstArg<Collection<Settlement>>().mapTo(hashSetOf()) { it.id }
                     demand = secondArg<Collection<Set<PaperChunkKey>>>().flatten().toSet()
                     if (loadRecovery) demand.forEach { h.world.loadChunk(it.x, it.z) }
                 }
@@ -1713,7 +1721,7 @@ class CivsRecoveryChunkAdmissionTest : FunSpec({
                 journal.pendingNativeChunks().flatten().toSet() shouldBe setOf(PaperChunkKey(h.world.uid, 1, 1),
                     PaperChunkKey(h.world.uid, 2, 1), PaperChunkKey(h.world.uid, 3, 1))
                 h.tickUntil("cold leaf authority chunk demand after startup") { demand.isNotEmpty() }
-                verify(atLeast = 1) { loader.pulse(any(), any()) }
+                verify(atLeast = 1) { loader.pulse(any(), any(), any()) }
                 h.world.isChunkLoaded(2, 1) shouldBe false
                 demand shouldBe setOf(PaperChunkKey(h.world.uid, 1, 1), PaperChunkKey(h.world.uid, 2, 1),
                     PaperChunkKey(h.world.uid, 3, 1))
@@ -1723,6 +1731,8 @@ class CivsRecoveryChunkAdmissionTest : FunSpec({
                 }
                 h.tick()
                 demand shouldBe emptySet()
+                // Quarantine has ended: the ordinary city envelope resumes, with no extra actors or retained routes in this fixture.
+                ordinaryDemand shouldBe mapOf(before.id to emptyList<CivPosition>())
                 item.isValid shouldBe false
                 holder.getItem(0) shouldBe ItemStack(Material.APPLE, 1)
                 h.service.settlements().single() shouldBe after
@@ -1827,7 +1837,7 @@ class CivsAutonomousInfrastructureFallbackTest : FunSpec({
         }
     }
 
-    test("an unavailable perimeter backs off for five minutes without starving ordinary retries") {
+    test("unchanged industry and perimeter refusals both back off until their five minute input memo expires") {
         infrastructureFallbackScenario { h, city, placement, development ->
             every { placement.search(any(), any(), any(), any()) } returns
                 CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
@@ -1836,11 +1846,13 @@ class CivsAutonomousInfrastructureFallbackTest : FunSpec({
             development.pulse(); h.tick()
             verify(exactly = 1) { placement.infrastructure(city) }
             h.time += 30_001; development.pulse(); h.tick()
-            verify(exactly = 2) { placement.search(any(), BuildingType.CRUSHER, 1, any()) }
+            verify(exactly = 1) { placement.search(any(), BuildingType.CRUSHER, 1, any()) }
             verify(exactly = 1) { placement.infrastructure(any()) }
+            (development.debug(city.id)["geometric_refusal"] as Map<*, *>)["cached_goals"] shouldBe 2
             h.time += 300_001; development.pulse(); h.tick() // The expired full-plan retry runs first.
             h.time += 30_001; development.pulse(); h.tick()
             verify(exactly = 2) { placement.infrastructure(city) }
+            verify(exactly = 2) { placement.search(any(), BuildingType.CRUSHER, 1, any()) }
             h.service.settlements().single() shouldBe city
             h.saves shouldBe emptyList()
         }
