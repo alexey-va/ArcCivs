@@ -175,6 +175,7 @@ class CivsStore(
             cargoDropoff = transaction.cargoDropoff?.detached(),
             cargoPickup = transaction.cargoPickup?.detached(),
             gateRefit = transaction.gateRefit?.detached(),
+            warehouseRefit = transaction.warehouseRefit?.detached(),
             autonomousVisual = transaction.autonomousVisual?.let { it.copy(
                 buildingBefore = snapshotBuilding(it.buildingBefore),
                 mineProgressBefore = it.mineProgressBefore?.toMap(),
@@ -504,6 +505,8 @@ class CivsStore(
         require(validSha256(plan.capturedSha256)) { "Placement capture SHA-256 is invalid" }
         require(building.level in 1..building.type.maxLevel) { "Placement building level is invalid" }
         require(building.rotation in ROTATIONS) { "Placement building rotation is invalid" }
+        require(CivsWarehouseRefit.validReference(building) &&
+            (building.warehouseCaptureId == null || building.warehouseCaptureId == plan.id)) { "Invalid warehouse capture reference" }
         require(validBoundedText(building.schematicId, MAX_SCHEMATIC_ID_CHARS)) { "Placement schematic id is invalid" }
 
         val bounds = requireNotNull(building.bounds) { "Placement building has no bounds" }

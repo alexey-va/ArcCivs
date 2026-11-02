@@ -28,6 +28,7 @@ internal class CivsInventoryJournal(
     private val updateHealth: () -> Unit,
     private val clock: () -> Long,
     private val verifyGateCaptures: (CivInventoryTransaction) -> CompletableFuture<Unit> = { CompletableFuture.completedFuture(Unit) },
+    private val verifyWarehouseCaptures: (CivInventoryTransaction) -> CompletableFuture<Unit> = { CompletableFuture.completedFuture(Unit) },
 ) {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -47,7 +48,8 @@ internal class CivsInventoryJournal(
             tx.collected?.containers.orEmpty().map(CivNativeContainerChange::container) +
             tx.collected?.ground.orEmpty().map(CivGroundItemChange::position) +
             tx.collected?.forestryLeafLoot?.sources.orEmpty().map(CivForestryLeafSource::leaf) +
-            tx.containerRelocation?.containers.orEmpty().map(CivRelocatedContainer::position)
+            tx.containerRelocation?.containers.orEmpty().map(CivRelocatedContainer::position) +
+            tx.warehouseRefit?.routes.orEmpty().flatten()
         val keys = positions.mapTo(linkedSetOf()) { PaperChunkKey(tx.after.worldId, it.x shr 4, it.z shr 4) }
         tx.upkeep?.work?.let { work ->
             val upkeep = requireNotNull(work.upkeep)
@@ -206,6 +208,13 @@ internal class CivsInventoryJournal(
             result?.completeExceptionally(error)
             updateHealth()
         }
+        if (tx.warehouseRefit != null && !gateVerified) {
+            runCatching { verifyWarehouseCaptures(tx) }.getOrElse { CompletableFuture.failedFuture(it) }
+                .whenCompleteSync(tasks) { _, failure ->
+                    if (failure != null) fail(failure) else applyInventory(tx, result, gateVerified = true)
+                }
+            return
+        }
         if (tx.gateRefit != null && !gateVerified) {
             runCatching { verifyGateCaptures(tx) }.getOrElse { CompletableFuture.failedFuture(it) }
                 .whenCompleteSync(tasks) { _, failure ->
@@ -253,6 +262,10 @@ internal class CivsInventoryJournal(
             fun commit() {
                 val stale = runCatching {
                     rejectIf(closed, "not-ready"); requireCollectedCity(tx)
+                    tx.warehouseRefit?.let { receipt ->
+                        val current = cities[tx.cityId]
+                        rejectIf(current != receipt.before(tx.after) && current != tx.after, "stale-city")
+                    }
                     tx.gateRefit?.let { receipt ->
                         val current = cities[tx.cityId]
                         rejectIf(current != receipt.before(tx.after) && current != tx.after, "stale-city")
@@ -374,7 +387,7 @@ internal class CivsInventoryJournal(
             storage.lock(tx)
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
-                if (tx.gateRefit != null) {
+                if (tx.gateRefit != null || tx.warehouseRefit != null) {
                     rejectIf(city != tx.after, "stale-city")
                     applyInventory(tx, null)
                     return@runCatching

@@ -27,10 +27,15 @@ internal class CivsCityPlans(
     fun loadAutonomousPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
         require(city.buildings.size <= CivsRules.MAX_SITES)
         val buildings = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }
-        val plans = buildings.map { store.loadPlan(CivsGateRefit.retainedPlanId(it)) }
+        val plans = buildings.map { store.loadPlan(CivsWarehouseRefit.retainedPlanId(it)) }
         val result = authority.tracked<List<CivPlacementPlan>>()
         CompletableFuture.allOf(*plans.toTypedArray()).thenApplyAsync({
             val saved = plans.mapNotNull { it.join() }
+            buildings.filter { it.warehouseCaptureId != null }.forEach { building ->
+                require(CivsWarehouseRefit.matchesCapture(building, saved.singleOrNull { it.id == building.warehouseCaptureId })) {
+                    "Warehouse retained capture does not match its building"
+                }
+            }
             Triple(saved, CivAutonomousAccess.from(city, saved).routes.values.flatten().mapTo(hashSetOf()) { it.x to it.z },
                 CivsRoadMaintenance.prepare(city, saved))
         }, executor).whenCompleteSync(tasks) { captured, failure ->

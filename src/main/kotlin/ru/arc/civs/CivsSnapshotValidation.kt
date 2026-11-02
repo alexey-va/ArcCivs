@@ -219,6 +219,7 @@ internal object CivsSnapshotValidation {
             building.bounds.min.x <= building.bounds.max.x && building.bounds.min.y <= building.bounds.max.y && building.bounds.min.z <= building.bounds.max.z &&
             city.contains(building.bounds.min.x, building.bounds.min.z) && city.contains(building.bounds.max.x, building.bounds.max.z) &&
             city.contains(building.anchor.x, building.anchor.z) && city.contains(building.entrance.x, building.entrance.z) &&
+            CivsWarehouseRefit.validReference(building) &&
             (building.phase != BuildingPhase.SITE || building.level == 1) &&
             (building.control?.let { city.contains(it.x, it.z) } != false) &&
             (!(building.type.isInfrastructure || building.type == BuildingType.DECORATION) || building.control == null) &&

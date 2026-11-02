@@ -87,15 +87,17 @@ data class CivInventoryTransaction(
     val cargoPickup: CivCargoPickupReceipt? = null,
     /** Versioned maintenance of one existing gate; absent from every older receipt. */
     val gateRefit: CivGateRefitReceipt? = null,
+    /** Reviewed annex enclosure; never changes native inventory slots. */
+    val warehouseRefit: CivWarehouseRefitReceipt? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
         require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null ||
-            autonomousVisual != null || containerRelocation != null || gateRefit != null || after.autonomy != null && residentTransfer != null)
+            autonomousVisual != null || containerRelocation != null || gateRefit != null || warehouseRefit != null || after.autonomy != null && residentTransfer != null)
         require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine,
-            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup, gateRefit).size <= 1)
+            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup, gateRefit, warehouseRefit).size <= 1)
         containerRelocation?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -108,7 +110,11 @@ data class CivInventoryTransaction(
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
         }
-        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || upkeep != null || autonomousVisual != null || gateRefit != null || worldChanges.orEmpty().isEmpty()))
+        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || upkeep != null || autonomousVisual != null || gateRefit != null || warehouseRefit != null || worldChanges.orEmpty().isEmpty()))
+        warehouseRefit?.let {
+            require(changes.isEmpty() && worldChanges.orEmpty() == it.changes())
+            it.validated(after)
+        }
         gateRefit?.let {
             require(changes.isEmpty() && worldChanges.orEmpty() == it.changes())
             it.validated(after)
@@ -140,7 +146,7 @@ data class CivInventoryTransaction(
             it.validated(after, changes)
         }
         residentTransfer?.validated(after)
-        require(worldChanges.orEmpty().size <= 128 && worldChanges.orEmpty().map { it.position }.distinct().size == worldChanges.orEmpty().size)
+        require(worldChanges.orEmpty().size <= (if (warehouseRefit != null) CivsWarehouseRefit.MAX_CHANGES else 128) && worldChanges.orEmpty().map { it.position }.distinct().size == worldChanges.orEmpty().size)
         worldChanges.orEmpty().forEach { cell ->
             require(after.contains(cell.position.x, cell.position.z) && cell.position.y in -4_096..4_096 &&
                 cell.before.length in 1..2_048 && cell.after.length in 1..2_048 && cell.before != cell.after)

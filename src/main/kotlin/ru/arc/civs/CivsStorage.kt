@@ -94,6 +94,9 @@ class CivsStorage(private val plugin: Plugin,
     internal var validateMineNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "mine-authority-unavailable"))
     }
+    internal var validateWarehouseRefitNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
+        CivInventoryApplyResult.Conflict(mapOf("reason" to "warehouse-refit-authority-unavailable"))
+    }
     internal var validateGateRefitNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "gate-refit-authority-unavailable"))
     }
@@ -268,7 +271,8 @@ class CivsStorage(private val plugin: Plugin,
         val claim = claims[transaction.id] ?: throw CivsRejection("storage-busy")
         val positions = transaction.changes.associate { it.container to it.containerType } +
             transaction.collected?.containers.orEmpty().associate { it.container to it.containerType } +
-            transaction.containerRelocation?.containers.orEmpty().associate { it.position to it.type }
+            transaction.containerRelocation?.containers.orEmpty().associate { it.position to it.type } +
+            transaction.warehouseRefit?.containers.orEmpty().associate { it.position to it.type }
         reject(transaction.containerRelocation == null && positions.keys.any { Key(transaction.after.worldId, it) in retiringControls }, "storage-busy")
         val worldPositions = transaction.worldChanges.orEmpty().mapTo(mutableSetOf(), CivPlanBlock::position)
         val groundItems = transaction.collected?.ground.orEmpty().mapTo(mutableSetOf(), CivGroundItemChange::entityId)
@@ -287,6 +291,7 @@ class CivsStorage(private val plugin: Plugin,
                 administrator = claim.city.autonomy != null))
         }
         transaction.gateRefit?.let { require(it.before(transaction.after) == claim.city) }
+        transaction.warehouseRefit?.let { require(it.before(transaction.after) == claim.city) }
         transaction.collected?.let { collected ->
             val worker = claim.city.workers.single { it.id == collected.workerId }
             val afterWorker = transaction.after.workers.single { it.id == worker.id }
@@ -345,7 +350,7 @@ class CivsStorage(private val plugin: Plugin,
         }
         reject(worldPositions.any { lockedWorld[Key(claim.city.worldId, it)]?.let { id -> id != transaction.id } == true }, "storage-busy")
         reject(groundItems.any { lockedGround[it]?.let { id -> id != transaction.id } == true }, "storage-busy")
-        val viewersAllowed = transaction.containerRelocation == null && (keepViewersOpen || claim.playerId == null)
+        val viewersAllowed = transaction.containerRelocation == null && transaction.warehouseRefit == null && (keepViewersOpen || claim.playerId == null)
         claims[transaction.id] = claim.copy(worldPositions = worldPositions, groundItems = groundItems,
             viewersAllowed = viewersAllowed)
         worldPositions.forEach { lockedWorld[Key(claim.city.worldId, it)] = transaction.id }
@@ -360,11 +365,12 @@ class CivsStorage(private val plugin: Plugin,
         transaction.validated()
         val positions = transaction.changes.associate { it.container to it.containerType } +
             transaction.collected?.containers.orEmpty().associate { it.container to it.containerType } +
-            transaction.containerRelocation?.containers.orEmpty().associate { it.position to it.type }
+            transaction.containerRelocation?.containers.orEmpty().associate { it.position to it.type } +
+            transaction.warehouseRefit?.containers.orEmpty().associate { it.position to it.type }
         lock(transaction.after, transaction.id, positions, transaction.playerId(),
             transaction.worldChanges.orEmpty().mapTo(mutableSetOf(), CivPlanBlock::position),
             transaction.collected?.ground.orEmpty().mapTo(mutableSetOf(), CivGroundItemChange::entityId),
-            closeViewers = transaction.containerRelocation != null || transaction.playerId() != null)
+            closeViewers = transaction.containerRelocation != null || transaction.warehouseRefit != null || transaction.playerId() != null)
     }
 
     private fun lock(city: Settlement, transactionId: UUID, positions: Map<CivPosition, String?>, playerId: UUID?,
@@ -821,6 +827,11 @@ class CivsStorage(private val plugin: Plugin,
             else -> Unit
         }
         if (transaction.mine != null) when (val authority = validateMineNative(transaction)) {
+            is CivInventoryApplyResult.Retry -> return authority
+            is CivInventoryApplyResult.Conflict -> return authority
+            else -> Unit
+        }
+        if (transaction.warehouseRefit != null) when (val authority = validateWarehouseRefitNative(transaction)) {
             is CivInventoryApplyResult.Retry -> return authority
             is CivInventoryApplyResult.Conflict -> return authority
             else -> Unit

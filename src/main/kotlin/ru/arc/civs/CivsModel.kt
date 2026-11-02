@@ -52,6 +52,8 @@ data class CivBuilding(
     val production: String? = null,
     /** Explicit public walking columns of a constructed road or gate. Native collisions still apply. */
     val transit: List<CivPosition>? = null,
+    /** Exact enclosure capture for a reviewed rack annex; the authored source family remains unchanged. */
+    val warehouseCaptureId: UUID? = null,
 )
 
 data class CivWorker(

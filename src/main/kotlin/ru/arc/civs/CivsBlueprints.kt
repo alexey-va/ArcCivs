@@ -405,7 +405,8 @@ class CivsBlueprints(
     /** A committed construction replays captured bytes, never a newer mutable library file. */
     fun recover(plan: CivPlacementPlan): CompletableFuture<ArcSchematicSnapshot> =
         captured.loadVerified(plan.id.toString(), requireNotNull(plan.capturedSha256) { "Construction capture digest is missing" }, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
-            .thenCompose { captured.transform(it, ArcSchematicTransform(plan.building.rotation / 90, false)) }
+            .thenCompose { captured.transform(it, ArcSchematicTransform(
+                if (CivsWarehouseRefit.captured(plan)) 0 else plan.building.rotation / 90, false)) }
             .thenApplyAsync({ snapshot ->
                 verifyCapturedPlan(plan, snapshot)
                 snapshot

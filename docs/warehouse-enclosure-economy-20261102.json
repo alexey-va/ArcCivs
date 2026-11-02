@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "title": "ArcCivs repair of an open warehouse annex inside its existing paid bounds",
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "assumptions": [
+    "One owner-authorized repair of an existing paid warehouse, not ordinary worker construction or a repeatable reward.",
+    "All three scenarios assume one repair; they are not measured player throughput.",
+    "Proposed authored shell adds323 world cells inside23x7x5: exact per-material map is separate from item inventory. Fresh native preview must verify exclusions and exact changes before apply.",
+    "Existing thirteen source container blocks plus any current relocated control, their real inventories and lids are preserved. No extra container is created.",
+    "No Native material grant, inventory debit, refund, Stock, resident cycle, worker credit, skill or player XP flow. A typed existing world-change journal owns exact capture, CAS, replay and rollback.",
+    "Both confirmed annex families were already excluded from fresh autonomous standalone selection; accepted source lookup and old plan replay remain available. Existing prices, rates and ordinary construction bills are unchanged.",
+    "Current SELL and future SELL-to-contract flows remain separate and unchanged. No value or exchange rate is assigned to world blocks.",
+    "Source rendering, native preview/apply, disk runtime version and ordinary client acceptance are independent evidence."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "warehouse_repair_direct_vault",
+          "kind": "mint",
+          "source": "CivsWarehouseMaintenance existing native world-change journal",
+          "basis": "No direct issuance hook; physical world repairs are not inventory rewards.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "warehouse_repair_direct_tokens",
+          "kind": "mint",
+          "source": "CivsWarehouseMaintenance existing native world-change journal",
+          "basis": "No direct issuance hook; physical world repairs are not inventory rewards.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "warehouse_repair_direct_player_xp",
+          "kind": "mint",
+          "source": "CivsWarehouseMaintenance existing native world-change journal",
+          "basis": "No direct issuance hook; physical world repairs are not inventory rewards.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "proposed_world_additions": {
+    "STONE_BRICKS": 53,
+    "DARK_OAK_LOG": 66,
+    "GLASS": 43,
+    "DARK_OAK_STAIRS": 46,
+    "DARK_OAK_SLAB": 115
+  },
+  "proposed_world_addition_count": 323,
+  "inventory_delta": {},
+  "closed_stock_delta": {
+    "wood": 0,
+    "stone": 0,
+    "food": 0
+  },
+  "runtime_acceptance": "pending"
+}

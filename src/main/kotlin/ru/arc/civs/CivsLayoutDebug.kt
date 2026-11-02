@@ -74,7 +74,7 @@ internal class CivsLayoutDebug(
             }
         }
         val plans = mutableListOf<Map<String, Any?>>()
-        val requests = captured.buildings.map { CivsGateRefit.retainedPlanId(it) to
+        val requests = captured.buildings.map { CivsWarehouseRefit.retainedPlanId(it) to
             if (it.id == captured.construction?.id) "current-construction" else "retained-building" } +
             listOfNotNull(captured.construction?.id?.takeUnless { id -> captured.buildings.any { it.id == id } }
                 ?.let { it to "current-construction" })
@@ -240,7 +240,7 @@ internal class CivsLayoutDebug(
         internal fun planRow(city: Settlement, requested: UUID, source: String, plan: CivPlacementPlan?): Map<String, Any?> {
             if (plan == null) return mapOf("requested_id" to requested, "source" to source, "status" to "missing")
             val building = city.building(plan.building.id)?.takeIf {
-                source != "retained-building" || CivsGateRefit.retainedPlanId(it) == requested
+                source != "retained-building" || CivsWarehouseRefit.retainedPlanId(it) == requested
             }
             val expected = if (source == "current-construction") city.construction?.plannedBuilding ?: building else building
             val identity = plan.id == requested && plan.cityId == city.id && plan.worldId == city.worldId && expected != null &&

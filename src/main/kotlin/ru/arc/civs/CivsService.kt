@@ -90,6 +90,7 @@ class CivsService(
         it.validateUpkeepNative = ::validateUpkeepNative
         it.validateMineNative = ::validateMineNative
         it.validateGateRefitNative = { tx -> gateMaintenance.validateNative(tx) }
+        it.validateWarehouseRefitNative = { tx -> warehouseMaintenance.validateNative(tx) }
     }
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
     private val planBoardSnapshots = CivsPlanBoardSnapshots(tasks, executor, { id ->
@@ -175,9 +176,14 @@ class CivsService(
         unhealthy, { closed }, { city -> publish(city) }, { id, transform -> mutate(id, transform = transform) },
         ::track, { tx -> cargoRequests.validateNativeCollected(tx) }, ::resurrectionRejection, ::requestResurrectionAdmission,
         ::inventoryRetired, ::updateHealth, clock,
-        verifyGateCaptures = { tx -> gateMaintenance.verifyCaptures(tx) })
+        verifyGateCaptures = { tx -> gateMaintenance.verifyCaptures(tx) },
+        verifyWarehouseCaptures = { tx -> warehouseMaintenance.verifyCaptures(tx) })
 
     private val gateMaintenance: CivsGateMaintenance = CivsGateMaintenance(plugin, this, records, tasks, executor, store, blueprints,
+        world, storage, inventoryJournal, { city -> cityPlans.loadAutonomousPlans(city) }, construction::isPlacing,
+        citizens::growthBlocked)
+
+    private val warehouseMaintenance: CivsWarehouseMaintenance = CivsWarehouseMaintenance(plugin, this, records, tasks, executor, store, blueprints,
         world, storage, inventoryJournal, { city -> cityPlans.loadAutonomousPlans(city) }, construction::isPlacing,
         citizens::growthBlocked)
 
@@ -821,6 +827,14 @@ class CivsService(
     private fun inventoryRetired(tx: CivInventoryTransaction, recoveryPath: Boolean): Settlement {
         if (tx.worldChanges.orEmpty().isNotEmpty())
             citizens.terrainChanged(tx.after.worldId, tx.worldChanges.orEmpty().map { it.position })
+        tx.warehouseRefit?.let { receipt ->
+            cityPlans.loadAutonomousPlans(tx.after).whenCompleteSync(tasks) { _, failure ->
+                if (failure != null) log("reload refitted warehouse ${receipt.beforeBuilding.id}", failure, tx.cityId)
+            }
+            CivsDiagnostics.event("warehouse_refit_committed", "city" to tx.cityId, "warehouse" to receipt.beforeBuilding.id,
+                "transaction" to tx.id, "capture" to receipt.replacement.id, "blocks" to receipt.changes().size,
+                "revision" to tx.after.revision, "recovery_path" to recoveryPath)
+        }
         tx.gateRefit?.let { receipt ->
             cityPlans.loadAutonomousPlans(tx.after).whenCompleteSync(tasks) { _, failure ->
                 if (failure != null) log("reload refitted gate ${receipt.beforeBuilding.id}", failure, tx.cityId)
@@ -1302,6 +1316,11 @@ class CivsService(
     internal fun deleteRecord(city: Settlement): CompletableFuture<Unit> = store.delete(city)
 
     internal fun repairBuildingStorage(cityId: UUID, buildingId: UUID): CompletableFuture<Map<String, Int>> = storageActions.repairBuildingStorage(cityId, buildingId)
+
+    internal fun refitWarehouse(cityId: UUID, buildingId: UUID, proof: String?): CompletableFuture<Map<String, Any?>> =
+        action("warehouse_refit", null, "city" to cityId, "warehouse" to buildingId, "apply" to (proof != null)) {
+            warehouseMaintenance.request(cityId, buildingId, proof)
+        }
 
     internal fun refitGate(cityId: UUID, gateId: UUID, proof: String?): CompletableFuture<Map<String, Any?>> =
         action("gate_refit", null, "city" to cityId, "gate" to gateId, "apply" to (proof != null)) {
