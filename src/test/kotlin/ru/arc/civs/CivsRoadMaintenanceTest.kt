@@ -8,6 +8,9 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import io.mockk.verify
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
@@ -442,6 +445,35 @@ class CivsRoadMaintenanceTest : FunSpec({
         }
         probes.drop(before).map { it.second }.toSet() shouldBe towns.map { it.id }.toSet()
         probes.groupBy { it.first }.values.all { it.size <= 8 } shouldBe true
+    }
+
+    test("healthy pavement skips old finish projection while ordinary clearance keeps native validation") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("upkeep-capture-lazy").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val city = upkeepCity().copy(worldId = world.uid)
+            val target = requireNotNull(upkeepWork(city).upkeep)
+            val p = target.floor
+            val floor = world.getBlockAt(p.x, p.y, p.z)
+            floor.blockData = Bukkit.createBlockData(target.after)
+            val cover = world.getBlockAt(p.x, p.y + 1, p.z)
+            val plugin = paper.createSimplePlugin("UpkeepCaptureLazy")
+            LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                CivsWorld(plugin, tasks, { 0L }) { listOf(city) }.use { native ->
+                    mockkObject(CivsRoadMaintenance.Companion)
+                    try {
+                        native.captureRoadUpkeep(city, city.workers.single(), target) shouldBe null
+                        verify(exactly = 0) { CivsRoadMaintenance.ownedPavement(city, target) }
+                        cover.type = Material.SHORT_GRASS
+                        val before = cover.blockData.asString
+                        val work = requireNotNull(native.captureRoadUpkeep(city, city.workers.single(), target))
+                        work.changes shouldBe listOf(CivPlanBlock(p.copy(y = p.y + 1), before, "minecraft:air"))
+                        verify(exactly = 1) { CivsRoadMaintenance.ownedPavement(city, target) }
+                        cover.blockData.asString shouldBe before
+                    } finally { unmockkObject(CivsRoadMaintenance.Companion) }
+                }
+            }
+        }
     }
 
     test("native missing pavement needs immediate solid support and forbidden blocks or body obstructions remain untouched") {

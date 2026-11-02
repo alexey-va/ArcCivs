@@ -53,14 +53,16 @@ internal class CivsRoadWorld(
             p.y !in world.minHeight + 1 until world.maxHeight - CivsRoadMaintenance.MAX_CLEARANCE) return null
         val block = world.getBlockAt(p.x, p.y, p.z)
         val after = Bukkit.createBlockData(upkeep.after)
-        val pavement = CivsRoadMaintenance.ownedPavement(city, upkeep)
+        val pavement by lazy(LazyThreadSafetyMode.NONE) { CivsRoadMaintenance.ownedPavement(city, upkeep) }
         val change = if (sameConstructionState(block.blockData, after)) null else {
             if (!roadUpkeepReplaceable(block) && block.blockData.asString !in pavement[p].orEmpty()) return null
             CivPlanBlock(p, block.blockData.asString, after.asString)
         }
-        val cover = CivsRoadMaintenance.covers(p, (1..CivsRoadMaintenance.MAX_CLEARANCE).map { dy ->
+        val clearance = (1..CivsRoadMaintenance.MAX_CLEARANCE).map { dy ->
             world.getBlockAt(p.x, p.y + dy, p.z).blockData.asString
-        }, pavement) ?: return null
+        }
+        val cover = CivsRoadMaintenance.covers(p, clearance)
+            ?: CivsRoadMaintenance.covers(p, clearance, pavement) ?: return null
         val changes = listOfNotNull(change) + cover
         if (changes.isEmpty()) {
             val stairs = block.blockData as? Stairs
