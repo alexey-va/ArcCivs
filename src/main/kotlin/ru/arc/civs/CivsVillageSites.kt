@@ -544,75 +544,15 @@ internal class CivsVillageSites(
                             prove(search, ordinal, raised, surface, allowRaised = false)
                         } else rejectCandidate(error)
                     }) { _ ->
-                        search.phase = "complete-layout-proof"
-                        val templates = search.templates.getValue(ordinal)
-                        val preparation = blueprints.fortification(city.style).thenApplyAsync({ fortification ->
-                            fortification to CivsVillageSiteScoring.preparedSurface(surface, blueprint.building)
-                        }, executor)
-                        await(search, preparation, failed = ::rejectCandidate) { (fortification, preparedSurface) ->
-                            fun proveLayout(selected: Map<BuildingType, Pair<CivBuilding, CivBuilding>>, allowCompactHouse: Boolean) {
-                                search.phase = "complete-layout-proof"
-                                val proof = CompletableFuture.supplyAsync({
-                                    fun prepare(inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? = null): Pair<CivSettlementPlan, Int> {
-                                        val plan = CivsSettlementPlans.prepare(city, selected, preparedSurface, CivAutonomousAccess(),
-                                            fortification = fortification, inspect = inspect)
-                                        if (!CivsVillageSiteScoring.completeProfile(plan)) throw CivsRejection("autonomy-no-site")
-                                        return plan to CivsVillageSiteScoring.usableTreeColumns(city, plan, surface)
-                                    }
-                                    capture?.prove(search.id, search.referenceId, city, preparedSurface, selected) { inspect -> prepare(inspect) }
-                                        ?: prepare()
-                                }, executor)
-                                await(search, proof, failed = { error ->
-                                    val refused = CivsDiagnostics.rejection(error)
-                                    val original = selected.getValue(BuildingType.HOUSE)
-                                    val alternative = if (allowCompactHouse && refused?.reason == "autonomy-no-site" &&
-                                        refused.values["type"] == BuildingType.HOUSE.name) compactHouseSource(city.style, original) else null
-                                    if (alternative == null) rejectCandidate(error) else {
-                                        search.phase = "house-family-template"
-                                        await(search, blueprints.prepareEntry(alternative, original.first.id, city.worldId,
-                                            CivPosition(0, 0, 0), 2, 0), failed = ::rejectCandidate) { current ->
-                                            val maximum = blueprints.maximumLevel(current.building)
-                                            if (maximum != original.second.level) rejectCandidate(error) else {
-                                                val last = if (maximum == 1) CompletableFuture.completedFuture(current)
-                                                    else blueprints.prepareUpgrade(current.building, maximum, city.worldId)
-                                                await(search, last, failed = ::rejectCandidate) { future ->
-                                                    val pair = current.building to future.building
-                                                    if (pair.first.id != original.first.id || pair.second.id != original.first.id ||
-                                                        pair.first.type != BuildingType.HOUSE || pair.second.type != BuildingType.HOUSE ||
-                                                        pair.first.level != 1 || pair.second.level != original.second.level ||
-                                                        CivsBlueprints.styleOf(pair.first) != city.style || CivsBlueprints.styleOf(pair.second) != city.style ||
-                                                        footprint(pair) >= footprint(original)) rejectCandidate(error)
-                                                    else proveLayout(selected + (BuildingType.HOUSE to pair), false)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }) { (plan, trees) ->
-                                    search.phase = "founding"
-                                    val planned = CivsRules.validate(city.copy(autonomy = city.autonomy!!.copy(plan = plan,
-                                        layoutHalfWidth = plan.halfWidth)))
-                                    found(search, ordinal, planned, blueprint, terrain, score.copy(treeColumns = trees))
-                                }
-                            }
-                            proveLayout(templates, true)
-                        }
+                        // ponytail: reserve only the verified hall; ordinary goals prove each future site when needed.
+                        search.phase = "founding"
+                        val initial = CivsRules.validate(city.copy(autonomy = city.autonomy!!.copy(
+                            layoutHalfWidth = CivsSettlementLayout.frame(city).halfWidth)))
+                        found(search, ordinal, initial, blueprint, terrain, score)
                     }
                 }
             }
         }
-    }
-
-    private fun compactHouseSource(style: String, original: Pair<CivBuilding, CivBuilding>): String? {
-        val choices = blueprints.choices(BuildingType.HOUSE, style).filter { it.style == style &&
-            it.type == BuildingType.HOUSE && it.maxLevel == original.second.level && it.size.size == 3 &&
-            it.size[0].toLong() * it.size[2] < footprint(original) }.mapTo(hashSetOf()) { it.id }
-        return blueprints.autonomousAlternatives(style, BuildingType.HOUSE).firstOrNull { it in choices }
-    }
-
-    private fun footprint(pair: Pair<CivBuilding, CivBuilding>): Long {
-        val a = pair.first.bounds; val b = pair.second.bounds
-        return (maxOf(a.max.x, b.max.x).toLong() - minOf(a.min.x, b.min.x) + 1) *
-            (maxOf(a.max.z, b.max.z).toLong() - minOf(a.min.z, b.min.z) + 1)
     }
 
     private fun found(search: Search, ordinal: Int, city: Settlement, blueprint: CivBlueprint,

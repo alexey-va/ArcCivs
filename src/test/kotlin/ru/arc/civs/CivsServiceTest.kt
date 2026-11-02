@@ -1849,7 +1849,7 @@ class CivsAutonomousInfrastructureFallbackTest : FunSpec({
             verify(exactly = 1) { placement.search(any(), BuildingType.CRUSHER, 1, any()) }
             verify(exactly = 1) { placement.infrastructure(any()) }
             (development.debug(city.id)["geometric_refusal"] as Map<*, *>)["cached_goals"] shouldBe 2
-            h.time += 300_001; development.pulse(); h.tick() // The expired full-plan retry runs first.
+            h.time += 300_001; development.pulse(); h.tick() // Both unchanged-input memos expire.
             h.time += 30_001; development.pulse(); h.tick()
             verify(exactly = 2) { placement.infrastructure(city) }
             verify(exactly = 2) { placement.search(any(), BuildingType.CRUSHER, 1, any()) }
@@ -1919,11 +1919,8 @@ private fun infrastructureFallbackScenario(refit: Boolean = false,
             h.paper.addPlayer("PerimeterObserver").teleport(Location(h.world, 0.5, 65.0, 0.5))
             val development = autonomousDevelopment(h.service)
             development.pulseAccessRepair(); h.tick()
-            if (!refit) {
-                h.time += 5_001; development.pulse(); h.tick()
-                verify(exactly = 1) { placement.plan(any()) }
-                h.time += 30_001
-            } else h.time += 5_001
+            h.time += 5_001
+            verify(exactly = 0) { placement.plan(any()) }
             development.accessReady(city) shouldBe true
             h.service.settlements().single() shouldBe city
             h.saves shouldBe emptyList()
@@ -2727,7 +2724,7 @@ class CivsServiceTest : FunSpec({
     }
 
     for (atInfrastructureCap in listOf(false, true))
-    test("a failed full plan backs off while ordinary growth remains admissible atInfrastructureCap=$atInfrastructureCap") {
+    test("a planless town immediately searches its next goal without a full forecast atInfrastructureCap=$atInfrastructureCap") {
         mockkConstructor(CivsAutonomousPlacement::class)
         try {
             every { anyConstructed<CivsAutonomousPlacement>().plan(any()) } returns
@@ -2748,11 +2745,11 @@ class CivsServiceTest : FunSpec({
                 development.pulseAccessRepair(); h.tick()
                 h.time += 5_001
                 development.pulse(); h.tick()
-                verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().plan(any()) }
-                verify(exactly = 0) { anyConstructed<CivsAutonomousPlacement>().search(any(), any(), any(), any()) }
+                verify(exactly = 0) { anyConstructed<CivsAutonomousPlacement>().plan(any()) }
+                verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().search(any(), BuildingType.BUILDER_HUT, 1, any()) }
                 h.time += 30_001
                 development.pulse(); h.tick()
-                verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().plan(any()) }
+                verify(exactly = 0) { anyConstructed<CivsAutonomousPlacement>().plan(any()) }
                 verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().search(any(), BuildingType.BUILDER_HUT, 1, any()) }
                 val after = h.service.settlements().single()
                 after.buildings shouldBe city.buildings

@@ -252,9 +252,11 @@ internal class CivsBuildingRequests(
             proposed.center != (hall.control ?: hall.entrance) || proposed.radius != settings.radius ||
             proposed.settings != CivSettlementSettings(chunkLoading = true, immortalResidents = true,
                 autoConstructionMaterials = false), "invalid-state")
-        val layout = proposed.autonomy?.plan ?: throw CivsRejection("invalid-plan")
-        CivsSettlementPlans.validate(proposed, layout)
-        rejectIf(!CivsVillageSiteScoring.completeProfile(layout), "autonomy-no-site")
+        val layout = proposed.autonomy?.plan
+        if (layout != null) {
+            CivsSettlementPlans.validate(proposed, layout)
+            rejectIf(!CivsVillageSiteScoring.completeProfile(layout), "autonomy-no-site")
+        }
         rejectIf(records.cities.values.any { it.name.equals(proposed.name, ignoreCase = true) }, "city-name-conflict")
         checkSettlementSpace(proposed.worldId, proposed.center)
         pendingFounders[proposed.owner] = FoundingReservation(proposed.id, proposed.worldId, proposed.center)
@@ -313,7 +315,7 @@ internal class CivsBuildingRequests(
                         } else {
                             CivsDiagnostics.event("autonomous_village_founded", "city" to saved.id, "owner" to saved.owner,
                                 "name" to saved.name, "style" to saved.style, "center" to saved.center,
-                                "plots" to layout.plots.size)
+                                "plots" to (layout?.plots?.size ?: proposed.buildings.size))
                             // The existing pending-control recovery also owns interrupted installation.
                             authority.releaseCity(proposed.id)
                             runCatching { controlInstallations.install(proposed.id, hall.id) }.onSuccess { installed ->

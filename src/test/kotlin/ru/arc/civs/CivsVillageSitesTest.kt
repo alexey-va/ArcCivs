@@ -5,6 +5,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.clearAllMocks
 import io.mockk.every
+import io.mockk.verify
 import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
@@ -268,7 +269,7 @@ class CivsVillageSitesTest : FunSpec({
             admitted.workers shouldBe emptyList()
             admitted.construction shouldBe null
             admitted.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
-            CivsVillageSiteScoring.completeProfile(requireNotNull(admitted.autonomy?.plan)) shouldBe true
+            admitted.autonomy!!.plan shouldBe null
             val loads = s.loads.size
             val repeated = s.subject.bootstrap(request)
             s.until { repeated.isDone }
@@ -328,7 +329,7 @@ class CivsVillageSitesTest : FunSpec({
                 autoConstructionMaterials = false)
             founded.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
             founded.inventory!!.materials.values.sum() shouldBe 216L
-            CivsVillageSiteScoring.completeProfile(requireNotNull(founded.autonomy?.plan)) shouldBe true
+            founded.autonomy!!.plan shouldBe null
             s.cities.filter { it.id in existing.map(Settlement::id) } shouldBe existing
             val canonical = s.cities.toList()
             val proofs = s.siteProofs.size
@@ -349,139 +350,25 @@ class CivsVillageSitesTest : FunSpec({
         }
     }
 
-    test("a HOUSE space refusal retries the complete profile once with the first compact same style maximum family") {
+    test("founding a proved hall never forecasts future houses routes or perimeter") {
         villageScenario { s ->
-            val family = VillageHouseFallbackFixture(s)
-            val attempts = mutableListOf<Map<BuildingType, Pair<CivBuilding, CivBuilding>>>()
-            val surfaces = mutableListOf<CivTerrainSurface>()
-            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
-                attempts += arg<Map<BuildingType, Pair<CivBuilding, CivBuilding>>>(1)
-                surfaces += arg<CivTerrainSurface>(2)
-                if (attempts.size == 1) throw CivsRejection("autonomy-no-site", mapOf("type" to "HOUSE"))
-                villageLayout(firstArg())
-            }
-            val result = s.subject.search(s.reference, 1, "Compact-", style = "nordic")
+            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } throws
+                AssertionError("Future geometry is proved by the next ordinary construction goal")
+            every { s.blueprints.fortification(any()) } throws AssertionError("No speculative perimeter at founding")
+            val result = s.subject.search(s.reference, 1, "Incremental-", style = "nordic")
             s.until { result.isDone }
             result.join().complete shouldBe true
-            attempts.size shouldBe 2
-            family.loaded shouldBe listOf(family.original, family.compact)
-            family.upgraded shouldBe listOf(family.original, family.compact)
-            val original = attempts[0].getValue(BuildingType.HOUSE)
-            val compact = attempts[1].getValue(BuildingType.HOUSE)
-            compact.first.schematicId shouldBe family.compact
-            compact.first.id shouldBe original.first.id
-            compact.second.id shouldBe original.second.id
-            compact.second.level shouldBe original.second.level
-            (attempts[0] - BuildingType.HOUSE) shouldBe (attempts[1] - BuildingType.HOUSE)
-            (surfaces[0] === surfaces[1]) shouldBe true
             s.fullCities.size shouldBe 1
             s.siteProofs.size shouldBe 1
-            s.admissions.size shouldBe 1
-            CivsVillageSiteScoring.completeProfile(requireNotNull(s.admissions.single().city.autonomy?.plan)) shouldBe true
+            val admitted = s.admissions.single().city
+            admitted.buildings.single().phase shouldBe BuildingPhase.SITE
+            admitted.autonomy!!.plan shouldBe null
+            admitted.autonomy!!.layoutHalfWidth shouldBe CivsSettlementLayout.frame(admitted).halfWidth
+            admitted.workers shouldBe emptyList()
+            admitted.construction shouldBe null
+            admitted.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
+            verify(exactly = 0) { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) }
             s.registry.activeLeaseCount shouldBe 0
-        }
-    }
-
-    test("a compact HOUSE refusal never tries the next family on the same site") {
-        villageScenario { s ->
-            val family = VillageHouseFallbackFixture(s)
-            var attempts = 0
-            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
-                attempts++
-                throw CivsRejection("autonomy-no-site", mapOf("type" to "HOUSE"))
-            }
-            val result = s.subject.search(s.reference, 1, "Compact-", style = "nordic")
-            s.until { attempts >= 2 || result.isDone }
-            attempts shouldBe 2
-            family.loaded shouldBe listOf(family.original, family.compact)
-            s.admissions shouldBe emptyList()
-            s.subject.cancel("compact-refused-test")
-            s.until { result.isDone }
-            attempts shouldBe 2
-            s.registry.activeLeaseCount shouldBe 0
-        }
-    }
-
-    for ((reason, details) in listOf("autonomy-no-site" to mapOf("type" to "QUARRY"),
-        "autonomy-no-site" to emptyMap(), "autonomy-layout-obstructed" to mapOf("type" to "HOUSE")))
-    test("$reason $details cannot select a compact founding family") {
-        villageScenario { s ->
-            val family = VillageHouseFallbackFixture(s)
-            var attempts = 0
-            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
-                attempts++
-                throw CivsRejection(reason, details)
-            }
-            val result = s.subject.search(s.reference, 1, "Compact-", style = "nordic")
-            s.until { attempts > 0 || result.isDone }
-            family.loaded shouldBe listOf(family.original)
-            s.subject.cancel("other-layout-refusal-test")
-            s.until { result.isDone }
-            attempts shouldBe 1
-            s.admissions shouldBe emptyList()
-        }
-    }
-
-    for (invalid in listOf("larger-maximum", "lower-maximum-level"))
-    test("compact metadata cannot bypass the actual $invalid") {
-        villageScenario { s ->
-            val family = VillageHouseFallbackFixture(s)
-            if (invalid == "larger-maximum") family.compactMaximumSize = 13 else family.compactMaximumLevel = 2
-            var attempts = 0
-            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
-                attempts++
-                throw CivsRejection("autonomy-no-site", mapOf("type" to "HOUSE"))
-            }
-            val result = s.subject.search(s.reference, 1, "Compact-", style = "nordic")
-            s.until { family.loaded.size == 2 || result.isDone }
-            family.loaded shouldBe listOf(family.original, family.compact)
-            attempts shouldBe 1
-            s.subject.cancel("invalid-compact-maximum-test")
-            s.until { result.isDone }
-            attempts shouldBe 1
-            s.admissions shouldBe emptyList()
-            s.registry.activeLeaseCount shouldBe 0
-        }
-    }
-
-    for (heldStage in listOf("current", "maximum"))
-    test("cancellation fences a late compact HOUSE $heldStage template before another proof or founding") {
-        villageScenario { s ->
-            val family = VillageHouseFallbackFixture(s)
-            var cancellations = 0
-            val held = object : CompletableFuture<CivBlueprint>() {
-                override fun cancel(mayInterruptIfRunning: Boolean): Boolean { cancellations++; return false }
-            }
-            if (heldStage == "current") family.heldCurrent = held else family.heldMaximum = held
-            var attempts = 0
-            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
-                attempts++
-                throw CivsRejection("autonomy-no-site", mapOf("type" to "HOUSE"))
-            }
-            val result = s.subject.search(s.reference, 1, "Compact-", style = "nordic")
-            try {
-                s.until { (if (heldStage == "current") family.loaded.size == 2 else family.upgraded.size == 2) || result.isDone }
-                result.isDone shouldBe false
-                attempts shouldBe 1
-                val upgrades = family.upgraded.toList()
-                val loads = s.loads.size
-                s.subject.cancel("held-compact-$heldStage-test")
-                s.until { result.isDone }
-                cancellations shouldBe 1
-                held.complete(requireNotNull(family.heldBlueprint)) shouldBe true
-                s.tick(10)
-                attempts shouldBe 1
-                family.upgraded shouldBe upgrades
-                s.loads.size shouldBe loads
-                s.siteProofs.size shouldBe 1
-                s.admissions shouldBe emptyList()
-                s.cities shouldBe listOf(s.reference)
-                s.registry.activeLeaseCount shouldBe 0
-            } finally {
-                s.subject.cancel("held-compact-fixture-cleanup")
-                held.completeExceptionally(CancellationException("Controlled compact template cleanup"))
-                s.tick(64)
-            }
         }
     }
 
@@ -572,7 +459,7 @@ class CivsVillageSitesTest : FunSpec({
             admission.city.style shouldBe "original"
             admission.city.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
             admission.city.inventory!!.materials.values.sum() shouldBe 216L
-            CivsVillageSiteScoring.completeProfile(requireNotNull(admission.city.autonomy?.plan)) shouldBe true
+            admission.city.autonomy!!.plan shouldBe null
             s.cities.filter { it.id in existing.map(Settlement::id) } shouldBe existing
             val canonical = s.cities.toList()
             val proofs = s.siteProofs.size
@@ -846,7 +733,7 @@ class CivsVillageSitesTest : FunSpec({
             result.join().rejected["lands-denied"] shouldBe 1
             result.join().rejectedSites.single().details shouldBe requireNotNull(rejected)
             result.join().rejectedSites.single().point shouldBe refused.building.control
-            planned shouldBe listOf(accepted.building.control)
+            planned shouldBe emptyList()
             s.admissions.single().city.center shouldBe accepted.building.control
             result.join().created.single().city shouldBe accepted.cityId
             result.join().complete shouldBe true
@@ -985,9 +872,7 @@ class CivsVillageSitesTest : FunSpec({
             s.fullCities.size shouldBe 1
             s.loads.size shouldBe loadsAtOriginal
             s.added.size shouldBe ticketsAtOriginal
-            val (planned, surface) = prepared.single()
-            planned.center shouldBe raised.building.control
-            surface.at(raised.building.anchor.x, raised.building.anchor.z)!!.groundY shouldBe raised.building.anchor.y
+            prepared shouldBe emptyList()
             val admission = s.admissions.single()
             admission.city.id shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
             admission.city.owner shouldBe s.reference.owner
@@ -1027,7 +912,7 @@ class CivsVillageSitesTest : FunSpec({
             (requireNotNull(result.join().rejected["autonomy-terrain"]) >= 1) shouldBe true
             result.join().rejectedSites.any { it.reason == "autonomy-terrain" &&
                 it.details["y"] == raised.building.bounds.min.y.toString() } shouldBe true
-            planned shouldBe listOf(accepted.building.control)
+            planned shouldBe emptyList()
             s.admissions.single().city.center shouldBe accepted.building.control
             result.join().created.single().city shouldBe original.cityId
             result.join().complete shouldBe true
@@ -1082,7 +967,7 @@ class CivsVillageSitesTest : FunSpec({
         }
     }
 
-    test("a complete layout can be founded without provincial or reachable timber") {
+    test("a natively proved hall can be founded without provincial or reachable timber") {
         for (withRemoteTrees in listOf(false, true)) villageScenario { s ->
             s.fullSurface = { city ->
                 val surface = villageSurface(city.center, 127)
@@ -1098,7 +983,7 @@ class CivsVillageSitesTest : FunSpec({
             result.join().created.single().treeColumns shouldBe 0
             s.siteProofs.size shouldBe 1
             val founded = s.admissions.single().city
-            CivsVillageSiteScoring.completeProfile(requireNotNull(founded.autonomy?.plan)) shouldBe true
+            founded.autonomy!!.plan shouldBe null
             founded.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
             s.registry.activeLeaseCount shouldBe 0
             s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
@@ -1167,9 +1052,9 @@ class CivsVillageSitesTest : FunSpec({
     test("exhausted full proofs continue once into the next tier while keeping the final proof inside the request budget") {
         villageScenario { s ->
             var proofs = 0
-            s.layout = { city ->
-                if (++proofs <= 16) throw CivsRejection("autonomy-no-site")
-                villageLayout(city)
+            s.siteProof = { proof ->
+                if (++proofs <= 16) CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
+                else CompletableFuture.completedFuture(proof.plan())
             }
             val result = s.subject.search(s.reference, 1, "Auto-")
             s.until { result.isDone }
@@ -1189,10 +1074,10 @@ class CivsVillageSitesTest : FunSpec({
     test("a partial canonical receipt resumes in another batch without repeating grants or changing its existing town") {
         villageScenario { s ->
             var proofs = 0
-            s.layout = { city ->
+            s.siteProof = { proof ->
                 proofs++
-                if (s.admissions.isNotEmpty()) throw CivsRejection("autonomy-no-site")
-                villageLayout(city)
+                if (s.admissions.isNotEmpty()) CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
+                else CompletableFuture.completedFuture(proof.plan())
             }
             val result = s.subject.search(s.reference, 5, "Auto-")
             s.until { result.isDone }
@@ -1208,7 +1093,7 @@ class CivsVillageSitesTest : FunSpec({
             CivsVillageSiteScoring.probeFits(s.peakRequests, 25, 4, 361) shouldBe false
             (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
             s.registry.activeLeaseCount shouldBe 0
-            s.layout = ::villageLayout
+            s.siteProof = { CompletableFuture.completedFuture(it.plan()) }
             val replay = s.subject.search(s.reference, 5, "Auto-", batch = 2)
             s.until { replay.isDone }
             replay.join().complete shouldBe true
@@ -1485,12 +1370,11 @@ class CivsVillageSitesTest : FunSpec({
         }
     }
 
-    test("a failed full growth proof creates no town and returns bounded rejection evidence") {
+    test("a failed native hall proof creates no town and returns bounded rejection evidence") {
         villageScenario { s ->
             val values = mutableMapOf("type" to "HOUSE", "frontage_candidates" to "64", "frontage_options" to "0",
                 "infill_candidates" to "32", "infill_options" to "0", "route-state-budget" to "8", "draft_samples" to "999")
-            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } throws
-                CivsRejection("autonomy-no-site", values)
+            s.siteProof = { CompletableFuture.failedFuture(CivsRejection("autonomy-no-site", values)) }
             val result = s.subject.search(s.reference, 1, "Auto-")
             s.until { result.isDone }
             result.join().complete shouldBe false
@@ -1498,7 +1382,7 @@ class CivsVillageSitesTest : FunSpec({
             result.join().reason shouldBe "village-chunk-budget"
             (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
             result.join().rejectedSites.size shouldBe 8
-            result.join().rejectedSites.all { it.phase == "complete-layout-proof" && it.reason == "autonomy-no-site" &&
+            result.join().rejectedSites.all { it.phase == "town-hall-capture" && it.reason == "autonomy-no-site" &&
                 it.terrain?.columns == 181 * 181 && (it.provinceTreeColumns ?: 0) >= 8 } shouldBe true
             result.join().rejectedSites.last().point shouldBe s.fullCities.last().center
             val observations = result.join().rejectedSites
@@ -1670,66 +1554,6 @@ private data class VillageSiteProof(val cityId: UUID, val owner: UUID, val world
     fun refusedOre(): CompletableFuture<CivPlacementPlan> = CompletableFuture.failedFuture(CivsRejection("autonomy-terrain",
         mapOf("block" to "COPPER_ORE", "x" to building.bounds.min.x.toString(),
             "y" to building.bounds.min.y.toString(), "z" to building.bounds.min.z.toString())))
-}
-
-private class VillageHouseFallbackFixture(s: VillageScenario) {
-    val original = "civs/v2/nordic/house/original/level1"
-    val compact = "civs/v2/nordic/house/compact/level1"
-    private val later = "civs/v2/nordic/house/later/level1"
-    val loaded = mutableListOf<String>()
-    val upgraded = mutableListOf<String>()
-    var compactMaximumSize = 7
-    var compactMaximumLevel = 3
-    var heldCurrent: CompletableFuture<CivBlueprint>? = null
-    var heldMaximum: CompletableFuture<CivBlueprint>? = null
-    var heldBlueprint: CivBlueprint? = null
-
-    init {
-        val foreign = "civs/v2/acacia/house/foreign/level1"
-        val lower = "civs/v2/nordic/house/lower/level1"
-        val equal = "civs/v2/nordic/house/equal/level1"
-        every { s.blueprints.autonomousSource("nordic", BuildingType.HOUSE) } returns original
-        every { s.blueprints.choices(BuildingType.HOUSE, "nordic") } returns listOf(
-            CivBlueprintChoice(foreign, "acacia", BuildingType.HOUSE, "foreign", 3, listOf(3, 5, 3)),
-            CivBlueprintChoice(lower, "nordic", BuildingType.HOUSE, "lower", 2, listOf(3, 5, 3)),
-            CivBlueprintChoice(equal, "nordic", BuildingType.HOUSE, "equal", 3, listOf(11, 5, 11)),
-            CivBlueprintChoice(compact, "nordic", BuildingType.HOUSE, "compact", 3, listOf(5, 5, 5)),
-            CivBlueprintChoice(later, "nordic", BuildingType.HOUSE, "later", 3, listOf(3, 5, 3)))
-        every { s.blueprints.autonomousAlternatives("nordic", BuildingType.HOUSE) } returns listOf(foreign, lower, equal, compact, later)
-        every { s.blueprints.maximumLevel(match { it.type == BuildingType.HOUSE }) } answers {
-            if (firstArg<CivBuilding>().schematicId == compact) compactMaximumLevel else 3
-        }
-        every { s.blueprints.prepareEntry(match { it in setOf(original, compact, later) }, any(), any(), any(), any(), any()) } answers {
-            val source = firstArg<String>()
-            loaded += source
-            val value = blueprint(source, arg(1), arg(2), arg(3), if (source == original) 9 else 5)
-            if (source == compact) {
-                heldBlueprint = value
-                heldCurrent ?: CompletableFuture.completedFuture(value)
-            } else CompletableFuture.completedFuture(value)
-        }
-        every { s.blueprints.prepareUpgrade(match { it.type == BuildingType.HOUSE }, any(), any()) } answers {
-            val first = firstArg<CivBuilding>()
-            upgraded += first.schematicId
-            val source = first.schematicId.substringBeforeLast('/') + "/level${arg<Int>(1)}"
-            val value = blueprint(source, first.id, arg(2), first.anchor,
-                if (first.schematicId == original) 11 else compactMaximumSize).let {
-                it.copy(building = it.building.copy(level = arg(1)))
-            }
-            if (first.schematicId == compact) {
-                heldBlueprint = value
-                heldMaximum ?: CompletableFuture.completedFuture(value)
-            } else CompletableFuture.completedFuture(value)
-        }
-    }
-
-    private fun blueprint(source: String, id: UUID, world: UUID, anchor: CivPosition, size: Int): CivBlueprint {
-        val value = villageBlueprint(source, id, world, anchor, BuildingType.HOUSE)
-        return value.copy(building = value.building.copy(bounds = CivBox(
-            anchor.copy(x = anchor.x - size / 2, z = anchor.z - size),
-            anchor.copy(x = anchor.x + size - size / 2 - 1, y = anchor.y + 4, z = anchor.z - 1)),
-            entrance = anchor.copy(y = anchor.y + 1)))
-    }
 }
 
 private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {

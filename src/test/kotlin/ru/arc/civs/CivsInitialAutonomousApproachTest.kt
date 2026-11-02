@@ -19,9 +19,10 @@ import java.util.concurrent.CompletableFuture
 class CivsInitialAutonomousApproachTest : FunSpec({
     afterEach { clearAllMocks(currentThreadOnly = true) }
 
-    test("an initial autonomous hall journals its freshly proved leaf-floor approach before writing and keeps its existing barrel") {
+    for (adoptedPlan in listOf(false, true))
+    test("an initial autonomous hall journals its fresh approach and keeps its barrel with adoptedPlan=$adoptedPlan") {
         serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
-            val initial = InitialApproach(h)
+            val initial = InitialApproach(h, adoptedPlan = adoptedPlan)
             h.start()
             initial.pulse()
 
@@ -169,7 +170,8 @@ class CivsInitialAutonomousApproachTest : FunSpec({
 })
 
 /** Service admission and persistence fixture. Native terrain-policy guards remain covered by CivsWorldTest. */
-private class InitialApproach(val h: ServiceScenario, proof: CompletableFuture<CivTerraformPlan?>? = null) {
+private class InitialApproach(val h: ServiceScenario, proof: CompletableFuture<CivTerraformPlan?>? = null,
+    adoptedPlan: Boolean = true) {
     val hall = h.city.buildings.first().copy(level = 1, phase = BuildingPhase.SITE,
         anchor = CivPosition(0, 68, 0), bounds = CivBox(CivPosition(-2, 66, -4), CivPosition(2, 73, 0)),
         entrance = CivPosition(0, 69, 1), control = CivPosition(1, 69, 0))
@@ -185,7 +187,7 @@ private class InitialApproach(val h: ServiceScenario, proof: CompletableFuture<C
         workers = h.city.workers.take(2).mapIndexed { index, worker -> worker.copy(assignment = null, homeId = hall.id,
             sex = if (index == 0) CivSex.MALE else CivSex.FEMALE, hunger = 20) },
         settings = CivSettlementSettings(chunkLoading = true, immortalResidents = true, autoConstructionMaterials = false),
-        autonomy = CivAutonomy(layoutHalfWidth = 74, plan = layout)))
+        autonomy = CivAutonomy(layoutHalfWidth = 74, plan = layout.takeIf { adoptedPlan })))
     val floor = h.world.getBlockAt(0, 68, 1)
     val feet = h.world.getBlockAt(0, 69, 1)
     val head = h.world.getBlockAt(0, 70, 1)

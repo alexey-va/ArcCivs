@@ -82,7 +82,7 @@ internal class CivsControlInstallations(
         val hall = city.buildings.singleOrNull()?.takeIf { it.type == BuildingType.TOWN_HALL && it.level == 1 &&
             it.phase == BuildingPhase.SITE && it.control != null && city.center == it.control &&
             !CivsAutonomousGeometry.horizontalContains(it.bounds, it.entrance) } ?: return null
-        return hall.takeIf { CivsSettlementPlans.current(city)?.plots?.any { it.building == hall } == true }
+        return hall.takeIf { city.autonomy?.plan == null || CivsSettlementPlans.current(city)?.plots?.any { it.building == hall } == true }
     }
 
     fun initialApproachNeeded(city: Settlement, hall: CivBuilding): Boolean {
