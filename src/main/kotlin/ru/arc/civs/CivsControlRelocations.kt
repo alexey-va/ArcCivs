@@ -77,6 +77,8 @@ internal class CivsControlRelocations(
                 now >= (failures[it.id]?.after ?: 0L) &&
                 it.control?.let { p -> it.bounds.contains(p.x, p.y, p.z) } == true &&
                 city.construction?.buildingId != it.id &&
+                (it.id !in city.constructionQueue.orEmpty() ||
+                    city.pendingControls.orEmpty().any { pending -> pending.buildingId == it.id && pending.retire != null }) &&
                 city.pendingControls.orEmpty().none { pending -> pending.buildingId == it.id && pending.retire == null }
             }.map { city to it }
         }
@@ -105,7 +107,8 @@ internal class CivsControlRelocations(
 
     private fun prove(pending: Proof) {
         val city = cityProvider().firstOrNull { it.id == pending.cityId }
-        if (city == null || city.building(pending.building.id) != pending.building || !available(city)) { proof = null; return }
+        if (city == null || city.building(pending.building.id) != pending.building || !available(city) ||
+            pending.building.id in city.constructionQueue.orEmpty()) { proof = null; return }
         runCatching {
             val native = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
             when (pending.route.advance(native)) {
@@ -189,6 +192,7 @@ internal class CivsControlRelocations(
         reject(civsControlOccupied(plugin, city.worldId, candidate.position, blocked), "worksite-blocked")
         return mutate(city.id) { fresh ->
             reject(fresh != city || fresh.construction?.buildingId == building.id ||
+                building.id in fresh.constructionQueue.orEmpty() ||
                 fresh.pendingControls.orEmpty().any { it.buildingId == building.id }, "control-location-changed")
             CivsRules.validate(fresh.copy(
                 // This durable intent protects both cells before the empty receiver is created.

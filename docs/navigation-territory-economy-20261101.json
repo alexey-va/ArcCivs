@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "title": "ArcCivs181-186 navigation territory maintenance and exact-slot control relocation",
+  "title": "ArcCivs181-187 navigation territory maintenance and exact-slot control relocation",
   "participants": [
     1,
     7,
@@ -15,7 +15,8 @@
     "Existing-gate maintenance issues no items or resources. Future generated flat-gate material sinks are assessed separately in gate-refit-economy-20261101.json; stepped existing gates retain their exact native floor.",
     "No combined currency unit or item SELL quote is used. Active SELL/AutoSell and planned SELL-to-contract remain separate; no downstream sales, savings or new earning potential are inferred from zero direct money mint.",
     "185 aligns detached flat WALK admission with unchanged native crossed-support checks. An exact891-cell stair capture previously produced first-frame path-changed with zero motion; the corrected local replay arrives in10ticks. This is a local geometry regression, not a measured full live trip or earning multiplier. All direct currency, item, Stock, XP and per-action quantities remain unchanged.",
-    "186 places new furniture on a dry authored bottom slab by completing only the matching slab directly beneath the barrel to a double slab through the existing durable pendingControls receipt. Before: a half-height finite world slab and an exterior control. After: one matching full-height finite support and an interior control; adjacent half-height walking surfaces remain unchanged. This adds one finite half-slab of world geometry per such relocation, with zero item drops, issued items, inventory/Stock/Vault/token/player-XP changes. Exact existing cargo slots and NBT still move through the same receipt; no earning or SELL conversion is inferred."
+    "186 places new furniture on a dry authored bottom slab by completing only the matching slab directly beneath the barrel to a double slab through the existing durable pendingControls receipt. Before: a half-height finite world slab and an exterior control. After: one matching full-height finite support and an interior control; adjacent half-height walking surfaces remain unchanged. This adds one finite half-slab of world geometry per such relocation, with zero item drops, issued items, inventory/Stock/Vault/token/player-XP changes. Exact existing cargo slots and NBT still move through the same receipt; no earning or SELL conversion is inferred.",
+    "187 retains a legal current control before prioritizing full-support new spares. An already accepted queued upgrade defers new control relocation until the queued design is activated or retired; durable existing relocation recovery still completes. Typed upgrade registration retirement removes only exact changing owned source registrations after native empty-slot evacuation is durable, including a strictly proved initially empty source. All pre-existing item slots and NBT are conserved; a late native refill/state/permission mismatch refuses registry publication. Removed empty physical holders are changed only by the ordinary paid upgrade. Registration count/capacity is not a money unit or an issued resource; no before/after production or SELL multiplier is claimed. Wall infill now waits for an unaccepted same-city search to retire before ordinary admission; the native complete bill stays26STONE_BRICKS+2DARK_OAK_FENCE, with0 direct Vault/tokens/XP or free materials."
   ],
   "currencies": {
     "vault": {

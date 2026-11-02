@@ -183,6 +183,8 @@ class CivsStore(
             collected = transaction.collected?.let { it.copy(before = it.before.toList(), ground = it.ground.toList(), containers = it.containers.toList(),
                 forestryLeafLoot = it.forestryLeafLoot?.copy(sources = it.forestryLeafLoot.sources.toList())) },
             containerRelocation = transaction.containerRelocation?.let { it.copy(building = snapshotBuilding(it.building),
+                unregister = it.unregister?.let { proof -> proof.copy(target = snapshotBuilding(proof.target),
+                    registeredBefore = proof.registeredBefore.toList(), cells = proof.cells.toList()) },
                 containers = it.containers.map { holder -> holder.copy(before = holder.before.toList(), after = holder.after.toList()) }) },
             resurrection = transaction.resurrection?.let { it.copy(corpse = it.corpse.copy(worker = snapshotWorker(it.corpse.worker))) })
         return submit {

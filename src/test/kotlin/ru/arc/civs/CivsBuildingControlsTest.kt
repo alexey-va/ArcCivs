@@ -15,6 +15,24 @@ import java.util.UUID
 import java.util.zip.GZIPInputStream
 
 class CivsBuildingControlsTest : FunSpec({
+    test("a valid current half slab marker stays ahead of more than sixteen full support spares") {
+        val size = listOf(19, 5, 21)
+        val states = buildList {
+            for (y in 0 until size[1]) for (z in 0 until size[2]) for (x in 0 until size[0]) add(when {
+                x == 10 && y == 1 && z == 20 -> "minecraft:structure_void"
+                x == 1 && y == 0 && z == 2 -> "minecraft:cobblestone_slab[type=bottom,waterlogged=false]"
+                y == 0 || y == 4 || y in 1..3 && (x == 0 || x == 18 || z == 0 || z == 19 && x != 9) -> "minecraft:stone"
+                else -> "minecraft:air"
+            })
+        }
+        val snapshot = ControlSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(9, 0, 21), size, states)
+        val base = controlBuilding(snapshot, BuildingType.TOWN_HALL, 0)
+        val current = CivsWorksiteLayouts.point(base, CivPosition(-8, 1, -19))
+        val candidates = CivsBuildingControls.authored(base.copy(control = current), snapshot)
+        candidates.first().position shouldBe current
+        candidates.any { it.support == null } shouldBe true
+    }
+
     test("new furniture completes its exact dry authored bottom slab in every rotation") {
         val room = controlRoom()
         val snapshot = ControlSnapshot(room.minimum, room.origin, listOf(room.sizeX, room.sizeY, room.sizeZ),
@@ -274,7 +292,8 @@ class CivsBuildingControlsTest : FunSpec({
                     "before" to building.control, "status" to when {
                         building.control == null -> "no-control-by-design"
                         !CivsBuildingControls.supported(building.type) -> "dedicated-control"
-                        building.phase != BuildingPhase.ACTIVE || city.construction?.buildingId == building.id -> "accepted-construction-deferred"
+                        building.phase != BuildingPhase.ACTIVE || city.construction?.buildingId == building.id ||
+                            building.id in city.constructionQueue.orEmpty() -> "accepted-construction-deferred"
                         else -> "source-unavailable"
                     })
             } }

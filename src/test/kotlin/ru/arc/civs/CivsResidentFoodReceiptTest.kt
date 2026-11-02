@@ -644,6 +644,255 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
     beforeEach { f = UpgradeStorageFixture() }
     afterEach { f.close() }
 
+    test("one empty changing barrel retires without a receiver when every other native holder is full") {
+        f.configure()
+        f.h.world.getBlockAt(f.source.x, f.source.y, f.source.z).type = Material.BARREL
+        repeat(STORAGE_SLOTS) { f.inventory(f.destination).setItem(it, ItemStack(Material.DIRT, 64)) }
+        val before = f.h.city
+        val original = f.allItems()
+        val fullHall = f.h.barrel.storageContents.map(CivResidentItem::of)
+        val tx = f.prepare(f.future + (f.source to "minecraft:air"))
+        val proof = requireNotNull(tx.containerRelocation)
+        proof.containers.map { it.position } shouldBe listOf(f.source)
+        proof.changes() shouldBe emptyList()
+        proof.unregister!!.cells.map { it.position } shouldBe listOf(f.source)
+        val result = f.h.journal.submitRelocation(before, tx); f.h.ticks()
+        result.join() shouldBe tx.after
+        f.h.city.inventory!!.containers shouldBe listOf(f.destination)
+        f.allItems() shouldBe original
+        f.h.barrel.storageContents.map(CivResidentItem::of) shouldBe fullHall
+        f.h.world.getBlockAt(f.source.x, f.source.y, f.source.z).type shouldBe Material.BARREL
+        shouldThrow<IllegalArgumentException> { proof.copy(unregister = null).validated(before) }
+    }
+
+    test("an initially empty changing registration retires only after both native disk fences") {
+        f.configure()
+        val before = f.h.city
+        val original = f.allItems()
+        val tx = f.prepare()
+        val proof = requireNotNull(tx.containerRelocation)
+        proof.changes() shouldBe emptyList()
+        proof.unregister!!.cells.map { it.position } shouldBe listOf(f.source)
+        proof.before(tx.after) shouldBe before
+        val sourceFence = CompletableFuture<Unit>()
+        val afterFence = CompletableFuture<Unit>()
+        f.h.storage.persistCollectedNative = { _, first -> if (first) sourceFence else afterFence }
+        val result = f.h.journal.submitRelocation(before, tx)
+        f.h.ticks()
+        f.h.city shouldBe before
+        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
+        sourceFence.complete(Unit); f.h.ticks()
+        f.h.city shouldBe before
+        result.isDone shouldBe false
+        afterFence.complete(Unit); f.h.ticks()
+        result.join() shouldBe tx.after
+        f.h.city.inventory!!.containers shouldBe listOf(f.destination)
+        f.allItems() shouldBe original
+        f.h.world.getBlockAt(f.source.x, f.source.y, f.source.z).type shouldBe Material.CHEST
+    }
+
+    for (published in listOf(false, true))
+    test("empty registration retirement survives durable receipt reload without dropping any native holder published=$published") {
+        f.configure()
+        val before = f.h.city
+        val original = f.allItems()
+        val tx = f.prepare()
+        val root = Files.createTempDirectory("civs-empty-registration-retirement-")
+        val accepted = try {
+            CivsStore(root, Executor(Runnable::run)).use { store ->
+                store.save(before).join()
+                if (published) store.save(tx.after).join()
+                store.saveInventoryTransaction(tx).join()
+                f.h.city = store.load().join().single()
+                store.loadInventoryTransactions().join().single().also { it shouldBe tx }
+            }
+        } finally { root.toFile().deleteRecursively() }
+        f.h.storage.unlock(tx.id)
+        f.h.storage.updateCity(f.h.city)
+        every { f.h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(accepted))
+        every { f.h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
+        val boot = f.h.journal.bootstrap(); f.h.ticks(); boot.join()
+        repeat(2) { f.h.journal.recover(); f.h.ticks() }
+        f.h.city shouldBe accepted.after
+        requireNotNull(accepted.containerRelocation).before(f.h.city) shouldBe before
+        f.allItems() shouldBe original
+        f.h.journal.pendingCount shouldBe 0
+        verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
+    }
+
+    test("a legacy relocation JSON without registration proof replays exact items and keeps its registry") {
+        f.configure()
+        f.fillSource()
+        val before = f.h.city
+        val items = f.items(f.source)
+        val tx = f.prepare()
+        f.h.storage.unlock(tx.id)
+        val legacy = tx.copy(after = before.copy(revision = before.revision + 1),
+            containerRelocation = tx.containerRelocation!!.copy(unregister = null)).validated()
+        val gson = com.google.gson.Gson()
+        val json = gson.toJsonTree(legacy).asJsonObject
+        json.getAsJsonObject("containerRelocation").remove("unregister")
+        val accepted = gson.fromJson(json, CivInventoryTransaction::class.java).validated()
+        accepted.containerRelocation!!.unregister shouldBe null
+        every { f.h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(accepted))
+        every { f.h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
+        val boot = f.h.journal.bootstrap(); f.h.ticks(); boot.join()
+        repeat(2) { f.h.journal.recover(); f.h.ticks() }
+        f.h.city shouldBe accepted.after
+        f.h.city.inventory shouldBe before.inventory
+        f.items(f.source).all { it == null } shouldBe true
+        f.items(f.destination) shouldBe items
+        f.h.journal.pendingCount shouldBe 0
+        verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
+    }
+
+    test("the durable retirement snapshot detaches proof collections before asynchronous storage") {
+        f.configure()
+        val tx = f.prepare()
+        val proof = requireNotNull(tx.containerRelocation)
+        val retirement = requireNotNull(proof.unregister)
+        val registered = retirement.registeredBefore.toMutableList()
+        val cells = retirement.cells.toMutableList()
+        val mutable = tx.copy(containerRelocation = proof.copy(unregister = retirement.copy(
+            registeredBefore = registered, cells = cells)))
+        val pending = ArrayDeque<Runnable>()
+        val root = Files.createTempDirectory("civs-retirement-snapshot-")
+        try {
+            CivsStore(root, Executor { pending.addLast(it) }).use { store ->
+                val write = store.saveInventoryTransaction(mutable)
+                registered.clear(); cells.clear()
+                pending.removeFirst().run()
+                write.join() shouldBe tx
+                val load = store.loadInventoryTransactions()
+                pending.removeFirst().run()
+                load.join() shouldBe listOf(tx)
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    test("refilling an empty source before receipt admission rejects registration retirement") {
+        f.configure()
+        val before = f.h.city
+        val tx = f.prepare()
+        val fence = CompletableFuture<Unit>()
+        f.h.storage.persistCollectedNative = { _, _ -> fence }
+        val result = f.h.journal.submitRelocation(before, tx)
+        f.h.ticks()
+        f.inventory(f.source).setItem(0, ItemStack(Material.DIAMOND, 7))
+        fence.complete(Unit); f.h.ticks()
+        shouldThrow<CompletionException> { result.join() }
+        f.h.city shouldBe before
+        f.inventory(f.source).getItem(0) shouldBe ItemStack(Material.DIAMOND, 7)
+        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
+    }
+
+    test("refilling an empty source during the after-native fence cannot publish retired registration") {
+        f.configure()
+        val before = f.h.city
+        val tx = f.prepare()
+        val fence = CompletableFuture<Unit>()
+        f.h.storage.persistCollectedNative = { _, first -> if (first) CompletableFuture.completedFuture(Unit) else fence }
+        val result = f.h.journal.submitRelocation(before, tx); f.h.ticks()
+        result.isDone shouldBe false
+        f.inventory(f.source).setItem(0, ItemStack(Material.DIAMOND, 7))
+        fence.complete(Unit); f.h.ticks()
+        shouldThrow<CompletionException> { result.join() }
+        f.h.city shouldBe before
+        f.inventory(f.source).getItem(0) shouldBe ItemStack(Material.DIAMOND, 7)
+        verify(exactly = 0) { f.h.store.save(any()) }
+        verify(exactly = 0) { f.h.store.deleteInventoryTransaction(any()) }
+    }
+
+    test("permission lost during the after-native fence retries the same retirement after permission returns") {
+        f.configure()
+        val before = f.h.city
+        val original = f.allItems()
+        val tx = f.prepare()
+        val fence = CompletableFuture<Unit>()
+        f.h.storage.persistCollectedNative = { _, first -> if (first) CompletableFuture.completedFuture(Unit) else fence }
+        val result = f.h.journal.submitRelocation(before, tx); f.h.ticks()
+        f.h.foodAllowed = false
+        fence.complete(Unit); f.h.ticks()
+        shouldThrow<CompletionException> { result.join() }
+        f.h.city shouldBe before
+        f.h.journal.pendingCount shouldBe 1
+        f.h.journal.blockedCount shouldBe 0
+        f.allItems() shouldBe original
+        verify(exactly = 0) { f.h.store.save(any()) }
+        f.h.foodAllowed = true
+        f.h.journal.recover(); f.h.ticks()
+        f.h.city shouldBe tx.after
+        f.h.journal.pendingCount shouldBe 0
+        f.allItems() shouldBe original
+        verify(exactly = 1) { f.h.store.saveInventoryTransaction(tx) }
+        verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
+    }
+
+    test("fifteen retained control barrels stop blocking upgrade capture only after exact empty retirement") {
+        f.configure()
+        f.h.world.loadChunk(0, -1)
+        f.building = f.building.copy(bounds = f.building.bounds.copy(max = f.building.bounds.max.copy(z = 3)))
+        val barrels = (7..11).flatMap { x -> (1..3).map { z -> CivPosition(x, 64, z) } }
+        barrels.forEach { p -> f.h.world.getBlockAt(p.x, p.y, p.z).type = Material.BARREL }
+        f.h.city = CivsRules.validate(f.h.city.copy(buildings = f.h.city.buildings.map {
+            if (it.id == f.building.id) f.building else it
+        }, inventory = f.h.city.inventory!!.copy(containers = barrels + f.destination)))
+        f.h.storage.replaceCities(listOf(f.h.city))
+        val before = f.h.city
+        val future = f.future + (f.source to f.state("south")) + barrels.associateWith { "minecraft:air" }
+        val cells = (f.target.bounds.min.x..f.target.bounds.max.x).flatMap { x ->
+            (f.target.bounds.min.y..f.target.bounds.max.y).flatMap { y ->
+                (f.target.bounds.min.z..f.target.bounds.max.z).map { z ->
+                    val p = CivPosition(x, y, z)
+                    val state = future[p] ?: "minecraft:barrier"
+                    ru.arc.paper.api.ArcSchematicBlock(ru.arc.paper.api.ArcSchematicPoint(x, y, z), state,
+                        state == "minecraft:air", state == "minecraft:barrier")
+                }
+            }
+        }
+        CivsWorld(f.h.plugin, f.h.tasks, { 0L }) { listOf(f.h.city) }.use { world ->
+            fun capture() = world.capture(before.id, before.owner, before.worldId, f.target, cells, f.building)
+                .also { f.h.ticks() }
+            requireNotNull(CivsDiagnostics.rejection(shouldThrow<CompletionException> { capture().join() })).reason shouldBe
+                "registered-container"
+            val tx = f.prepare(future)
+            tx.containerRelocation!!.unregister!!.cells.size shouldBe 15
+            tx.containerRelocation!!.changes() shouldBe emptyList()
+            val retired = f.h.journal.submitRelocation(before, tx); f.h.ticks(); retired.join() shouldBe tx.after
+            f.h.city.inventory!!.containers shouldBe listOf(f.destination)
+            val accepted = capture().join()
+            val cleared = accepted.blocks.filter { it.position in barrels }
+            cleared.size shouldBe 15
+            cleared.all { it.before.startsWith("minecraft:barrel[") && it.after == "minecraft:air" } shouldBe true
+            accepted.blocks.filter { it.position !in barrels }.all { it.before == it.after } shouldBe true
+            barrels.forEach { p -> f.h.world.getBlockAt(p.x, p.y, p.z).type shouldBe Material.BARREL }
+            f.inventory(barrels.first()).setItem(0, ItemStack(Material.DIAMOND))
+            requireNotNull(CivsDiagnostics.rejection(shouldThrow<CompletionException> { capture().join() })).reason shouldBe
+                "container-not-empty"
+            f.inventory(barrels.first()).getItem(0) shouldBe ItemStack(Material.DIAMOND)
+        }
+    }
+
+    test("retirement proof cannot unregister a current control foreign holder or matching authored holder") {
+        f.configure()
+        val foreign = f.addReceiver()
+        val tx = f.prepare()
+        val proof = requireNotNull(tx.containerRelocation)
+        val retirement = requireNotNull(proof.unregister)
+        for (point in listOf(f.control, foreign.anchor, f.destination)) {
+            val block = f.h.world.getBlockAt(point.x, point.y, point.z)
+            val state = block.blockData.asString
+            val holder = CivRelocatedContainer(point, block.type.name, state,
+                List(STORAGE_SLOTS) { null }, List(STORAGE_SLOTS) { null })
+            val registered = (retirement.registeredBefore + point).distinct()
+            val changed = retirement.copy(registeredBefore = registered, cells = listOf(CivPlanBlock(point, state,
+                if (point == f.destination) state else "minecraft:air")))
+            val forged = proof.copy(containers = proof.containers.filterNot { it.position == point } + holder, unregister = changed)
+            val after = tx.after.copy(inventory = tx.after.inventory!!.copy(containers = registered - point))
+            shouldThrow<IllegalArgumentException> { tx.copy(after = after, containerRelocation = forged).validated() }
+        }
+    }
+
     for (type in listOf(BuildingType.WAREHOUSE, BuildingType.FARM, BuildingType.FORESTER))
     test("a full changing $type chest moves every exact item to existing unchanged native slots once") {
         f.configure(type)
@@ -654,7 +903,8 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         val tx = f.prepare()
         tx.containerRelocation!!.containers.single { it.position == f.source }.after.all { it == null } shouldBe true
         tx.collected shouldBe null
-        tx.after shouldBe before.copy(revision = before.revision + 1)
+        tx.after shouldBe before.copy(revision = before.revision + 1,
+            inventory = before.inventory!!.copy(containers = before.inventory!!.containers - f.source))
         f.items(f.source) shouldBe source
         f.items(f.destination) shouldBe target // Preparation and journal serialization are read-only.
         f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
@@ -665,7 +915,7 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
             org.bukkit.NamespacedKey(f.h.plugin, "keepsake"), org.bukkit.persistence.PersistentDataType.STRING) shouldBe "native-metadata"
         tx.after.stock shouldBe before.stock
         tx.after.workers shouldBe before.workers
-        tx.after.inventory shouldBe before.inventory
+        tx.after.inventory shouldBe before.inventory!!.copy(containers = before.inventory!!.containers - f.source)
     }
 
     test("insufficient exact native room rejects the whole evacuation before any write") {
@@ -728,7 +978,7 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
             org.bukkit.NamespacedKey(f.h.plugin, "keepsake"), org.bukkit.persistence.PersistentDataType.STRING) shouldBe "native-metadata"
         tx.after.stock shouldBe before.stock
         tx.after.workers shouldBe before.workers
-        tx.after.inventory shouldBe before.inventory
+        tx.after.inventory shouldBe before.inventory!!.copy(containers = before.inventory!!.containers - f.source)
         val external = tx.containerRelocation!!.containers.filter { !civsRelocationLocal(f.building, it.position) }
         fun totals(values: Collection<List<CivResidentItem?>>) = values.flatten().filterNotNull()
             .groupingBy { it.material to it.data }.fold(0L) { sum, item -> sum + item.amount }
@@ -924,7 +1174,7 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
             f.h.journal.pendingCount shouldBe 0
             verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
         } else {
-            f.h.city shouldBe tx.after.copy(revision = tx.beforeRevision)
+            f.h.city shouldBe requireNotNull(tx.containerRelocation).before(tx.after)
             holders.associate { it.position to f.items(it.position) } shouldBe before
             f.h.journal.pendingCount shouldBe 1
             verify(exactly = 0) { f.h.store.deleteInventoryTransaction(any()) }
@@ -1126,8 +1376,11 @@ class CivsUpgradeStorageNoRefillTest : FunSpec({
             val before = f.h.worker
             val id = UUID.randomUUID()
             f.h.storage.reserve(f.h.city, id)
-            val prepared = f.h.storage.prepareHomeDeposit(f.h.city, before.id, f.source,
-                Location(f.h.world, 8.5, 64.0, 1.5), emptyMap())
+            // The upgraded receipt has removed this old registration; it cannot receive a fresh deposit.
+            shouldThrow<CivsRejection> { f.h.storage.prepareHomeDeposit(f.h.city, before.id, f.source,
+                Location(f.h.world, 8.5, 64.0, 1.5), emptyMap()) }.reason shouldBe "worker-too-far"
+            val prepared = f.h.storage.prepareHomeDeposit(f.h.city, before.id, f.destination,
+                Location(f.h.world, 10.5, 64.0, 1.5), emptyMap())
             prepared.transfer shouldBe null
             prepared.worker shouldBe before
             f.items(f.source).all { it == null } shouldBe true
@@ -1194,12 +1447,12 @@ private class UpgradeStorageFixture : AutoCloseable {
                 org.bukkit.persistence.PersistentDataType.STRING, "native-metadata")
         } })
     }
-    fun prepare(): CivInventoryTransaction {
+    fun prepare(futureCells: Map<CivPosition, String> = future): CivInventoryTransaction {
         val before = h.city
         val id = UUID.randomUUID()
         h.storage.reserve(before, id)
-        val proof = requireNotNull(h.storage.prepareUpgradeRelocation(before, target, future))
-        return CivInventoryTransaction(id, before.id, before.revision, before.copy(revision = before.revision + 1),
+        val proof = requireNotNull(h.storage.prepareUpgradeRelocation(before, target, futureCells))
+        return CivInventoryTransaction(id, before.id, before.revision, proof.after(before),
             emptyList(), containerRelocation = proof).validated().also { h.storage.seal(it) }
     }
     fun beginUpgrade(upgrading: CivBuilding = building) {

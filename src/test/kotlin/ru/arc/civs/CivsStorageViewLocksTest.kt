@@ -178,7 +178,7 @@ private data class StorageViewLocks(val storage: CivsStorage, val protection: Ci
         storage.reserve(city, id)
         val proof = requireNotNull(storage.prepareUpgradeRelocation(city, building.copy(level = 2,
             phase = BuildingPhase.CONSTRUCTING), mapOf(source to "minecraft:air", destination to destinationData)))
-        return CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1),
+        return CivInventoryTransaction(id, city.id, city.revision, proof.after(city),
             emptyList(), containerRelocation = proof).validated().also { storage.seal(it, keepViewersOpen = true) }
     }
     fun open(denied: Boolean) {

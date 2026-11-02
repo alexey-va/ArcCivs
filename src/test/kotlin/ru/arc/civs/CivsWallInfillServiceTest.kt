@@ -79,6 +79,67 @@ class CivsWallInfillServiceTest : FunSpec({
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
+
+    test("preview and paid SITE admission wait for an unaccepted search without waiting for city commit") {
+        serviceScenario { h ->
+            val f = installWallInfill(h)
+            h.start()
+            val placement = CivsService::class.java.getDeclaredField("autonomousPlacement").also { it.isAccessible = true }
+                .get(h.service) as CivsAutonomousPlacement
+            val backgroundCommits = mutableListOf<CompletableFuture<Unit>>()
+            fun searching(): CompletableFuture<CivTerrainSurface> {
+                val surface = CompletableFuture<CivTerrainSurface>()
+                var requested = false
+                every { h.worldAdapter.autonomousHeightField(any(), any(), any(), any()) } answers {
+                    requested = true; surface
+                }
+                backgroundCommits += placement.infrastructure(f.city).handle { _, _ -> Unit }.thenCompose {
+                    h.service.afterCityAvailable(f.city.id) { CompletableFuture.completedFuture(Unit) }.also {
+                        it.isDone shouldBe false
+                    }
+                }
+                h.tickUntil("background search enters native surface capture") { requested }
+                every { h.worldAdapter.autonomousHeightField(any(), any(), any(), any()) } returns CompletableFuture.completedFuture(f.surface)
+                return surface
+            }
+
+            val firstSearch = searching()
+            val preview = h.service.infillWall(f.city.id, f.gate.id, f.wall.id, null)
+            h.tick()
+            preview.isDone shouldBe false
+            h.saves shouldBe emptyList()
+            firstSearch.isCancelled shouldBe false
+            firstSearch.completeExceptionally(CivsRejection("autonomy-no-site"))
+            val reviewed = h.await(preview)
+            reviewed["state"] shouldBe "preview"
+            reviewed["materials"] shouldBe mapOf("DARK_OAK_FENCE" to 2L, "STONE_BRICKS" to 26L)
+            h.saves shouldBe emptyList()
+            h.await(backgroundCommits.first()) shouldBe Unit
+
+            val secondSearch = searching()
+            val apply = h.service.infillWall(f.city.id, f.gate.id, f.wall.id, reviewed["proof"] as String)
+            h.tick()
+            apply.isDone shouldBe false
+            h.saves shouldBe emptyList()
+            secondSearch.isCancelled shouldBe false
+            secondSearch.completeExceptionally(CivsRejection("autonomy-no-site"))
+            h.tickUntil("ordinary wall SITE save") { h.saves.isNotEmpty() || apply.isDone }
+            if (apply.isDone) apply.join()
+            h.saves.size shouldBe 1
+            val queued = h.saves.single().first
+            queued.stock shouldBe f.city.stock
+            queued.inventory shouldBe f.city.inventory
+            queued.construction shouldBe f.city.construction
+            queued.buildings.filter { it.id != reviewed["building"] } shouldBe f.city.buildings
+            queued.building(reviewed["building"] as UUID)!!.phase shouldBe BuildingPhase.SITE
+            apply.isDone shouldBe false
+            h.commit()
+            h.await(apply)["state"] shouldBe "queued"
+            h.await(backgroundCommits.last()) shouldBe Unit
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
 })
 
 private fun installWallInfill(h: ServiceScenario, driftAtCapture: Int = Int.MAX_VALUE): WallInfillFixture {

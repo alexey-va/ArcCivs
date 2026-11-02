@@ -62,9 +62,18 @@ internal class CivsAutonomousPlacement(
         admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
 
     fun wallInfill(city: Settlement, gateId: UUID, wallId: UUID,
-        acceptedWork: List<CivPlacementPlan>): CompletableFuture<CivAutonomousDesign> =
-        admit(Search(city, BuildingType.WALL, 1, UUID.randomUUID(), infrastructure = true,
-            wallInfill = CivsWallInfill.target(city, gateId, wallId), acceptedWork = acceptedWork.toList()))
+        acceptedWork: List<CivPlacementPlan>): CompletableFuture<CivAutonomousDesign> {
+        val job = Search(city, BuildingType.WALL, 1, UUID.randomUUID(), infrastructure = true,
+            wallInfill = CivsWallInfill.target(city, gateId, wallId), acceptedWork = acceptedWork.toList())
+        val preceding = synchronized(jobs) {
+            jobs[city.id]?.takeIf { it.unaccepted && city.building(it.buildingId) == null }
+        } ?: return admit(job)
+        // The service already reserves this city. Wait only for detached search cleanup;
+        // waiting for its later city commit would deadlock that reservation.
+        return preceding.retired.thenCompose { admit(job) }.also { waiting ->
+            waiting.whenComplete { _, _ -> if (waiting.isCancelled) job.result.cancel(false) }
+        }
+    }
 
     /** One adopted plan, using the same detached height field, catalogue and finite solvers. */
     fun plan(city: Settlement, unpaidSite: CivAutonomousDesign? = null): CompletableFuture<CivSettlementPlan> {
@@ -200,6 +209,7 @@ internal class CivsAutonomousPlacement(
 
     private fun admit(job: Search): CompletableFuture<CivAutonomousDesign> = synchronized(jobs) {
         if (closed) return@synchronized CompletableFuture.failedFuture(CivsRejection("world-closed"))
+        if (job.result.isCancelled) return@synchronized job.result
         if (job.city.id in jobs || job.city.id in planning || jobs.size + planning.size >= 2)
             return@synchronized CompletableFuture.failedFuture(CivsRejection("world-busy"))
         jobs[job.city.id] = job
@@ -217,6 +227,9 @@ internal class CivsAutonomousPlacement(
                     "route_length" to design?.terrain?.route?.size)
                 while (terminal.size > 16) terminal.remove(terminal.keys.first())
             }
+            // Other result callbacks may run before this one. Admission must observe the
+            // removed registry entry and completed terminal bookkeeping, not just result.isDone.
+            if (job.result.isCancelled) job.retired.cancel(false) else job.retired.complete(Unit)
         }
         job.start()
         job.result
@@ -251,6 +264,8 @@ internal class CivsAutonomousPlacement(
         private var alternatives: Iterator<String>? = null
         @Volatile private var attempted = 0
         val result = CompletableFuture<CivAutonomousDesign>()
+        val retired = CompletableFuture<Unit>()
+        val unaccepted: Boolean get() = previous == null && nativeCity.building(buildingId) == null
         @Volatile var temporaryCapture = false
         @Volatile var pending: CompletableFuture<*>? = null
         @Volatile var candidates = emptyList<CivsAutonomousCandidate>()

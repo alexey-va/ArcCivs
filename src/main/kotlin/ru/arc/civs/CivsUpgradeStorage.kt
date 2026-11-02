@@ -4,11 +4,28 @@ package ru.arc.civs
 data class CivRelocatedContainer(val position: CivPosition, val type: String, val blockData: String,
     val before: List<CivResidentItem?>, val after: List<CivResidentItem?>)
 
-data class CivContainerRelocation(val building: CivBuilding, val containers: List<CivRelocatedContainer>) {
+/** Metadata retirement only: these exact empty holders remain native until ordinary upgrade capture. */
+data class CivUpgradeContainerRetirement(val target: CivBuilding, val registeredBefore: List<CivPosition>,
+    val cells: List<CivPlanBlock>)
+
+data class CivContainerRelocation(val building: CivBuilding, val containers: List<CivRelocatedContainer>,
+    val unregister: CivUpgradeContainerRetirement? = null) {
+    fun after(city: Settlement): Settlement = city.copy(revision = Math.addExact(city.revision, 1),
+        inventory = unregister?.let { proof ->
+            val inventory = requireNotNull(city.inventory)
+            require(inventory.containers == proof.registeredBefore)
+            inventory.copy(containers = inventory.containers - proof.cells.map { it.position }.toSet())
+        } ?: city.inventory)
+
+    fun before(after: Settlement): Settlement = after.copy(revision = Math.subtractExact(after.revision, 1),
+        inventory = unregister?.let { requireNotNull(after.inventory).copy(containers = it.registeredBefore) } ?: after.inventory)
+
     fun validated(city: Settlement) {
         require(city.building(building.id) == building && building.phase == BuildingPhase.ACTIVE &&
             !building.type.isInfrastructure && city.pendingDeletion == null)
-        require(containers.size in 2..MAX_CONTAINERS && containers.map { it.position }.distinct().size == containers.size)
+        val metadataOnly = unregister != null && containers.all { it.before.all { item -> item == null } && it.before == it.after }
+        require(containers.size in (if (metadataOnly) 1 else 2)..MAX_CONTAINERS &&
+            containers.map { it.position }.distinct().size == containers.size)
         require(containers.map { (it.position.x shr 4) to (it.position.z shr 4) }.distinct().size <= 8)
         val delta = mutableMapOf<Pair<String, String?>, Long>()
         fun count(item: CivResidentItem?, sign: Long) {
@@ -32,9 +49,34 @@ data class CivContainerRelocation(val building: CivBuilding, val containers: Lis
             }
             holder.before.forEach { count(it, -1) }; holder.after.forEach { count(it, 1) }
         }
-        require(containers.any { civsRelocationLocal(building, it.position) &&
+        unregister?.let { proof ->
+            val target = proof.target
+            require(target.id == building.id && target.type == building.type && target.level == building.level + 1 &&
+                target.phase == BuildingPhase.CONSTRUCTING &&
+                target.rotation == building.rotation && target.entrance == building.entrance &&
+                civsContainsBox(target.bounds, building.bounds))
+            require(proof.registeredBefore.size <= CivInventory.MAX_CONTAINERS &&
+                proof.registeredBefore.distinct().size == proof.registeredBefore.size &&
+                proof.cells.size in 1..MAX_CONTAINERS && proof.cells.map { it.position }.distinct().size == proof.cells.size)
+            val removed = proof.cells.mapTo(hashSetOf()) { it.position }
+            require(city.inventory?.containers == proof.registeredBefore.filterNot { it in removed })
+            proof.cells.forEach { cell ->
+                val holder = containers.single { it.position == cell.position }
+                require(cell.position in proof.registeredBefore && cell.position != building.control && cell.position != target.control &&
+                    building.bounds.contains(cell.position.x, cell.position.y, cell.position.z) &&
+                    city.buildings.none { it.id != building.id && it.control == cell.position } &&
+                    holder.after.all { it == null } && holder.blockData == cell.before && civsRetainContainerState(cell.before) &&
+                    cell.after.length in 1..CivsStore.MAX_BLOCK_STATE_CHARS &&
+                    org.bukkit.Material.matchMaterial(cell.after.substringBefore('['))?.isBlock == true &&
+                    cell.after.substringBefore('[') !in setOf("minecraft:barrier", "minecraft:structure_void") &&
+                    !civsSameRelocationContainerState(cell.after, cell.before))
+            }
+        }
+        require(unregister != null || containers.any { civsRelocationLocal(building, it.position) &&
             it.before.any { item -> item != null } && it.after.all { item -> item == null } })
-        require(changes().isNotEmpty() && delta.values.all { it == 0L }) { "Container relocation must conserve exact native items" }
+        require((changes().isNotEmpty() || unregister != null) && delta.values.all { it == 0L }) {
+            "Container relocation must conserve exact native items"
+        }
     }
 
     fun changes(): List<CivNativeContainerChange> = containers.flatMap { holder -> holder.before.indices.mapNotNull { slot ->
@@ -117,12 +159,25 @@ internal fun civsRelocationRetained(building: CivBuilding, target: CivBuilding,
 
 /** Detached all-or-nothing packing; native holders stay untouched until the existing receipt is durable. */
 internal fun civsPlanContainerRelocation(building: CivBuilding, target: CivBuilding,
-    future: Map<CivPosition, String>, holders: List<CivRelocatedContainer>): CivContainerRelocation? {
+    future: Map<CivPosition, String>, holders: List<CivRelocatedContainer>,
+    registered: List<CivPosition> = emptyList()): CivContainerRelocation? {
     require(holders.size <= CivContainerRelocation.MAX_CONTAINERS)
     val retained = civsRelocationRetained(building, target, future, holders)
     val sources = holders.filter { civsRelocationLocal(building, it.position) && it.position !in retained &&
         it.before.any { item -> item != null } }
-    if (sources.isEmpty()) return null
+    val retiring = holders.mapNotNull { holder ->
+        if (holder.position !in registered || holder.position in retained || holder.position == building.control ||
+            holder.position == target.control || !building.bounds.contains(holder.position.x, holder.position.y, holder.position.z))
+            return@mapNotNull null
+        val after = future[holder.position] ?: return@mapNotNull null
+        if (after.substringBefore('[') in setOf("minecraft:barrier", "minecraft:structure_void") ||
+            civsSameRelocationContainerState(after, holder.blockData)) return@mapNotNull null
+        CivPlanBlock(holder.position, holder.blockData, after)
+    }
+    if (sources.isEmpty() && retiring.isEmpty()) return null
+    if (sources.isEmpty()) return CivContainerRelocation(building,
+        holders.filter { holder -> retiring.any { it.position == holder.position } },
+        CivUpgradeContainerRetirement(target, registered.toList(), retiring))
     val destinations = holders.filter { it.position in retained }
     val destinationGroups = destinations.partition { civsRelocationLocal(building, it.position) }.toList()
     val slots = destinations.associate { it.position to it.before.toMutableList() }
@@ -146,5 +201,5 @@ internal fun civsPlanContainerRelocation(building: CivBuilding, target: CivBuild
         in sourcePositions -> List(STORAGE_SLOTS) { null }
         in retained -> slots.getValue(holder.position).toList()
         else -> holder.before
-    }) })
+    }) }, retiring.takeIf { it.isNotEmpty() }?.let { CivUpgradeContainerRetirement(target, registered.toList(), it) })
 }

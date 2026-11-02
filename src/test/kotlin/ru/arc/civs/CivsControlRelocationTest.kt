@@ -24,6 +24,70 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsControlRelocationTest : FunSpec({
+    test("an accepted queued upgrade defers new interior relocation until the upgraded building is active") {
+        ControlRelocationFixture().use { h ->
+            h.city = CivsRules.validate(h.city.copy(constructionQueue = listOf(h.original.id),
+                buildings = h.city.buildings.map { if (it.id == h.hall.id) it.copy(level = 2) else it }))
+            h.storage.updateCity(h.city)
+            h.durable()
+            var now = 0L
+            var sources = 0
+            h.relocations(candidates = { building ->
+                if (building.id == h.original.id) {
+                    sources++; CompletableFuture.completedFuture(listOf(h.candidate(h.replacement, false)))
+                } else CompletableFuture.completedFuture(listOf(h.candidate(requireNotNull(building.control), true)))
+            }, clock = { now }).use { owner ->
+                repeat(4) { owner.pulse(); now += 1_000 }
+                sources shouldBe 0
+                h.mutations shouldBe 0
+                h.block(h.replacement).type shouldBe Material.AIR
+                h.city = CivsRules.validate(h.city.copy(constructionQueue = emptyList(), buildings = h.city.buildings.map {
+                    if (it.id == h.original.id) it.copy(level = 2) else it
+                }))
+                h.storage.updateCity(h.city)
+                repeat(4) { owner.pulse(); now += 1_000 }
+                sources shouldBe 1
+                h.city.pendingControls!!.single().position shouldBe h.replacement
+            }
+        }
+    }
+
+    test("an upgrade accepted while route proof is pending prevents a new control intent") {
+        ControlRelocationFixture().use { h ->
+            var now = 0L
+            h.relocations(candidates = { CompletableFuture.completedFuture(listOf(h.candidate(h.replacement, false))) },
+                clock = { now }).use { owner ->
+                owner.pulse()
+                h.city.pendingControls shouldBe null
+                h.city = CivsRules.validate(h.city.copy(constructionQueue = listOf(h.original.id)))
+                h.storage.updateCity(h.city)
+                repeat(4) { now += 1_000; owner.pulse() }
+                h.mutations shouldBe 0
+                h.city.pendingControls shouldBe null
+                h.block(h.replacement).type shouldBe Material.AIR
+            }
+        }
+    }
+
+    test("a durable control retirement still recovers if an upgrade was already queued") {
+        ControlRelocationFixture().use { h ->
+            h.durable()
+            h.acceptIntent(staging = true)
+            h.city = CivsRules.validate(h.city.copy(constructionQueue = listOf(h.original.id)))
+            h.storage.updateCity(h.city)
+            h.relocations().use { owner ->
+                owner.pulse(); h.ticks()
+                h.stagingBarriers shouldBe 1
+                h.stagingFence.complete(Unit); h.ticks()
+                h.fence.complete(Unit); h.ticks(); owner.drained().join()
+                h.city.pendingControls shouldBe emptyList()
+                h.city.constructionQueue shouldBe listOf(h.original.id)
+                h.building.control shouldBe h.replacement
+                h.block(h.old).type shouldBe Material.AIR
+            }
+        }
+    }
+
     test("a fresh authored half slab candidate is admitted without relaxing resident support") {
         ControlRelocationFixture().use { h ->
             h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.original, h.hall)))

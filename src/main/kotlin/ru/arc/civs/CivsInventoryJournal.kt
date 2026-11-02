@@ -128,7 +128,7 @@ internal class CivsInventoryJournal(
     private fun requireCollectedCity(tx: CivInventoryTransaction) {
         if (tx.containerRelocation != null) {
             val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
-            rejectIf(current != tx.after.copy(revision = tx.beforeRevision), "stale-delivery")
+            rejectIf(current != tx.containerRelocation.before(tx.after), "stale-delivery")
         }
         tx.cargoDropoff?.let { receipt ->
             val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
@@ -262,6 +262,12 @@ internal class CivsInventoryJournal(
             fun commit() {
                 val stale = runCatching {
                     rejectIf(closed, "not-ready"); requireCollectedCity(tx)
+                    if (tx.containerRelocation?.unregister != null) when (val native = storage.relocationAfterState(tx)) {
+                        CivInventoryApplyResult.Applied -> Unit
+                        is CivInventoryApplyResult.Retry -> return fail(CivsRejection("inventory-recovery", native.values), retry = true)
+                        is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", native.values)
+                        null -> throw CivsRejection("inventory-conflict")
+                    }
                     tx.warehouseRefit?.let { receipt ->
                         val current = cities[tx.cityId]
                         rejectIf(current != receipt.before(tx.after) && current != tx.after, "stale-city")

@@ -700,7 +700,7 @@ class CivsService(
                 freshAdmission()
                 val move = storage.prepareUpgradeRelocation(city, target, requireNotNull(future))
                     ?: run { abort(null); return@whenCompleteSync }
-                CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1),
+                CivInventoryTransaction(id, city.id, city.revision, move.after(city),
                     emptyList(), containerRelocation = move).also { storage.seal(it) }
             }.getOrElse { abort(it); return@whenCompleteSync }
             inventoryJournal.submitRelocation(city, tx, freshAdmission).whenCompleteSync(tasks) { saved, journalFailure ->
