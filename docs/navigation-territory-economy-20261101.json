@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "title": "ArcCivs181-185 navigation territory maintenance and exact-slot control relocation",
+  "title": "ArcCivs181-186 navigation territory maintenance and exact-slot control relocation",
   "participants": [
     1,
     7,
@@ -14,7 +14,8 @@
     "Bulk chunk snapshots and faster routing can increase completed legitimate work per hour. The scale is unmeasured before delivery; per-action yields, debits, resident skill and existing supply caps are unchanged. Native comparable route and paid-commit observations are required separately.",
     "Existing-gate maintenance issues no items or resources. Future generated flat-gate material sinks are assessed separately in gate-refit-economy-20261101.json; stepped existing gates retain their exact native floor.",
     "No combined currency unit or item SELL quote is used. Active SELL/AutoSell and planned SELL-to-contract remain separate; no downstream sales, savings or new earning potential are inferred from zero direct money mint.",
-    "185 aligns detached flat WALK admission with unchanged native crossed-support checks. An exact891-cell stair capture previously produced first-frame path-changed with zero motion; the corrected local replay arrives in10ticks. This is a local geometry regression, not a measured full live trip or earning multiplier. All direct currency, item, Stock, XP and per-action quantities remain unchanged."
+    "185 aligns detached flat WALK admission with unchanged native crossed-support checks. An exact891-cell stair capture previously produced first-frame path-changed with zero motion; the corrected local replay arrives in10ticks. This is a local geometry regression, not a measured full live trip or earning multiplier. All direct currency, item, Stock, XP and per-action quantities remain unchanged.",
+    "186 places new furniture on a dry authored bottom slab by completing only the matching slab directly beneath the barrel to a double slab through the existing durable pendingControls receipt. Before: a half-height finite world slab and an exterior control. After: one matching full-height finite support and an interior control; adjacent half-height walking surfaces remain unchanged. This adds one finite half-slab of world geometry per such relocation, with zero item drops, issued items, inventory/Stock/Vault/token/player-XP changes. Exact existing cargo slots and NBT still move through the same receipt; no earning or SELL conversion is inferred."
   ],
   "currencies": {
     "vault": {

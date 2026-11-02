@@ -15,6 +15,27 @@ import java.util.UUID
 import java.util.zip.GZIPInputStream
 
 class CivsBuildingControlsTest : FunSpec({
+    test("new furniture completes its exact dry authored bottom slab in every rotation") {
+        val room = controlRoom()
+        val snapshot = ControlSnapshot(room.minimum, room.origin, listOf(room.sizeX, room.sizeY, room.sizeZ),
+            room.blocks().map { when {
+                it.position.y == room.minimum.y -> "minecraft:cobblestone_slab[type=bottom,waterlogged=false]"
+                it.blockData.startsWith("minecraft:barrel[") -> "minecraft:air"
+                else -> it.blockData
+            } })
+        for (turns in 0..3) {
+            val building = controlBuilding(snapshot, BuildingType.GUARD_TOWER, turns)
+            val candidates = CivsBuildingControls.authored(building, snapshot)
+            candidates.isNotEmpty() shouldBe true
+            candidates.all { !it.existing && it.support == CivPlanBlock(it.position.copy(y = it.position.y - 1),
+                "minecraft:cobblestone_slab[type=bottom,waterlogged=false]",
+                "minecraft:cobblestone_slab[type=double,waterlogged=false]") } shouldBe true
+        }
+        for (state in listOf("minecraft:cobblestone", "minecraft:oak_slab[type=top,waterlogged=false]",
+            "minecraft:oak_slab[type=bottom,waterlogged=true]", "minecraft:water", "minecraft:barrel[facing=up,open=false]"))
+            civsControlSupport(CivPosition(1, 64, 1), state) shouldBe null
+    }
+
     test("a roofed facade recess is outside even when it is the current marker and the room has a grass floor") {
         val size = listOf(15, 7, 17)
         val states = buildList {

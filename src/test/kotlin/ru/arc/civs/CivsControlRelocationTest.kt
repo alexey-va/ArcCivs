@@ -24,6 +24,95 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsControlRelocationTest : FunSpec({
+    test("a fresh authored half slab candidate is admitted without relaxing resident support") {
+        ControlRelocationFixture().use { h ->
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.original, h.hall)))
+            h.storage.updateCity(h.city)
+            val support = civsControlSupport(h.replacement, "minecraft:cobblestone_slab[type=bottom,waterlogged=false]")!!
+            h.block(support.position).blockData = org.bukkit.Bukkit.createBlockData(support.before)
+            citizenStandable(h.world, h.replacement) shouldBe false
+            h.durable()
+            var now = 0L
+            h.relocations(candidates = { CompletableFuture.completedFuture(listOf(h.candidate(h.replacement, false).copy(support = support))) },
+                clock = { now }).use { owner ->
+                repeat(4) { owner.pulse(); now += 1_000L }
+                h.city.pendingControls!!.single().approach shouldBe listOf(support)
+                h.block(support.position).blockData.asString shouldBe support.after
+                h.stagingBarriers shouldBe 1
+                h.stagingFence.complete(Unit); h.ticks()
+                h.fence.complete(Unit); h.ticks(); owner.drained().join()
+                h.building.control shouldBe h.replacement
+                h.block(h.old).type shouldBe Material.AIR
+            }
+        }
+    }
+
+    test("matching half slab support uses the durable control receipt and preserves exact cargo on replay") {
+        ControlRelocationFixture().use { h ->
+            val support = civsControlSupport(h.replacement, "minecraft:cobblestone_slab[type=bottom,waterlogged=false]")!!
+            h.block(support.position).blockData = org.bukkit.Bukkit.createBlockData(support.before)
+            h.oldInventory.setItem(0, ItemStack(Material.DIAMOND, 7))
+            h.durable()
+            h.acceptIntent(staging = true)
+            h.mutate(h.city.id) { city -> CivsRules.validate(city.copy(revision = city.revision + 1,
+                pendingControls = listOf(city.pendingControls!!.single().copy(approach = listOf(support))))) }.join()
+            h.reload()
+            val operation = h.installations.install(h.city.id, h.original.id)
+            h.block(support.position).blockData.asString shouldBe support.after
+            h.block(h.replacement).type shouldBe Material.BARREL
+            h.oldInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 7)
+            h.building.control shouldBe h.old
+            // The unchanged after-image is accepted after a restart; no second slab or item is issued.
+            h.reload()
+            h.stagingFence.complete(Unit); h.ticks(); operation.join()
+            h.relocations().use { owner ->
+                owner.pulse(); h.ticks()
+                h.fence.complete(Unit); h.ticks(); owner.drained().join()
+            }
+            h.block(support.position).blockData.asString shouldBe support.after
+            h.building.control shouldBe h.replacement
+            h.replacementInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 7)
+            h.block(h.old).type shouldBe Material.AIR
+            h.city.pendingControls shouldBe emptyList()
+        }
+    }
+
+    test("support drift and unsupported floor changes cannot mutate the receiver") {
+        ControlRelocationFixture().use { h ->
+            val support = civsControlSupport(h.replacement, "minecraft:cobblestone_slab[type=bottom,waterlogged=false]")!!
+            h.acceptIntent(staging = true)
+            h.city = CivsRules.validate(h.city.copy(pendingControls = listOf(h.city.pendingControls!!.single().copy(approach = listOf(support)))))
+            h.block(support.position).type = Material.DIAMOND_BLOCK
+            shouldThrow<CivsRejection> { h.installations.install(h.city.id, h.original.id) }.reason shouldBe "world-changed"
+            h.block(h.replacement).type shouldBe Material.AIR
+            for (bad in listOf(support.copy(after = "minecraft:cobblestone"),
+                support.copy(position = support.position.copy(x = support.position.x + 1))))
+                shouldThrow<CivsRejection> { CivsRules.validate(h.city.copy(pendingControls = listOf(
+                    h.city.pendingControls!!.single().copy(approach = listOf(bad))))) }.reason shouldBe "invalid-state"
+        }
+    }
+
+    test("a viewer closing the old inventory cannot bypass support state or occupancy readback") {
+        for (occupied in listOf(false, true)) ControlRelocationFixture().use { h ->
+            val support = civsControlSupport(h.replacement, "minecraft:cobblestone_slab[type=bottom,waterlogged=false]")!!
+            h.block(support.position).blockData = org.bukkit.Bukkit.createBlockData(support.before)
+            h.acceptIntent(staging = true)
+            h.city = CivsRules.validate(h.city.copy(pendingControls = listOf(h.city.pendingControls!!.single().copy(approach = listOf(support)))))
+            val viewer = mockk<org.bukkit.entity.HumanEntity>()
+            every { viewer.closeInventory() } answers {
+                if (occupied) h.installations.controlOccupied = { _, p -> p == support.position }
+                else h.block(support.position).type = Material.DIAMOND_BLOCK
+            }
+            (h.oldInventory as org.mockbukkit.mockbukkit.inventory.InventoryMock).addViewer(viewer)
+            shouldThrow<CivsRejection> { h.installations.install(h.city.id, h.original.id) }.reason shouldBe
+                if (occupied) "worksite-blocked" else "world-changed"
+            h.block(h.replacement).type shouldBe Material.AIR
+            h.block(support.position).blockData.asString shouldBe if (occupied) support.before else "minecraft:diamond_block"
+            h.block(h.old).type shouldBe Material.BARREL
+            io.mockk.verify(exactly = 1) { viewer.closeInventory() }
+        }
+    }
+
     test("completed asynchronous sources survive more than 64 current control identities") {
         ControlRelocationFixture().use { h ->
             val cities = List(67) { index ->

@@ -12,7 +12,12 @@ import java.util.concurrent.CompletionException
 import java.util.logging.Level
 
 internal data class CivControlCandidate(val position: CivPosition, val standing: CivPosition, val existing: Boolean,
-    val retirePrevious: Boolean = true, val route: List<CivPosition> = emptyList())
+    val retirePrevious: Boolean = true, val route: List<CivPosition> = emptyList(), val support: CivPlanBlock? = null)
+
+/** Finish the matching authored half slab only beneath new furniture; actor support rules stay unchanged. */
+internal fun civsControlSupport(position: CivPosition, before: String): CivPlanBlock? =
+    if (before.substringBefore('[').endsWith("_slab") && before.substringAfter('[', "") == "type=bottom,waterlogged=false]")
+        CivPlanBlock(position.copy(y = position.y - 1), before, before.replace("type=bottom", "type=double")) else null
 
 internal fun civsControlOccupied(plugin: Plugin, worldId: UUID, point: CivPosition,
     blocked: (UUID, CivPosition) -> Boolean): Boolean = blocked(worldId, point) || plugin.server.onlinePlayers.any {
@@ -160,7 +165,13 @@ internal class CivsControlRelocations(
         return if (candidate.existing) CivsWorkstations.valid(city, building, native,
             CivWorkstation(candidate.standing, p, "minecraft:barrel"), feet)
         else block.type.isAir && CivsWorkstations.valid(city, building, native, CivWorkstation(candidate.standing), feet) &&
-            citizenStandable(native, p) && citizenPacketBodyClear(native, p.point(), false)
+            (candidate.support?.let { cell ->
+                cell == civsControlSupport(p, cell.before) && building.bounds.contains(cell.position.x, cell.position.y, cell.position.z) &&
+                    !civsControlOccupied(plugin, city.worldId, cell.position, blocked) &&
+                    native.getBlockAt(cell.position.x, cell.position.y, cell.position.z).let { floor ->
+                        floor.blockData.asString in setOf(cell.before, cell.after) && world.canModify(city.owner, floor, floor.type)
+                    }
+            } ?: citizenStandable(native, p)) && citizenPacketBodyClear(native, p.point(), false)
     }
 
     private fun move(city: Settlement, building: CivBuilding, candidate: CivControlCandidate): CompletableFuture<Settlement> {
@@ -171,7 +182,8 @@ internal class CivsControlRelocations(
         val source = native.getBlockAt(old.x, old.y, old.z)
         reject(source.type != Material.BARREL, "control-obstructed")
         val placement = installations.prepare(city.id, city.worldId, city.owner, building.copy(control = candidate.position), false)
-            .copy(retire = if (candidate.retirePrevious) CivPlanBlock(old, source.blockData.asString, "minecraft:air") else null)
+            .copy(retire = if (candidate.retirePrevious) CivPlanBlock(old, source.blockData.asString, "minecraft:air") else null,
+                approach = candidate.support?.let(::listOf))
         val destination = native.getBlockAt(candidate.position.x, candidate.position.y, candidate.position.z)
         reject(if (candidate.existing) destination.type != Material.BARREL else !destination.type.isAir, "control-obstructed")
         reject(civsControlOccupied(plugin, city.worldId, candidate.position, blocked), "worksite-blocked")

@@ -69,8 +69,9 @@ internal object CivsBuildingControls {
             val stance = interior.neighbors(point).firstOrNull { it != point && standing(it) }
                 ?: return@mapNotNull null
             val route = interior.routeTo(stance, point) ?: return@mapNotNull null
-            CivControlCandidate(interior.world(point), interior.world(stance), false, retire, route)
-        }.take(16).toList()
+            CivControlCandidate(interior.world(point), interior.world(stance), false, retire, route,
+                civsControlSupport(interior.world(point), snapshot.blockAt(point.x, point.y - 1, point.z).blockData))
+        }.sortedBy { it.support != null }.take(16).toList()
         return Source(space.geometry, (existing + spare).take(CivsWorkstations.MAXIMUM_POINTS))
     }
 

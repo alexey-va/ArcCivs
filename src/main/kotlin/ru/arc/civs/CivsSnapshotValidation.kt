@@ -196,11 +196,14 @@ internal object CivsSnapshotValidation {
                     snapshot(approach.size <= 3 && approach.map { it.position }.distinct().size == approach.size)
                     snapshot(approach.all { cell ->
                         val point = cell.position
-                        CivsRules.present(point, cell.before, cell.after) && point.x == building.entrance.x && point.z == building.entrance.z &&
-                            point.y.toLong() in (building.entrance.y.toLong() - 1)..(building.entrance.y.toLong() + 1) &&
-                            point.y in -4_096..4_096 && point != receipt.position && !building.bounds.contains(point.x, point.y, point.z) &&
+                        CivsRules.present(point, cell.before, cell.after) && point.y in -4_096..4_096 && point != receipt.position &&
                             CivsRules.validText(cell.before, CivsStore.MAX_BLOCK_STATE_CHARS) && cell.before.startsWith("minecraft:") &&
-                            cell.before != cell.after && cell.after == if (point.y < building.entrance.y) "minecraft:dirt" else "minecraft:air"
+                            cell.before != cell.after && (if (building.bounds.contains(point.x, point.y, point.z))
+                                approach.size == 1 && !building.type.isInfrastructure && building.phase == BuildingPhase.ACTIVE &&
+                                    city.construction?.buildingId != building.id && cell == civsControlSupport(receipt.position, cell.before)
+                            else point.x == building.entrance.x && point.z == building.entrance.z &&
+                                point.y.toLong() in (building.entrance.y.toLong() - 1)..(building.entrance.y.toLong() + 1) &&
+                                cell.after == if (point.y < building.entrance.y) "minecraft:dirt" else "minecraft:air")
                     })
                 }
             }

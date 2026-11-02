@@ -16,3 +16,5 @@ corrected local route arrives in10ticks. No physics, collision, arrival, credit,
 recipe or yield rule is relaxed. Direct Vault, premium-token and player-XP deltas
 remain separately zero; actual full-trip throughput and downstream SELL income
 are unmeasured. Native full-route and deposit acceptance remain separate.
+
+186: новая бочка над авторской нижней полуплитой получает опору из такой же двойной плиты через существующий журнал pendingControls. Добавляется одна конечная половина плиты в мире; предметы, дроп, Stock, Vault, жетоны и XP не выдаются. Соседний пол и правила физики NPC не меняются; существующие слоты и NBT переносятся прежним журналом.

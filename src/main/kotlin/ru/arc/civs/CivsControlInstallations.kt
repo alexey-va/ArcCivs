@@ -225,6 +225,14 @@ internal class CivsControlInstallations(
         val reused = block.type == Material.BARREL
         if (receipt.retire != null) rejectIf(!reused && !block.type.isAir, "control-obstructed")
         if (!reused) rejectIf(civsControlOccupied(plugin, city.worldId, point, controlOccupied), "worksite-blocked")
+        // Inventory-close callbacks may change terrain or permissions after the first readback.
+        receipt.approach.orEmpty().zip(approach).forEach { (cell, prepared) ->
+            val (native, after) = prepared
+            rejectIf(native.blockData.asString !in setOf(cell.before, cell.after), "world-changed")
+            checkApproachCell(city.id, city.owner, building, native, after.material)
+            if (cell == civsControlSupport(point, cell.before))
+                rejectIf(civsControlOccupied(plugin, city.worldId, cell.position, controlOccupied), "worksite-blocked")
+        }
         val changed = mutableListOf<CivPosition>()
         if (!reused) { block.setType(Material.BARREL, false); changed += point }
         approach.forEach { (native, after) -> if (native.blockData.asString != after.asString) {

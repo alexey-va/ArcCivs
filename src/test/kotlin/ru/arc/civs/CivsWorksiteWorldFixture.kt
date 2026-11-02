@@ -95,6 +95,9 @@ internal open class CivsWorksiteWorldFixture(name: String, private val ground: M
             }
 
             override fun getBoundingBox(): BoundingBox {
+                val slab = blockData as? org.bukkit.block.data.type.Slab
+                if (slab != null) return BoundingBox(x.toDouble(), y + if (slab.type == org.bukkit.block.data.type.Slab.Type.TOP) .5 else .0,
+                    z.toDouble(), x + 1.0, y + if (slab.type == org.bukkit.block.data.type.Slab.Type.BOTTOM) .5 else 1.0, z + 1.0)
                 if (type.name.endsWith("_FENCE")) {
                     val boxes = fenceCollisionBoxes(blockData.asString)
                     return BoundingBox(
