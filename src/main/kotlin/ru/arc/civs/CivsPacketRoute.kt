@@ -66,6 +66,12 @@ internal class CitizenPacketRoute(
     private var directCapture: CitizenNavigationCapture? = null
     private val directTerrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
     private var fallingSpeed = 0.0
+    private var reuseObserver: ((List<CitizenPlannedStep>, Set<CivPosition>) -> Unit)? = null
+    private var reuseFailure: (() -> Unit)? = null
+    private var reusableSteps: List<CitizenPlannedStep>? = null
+    private var proposedMove: Pair<CitizenPoint, CitizenPoint>? = null
+    private var observedPosition = origin
+    private val observedGround = linkedSetOf<CivPosition>()
     var preparationPhase = "queued"
         private set
     var capturedBlocks = 0
@@ -102,6 +108,82 @@ internal class CitizenPacketRoute(
     /** The request received a hint; ordinary wider-search fallback may still be needed. */
     internal val hasCourierCorridorHint: Boolean get() = corridor != null
 
+    internal fun reuseIdentity(): CitizenRouteIdentity? = snapshotPolicy?.reuseKey
+        ?.takeIf { corridor == null && avoiding.isEmpty() }
+        ?.let { CitizenRouteIdentity(worldId, it,
+            CitizenSearchNode(floor(origin.x).toInt(), origin.y, floor(origin.z).toInt()),
+            CitizenPoint(target.x, target.y, target.z), settings) }
+
+    internal val reuseOrigin: CitizenPoint get() = origin
+
+    internal fun attachReuseObserver(accepted: (List<CitizenPlannedStep>, Set<CivPosition>) -> Unit,
+        failed: () -> Unit) {
+        reuseObserver = accepted
+        reuseFailure = failed
+    }
+
+    /** Called by the movement owner after applying a checked proposal and reading the actual actor pose. */
+    internal fun observeAcceptedMove(from: CitizenPoint, actual: CitizenPoint) {
+        if (reuseObserver == null) return
+        if (from.distanceSquared(actual) <= .000000000001) return
+        val proposed = proposedMove
+        proposedMove = null
+        if (proposed == null || from.distanceSquared(proposed.first) > .000000000001 ||
+            actual.distanceSquared(proposed.second) > .000000000001 ||
+            from.distanceSquared(observedPosition) > .000000000001) {
+            reuseObserver = null
+            reusableSteps = null
+            observedGround.clear()
+            return
+        }
+        observedGround += CivPosition(floor(from.x).toInt(), citizenSupportY(from.y), floor(from.z).toInt())
+        observedGround += CivPosition(floor(actual.x).toInt(), citizenSupportY(actual.y), floor(actual.z).toInt())
+        observedPosition = actual
+        if (observedGround.size > CivsPaths.MAX_TRIP_CELLS) {
+            reuseObserver = null
+            reusableSteps = null
+            observedGround.clear()
+            return
+        }
+        val acceptedEnd = reusableSteps?.lastOrNull()?.point
+        if (finished && failure == null && !continuation && acceptedEnd != null &&
+            actual.distanceSquared(acceptedEnd) <= .000001) {
+            observeAcceptedArrival(actual)
+        }
+    }
+
+    /** Existing native arrival guards call this before cancelling the remaining tolerance tail.
+     * This publishes geometry for fresh replay validation, never work credit or unwalked road cells. */
+    internal fun observeAcceptedArrival(actual: CitizenPoint) {
+        val observer = reuseObserver ?: return
+        if (failure != null || continuation || observedGround.size < 2 ||
+            actual.distanceSquared(observedPosition) > .000000000001) return
+        reuseObserver = null
+        reusableSteps?.let { observer(it, observedGround.toSet()) }
+        reusableSteps = null
+        observedGround.clear()
+    }
+
+    /** Bounded replay validation uses current caller permissions, support, costs and native body sweeps. */
+    internal fun validatedCachedStepCost(from: CitizenPoint, step: CitizenPlannedStep): Double {
+        if (step.action != CitizenRouteAction.WALK && step.action != CitizenRouteAction.STEP) return Double.POSITIVE_INFINITY
+        val to = step.point
+        val point = CivPosition(floor(to.x).toInt(), floor(to.y + .001).toInt(), floor(to.z).toInt())
+        if (point.y !in minimumY until maximumY || !citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
+            !allowed(point) || !permits(from, to) || !citizenPacketSupported(world, to)) return Double.POSITIVE_INFINITY
+        // A different offset in the same source cell must not cut a protected neighbour's corner.
+        // Conservative bounds may fall back to A*, but never reuse another caller's permission result.
+        for (x in floor(min(from.x, to.x) - .299).toInt()..floor(max(from.x, to.x) + .299).toInt())
+            for (z in floor(min(from.z, to.z) - .299).toInt()..floor(max(from.z, to.z) + .299).toInt())
+                for (y in floor(min(from.y, to.y) + .001).toInt()..floor(max(from.y, to.y) + .001).toInt())
+                    if (!allowed(CivPosition(x, y, z))) return Double.POSITIVE_INFINITY
+        val weight = travelCost(world.getBlockAt(point.x, citizenSupportY(to.y), point.z))
+        if (!weight.isFinite() || from.y == to.y &&
+            !citizenFlatSupportClear(from, to) { citizenPacketSupported(world, it) } ||
+            !citizenPacketStepClear(world, from, to, true)) return Double.POSITIVE_INFINITY
+        return sqrt(from.distanceSquared(to)) * weight.coerceIn(1.0, CivsPaths.ORDINARY_COST)
+    }
+
     /** A raised foot may use only the exact native stair profile that admitted its current point. */
     internal fun stairProfileSupports(at: CitizenPoint): List<Triple<CivPosition, CitizenCollisionSnapshot, Double>> {
         if (searching || finished || failure != null) return emptyList()
@@ -131,6 +213,10 @@ internal class CitizenPacketRoute(
     }
 
     fun cancel() {
+        reuseObserver = null
+        reusableSteps = null
+        proposedMove = null
+        observedGround.clear()
         searching = false
         finished = true
         preparationPhase = "cancelled"
@@ -280,6 +366,9 @@ internal class CitizenPacketRoute(
             path.addLast(Waypoint(previous, step.point, action = step.action))
             previous = step.point
         }
+        reusableSteps = steps.takeIf { reuseObserver != null && !result.continuation &&
+            it.size in 1..CivsPaths.MAX_TRIP_CELLS &&
+            it.all { step -> step.action == CitizenRouteAction.WALK || step.action == CitizenRouteAction.STEP } }?.toList()
         searching = false
         continuation = result.continuation
         continuationReason = result.continuationReason
@@ -463,6 +552,7 @@ internal class CitizenPacketRoute(
             point.yaw = citizenTurn(from.yaw, wanted, CITIZEN_TURN_PER_TICK)
         }
         point.pitch = pitch
+        if (reuseObserver != null) proposedMove = observed to CitizenPoint(point.x, point.y, point.z)
         return point
     }
 
@@ -674,6 +764,12 @@ internal class CitizenPacketRoute(
     }
 
     private fun fail(reason: String) {
+        reuseObserver = null
+        reusableSteps = null
+        proposedMove = null
+        observedGround.clear()
+        reuseFailure?.invoke()
+        reuseFailure = null
         failure = reason
         searching = false
         preparationPhase = "failed"

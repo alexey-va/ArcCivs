@@ -9,14 +9,317 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.util.BoundingBox
 import ru.arc.core.BukkitTaskScheduler
+import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import java.util.UUID
 
 class CivsNavigationSnapshotsTest : FunSpec({
+    test("shared route geometry is learned only after observed traversal and replays without another A star") {
+        sharedRouteRuntime { h ->
+            val merelyReady = h.request()
+            h.finish(merelyReady)
+            h.cache()["entries"] shouldBe 0
+            merelyReady.cancel()
+            h.cache()["entries"] shouldBe 0
+            val walked = h.request()
+            h.finish(walked)
+            h.walk(walked).distanceSquared(h.target) shouldBe 0.0
+            h.cache()["entries"] shouldBe 1
+            val warm = h.request(from = CitizenPoint(.7, 64.0, .5))
+            h.finish(warm)
+            warm.failure shouldBe null
+            warm.nodeCount shouldBe 0
+            warm.capturedBlocks shouldBe 0
+            h.cache()["hits"] shouldBe 1L
+            ((h.cache()["native_step_checks"] as Long) > 0) shouldBe true
+            h.walk(warm, CitizenPoint(.7, 64.0, .5)).distanceSquared(h.target) shouldBe 0.0
+        }
+    }
+
+    test("a compatible ordinary trip joins a nearby shared suffix with fresh current costs and learns its own identity") {
+        sharedRouteRuntime { h ->
+            h.allowedZ = 0..2
+            val first = h.request(); h.finish(first); h.walk(first)
+            h.paths.begin(h.city).network.cells += CivPosition(7, 63, 0)
+            val from = CitizenPoint(4.5, 64.0, 2.5)
+            val joined = h.request(from = from); h.finish(joined)
+            joined.nodeCount shouldBe 0
+            joined.capturedBlocks shouldBe 0
+            h.suffixes()["hits"] shouldBe 1L
+            ((h.suffixes()["candidates"] as Long) in 1..8) shouldBe true
+            ((h.suffixes()["steps_examined"] as Long) <= 8 * 256) shouldBe true
+            ((h.cache()["last_validated_cost"] as Double) > 0.0) shouldBe true
+            h.walk(joined, from).distanceSquared(h.target) shouldBe 0.0
+            h.cache()["entries"] shouldBe 2 // The new C-to-B key does not replace the original A-to-B key.
+        }
+    }
+
+    for (obstruction in listOf("pit", "wall", "policy"))
+    test("a $obstruction in the suffix connector falls back to fresh ordinary search and retains the unaffected old route") {
+        sharedRouteRuntime { h ->
+            h.allowedZ = 0..2
+            val first = h.request(); h.finish(first); h.walk(first)
+            when (obstruction) {
+                "pit" -> h.world.getBlockAt(5, 63, 1).type = Material.AIR
+                "wall" -> for (y in 64..66) h.world.getBlockAt(5, y, 1).type = Material.STONE
+            }
+            val from = CitizenPoint(4.5, 64.0, 2.5)
+            val route = h.request(from = from, allowedPoint = { p ->
+                obstruction != "policy" || p.x != 5 || p.z != 1
+            })
+            h.finish(route)
+            h.suffixes()["hits"] shouldBe 0L
+            h.suffixes()["rejected_connectors"] shouldBe 1L
+            (route.nodeCount > 0) shouldBe true
+            h.cache()["entries"] shouldBe 1
+            h.walk(route, from).distanceSquared(h.target) shouldBe 0.0
+        }
+    }
+
+    test("current tail policy is checked after the join and wrong goals worlds and special routes cannot share it") {
+        sharedRouteRuntime { h ->
+            h.allowedZ = 0..2
+            val first = h.request(); h.finish(first); h.walk(first)
+            val from = CitizenPoint(4.5, 64.0, 2.5)
+            for (route in listOf(
+                h.request(from = from, target = h.target.copy(x = 7.5)),
+                h.request(from = from, reuseKey = null),
+                h.request(from = from, world = h.otherWorld()),
+            )) {
+                h.finish(route)
+                (route.nodeCount > 0) shouldBe true
+            }
+            h.suffixes()["hits"] shouldBe 0L
+            val rejected = h.request(from = from, allowedPoint = { it.x != 7 || it.z != 0 })
+            h.finish(rejected)
+            (rejected.nodeCount > 0) shouldBe true
+            h.cache()["rejected"] shouldBe 1L
+            h.suffixes()["rejected_connectors"] shouldBe 0L
+            h.cache()["entries"] shouldBe 0
+            h.walk(rejected, from).distanceSquared(h.target) shouldBe 0.0
+        }
+    }
+
+    test("shared routes separate policy geometry cost target height settings bodies and explicit corridors") {
+        sharedRouteRuntime { h ->
+            val first = h.request(); h.finish(first); h.walk(first)
+            val key = h.key()
+            val source = CitizenPoint(.5, 64.0, .5)
+            fun identity(policyKey: CitizenRouteReuseKey = key, y: Double = 64.0,
+                target: CitizenPoint = h.target, settings: CivsNavigationSettings = CivsNavigationSettings()) =
+                CitizenPacketRoute(h.world, Location(h.world, source.x, y, source.z),
+                    Location(h.world, target.x, target.y, target.z), { true }, { _, _ -> true }, { 1.0 },
+                    settings = settings, snapshotPolicy = CitizenSnapshotPolicy({ _, _ -> true }, { _, _ -> true }, policyKey)).reuseIdentity()
+            val original = identity()
+            (identity(h.key(setOf(UUID(0, 9)))) != original) shouldBe true
+            (identity(y = 64.5) != original) shouldBe true
+            (identity(target = h.target.copy(x = h.target.x + .1)) != original) shouldBe true
+            (identity(settings = CivsNavigationSettings(maximumNodes = 8192)) != original) shouldBe true
+            val changedCity = h.city.copy(radius = 95)
+            (identity(CitizenRouteReuseKey.of(CivsPaths().begin(changedCity), emptySet())) != original) shouldBe true
+            val trip = h.paths.begin(h.city)
+            trip.network.cells += CivPosition(1, 63, 0)
+            (identity(h.key()) != original) shouldBe true
+            trip.network.cells.clear()
+            val corridor = requireNotNull(CitizenSearchCorridor.fromWalked((0..8).mapTo(hashSetOf()) {
+                CivPosition(it, 63, 0) }, source, h.target))
+            val hinted = h.request(corridor = corridor)
+            h.finish(hinted)
+            (hinted.nodeCount > 0) shouldBe true
+            val body = h.owner.replan(hinted, source.location(h.world),
+                listOf(BoundingBox(4.0, 64.0, 3.0, 4.6, 65.8, 3.6)), refreshSnapshots = false)
+            h.finish(body)
+            (body.nodeCount > 0) shouldBe true
+            h.cache()["hits"] shouldBe 0L
+        }
+    }
+
+    test("shared route invalidation is local while physical retries unload and close still retire geometry") {
+        sharedRouteRuntime { h ->
+            val first = h.request(); h.finish(first); h.walk(first)
+            h.world.getBlockAt(4, 95, 0).type = Material.STONE
+            h.owner.changed(h.world.uid, CivPosition(4, 95, 0))
+            h.cache()["entries"] shouldBe 1
+            val warm = h.request(); h.finish(warm)
+            h.cache()["hits"] shouldBe 1L
+            val bodyRetry = h.owner.replan(warm, CitizenPoint(.5, 64.0, .5).location(h.world), refreshSnapshots = false)
+            h.cache()["entries"] shouldBe 1
+            h.finish(bodyRetry)
+            val nativeRetry = h.owner.replan(bodyRetry, CitizenPoint(.5, 64.0, .5).location(h.world))
+            h.cache()["entries"] shouldBe 0
+            h.finish(nativeRetry); h.walk(nativeRetry)
+            h.cache()["entries"] shouldBe 1
+            h.owner.removeChunk(h.world.uid, 0, 0)
+            h.cache()["entries"] shouldBe 0
+            val again = h.request(); h.finish(again); h.walk(again)
+            h.owner.clear()
+            h.cache()["entries"] shouldBe 0
+        }
+    }
+
+    test("cached geometry rechecks current policy and a wall appearing after installation still stops native movement") {
+        sharedRouteRuntime { h ->
+            val first = h.request(); h.finish(first); h.walk(first)
+            var permitted = true
+            val denied = h.request(permitted = { permitted })
+            permitted = false
+            h.finish(denied)
+            denied.failure shouldBe "no-path"
+            h.cache()["rejected"] shouldBe 1L
+            h.cache()["entries"] shouldBe 0
+            val next = h.request(); h.finish(next); h.walk(next)
+            val warm = h.request(); h.finish(warm)
+            warm.nodeCount shouldBe 0
+            for (y in 64..66) h.world.getBlockAt(4, y, 0).type = Material.STONE
+            val stopped = h.walk(warm, requireFinished = false)
+            (stopped.x < 3.8) shouldBe true
+            (warm.failure != null) shouldBe true
+            h.cache()["entries"] shouldBe 0
+            val ordinary = h.owner.replan(warm, stopped.location(h.world)); h.finish(ordinary)
+            (ordinary.failure ?: ordinary.continuationReason) shouldBe "no-path"
+            (ordinary.nodeCount > 0) shouldBe true
+            if (ordinary.failure == null) {
+                ordinary.continuation shouldBe true
+                (requireNotNull(ordinary.endpoint).x < 3.8) shouldBe true
+            }
+        }
+    }
+
+    test("shared route storage stays bounded and a discontinuous observed pose never learns a route") {
+        sharedRouteRuntime { h ->
+            val discontinuous = h.request(); h.finish(discontinuous)
+            val from = CitizenPoint(.5, 64.0, .5)
+            discontinuous.move(from.location(h.world), 1.0) { true }?.let { next ->
+                discontinuous.observeAcceptedMove(from, CitizenPoint(next.x + 4.0, next.y, next.z))
+            }
+            discontinuous.cancel()
+            h.cache()["entries"] shouldBe 0
+            for (index in 0..64) {
+                val route = h.request(target = CitizenPoint(2.5, 64.0, .5), reuseKey = h.key(setOf(UUID(0, index.toLong()))))
+                h.finish(route)
+                h.walk(route, target = CitizenPoint(2.5, 64.0, .5))
+            }
+            h.cache()["entries"] shouldBe 64
+            h.cache()["maximum_steps"] shouldBe 256
+        }
+    }
+
+    test("walked geometry remains reusable after native snapshot expiry because every replay is freshly validated") {
+        sharedRouteRuntime(CivsNavigationSettings(terrainRefreshTicks = 5)) { h ->
+            val first = h.request(); h.finish(first); h.walk(first)
+            h.waitTicks(10)
+            val later = h.request(); h.finish(later)
+            later.nodeCount shouldBe 0
+            h.cache()["hits"] shouldBe 1L
+            h.walk(later).distanceSquared(h.target) shouldBe 0.0
+        }
+    }
+
+    test("a complete observed path on fractional native support learns its accepted endpoint without changing requested arrival") {
+        sharedRouteRuntime { h ->
+            h.allowedY = 63..64
+            for (x in 0..8) h.world.getBlockAt(x, 63, 0).type = Material.DIRT_PATH
+            val from = CitizenPoint(.5, 63.9375, .5)
+            val accepted = h.target.copy(y = 63.9375)
+            val first = h.request(from = from); h.finish(first)
+            h.walk(first, from, accepted)
+            h.cache()["entries"] shouldBe 1
+            val later = h.request(from = from); h.finish(later)
+            later.nodeCount shouldBe 0
+            h.walk(later, from, accepted)
+            h.cache()["hits"] shouldBe 1L
+        }
+    }
+
+    test("native accepted arrival can publish checked geometry before its unwalked tolerance tail is cancelled") {
+        sharedRouteRuntime { h ->
+            val route = h.request(); h.finish(route)
+            val actual = h.walkUntil(route) { it.distanceSquared(h.target) <= .75 * .75 }
+            route.finished shouldBe false
+            h.cache()["entries"] shouldBe 0
+            citizenPacketSupported(h.world, actual) shouldBe true
+            route.observeAcceptedArrival(actual)
+            route.cancel()
+            h.cache()["entries"] shouldBe 1
+            val later = h.request(); h.finish(later)
+            later.nodeCount shouldBe 0
+            h.walk(later).distanceSquared(h.target) shouldBe 0.0
+        }
+    }
+
+    test("consumed section stamps retain unrelated floors and reject late use of a changed old snapshot section") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("snapshot-section-stamps").also(paper.server::addWorld)
+            world.loadChunk(0, 0)
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SnapshotSections")))
+            val snapshots = CivsNavigationSnapshots(131072, 5, tasks, contextFree = { true })
+            try {
+                val chunkKey = CitizenSnapshotKey(0, 0)
+                val old = requireNotNull(snapshots.capture(world, chunkKey, 0))
+                val surface = mapOf(CitizenSnapshotSectionKey(0, 4, 0) to old.revision)
+                val mine = mapOf(CitizenSnapshotSectionKey(0, 2, 0) to old.revision)
+                world.getBlockAt(8, 37, 8).type = Material.AIR
+                snapshots.changed(world.uid, CivPosition(8, 37, 8))
+                snapshots.current(world.uid, mapOf(chunkKey to old.revision)) shouldBe false
+                snapshots.currentSections(world.uid, surface) shouldBe true
+                snapshots.currentSections(world.uid, mine) shouldBe false
+                paper.performTicks(2)
+                snapshots.currentSections(world.uid, surface) shouldBe true
+                val terrain = CitizenSnapshotTerrain().also { it.chunks[chunkKey] = old }
+                val node = CitizenSearchNode(8, 38.0, 8)
+                val request = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), terrain,
+                    CitizenSnapshotPolicy({ _, _ -> true }, { _, _ -> true }), -64, 320, 32768, 1, false)
+                    .advance(CitizenSnapshotInput())
+                request.sections[CitizenSnapshotSectionKey(0, 2, 0)] shouldBe old.revision
+                snapshots.currentSections(world.uid, request.sections) shouldBe false
+                snapshots.capture(world, chunkKey, 8)
+                snapshots.currentSections(world.uid, surface) shouldBe false // Native snapshot TTL still retires old proofs.
+                snapshots.removeChunk(world.uid, 0, 0)
+                snapshots.capture(world, chunkKey, 9)
+                snapshots.currentSections(world.uid, surface) shouldBe false
+            } finally { snapshots.clear(); tasks.close() }
+        }
+    }
+
+    test("an ongoing surface search survives a same chunk mine floor edit without restarting its graph") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("snapshot-unrelated-floor").also(paper.server::addWorld)
+            for (x in -1..2) for (z in -1..1) world.loadChunk(x, z)
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("UnrelatedFloor")))
+            val workers = ArrayDeque<Runnable>()
+            val owner = CivsResidentNavigation(tasks, executor = Executor { workers.addLast(it) }, snapshotContextFree = { true })
+            val allowed: (CivPosition) -> Boolean = { it.x in 0..20 && it.y == 64 && it.z == 0 }
+            val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> true })
+            val route = owner.request(world, Location(world, .5, 64.0, .5), Location(world, 20.5, 64.0, .5),
+                allowed, policy.stepAllowed, { 1.0 }, null, policy)
+            try {
+                var tick = 0
+                while (!(route.capturedBlocks > 400 && route.preparationPhase == "searching") && tick++ < 100) {
+                    while (workers.isNotEmpty()) workers.removeFirst().run()
+                    paper.performTicks(1); owner.pulse()
+                }
+                (route.capturedBlocks > 400) shouldBe true
+                world.getBlockAt(8, 37, 0).type = Material.AIR
+                owner.changed(world.uid, CivPosition(8, 37, 0))
+                owner.pulse()
+                owner.debug()["stale_snapshot_restarts"] shouldBe 0L
+                while (route.searching && tick++ < 250) {
+                    while (workers.isNotEmpty()) workers.removeFirst().run()
+                    paper.performTicks(1); owner.pulse()
+                }
+                route.searching shouldBe false
+                route.failure shouldBe null
+                route.endpoint shouldBe CitizenPoint(20.5, 64.0, .5)
+                owner.debug()["stale_snapshot_restarts"] shouldBe 0L
+            } finally { owner.clear(); tasks.close() }
+        }
+    }
+
     test("snapshot captures reuse unchanged blocks and preserve the complete ordered neighbourhood map") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
             for (base in listOf(-3, 2)) {
@@ -352,3 +655,100 @@ private fun completeSnapshotCapture(terrain: CitizenSnapshotTerrain, probes: Lis
     request.dynamics shouldBe emptyMap()
     return requireNotNull(capture.advance(CitizenSnapshotInput(costs = request.costs.associateWith { cost })).captures)
 }
+
+private fun sharedRouteRuntime(settings: CivsNavigationSettings = CivsNavigationSettings(), block: (SharedRouteRuntime) -> Unit) {
+    MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+        SharedRouteRuntime(paper, settings).use(block)
+    }
+}
+
+private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, settings: CivsNavigationSettings) : AutoCloseable {
+    val world = CivsWorksiteWorldFixture("shared-route-cache").also(paper.server::addWorld)
+    val paths = CivsPaths()
+    val city = Settlement(UUID(0, 1), UUID(0, 2), "Shared", world.uid, CivPosition(0, 64, 0),
+        96, "fixture", Stock(), emptyList(), emptyList())
+    val target = CitizenPoint(8.5, 64.0, .5)
+    var allowedY = 64..64
+    var allowedZ = 0..0
+    private val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SharedRouteCache")))
+    private val work = BudgetedTaskQueue(tasks, 10000, nanoTime = { 0L })
+    private val workers = ArrayDeque<Runnable>()
+    val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) }, settings = settings,
+        snapshotContextFree = { true })
+
+    init { for (x in -1..1) for (z in -1..1) world.loadChunk(x, z) }
+
+    fun key(allowed: Set<UUID> = emptySet()) = CitizenRouteReuseKey.of(paths.begin(city), allowed)
+
+    fun request(from: CitizenPoint = CitizenPoint(.5, 64.0, .5), target: CitizenPoint = this.target,
+        reuseKey: CitizenRouteReuseKey? = key(), corridor: CitizenSearchCorridor? = null,
+        permitted: () -> Boolean = { true }, allowedPoint: (CivPosition) -> Boolean = { true },
+        world: org.bukkit.World = this.world): CitizenPacketRoute {
+        val trip = paths.begin(city)
+        fun allowed(p: CivPosition) = permitted() && allowedPoint(p) && p.x in 0..8 && p.y in allowedY && p.z in allowedZ
+        val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> permitted() }, reuseKey)
+        return owner.request(world, Location(world, from.x, from.y, from.z), Location(world, target.x, target.y, target.z),
+            ::allowed, policy.stepAllowed, { trip.cost(it) { 1.0 } }, corridor, policy)
+    }
+
+    fun finish(route: CitizenPacketRoute) {
+        repeat(300) {
+            if (!route.searching) return
+            while (workers.isNotEmpty()) workers.removeFirst().run()
+            paper.performTicks(1)
+            owner.pulse()
+        }
+        error("Shared route did not finish: ${route.preparationPhase} ${owner.debug()}")
+    }
+
+    fun walk(route: CitizenPacketRoute, from: CitizenPoint = CitizenPoint(.5, 64.0, .5),
+        target: CitizenPoint = this.target, requireFinished: Boolean = true): CitizenPoint {
+        var at = Location(world, from.x, from.y, from.z)
+        for (tick in 0 until 2000) {
+            if (route.finished || route.failure != null) break
+            val before = CitizenPoint(at.x, at.y, at.z)
+            route.move(at, 1.0) { true }?.let { next ->
+                at = next
+                route.observeAcceptedMove(before, CitizenPoint(at.x, at.y, at.z))
+            }
+        }
+        val actual = CitizenPoint(at.x, at.y, at.z)
+        if (requireFinished) withClue("actual=$actual target=$target failure=${route.failure}") {
+            route.finished shouldBe true
+            route.failure shouldBe null
+            actual.distanceSquared(target) shouldBe 0.0
+        }
+        return actual
+    }
+
+    fun walkUntil(route: CitizenPacketRoute, done: (CitizenPoint) -> Boolean): CitizenPoint {
+        var at = Location(world, .5, 64.0, .5)
+        for (tick in 0 until 2000) {
+            val from = CitizenPoint(at.x, at.y, at.z)
+            if (done(from)) return from
+            check(!route.finished && route.failure == null)
+            route.move(at, 1.0) { true }?.let { next ->
+                at = next
+                route.observeAcceptedMove(from, CitizenPoint(at.x, at.y, at.z))
+            }
+        }
+        error("Arrival tolerance was not reached")
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun cache() = owner.debug()["shared_routes"] as Map<String, Any>
+
+    @Suppress("UNCHECKED_CAST")
+    fun suffixes() = owner.debug()["shared_route_suffixes"] as Map<String, Any>
+
+    fun otherWorld(): org.bukkit.World = CivsWorksiteWorldFixture("other-shared-world").also { other ->
+        paper.server.addWorld(other)
+        for (x in -1..1) for (z in -1..1) other.loadChunk(x, z)
+    }
+
+    fun waitTicks(count: Int) { repeat(count) { paper.performTicks(1) } }
+
+    override fun close() { owner.clear(); work.close(); tasks.close() }
+}
+
+private fun CitizenPoint.location(world: org.bukkit.World) = Location(world, x, y, z)

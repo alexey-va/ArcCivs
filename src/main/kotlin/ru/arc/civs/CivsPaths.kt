@@ -27,6 +27,7 @@ internal class CivsPaths {
     class Trip internal constructor(internal val cityId: UUID, internal val network: Network) {
         // Costs cannot change halfway through one A* search as other residents finish their trips.
         private val preferred = network.cells.toHashSet()
+        internal val reuseSignature: Set<CivPosition> get() = preferred
         internal val walked = linkedSetOf<CivPosition>()
         internal var complete = false
         private var overflow = false

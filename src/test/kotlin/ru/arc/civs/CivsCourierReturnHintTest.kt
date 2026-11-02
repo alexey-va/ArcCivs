@@ -71,9 +71,11 @@ class CivsCourierReturnHintTest : FunSpec({
             val runtime = CivsCitizens::class.java.getDeclaredField("runtime").also { it.isAccessible = true }
                 .get(h.owner) as CitizenRuntime
             val actor = runtime.actors.getValue(courierId)
+            var observedMotion: CitizenPacketRoute? = null
             var completed = false
             var now = 3_000L
             for (tick in 1..600) {
+                actor.route?.motion?.takeIf { it.reuseIdentity() != null }?.let { observedMotion = it }
                 h.navigate(); now = requireNotNull(h.navigationNow)
                 if (completeUnrelated && !completed && actor.npc.location.distance(departure) >= 5.0 && h.pickups == 0) {
                     val oldRoute = requireNotNull(actor.route)
@@ -108,6 +110,21 @@ class CivsCourierReturnHintTest : FunSpec({
                 if (h.pickups == 1) break
             }
             withClue(h.navigationState(courierId)) { h.pickups shouldBe 1 }
+            if (warehouseX == 10 && !completeUnrelated) {
+                val key = requireNotNull(observedMotion?.reuseIdentity())
+                val navigation = CivsCitizens::class.java.getDeclaredField("navigation").run {
+                    isAccessible = true
+                    get(h.owner) as CivsResidentNavigation
+                }
+                val learned = CivsResidentNavigation::class.java.getDeclaredField("sharedRoutes").run {
+                    isAccessible = true
+                    get(navigation) as Map<*, *>
+                }
+                withClue("Native pickup before exact endpoint, shared=${navigation.debug()["shared_routes"]}") {
+                    (actor.npc.location.point().distanceSquared(key.to) > .000001) shouldBe true
+                    learned.containsKey(key) shouldBe true
+                }
+            }
             completed shouldBe completeUnrelated
             (actor.npc.location.distance(departure) >= 5.0) shouldBe true
             val hint = requireNotNull(actor.courierReturnHint)

@@ -15,6 +15,7 @@ internal class CitizenSnapshotTerrain {
     val dynamics = hashMapOf<CivPosition, List<CitizenTerrainBox>>()
     val costs = hashMapOf<CivPosition, Double>()
     val blocks = hashMapOf<CivPosition, CitizenTerrainBlock>()
+    val sections = hashMapOf<CitizenSnapshotSectionKey, Long>()
 }
 
 internal data class CitizenSnapshotInput(
@@ -32,6 +33,7 @@ internal data class CitizenSnapshotRequest(
     val costs: Set<CivPosition> = emptySet(),
     val captures: List<CitizenSearchCapture>? = null,
     val capturedBlocks: Int = 0,
+    val sections: Map<CitizenSnapshotSectionKey, Long> = emptyMap(),
 )
 
 /** Fixed x/z/y order, with owned immutable keys and cell references instead of sixty-three map nodes. */
@@ -99,6 +101,7 @@ internal class CitizenSnapshotCapture(
     private val seen = probes.mapTo(hashSetOf()) { it.node }
     private val completed = mutableListOf<CapturedProbe>()
     private val requiredCosts = hashSetOf<CivPosition>()
+    private val newSections = linkedMapOf<CitizenSnapshotSectionKey, Long>()
     private val cancelled = AtomicBoolean()
     private var next = 0
 
@@ -123,6 +126,17 @@ internal class CitizenSnapshotCapture(
                 .map { CitizenSnapshotKey(it.x shr 4, it.z shr 4) }
                 .filter { it !in terrain.chunks && it !in terrain.unavailable }.toSet()
             if (missingChunks.isNotEmpty()) return request(chunks = missingChunks)
+            for (cx in ((probe.node.x - 1) shr 4)..((probe.node.x + 1) shr 4))
+                for (cz in ((probe.node.z - 1) shr 4)..((probe.node.z + 1) shr 4)) {
+                    val chunk = terrain.chunks[CitizenSnapshotKey(cx, cz)] ?: continue
+                    for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4)) {
+                        val section = CitizenSnapshotSectionKey(cx, sy, cz)
+                        if (section !in terrain.sections) {
+                            terrain.sections[section] = chunk.revision
+                            newSections[section] = chunk.revision
+                        }
+                    }
+                }
             // Palette discovery scans a detached whole chunk once, shared by every route using that snapshot.
             val missingStates = linkedMapOf<BlockData, CivPosition>()
             positions.map { CitizenSnapshotKey(it.x shr 4, it.z shr 4) }.distinct().forEach { key ->
@@ -194,8 +208,11 @@ internal class CitizenSnapshotCapture(
 
     private fun request(chunks: Set<CitizenSnapshotKey> = emptySet(), states: Map<BlockData, CivPosition> = emptyMap(),
         dynamics: Map<CivPosition, BlockData> = emptyMap(), costs: Set<CivPosition> = emptySet(),
-        captures: List<CitizenSearchCapture>? = null) =
-        CitizenSnapshotRequest(chunks, states, dynamics, costs, captures, terrain.blocks.size)
+        captures: List<CitizenSearchCapture>? = null): CitizenSnapshotRequest {
+        val sections = newSections.toMap()
+        newSections.clear()
+        return CitizenSnapshotRequest(chunks, states, dynamics, costs, captures, terrain.blocks.size, sections)
+    }
 
     private fun checkCancelled() { if (cancelled.get()) throw CancellationException("Navigation snapshot retired") }
 }

@@ -153,6 +153,7 @@ internal class CivsCitizenMotion(
                 (actor.returningToWarehouse || actor.plan.idleReason in listOf(null, "placing")) &&
                 (physicalFood?.let { routes.arrivalBodyClear(actor) && civsCanReachContainer(npc.location, it.container) }
                     ?: routes.arrivedAt(actor, city, npc.world, travelTarget))) {
+                motion.observeAcceptedArrival(npc.location.point())
                 motion.cancel()
                 route.trip?.let { paths.complete(city, it) }
                 route.completion = CitizenNavigationCompletion(null)
@@ -209,6 +210,7 @@ internal class CivsCitizenMotion(
             }
             if (next != null) {
                 npc.teleport(next)
+                motion.observeAcceptedMove(before.point(), npc.location.point())
                 npc.bodyYaw = next.yaw
                 npc.headYaw = next.yaw
                 npc.pitch = next.pitch
@@ -312,7 +314,7 @@ internal class CivsCitizenMotion(
         if (routes.arrivalBodyClear(actor)) return false
         route.completion = null
         route.nativeCollisionTicks = 40
-        if (route.bodyBlockedSince == null) route.bodyBlockedSince = runtime.navigationTick
+        collisions.markArrivalContact(actor)
         return true
     }
 }

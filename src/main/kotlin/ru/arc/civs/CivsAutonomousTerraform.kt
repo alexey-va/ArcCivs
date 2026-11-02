@@ -176,6 +176,7 @@ internal object CivsAutonomousTerraform {
         }
         val routeObstacles = obstacles + additionalObstacles + portObstacles
         val routeFailures = sortedMapOf<String, Int>()
+        val preparedRoute by lazy { RoutePreparation(surface, standing, preferredRoads) }
         // A short facing link may lack room to grade into the flat apron; the ordinary guarded search can approach from the side.
         val route = reservedRoute?.also { points ->
             if (points.isEmpty() || points.size > MAXIMUM_ROUTE_LENGTH || points.last() != building.entrance ||
@@ -183,9 +184,9 @@ internal object CivsAutonomousTerraform {
                     routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }
                 } || points.zipWithNext().any { (a, b) -> abs(a.x - b.x) + abs(a.z - b.z) != 1 || abs(a.y - b.y) > 1 })
                 throw CivsRejection("autonomy-no-path")
-        } ?: (if (option.streetFrontage) frontageRoute(city, building, surface, access, routeObstacles, standing, preferredRoads, inspectRoute)
+        } ?: (if (option.streetFrontage) frontageRoute(city, building, surface, access, routeObstacles, standing, preferredRoads, inspectRoute, preparedRoute)
         else null) ?: sources(city, building).asSequence().mapNotNull {
-            route(city, building, surface, routeObstacles, standing, it, preferredRoads, inspectRoute) { reason ->
+            route(city, building, surface, routeObstacles, standing, it, preferredRoads, inspectRoute, prepared = preparedRoute) { reason ->
                 routeFailures.merge(reason, 1, Int::plus)
             }
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path",
@@ -293,8 +294,10 @@ internal object CivsAutonomousTerraform {
         inspectRoute: (CivRouteSearchStats) -> Unit = {}): List<CivPosition> {
         val obstacles = city.buildings.filter { it.id != building.id }
             .flatMap { civsRouteObstacles(city, it) } + additionalObstacles
+        val standing = access.standing(city, building.id)
+        val prepared = RoutePreparation(surface, standing, emptySet())
         return sources(city, building).asSequence().mapNotNull {
-            route(city, building, surface, obstacles, access.standing(city, building.id), it, inspect = inspectRoute)
+            route(city, building, surface, obstacles, standing, it, inspect = inspectRoute, prepared = prepared)
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
     }
 
@@ -380,7 +383,7 @@ internal object CivsAutonomousTerraform {
     /** Exact shared prefix plus a short facing connector, through the existing grade solver. */
     private fun frontageRoute(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
         access: CivAutonomousAccess, obstacles: List<CivBox>, standing: Map<Long, CivPosition>,
-        preferred: Set<Long>, inspect: (CivRouteSearchStats) -> Unit): List<CivPosition>? {
+        preferred: Set<Long>, inspect: (CivRouteSearchStats) -> Unit, prepared: RoutePreparation): List<CivPosition>? {
         val (dx, dz) = when (building.rotation) { 90 -> -1 to 0; 180 -> 0 to -1; 270 -> 1 to 0; else -> 0 to 1 }
         val entry = building.entrance
         val starts = sources(city, building).toSet()
@@ -397,7 +400,7 @@ internal object CivsAutonomousTerraform {
         fun connected(prefix: List<CivPosition>): List<CivPosition>? {
             if (prefix.any { p -> obstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) } }) return null
             val join = prefix.last()
-            val connector = route(city, building, surface, obstacles, standing, join, preferred, inspect) ?: return null
+            val connector = route(city, building, surface, obstacles, standing, join, preferred, inspect, prepared = prepared) ?: return null
             if (connector.size > 9 || connector.any { p ->
                     if (dx == 0) p.x != entry.x || p.z !in minOf(entry.z, join.z)..maxOf(entry.z, join.z)
                     else p.z != entry.z || p.x !in minOf(entry.x, join.x)..maxOf(entry.x, join.x)
@@ -413,13 +416,15 @@ internal object CivsAutonomousTerraform {
         if (joins.isNotEmpty()) return null
         val road = access.infrastructure.filter { it.type == BuildingType.ROAD }.flatMap { it.transit }
             .associateBy { civsTerrainKey(it.x, it.z) }
+        val roadPreference by lazy { preferred + road.keys }
+        val roadPreparation by lazy { RoutePreparation(surface, standing, roadPreference) }
         for (distance in 2..6) {
             val join = road[civsTerrainKey(entry.x + dx * distance, entry.z + dz * distance)] ?: continue
             if (civsTerrainKey(join.x - dz, join.z - dx) !in road ||
                 civsTerrainKey(join.x + dz, join.z + dx) !in road) continue
             for (start in starts) {
-                val prefix = route(city, building, surface, obstacles, standing, start, preferred + road.keys,
-                    inspect, destination = join) ?: continue
+                val prefix = route(city, building, surface, obstacles, standing, start, roadPreference,
+                    inspect, destination = join, prepared = roadPreparation) ?: continue
                 connected(prefix)?.let { return it }
             }
         }
@@ -443,13 +448,22 @@ internal object CivsAutonomousTerraform {
             return HashCommon.mix(hash xor climbed.hashCode())
         }
     }
-    private data class Open(val node: Node, val cost: Int, val score: Int, val ordinal: Int)
+    private data class Open(val node: Node, val cost: Int, val score: Int, val ordinal: Int, val parent: Open? = null)
     private data class HorizontalOpen(val key: Long, val distance: Int)
+
+    /** One immutable input family; every source depot shares its maps and each destination's reverse field. */
+    private class RoutePreparation(surface: CivTerrainSurface, standing: Map<Long, CivPosition>, preferredRoads: Set<Long>) {
+        val columns = Long2ObjectOpenHashMap<CivTerrainSurfaceColumn>(surface.columns)
+        val retained = Long2ObjectOpenHashMap<CivPosition>(standing)
+        val preferred = LongOpenHashSet(preferredRoads)
+        val distances = hashMapOf<CivPosition, Long2IntOpenHashMap>()
+    }
 
     private fun route(city: Settlement, building: CivBuilding, surface: CivTerrainSurface, obstacles: List<CivBox>,
         standing: Map<Long, CivPosition>, from: CivPosition, preferredRoads: Set<Long> = emptySet(),
         inspect: (CivRouteSearchStats) -> Unit = {},
         destination: CivPosition = building.entrance,
+        prepared: RoutePreparation = RoutePreparation(surface, standing, preferredRoads),
         rejected: (String) -> Unit = {}): List<CivPosition>? {
         val started = System.nanoTime()
         val start = Node(from.x, from.y - 1, from.z)
@@ -457,9 +471,9 @@ internal object CivsAutonomousTerraform {
         val target = Node(to.x, to.y - 1, to.z)
         // Packed x/z keys have heavily colliding Long.hashCode values on a two-dimensional grid.
         // Keep primitive, mixed-hash lookups local to this detached search.
-        val columns = Long2ObjectOpenHashMap<CivTerrainSurfaceColumn>(surface.columns)
-        val retained = Long2ObjectOpenHashMap<CivPosition>(standing)
-        val preferred = LongOpenHashSet(preferredRoads)
+        val columns = prepared.columns
+        val retained = prepared.retained
+        val preferred = prepared.preferred
         val goalApproach = LongOpenHashSet()
         if (to == building.entrance) CivsAutonomousGeometry.approach(building).forEach {
             goalApproach.add(civsTerrainKey(it.x, it.z))
@@ -497,9 +511,9 @@ internal object CivsAutonomousTerraform {
         }
         // Relax only height/history constraints: static footprints and retained road costs still bound every valid route.
         // The reverse edge charges its forward destination. This leaves the actual grading and safety checks unchanged.
-        val horizontalDistances by lazy {
+        val horizontalDistances by lazy { prepared.distances.getOrPut(to) {
             val distances = Long2IntOpenHashMap()
-            if (columns.size > MAXIMUM_SURFACE_COLUMNS) return@lazy distances
+            if (columns.size > MAXIMUM_SURFACE_COLUMNS) return@getOrPut distances
             val floors = Long2IntOpenHashMap()
             for (entry in columns.long2ObjectEntrySet()) {
                 val key = entry.longKey
@@ -534,7 +548,7 @@ internal object CivsAutonomousTerraform {
                 }
             }
             distances
-        }
+        } }
         fun distance(n: Node): Int {
             val key = civsTerrainKey(n.x, n.z)
             val distances = horizontalDistances
@@ -546,7 +560,6 @@ internal object CivsAutonomousTerraform {
             if (score != 0) score else a.ordinal.compareTo(b.ordinal)
         }
         val costs = hashMapOf(start to 0)
-        val parents = hashMapOf<Node, Node>()
         val closed = hashSetOf<Node>()
         var ordinal = 0
         open += Open(start, 0, baseDistance(start), ordinal++)
@@ -569,8 +582,11 @@ internal object CivsAutonomousTerraform {
             val n = current.node
             if (n.x == target.x && n.y == target.y && n.z == target.z) {
                 val reversed = mutableListOf(n)
-                var cursor = n
-                while (cursor != start) { cursor = parents[cursor] ?: return finish(null, "route-history"); reversed += cursor }
+                var cursor = current
+                while (cursor.node != start) {
+                    cursor = cursor.parent ?: return finish(null, "route-history")
+                    reversed += cursor.node
+                }
                 if (reversed.size > MAXIMUM_ROUTE_LENGTH || reversed.map { civsTerrainKey(it.x, it.z) }.distinct().size != reversed.size) {
                     return finish(null, "route-length-or-repeat")
                 }
@@ -599,16 +615,16 @@ internal object CivsAutonomousTerraform {
                 // Closed ancestors cannot be reparented; refresh once per expansion, reusing only the allocation.
                 if (!ancestorsReady) {
                     ancestorColumns.clear()
-                    var ancestor: Node? = n
+                    var ancestor: Open? = current
                     while (ancestor != null) {
-                        ancestorColumns.add(civsTerrainKey(ancestor.x, ancestor.z))
-                        ancestor = parents[ancestor]
+                        ancestorColumns.add(civsTerrainKey(ancestor.node.x, ancestor.node.z))
+                        ancestor = ancestor.parent
                     }
                     ancestorsReady = true
                 }
                 if (ancestorColumns.contains(column)) continue
-                costs[candidate] = cost; parents[candidate] = n
-                open += Open(candidate, cost, cost + distance(candidate), ordinal++)
+                costs[candidate] = cost
+                open += Open(candidate, cost, cost + distance(candidate), ordinal++, current)
                 peakQueue = maxOf(peakQueue, open.size)
             }
         }

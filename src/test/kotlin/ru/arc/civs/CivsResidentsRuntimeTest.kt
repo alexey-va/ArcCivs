@@ -4749,6 +4749,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     private val packets = mockk<PaperPacketNpcs>(relaxed = true)
     var viewing = true
     var background = false
+    var backgroundHydrating = false
     var spawns = 0
     var teleports = 0
         private set
@@ -4947,7 +4948,8 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
             workstation = workstationProvider, prepareSupplies = { _, _, _ ->
                 supplyRequests++
                 pendingSupplies
-            }, backgroundActive = { background }, navigationTasks = navigationTasks, navigationWork = navigationWork,
+            }, backgroundActive = { background }, backgroundHydrating = { backgroundHydrating },
+            navigationTasks = navigationTasks, navigationWork = navigationWork,
             navigationExecutor = if (useOwnedNavigationExecutor) null else Executor { task ->
                 if (navigationRejections > 0) {
                     navigationRejections--

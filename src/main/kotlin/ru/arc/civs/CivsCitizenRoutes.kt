@@ -53,9 +53,17 @@ internal class CivsCitizenRoutes(
     }
 
     fun startRoute(actor: CitizenActor, world: World, target: CivPosition, now: Long, idleAnchor: CivPosition? = null): Boolean {
+        actor.pendingChunkTarget = null
         if (!shelter.wake(actor)) return false
         val from = actor.npc.location
         val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
+        // The endpoint must be visible to the chunk owner before arrival/standing reads or
+        // route admission. Missing terrain is a loading wait, never an invented arrival.
+        if (citizenRouteWithinReach(from.point(), target.point(), CivsLogistics.maximumTransferDistance(city)) &&
+            !CitizenChunks.between(from.blockX, from.blockZ, target.x, target.z).ready(world)) {
+            actor.pendingChunkTarget = target
+            return true // Accepted preparation, not physical arrival; callers keep their existing intent.
+        }
         if (workRuntime.inboundMineAccess(actor, city, target, idleAnchor) != null &&
             city.workers.firstOrNull { it.id == actor.workerId }?.let { workRuntime.waitingForMineAccess(actor, city, it) } == true) {
             actor.cycle.deferWork(now)
@@ -102,8 +110,8 @@ internal class CivsCitizenRoutes(
         }
         val chunks = CitizenChunks.between(from.blockX, from.blockZ, resolved.x, resolved.z)
         if (!chunks.ready(world)) {
-            if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing")) remove(actor, "chunk-unloaded")
-            return false
+            actor.pendingChunkTarget = resolved
+            return true
         }
         if (!citizenControlClear(city, resolved) || !citizenStandable(world, resolved) ||
             idleAnchor != null && !citizenIdleTerrain(world, resolved, city.buildings)) {
@@ -156,7 +164,12 @@ internal class CivsCitizenRoutes(
         }, { first, second -> citizenControlStepClear(city, first, second) &&
             (waitingMine == null || !outsideSnapshot(waitingMine, kotlin.math.floor(first.x).toInt(), kotlin.math.floor(first.z).toInt()) ||
                 outsideSnapshot(waitingMine, kotlin.math.floor(second.x).toInt(), kotlin.math.floor(second.z).toInt())) &&
-            (entrance != null || minePassage == null || minePassage.allows(second)) })
+            (entrance != null || minePassage == null || minePassage.allows(second)) },
+            reuseKey = if (trip != null && idleAnchor == null && mine == null && waitingMine == null && corridor == null &&
+                !actor.sheltering && actor.attacker == null && actor.combatDestination == null &&
+                actor.foodSource == null && actor.mealVisit == null && actor.workDetour == null &&
+                actor.collectionSeek == null && actor.collectionHome == null && actor.tavernService == null && actor.social.visit == null)
+                CitizenRouteReuseKey.of(routeCosts, allowed) else null)
         val motion = navigation.request(world, from, to, { point -> policy.allowed(point) { p ->
             if (p.y in minimumY until maximumY && world.isChunkLoaded(p.x shr 4, p.z shr 4)) world.getBlockAt(p.x, p.y, p.z).type
             else null
@@ -437,13 +450,25 @@ internal class CivsCitizenRoutes(
 
     fun resolvedTarget(actor: CitizenActor, target: CivPosition): CivPosition = actor.targets[target] ?: target
 
-    /** The moving actor tries a fresh body-aware path; an unavailable detour permits only short body contact. */
+    /** Resident contact stays local; players retain their bounded detour and strict arrival checks. */
     fun handleBodyContact(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
         val since = route.bodyBlockedSince ?: return false
         if (navigationHeld(actor)) return true
         if (collisions.passingBodies(actor)) return false
+        val residentContact = actor.collisionResident != null
+        if (residentContact) {
+            // A real terrain failure still belongs to the ordinary route recovery below.
+            if (route.motion.failure != null) return false
+            // Arrival cannot be earned by passing through the body at the final waypoint.
+            // Existing supported separation steps may clear it, without another terrain search.
+            if (route.motion.finished) return false // Recheck the real endpoint each frame after an occupant leaves.
+            if (runtime.navigationTick - since < 4) {
+                route.progressTick = runtime.navigationTick
+                return true
+            }
+        }
         val failed = route.bodyDetourFailed || route.bodyDetourStarted && route.previousMotion != null && route.motion.failure != null
-        if (failed || runtime.navigationTick - since >= 30 || route.replanAttempts >= 2 && !route.bodyDetourStarted) {
+        if (residentContact || failed || runtime.navigationTick - since >= 30 || route.replanAttempts >= 2 && !route.bodyDetourStarted) {
             route.previousMotion?.let { original ->
                 route.motion.cancel()
                 route.motion = original
@@ -458,12 +483,13 @@ internal class CivsCitizenRoutes(
             actor.collisionResident = null
             route.completion = null
             if (route.motion.failure != null || route.motion.finished) {
-                route.motion = navigation.replan(route.motion, actor.npc.location, emptyList())
+                route.motion = navigation.replan(route.motion, actor.npc.location, emptyList(),
+                    refreshSnapshots = route.motion.failure != null)
                 route.timing.prepare(now)
             } else route.motionReady(runtime.navigationTick, now)
             route.motion.bodyContactAllowed = true
             CivsDiagnostics.event("citizen_body_contact", "city" to actor.cityId, "worker" to actor.workerId,
-                "action" to "pass", "cause" to if (failed) "detour-unavailable" else "contact-timeout",
+                "action" to "pass", "cause" to if (residentContact) "resident-contact" else if (failed) "detour-unavailable" else "contact-timeout",
                 "phase" to actor.cycle.phase, "actual" to actor.npc.location.point().coordinates(),
                 "target" to route.authored)
             return route.motion.searching
@@ -665,7 +691,7 @@ internal class CivsCitizenRoutes(
     }
 
     /** Accepted native receipts own the actor's position; a night retry cannot interrupt or age through that hold. */
-    fun navigationHeld(actor: CitizenActor): Boolean = actor.workerId in runtime.pendingHarm ||
+    fun navigationHeld(actor: CitizenActor): Boolean = actor.pendingChunkTarget != null || actor.workerId in runtime.pendingHarm ||
         actor.supplyPickup != null || life.residentLifePending(actor) || logistics.collectedPending(actor) ||
         actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)
 
@@ -695,6 +721,7 @@ internal class CivsCitizenRoutes(
     }
 
     fun cancelRoute(actor: CitizenActor, wakeDestination: Location? = null) {
+        actor.pendingChunkTarget = null
         actor.courierInboundPrefix = null
         actor.npc.isUsingMainHand = false
         life.standFromMeal(actor)

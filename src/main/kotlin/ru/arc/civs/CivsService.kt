@@ -132,6 +132,7 @@ class CivsService(
         productionReady = ::productionReady, workInputsReady = ::workInputsReady, workStatusInputs = ::workStatusInputs,
         workstation = workstations::select,
         backgroundActive = chunkLoading::active,
+        backgroundHydrating = chunkLoading::hydrating,
         navigationTasks = tasks, navigationWork = nativeWork, navigationSettings = settings.navigation,
         courierFailed = { cityId, workerId, cargo ->
             if (supply.plan(cityId, workerId)?.cargo == cargo) supply.release(cityId, workerId, failed = true)
@@ -377,18 +378,24 @@ class CivsService(
         citizens.deliverTavernMeal = { cityId, delivery -> residentSupplies.deliverTavernMeal(cityId, delivery) }
         citizens.finishResidentRest = residentLife::finishRest
         citizens.finishResidentLesson = residentLife::finishLesson
-        citizens.worksiteTerrainChanged = worksites::changed
+        citizens.worksiteTerrainChanged = { worldId, point ->
+            worksites.changed(worldId, point)
+            autonomousDevelopment.terrainChanged(worldId, point)
+        }
         citizens.worksiteWorldUnloaded = worksites::forgetWorld
         citizens.worksiteChunkUnloaded = worksites::forgetChunk
         world.onTerrainChanged = citizens::terrainChanged
+        world.scanChunks = chunkLoading::request
         controlCleanup.terrainChanged = world::terrainChanged
         plugin.server.pluginManager.registerEvents(this, plugin)
         plugin.server.pluginManager.registerEvents(protection, plugin)
         plugin.server.pluginManager.registerEvents(forestryLeafLoot, plugin)
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
         tasks.runTimer(1, 1) {
-            chunkLoading.pulse(if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList(),
-                if (ready()) inventoryJournal.pendingNativeChunks() else emptyList())
+            val activeCities = if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList()
+            val residentChunks = if (ready()) citizens.chunkPositions() else emptyMap()
+            chunkLoading.pulse(activeCities, if (ready()) inventoryJournal.pendingNativeChunks() else emptyList(),
+                activeCities.associate { city -> city.id to (residentChunks[city.id].orEmpty() + cityPlans.chunkPositions(city.id)) })
             testingPermissions.pulse(if (ready()) cities.values.filter { it.pendingDeletion == null }.mapNotNull { city ->
                 plugin.server.getWorld(city.worldId)?.let { city.owner to it.name }
             } else emptyList())

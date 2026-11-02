@@ -18,9 +18,24 @@ import java.util.concurrent.ConcurrentHashMap
 internal data class CitizenSnapshotPolicy(
     val allowed: (CivPosition, (CivPosition) -> Material?) -> Boolean,
     val stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
+    val reuseKey: CitizenRouteReuseKey? = null,
 )
 
+/** Explicit ordinary-trip identity; arbitrary caller closures never become cache keys. */
+internal data class CitizenRouteReuseKey private constructor(
+    val geometry: CivsPaths.Geometry,
+    val allowedBuildings: Set<UUID>,
+    val preferred: Set<CivPosition>,
+) {
+    companion object {
+        fun of(trip: CivsPaths.Trip, allowedBuildings: Set<UUID>) = CitizenRouteReuseKey(
+            trip.network.geometry.copy(buildings = trip.network.geometry.buildings.toList()),
+            allowedBuildings.toSet(), trip.reuseSignature.toSet())
+    }
+}
+
 internal data class CitizenSnapshotKey(val x: Int, val z: Int)
+internal data class CitizenSnapshotSectionKey(val x: Int, val y: Int, val z: Int)
 internal data class CitizenSnapshotState(val shape: CitizenTerrainShape, val dynamic: Boolean)
 
 /** Paper owns the immutable chunk copy. Palette discovery runs only on the worker. */
@@ -71,6 +86,8 @@ internal class CivsNavigationSnapshots(
     // Revisions retain only chunks requested by navigation, until their native unload.
     private val revisions = hashMapOf<Key, Long>()
     private val revisionTicks = hashMapOf<Key, Long>()
+    private val minimumRevisions = hashMapOf<Key, Long>()
+    private val sectionChanges = hashMapOf<Key, MutableMap<Int, Long>>()
     private val dirtyRequested = hashSetOf<Key>()
     private val dirty = linkedSetOf<Key>()
     private var refresh: ScheduledTask? = null
@@ -88,9 +105,12 @@ internal class CivsNavigationSnapshots(
         if (id in dirty) { dirtyRequested += id; throw CitizenSnapshotPending() }
         chunks[id]?.takeIf { tick - it.tick < refreshTicks }?.let { return it.chunk }
         val snapshot = world.getChunkAt(key.x, key.z).getChunkSnapshot(false, false, false, false)
+        val previousTick = revisionTicks[id]
+        val expired = previousTick != null && tick - previousTick >= refreshTicks
         // LRU eviction is not a native terrain change: concurrent routes keep the same generation.
         val revision = revisions[id]?.takeIf { tick - (revisionTicks[id] ?: Long.MIN_VALUE / 2) < refreshTicks }
             ?: (++revisionSerial).also { revisions[id] = it; revisionTicks[id] = tick }
+        if (expired) minimumRevisions[id] = revision else minimumRevisions.putIfAbsent(id, revision)
         val captured = CitizenSnapshotChunk(snapshot, world.minHeight, world.maxHeight, revision)
         chunks[id] = Cached(tick, captured)
         captures++
@@ -153,7 +173,13 @@ internal class CivsNavigationSnapshots(
         // Contextual collision shapes can read neighbouring blocks across either chunk edge.
         val xs = if (point.x and 15 == 0) x - 1..x else if (point.x and 15 == 15) x..x + 1 else x..x
         val zs = if (point.z and 15 == 0) z - 1..z else if (point.z and 15 == 15) z..z + 1 else z..z
-        for (cx in xs) for (cz in zs) markDirty(Key(world, CitizenSnapshotKey(cx, cz)))
+        for (cx in xs) for (cz in zs) {
+            val key = Key(world, CitizenSnapshotKey(cx, cz))
+            markDirty(key)
+            val revision = revisions[key] ?: continue
+            val sections = sectionChanges.getOrPut(key) { hashMapOf() }
+            for (y in ((point.y - 2) shr 4)..((point.y + 2) shr 4)) sections[y] = revision
+        }
         if (dirty.isNotEmpty() && refresh == null)
             refresh = tasks.runLater(2) { refresh = null; refreshDirty() }
     }
@@ -181,6 +207,16 @@ internal class CivsNavigationSnapshots(
         checkOwner()
         return captured.all { (chunk, revision) -> Key(world, chunk).let { it !in dirty && revisions[it] == revision } }
     }
+    /** A whole snapshot can remain valid for an untouched section while another floor is edited. */
+    fun currentSections(world: UUID, captured: Map<CitizenSnapshotSectionKey, Long>): Boolean {
+        checkOwner()
+        return captured.all { (section, revision) ->
+            val key = Key(world, CitizenSnapshotKey(section.x, section.z))
+            val minimum = minimumRevisions[key]
+            minimum != null && key in revisions && revision >= minimum &&
+                revision >= (sectionChanges[key]?.get(section.y) ?: minimum)
+        }
+    }
     fun pending(world: UUID, requested: Collection<CitizenSnapshotKey>): Boolean {
         checkOwner()
         return requested.any { Key(world, it) in dirty }
@@ -191,18 +227,26 @@ internal class CivsNavigationSnapshots(
         for (dx in -1..1) for (dz in -1..1) {
             val key = Key(world, CitizenSnapshotKey(x + dx, z + dz))
             chunks.remove(key)
-            if (key in revisions) revisions[key] = ++revisionSerial
+            if (key in revisions) {
+                val revision = ++revisionSerial
+                revisions[key] = revision
+                minimumRevisions[key] = revision
+            }
             revisionTicks.remove(key)
+            sectionChanges.remove(key)
             dirty.remove(key)
             dirtyRequested.remove(key)
         }
         revisions.remove(Key(world, CitizenSnapshotKey(x, z)))
+        minimumRevisions.remove(Key(world, CitizenSnapshotKey(x, z)))
     }
     fun removeWorld(world: UUID) {
         checkOwner()
         chunks.keys.removeIf { it.world == world }
         revisions.keys.removeIf { it.world == world }
         revisionTicks.keys.removeIf { it.world == world }
+        minimumRevisions.keys.removeIf { it.world == world }
+        sectionChanges.keys.removeIf { it.world == world }
         dirtyRequested.removeIf { it.world == world }
         dirty.removeIf { it.world == world }
     }
@@ -210,12 +254,14 @@ internal class CivsNavigationSnapshots(
         checkOwner()
         refresh?.cancel(); refresh = null
         chunks.clear(); palette.clear(); revisions.clear(); revisionTicks.clear(); dirty.clear(); dirtyRequested.clear()
+        minimumRevisions.clear(); sectionChanges.clear()
     }
     fun debug(): Map<String, Any> {
         checkOwner()
         return mapOf("chunks" to chunks.size, "maximum_chunks" to maximumChunks, "chunk_captures" to captures,
             "palette_states" to palette.size, "palette_shape_reads" to paletteReads,
             "dynamic_shape_reads" to dynamicReads, "support_cost_reads" to supportCostReads,
+            "tracked_changed_sections" to sectionChanges.values.sumOf { it.size },
             "dirty_chunks" to dirty.size, "refresh_scheduled" to (refresh != null), "refresh_batches" to refreshBatches)
     }
     private fun checkOwner() = check(Thread.currentThread() === owner) { "Chunk snapshots require their owning thread" }

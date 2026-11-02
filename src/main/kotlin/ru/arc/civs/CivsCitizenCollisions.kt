@@ -81,12 +81,22 @@ internal class CivsCitizenCollisions(
                 }
             }
         // Preserve the aggregate fast path; identify an owner only for an actually denied sweep.
-        actor.collisionResident = runtime.actors.values.firstOrNull { other -> other !== actor &&
-            other.worldId == actor.worldId && other.npc.isValid &&
-            !citizenResidentStepClear(actor.npc, from, to, residentOccupied(other)) }?.workerId
+        actor.collisionResident = blockingResident(actor, from, to)
         markBodyContact(actor)
         return false
     }
+
+    /** A finished path still distinguishes another resident from a player occupying its endpoint. */
+    fun markArrivalContact(actor: CitizenActor) {
+        val feet = actor.npc.location
+        actor.collisionResident = blockingResident(actor, feet, feet)
+        markBodyContact(actor)
+    }
+
+    private fun blockingResident(actor: CitizenActor, from: Location, to: Location): UUID? =
+        runtime.actors.values.firstOrNull { other -> other !== actor &&
+            other.worldId == actor.worldId && other.npc.isValid &&
+            !citizenResidentStepClear(actor.npc, from, to, residentOccupied(other)) }?.workerId
 
     private fun markBodyContact(actor: CitizenActor) {
         actor.bodyContactToken = actor.plan.token

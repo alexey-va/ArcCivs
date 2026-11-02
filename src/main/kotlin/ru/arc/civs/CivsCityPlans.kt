@@ -16,12 +16,14 @@ internal class CivsCityPlans(
 ) {
     /** Detached columns from the existing saved terrain routes; never a second road journal. */
     private val forestryRoutes = mutableMapOf<UUID, Pair<UUID, Set<Pair<Int, Int>>>>()
+    private val routeChunkPositions = mutableMapOf<UUID, List<CivPosition>>()
 
     fun forestryPath(worldId: UUID, x: Int, z: Int): Boolean =
         forestryRoutes.values.any { it.first == worldId && (x to z) in it.second }
     fun forestryRoute(cityId: UUID): Set<Pair<Int, Int>> = forestryRoutes[cityId]?.second.orEmpty()
-    fun clear() = forestryRoutes.clear()
-    fun remove(cityId: UUID) { forestryRoutes.remove(cityId) }
+    fun chunkPositions(cityId: UUID): List<CivPosition> = routeChunkPositions[cityId].orEmpty()
+    fun clear() { forestryRoutes.clear(); routeChunkPositions.clear() }
+    fun remove(cityId: UUID) { forestryRoutes.remove(cityId); routeChunkPositions.remove(cityId) }
 
     /** Completed building captures retain their actual road grades across later development. */
     fun loadAutonomousPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
@@ -45,6 +47,9 @@ internal class CivsCityPlans(
                 val (saved, columns, upkeep) = requireNotNull(captured)
                 if (records.cities[city.id]?.buildings == city.buildings && records.cities[city.id]?.roadRouteOverrides == city.roadRouteOverrides) {
                     forestryRoutes[city.id] = city.worldId to columns
+                    routeChunkPositions[city.id] = if (columns.isEmpty()) emptyList() else listOf(
+                        CivPosition(columns.minOf { it.first }, city.center.y, columns.minOf { it.second }),
+                        CivPosition(columns.maxOf { it.first }, city.center.y, columns.maxOf { it.second }))
                     roadMaintenance.publish(city, upkeep)
                 }
                 result.complete(saved)

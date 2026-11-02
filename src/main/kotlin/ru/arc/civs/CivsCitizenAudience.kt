@@ -7,6 +7,7 @@ internal class CivsCitizenAudience(
     private val runtime: CitizenRuntime,
     private val viewerRange: Int,
     private val backgroundActive: (UUID) -> Boolean,
+    private val backgroundHydrating: (UUID) -> Boolean,
     private val remove: (CitizenActor, String) -> Unit,
 ) {
 
@@ -17,11 +18,13 @@ internal class CivsCitizenAudience(
     fun pruneViewers(excluding: UUID? = null) {
         val viewers = viewers(excluding)
         runtime.actors.values.toList().filter { !it.npc.isValid ||
-            !activeAt(it.cityId, it.worldId, it.npc.location.point(), viewers) }
+            !hydrating(it.cityId) && !activeAt(it.cityId, it.worldId, it.npc.location.point(), viewers) }
             .forEach { remove(it, "sleeping") }
     }
 
     fun activeAt(cityId: UUID, worldId: UUID, point: CitizenPoint, viewers: List<CitizenViewer>): Boolean =
-        backgroundActive(cityId) || citizenHasViewer(worldId, point, viewers, viewerRange)
+        !hydrating(cityId) && (backgroundActive(cityId) || citizenHasViewer(worldId, point, viewers, viewerRange))
+
+    fun hydrating(cityId: UUID): Boolean = backgroundHydrating(cityId)
 
 }

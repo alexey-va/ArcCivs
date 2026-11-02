@@ -15,6 +15,40 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.civs.CivsAutonomousTerraform.Node
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("connection shares one detached surface preparation across source depots") {
+        val original = terraceCity()
+        val hall = original.buildings.single().copy(anchor = CivPosition(-3, 0, 0),
+            entrance = CivPosition(-3, 1, 0), phase = BuildingPhase.ACTIVE, control = null,
+            bounds = CivBox(CivPosition(-5, 0, 2), CivPosition(-1, 5, 5)))
+        val depot = hall.copy(id = UUID(0, 193), type = BuildingType.WAREHOUSE,
+            anchor = CivPosition(8, 0, 0), entrance = CivPosition(8, 1, 0),
+            bounds = CivBox(CivPosition(7, 0, 2), CivPosition(10, 5, 5)))
+        val city = original.copy(center = CivPosition(0, 0, 0), buildings = listOf(hall, depot))
+        val target = hall.copy(id = UUID(0, 194), type = BuildingType.GATE,
+            anchor = CivPosition(0, 0, 0), entrance = CivPosition(0, 1, 0),
+            bounds = CivBox(CivPosition(-1, 0, -4), CivPosition(1, 5, -2)))
+        val cells = ((-4..-2) + (0..8)).associate {
+            civsTerrainKey(it, 0) to CivTerrainSurfaceColumn(0, natural = true)
+        }
+        var fullSurfaceIterations = 0
+        val columns = object : AbstractMap<Long, CivTerrainSurfaceColumn>() {
+            override val entries: Set<Map.Entry<Long, CivTerrainSurfaceColumn>>
+                get() = object : AbstractSet<Map.Entry<Long, CivTerrainSurfaceColumn>>() {
+                    override val size: Int get() = cells.size
+                    override fun iterator(): Iterator<Map.Entry<Long, CivTerrainSurfaceColumn>> {
+                        fullSurfaceIterations++
+                        return cells.entries.iterator()
+                    }
+                }
+        }
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val route = CivsAutonomousTerraform.connection(city, target, CivTerrainSurface(-64, 320, columns),
+            CivAutonomousAccess(), emptyList(), searches::add)
+        route shouldBe (8 downTo 0).map { CivPosition(it, 1, 0) }
+        searches.map { it.outcome } shouldBe listOf("route-exhausted", "found")
+        fullSurfaceIterations shouldBe 1
+    }
+
     test("route node hashing avoids repeated equality probes for graded coordinate collisions") {
         val nodes = buildList {
             for (x in -16..15) for (z in -15..15) for (rise in -4..4)

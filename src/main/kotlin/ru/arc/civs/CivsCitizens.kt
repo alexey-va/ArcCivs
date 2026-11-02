@@ -66,6 +66,7 @@ class CivsCitizens(
     private val prepareSupplies: (UUID, UUID, UUID) -> CompletableFuture<Settlement> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
     private val backgroundActive: (UUID) -> Boolean = { false },
+    private val backgroundHydrating: (UUID) -> Boolean = { false },
     navigationTasks: LifecycleTaskScope? = null,
     navigationWork: BudgetedTaskQueue? = null,
     navigationExecutor: Executor? = null,
@@ -151,6 +152,28 @@ class CivsCitizens(
     internal fun collisionActors(): Collection<PacketPlayerNpc> {
         checkCitizenMainThread()
         return actors.values.map { it.npc }
+    }
+
+    /** Current feet and accepted journey endpoints extend the developed chunk envelope. */
+    internal fun chunkPositions(): Map<UUID, Collection<CivPosition>> {
+        checkCitizenMainThread()
+        val cities = cityProvider().associateBy { it.id }
+        val positions = linkedMapOf<UUID, MutableList<CivPosition>>()
+        for (actor in actors.values) {
+            if (!actor.npc.isValid || cities[actor.cityId]?.worldId != actor.worldId) continue
+            val points = positions.getOrPut(actor.cityId) { mutableListOf() }
+            actor.npc.location.let { points += CivPosition(it.blockX, it.blockY, it.blockZ) }
+            points += actor.plan.storage
+            actor.plan.workplace?.let { points += it }
+            actor.combatDestination?.let { points += it }
+            actor.pendingChunkTarget?.let { points += it }
+            actor.route?.let { route ->
+                points += CivPosition(kotlin.math.floor(route.from.x).toInt(), kotlin.math.floor(route.from.y).toInt(),
+                    kotlin.math.floor(route.from.z).toInt())
+                points += CivPosition(route.target.blockX, route.target.blockY, route.target.blockZ)
+            }
+        }
+        return positions
     }
 
     /** Typed player-collision seam; short contact transit never authorizes a recovery endpoint. */
@@ -333,6 +356,7 @@ class CivsCitizens(
         audience = CivsCitizenAudience(runtime,
             viewerRange = viewerRange,
             backgroundActive = backgroundActive,
+            backgroundHydrating = backgroundHydrating,
             remove = ::remove)
         life = CivsCitizenLife(runtime, residentFoods, threats,
             residentStepAllowed = { npc, from, to -> residentStepAllowed(npc, from, to) },
@@ -413,9 +437,18 @@ class CivsCitizens(
                 else -> null
             }
             if (reason != null) {
+                if (reason == "chunk-unloaded" && backgroundActive(city.id) && plan != null) {
+                    // The new plan may precede the next chunk-owner pulse and actor reconciliation.
+                    actor.pendingChunkTarget = plan.workplace ?: plan.storage
+                    continue
+                }
+                // Retiring the actor here would withdraw the very endpoint whose chunks are loading.
+                // Neither work nor movement is admitted while the city reports hydration.
+                if ((reason == "sleeping" || reason == "chunk-unloaded") && audience.hydrating(city.id)) continue
                 remove(actor, reason)
                 continue
             }
+            if (actor.route != null) actor.pendingChunkTarget = null // This accepted route passed readiness above.
             if (!plans.reconcilePlan(actor, requireNotNull(plan), city)) continue
             try {
                 equipment.syncResident(actor.npc, worker, requireNotNull(plan))
@@ -906,6 +939,7 @@ class CivsCitizens(
     }
 
     private fun remove(actor: CitizenActor, reason: String) {
+        actor.pendingChunkTarget = null
         couriers.releaseCourierSource(actor, runtime.residentObservedAt)
         runCatching { life.stopMeal(actor) }.onFailure { runtime.logFailure(actor, "stop-meal", it) }
         actors.remove(actor.workerId)

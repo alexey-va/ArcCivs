@@ -248,9 +248,11 @@ internal class CivsCitizenLeisure(
         }
         val route = actor.route
         if (route != null) {
+            val bodyClear = routes.arrivalBodyClear(actor)
+            if (!bodyClear && route.motion.failure == null && route.completion?.cancelReason == null) return
             val outcome = if (!route.chunks.ready(world)) CitizenNavigationOutcome.STOPPED
                 else citizenNavigationOutcome(route.completion,
-                    citizenArrived(actor.npc.location, route.target),
+                    bodyClear && citizenArrived(actor.npc.location, route.target),
                     route.timing.elapsed(now), route.timeoutMillis, route.motion.navigating, route.motion.searching)
             if (outcome == CitizenNavigationOutcome.PENDING) return
             if (outcome != CitizenNavigationOutcome.ARRIVED &&

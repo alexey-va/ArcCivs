@@ -89,7 +89,8 @@ class CivsChunkLoadingTest : FunSpec({
     for (failure in listOf("capacity", "close", "failed", "world-unload"))
     test("handoff reports known $failure instead of waiting for native readiness forever") {
         chunkRuntime(limit = 16) { h ->
-            val city = chunkCity(h.world.uid, radius = if (failure == "capacity") 96 else 1)
+            val city = chunkCity(h.world.uid, radius = 1)
+            if (failure == "capacity") h.extraPositions = mapOf(city.id to listOf(CivPosition(96, 64, 96)))
             h.cities = listOf(city)
             if (failure == "failed") h.loaded = true
             h.pulse(); h.pulse()
@@ -280,6 +281,195 @@ class CivsChunkLoadingTest : FunSpec({
             negative.maxZ shouldBe ((-17 + radius) shr 4) + 1
         }
         (CivsChunkArea.of(city.copy(radius = Int.MAX_VALUE)).size > 8192) shouldBe true
+    }
+
+    test("unused future territory is not held permanently and does not exhaust the city cap") {
+        chunkRuntime(limit = 16) { h ->
+            val city = chunkCity(h.world.uid, radius = 160)
+            h.cities = listOf(city)
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            repeat(20) { h.pulse() }
+            h.runtime.handoffReady(city) shouldBe true
+            h.added.toSet() shouldBe CivsChunkArea.developed(city).keys()
+            h.added.size shouldBe 16
+            CivsChunkArea.of(city).size shouldBe 529L
+        }
+    }
+
+    test("accepted sites upgrades controls holders roads and negative actor endpoints expand the developed rectangle") {
+        val city = chunkCity(UUID.randomUUID()).copy(center = CivPosition(-17, 64, -17))
+        val old = chunkBuilding(CivPosition(-20, 64, -20))
+        val site = chunkBuilding(CivPosition(64, 64, -20)).copy(phase = BuildingPhase.SITE)
+        val upgrade = old.copy(bounds = CivBox(old.bounds.min, CivPosition(96, 70, -18)))
+        val holder = CivPosition(-100, 64, -20)
+        val control = CivPosition(-20, 64, 128)
+        val retired = CivPosition(-20, 64, -128)
+        val approach = CivPosition(-20, 63, 144)
+        val road = listOf(CivPosition(-144, 64, -20), old.entrance)
+        val developed = city.copy(buildings = listOf(old, site),
+            construction = CivConstruction(UUID.randomUUID(), old.id, 2, 1, 0, ConstructionPhase.CONSTRUCTING,
+                Stock(), plannedBuilding = upgrade),
+            inventory = CivInventory(CivStorageMode.PHYSICAL, containers = listOf(holder)),
+            pendingControls = listOf(CivControlPlacement(old.id, control, "minecraft:air",
+                listOf(CivPlanBlock(approach, "minecraft:air", "minecraft:dirt")),
+                CivPlanBlock(retired, "minecraft:barrel", "minecraft:air"))),
+            roadRouteOverrides = mapOf(site.id.toString() to CivRoadRouteOverride(road, road)))
+        val area = CivsChunkArea.developed(developed)
+        val required = listOf(old.bounds.min, site.bounds.max, upgrade.bounds.max, holder, control, retired, approach) + road
+        required.forEach { p ->
+            for (x in (p.x shr 4) - 1..(p.x shr 4) + 1) for (z in (p.z shr 4) - 1..(p.z shr 4) + 1)
+                (PaperChunkKey(city.worldId, x, z) in area.keys()) shouldBe true
+        }
+        area.minX shouldBe -10
+        area.maxX shouldBe 7
+        area.minZ shouldBe -9
+        area.maxZ shouldBe 10
+    }
+
+    test("moving the required boundary preserves all common native leases and waits for only the new chunks") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 160)
+            h.cities = listOf(city)
+            h.perChunkLoads = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            repeat(30) { h.pulse(); h.completeLoads(evictUnticketed = true) }
+            h.runtime.active(city.id) shouldBe true
+            val initial = h.added.toSet()
+            val actor = CivPosition(48, 64, -1)
+            h.extraPositions = mapOf(city.id to listOf(actor))
+            h.pulse()
+            h.runtime.active(city.id) shouldBe false
+            h.removed shouldBe emptyList()
+            repeat(30) { h.completeLoads(evictUnticketed = true); h.pulse() }
+            h.runtime.active(city.id) shouldBe true
+            val expanded = CivsChunkArea.developed(city).union(requireNotNull(CivsChunkArea.around(city.worldId, listOf(actor)))).keys()
+            h.added.toSet() shouldBe expanded
+            h.added.groupingBy { it }.eachCount().values.all { it == 1 } shouldBe true
+            h.extraPositions = emptyMap()
+            h.pulse()
+            h.runtime.active(city.id) shouldBe true
+            h.removed.toSet() shouldBe expanded - initial
+            h.runtime.retainedChunks shouldBe initial.size
+        }
+    }
+
+    for (rotation in listOf(0, 90, 180, 270))
+    test("rotated work areas and saved mine lineage remain within the permanent envelope at $rotation degrees") {
+        val city = chunkCity(UUID.randomUUID()).copy(center = CivPosition(-65, 64, -65))
+        val farm = chunkBuilding(city.center).copy(type = BuildingType.FARM, rotation = rotation,
+            schematicId = "civs/minecolonies/nordic/agriculture/horticulture/farmer1")
+        val forest = chunkBuilding(city.center).copy(type = BuildingType.FORESTER, rotation = rotation,
+            schematicId = "civs/minecolonies/nordic/fundamentals/lumberjack1")
+        val mine = chunkBuilding(city.center).copy(type = BuildingType.QUARRY, rotation = rotation,
+            schematicId = "civs/minecolonies/nordic/fundamentals/miner1")
+        val oldMine = mine.copy(anchor = CivPosition(-160, 64, -160),
+            bounds = CivBox(CivPosition(-160, 64, -160), CivPosition(-158, 67, -158)), entrance = CivPosition(-160, 64, -160))
+        val tree = CivForestryJob(UUID.randomUUID(), CivPosition(160, 64, -65), "OAK_SAPLING",
+            listOf(CivPosition(160, 64, -65)), listOf("minecraft:oak_log"), listOf(15 or (15 shl 5)))
+        val developed = city.copy(buildings = listOf(farm, forest, mine),
+            minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, 1,
+                v3Step = 1, levels = listOf(CivMineLevelWitness(oldMine, 3, 1)))),
+            forestryJobs = mapOf(forest.id.toString() to tree))
+        val keys = CivsChunkArea.developed(developed).keys()
+        val search = CivsWorksiteLayouts.site(forest)!!.getAsJsonObject("forester").getAsJsonObject("searchBounds")
+        val positions = CivsWorksiteLayouts.field(farm) + CivsWorksiteLayouts.irrigation(farm) +
+            listOf("min", "max").map { CivsWorksiteLayouts.point(forest, CivsWorksiteLayouts.vector(search[it])) } +
+            requireNotNull(CivsMinePlan.forBuilding(mine)).steps.map { CivsWorksiteLayouts.point(mine, it.point) } +
+            requireNotNull(CivsMinePlan.forBuilding(oldMine, 3)).steps.map { CivsWorksiteLayouts.point(oldMine, it.point) } + tree.root
+        positions.forEach { p ->
+            (PaperChunkKey(city.worldId, p.x shr 4, p.z shr 4) in keys) shouldBe true
+        }
+    }
+
+    test("a capacity-denied moving endpoint suspends city activity without replacing its old leases") {
+        chunkRuntime(limit = 16) { h ->
+            val city = chunkCity(h.world.uid)
+            h.cities = listOf(city)
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            repeat(20) { h.pulse() }
+            h.runtime.active(city.id) shouldBe true
+            h.extraPositions = mapOf(city.id to listOf(CivPosition(96, 64, 96)))
+            h.pulse()
+            h.runtime.active(city.id) shouldBe false
+            h.runtime.retainedChunks shouldBe 16
+            h.removed shouldBe emptyList()
+            h.extraPositions = emptyMap()
+            h.pulse()
+            h.runtime.active(city.id) shouldBe true
+            h.added.size shouldBe 16
+        }
+    }
+
+    test("a temporary scan shares permanent and recovery demand until its last owner retires") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            val key = CivsChunkArea.developed(city).keys().first()
+            h.cities = listOf(city)
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            val demand = h.runtime.request(city.owner, city.worldId, setOf(key))
+            h.recoveryChunks = listOf(setOf(key))
+            repeat(20) { h.pulse() }
+            demand.ready() shouldBe true
+            h.added.count { it == key } shouldBe 1
+            h.cities = emptyList()
+            h.recoveryChunks = emptyList()
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 1
+            demand.ready() shouldBe true
+            demand.close()
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 0
+            h.removed.count { it == key } shouldBe 1
+        }
+    }
+
+    test("temporary survey loads remain bounded and never activate an unrelated city") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 32)
+            val keys = CivsChunkArea.of(city).keys()
+            h.perChunkLoads = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            val demand = h.runtime.request(city.owner, city.worldId, keys)
+            repeat(80) {
+                val before = h.added.size
+                h.pulse(); h.completeLoads(evictUnticketed = true)
+                (h.added.size - before <= 2) shouldBe true
+                (h.loads.values.count { !it.isDone } <= 2) shouldBe true
+            }
+            demand.ready() shouldBe true
+            h.runtime.active(city.id) shouldBe false
+            h.added.toSet() shouldBe keys
+            demand.close()
+            repeat(3) { h.pulse() }
+            h.runtime.retainedChunks shouldBe 0
+        }
+    }
+
+    for (stop in listOf("cancel", "reset", "world-unload", "close"))
+    test("$stop retires pending temporary demand before a late async load can pin it") {
+        chunkRuntime { h ->
+            val key = PaperChunkKey(h.world.uid, -20, 30)
+            h.perChunkLoads = true
+            val demand = h.runtime.request(UUID.randomUUID(), h.world.uid, setOf(key))
+            h.pulse()
+            if (stop == "cancel") CompletableFuture.runAsync { demand.close() }.join()
+            else if (stop == "reset") h.runtime.reset()
+            else if (stop == "close") h.runtime.close()
+            else {
+                val event = mockk<WorldUnloadEvent>()
+                every { event.world } returns h.world
+                h.runtime.worldUnloading(event)
+            }
+            // Deliberately complete before another pulse: the owner has already withdrawn demand.
+            h.completeLoad(key, evictUnticketed = true)
+            h.pulse()
+            h.added shouldBe emptyList()
+            h.runtime.retainedChunks shouldBe 0
+            shouldThrow<CivsRejection> { demand.ready() }
+        }
     }
 
     test("whole-city admission waits for every ticking ticket and uses no more than two acquisitions per pulse") {
@@ -549,6 +739,9 @@ class CivsChunkLoadingTest : FunSpec({
 private fun chunkCity(world: UUID, radius: Int = 96) = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Town", world,
     CivPosition(0, 64, 0), radius, "nordic", Stock(), emptyList(), emptyList())
 
+private fun chunkBuilding(p: CivPosition) = CivBuilding(UUID.randomUUID(), BuildingType.HOUSE, 1, p, 0, "test",
+    CivBox(p, p.copy(x = p.x + 2, y = p.y + 3, z = p.z + 2)), p, BuildingPhase.ACTIVE)
+
 private fun chunkRuntime(limit: Int = 2048, run: (ChunkRuntime) -> Unit) {
     MockBukkitTestRuntime.open().use { paper ->
         val fixture = ChunkRuntime(paper, limit)
@@ -572,6 +765,7 @@ private class ChunkRuntime(paper: MockBukkitTestRuntime, limit: Int) {
     var level = Chunk.LoadLevel.TICKING
     var cities = emptyList<Settlement>()
     var recoveryChunks = emptyList<Set<PaperChunkKey>>()
+    var extraPositions = emptyMap<UUID, Collection<CivPosition>>()
     val added = mutableListOf<PaperChunkKey>()
     val removed = mutableListOf<PaperChunkKey>()
     var failRelease: PaperChunkKey? = null
@@ -627,5 +821,5 @@ private class ChunkRuntime(paper: MockBukkitTestRuntime, limit: Int) {
     fun completeLoads(evictUnticketed: Boolean) {
         loads.filterValues { !it.isDone }.keys.toList().forEach { completeLoad(it, evictUnticketed) }
     }
-    fun pulse() { runtime.pulse(cities, recoveryChunks) }
+    fun pulse() { runtime.pulse(cities, recoveryChunks, extraPositions) }
 }

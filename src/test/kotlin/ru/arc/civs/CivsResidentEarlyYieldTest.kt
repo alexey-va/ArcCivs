@@ -9,7 +9,7 @@ import java.util.UUID
 
 class CivsResidentEarlyYieldTest : FunSpec({
     for (obstruction in listOf("clear", "solid", "player"))
-    test("a ready resident collision starts an early detour while its neighbour stays fixed with $obstruction side corridors") {
+    test("a ready resident contact keeps its route and native terrain while its neighbour stays fixed with $obstruction side corridors") {
         residentRuntime { h ->
             val quarry = h.assignQuarry().copy(control = null, production = null,
                 bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)))
@@ -54,16 +54,25 @@ class CivsResidentEarlyYieldTest : FunSpec({
             val before = h.city
             val fixed = actors.getValue(blocker).location
             val original = requireNotNull(h.routeMotion(h.workerId))
-            val route = requireNotNull(h.routeIdentity(h.workerId))
+            val route = requireNotNull(h.routeIdentity(h.workerId)) as CitizenRoute
             val phase = h.phase()
             val collisions = h.nativeCollisions()
             try {
                 h.owner.residentStepAllowed = { npc, from, to -> npc.uniqueId != blocker && collisions.canResidentMove(npc, from, to) }
-                var detouredAt: Int? = null
+                fun nativeRefreshes(): Any? = ((h.owner.debug(h.city.id, null)["planner_global"] as Map<*, *>)["snapshot_cache"] as Map<*, *>)["refresh_batches"]
+                val nativeRefreshesBefore = nativeRefreshes()
+                var passingAt: Int? = null
                 repeat(8) { tick ->
                     val previous = actors.mapValues { it.value.location }
                     h.navigate()
-                    if (h.routeMotion(h.workerId)?.let { it !== original } == true && detouredAt == null) detouredAt = tick + 1
+                    withClue("contact tick=$tick ${h.navigationState()}") {
+                        (h.routeMotion(h.workerId) === original) shouldBe true
+                        route.replanAttempts shouldBe 0
+                        route.previousMotion shouldBe null
+                        original.searching shouldBe false
+                        nativeRefreshes() shouldBe nativeRefreshesBefore
+                    }
+                    if (h.owner.passingBodies(actors.getValue(h.workerId)) && passingAt == null) passingAt = tick + 1
                     actors.getValue(blocker).location shouldBe fixed
                     actors.keys.any(h::yielding) shouldBe false
                     actors.forEach { (id, npc) ->
@@ -72,7 +81,7 @@ class CivsResidentEarlyYieldTest : FunSpec({
                         citizenPacketSupported(h.world, npc.location.point()) shouldBe true
                     }
                 }
-                withClue(h.owner.debug(h.city.id, null)) { (detouredAt != null && detouredAt!! <= 8) shouldBe true }
+                withClue(h.owner.debug(h.city.id, null)) { (passingAt != null && passingAt!! <= 8) shouldBe true }
                 h.routeIdentity(h.workerId) shouldBe route
                 h.phase() shouldBe phase
                 h.deliveries shouldBe 0
@@ -80,6 +89,61 @@ class CivsResidentEarlyYieldTest : FunSpec({
                 h.pickups shouldBe 0
                 h.city shouldBe before
             } finally { collisions.close() }
+        }
+    }
+    test("a resident at the finished endpoint waits without replanning or work until its neighbour leaves") {
+        residentRuntime { h ->
+            h.prepareMineWork(CivPosition(23, 64, 0), focus = CivPosition(26, 64, 0))
+            val blocker = UUID(0, 99)
+            h.city = h.city.copy(workers = h.city.workers + CivWorker(blocker, "Waiting neighbour", null))
+            h.idleReason = "searching-work"
+            h.navigationNow = 2_000
+            repeat(2) { h.owner.pulse(2_000) }
+            val actors = h.owner.collisionActors().associateBy { it.uniqueId }
+            val walker = actors.getValue(h.workerId)
+            val neighbour = actors.getValue(blocker)
+            val aside = Location(h.world, 10.5, 64.0, 10.5)
+            neighbour.teleport(aside)
+            h.nativeCollisions().use { collisions ->
+                h.owner.residentStepAllowed = { npc, from, to ->
+                    npc.uniqueId != blocker && collisions.canResidentMove(npc, from, to)
+                }
+                for (tick in 1..500) {
+                    h.navigate()
+                    if (h.routeFinished(h.workerId)) break
+                }
+                withClue(h.navigationState()) {
+                    h.routeFinished(h.workerId) shouldBe true
+                    h.phase() shouldBe CitizenPhase.TO_WORK
+                }
+                val route = requireNotNull(h.routeIdentity(h.workerId)) as CitizenRoute
+                val motion = route.motion
+                // A real endpoint was reached, but its next coarse work pulse must still see the new occupant.
+                neighbour.teleport(walker.location.clone().add(-.2, 0.0, 0.0))
+                val occupied = neighbour.location
+                repeat(6) {
+                    val previous = walker.location
+                    h.navigate()
+                    h.owner.pulse(requireNotNull(h.navigationNow))
+                    withClue(h.navigationState()) {
+                        (previous.distance(walker.location) <= .050001) shouldBe true
+                        neighbour.location shouldBe occupied
+                        (h.routeMotion(h.workerId) === motion) shouldBe true
+                        route.replanAttempts shouldBe 0
+                        route.previousMotion shouldBe null
+                        motion.searching shouldBe false
+                        route.completion shouldBe null
+                        h.phase() shouldBe CitizenPhase.TO_WORK
+                        h.observedWork() shouldBe 0
+                        h.deliveries shouldBe 0
+                    }
+                }
+                neighbour.teleport(aside)
+                h.navigate()
+                h.owner.pulse(requireNotNull(h.navigationNow))
+                withClue(h.navigationState()) { h.phase() shouldBe CitizenPhase.WORKING }
+                h.deliveries shouldBe 0
+            }
         }
     }
 

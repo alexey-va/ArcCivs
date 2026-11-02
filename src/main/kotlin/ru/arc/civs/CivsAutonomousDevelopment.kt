@@ -8,6 +8,45 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 import java.util.logging.Level
 
+/** A geometric refusal remains useful until its inputs change; unknown external edits get a bounded retry. */
+internal class CivsAutonomousSearchFailures(private val lifetimeMillis: Long = 300_000) {
+    private data class Refusal(val owner: UUID, val world: UUID, val center: CivPosition, val radius: Int,
+        val layout: String, val type: BuildingType, val level: Int, val building: UUID?, val until: Long)
+    private val refused = mutableMapOf<UUID, Refusal>()
+    private val suppressed = mutableMapOf<UUID, Long>()
+
+    fun remember(city: Settlement, goal: CivAutonomyGoal, reason: String, now: Long) {
+        if (reason !in setOf("autonomy-no-site", "autonomy-no-path")) return
+        refused[city.id] = Refusal(city.owner, city.worldId, city.center, city.radius, civsPlanBoardLayoutKey(city),
+            goal.type, goal.targetLevel, goal.buildingId, now + lifetimeMillis)
+    }
+
+    fun blocked(city: Settlement, goal: CivAutonomyGoal, now: Long): Boolean {
+        val old = refused[city.id] ?: return false
+        if (now >= old.until || old.owner != city.owner || old.world != city.worldId || old.type != goal.type ||
+            old.level != goal.targetLevel || old.building != goal.buildingId || old.layout != civsPlanBoardLayoutKey(city)) {
+            refused.remove(city.id)
+            return false
+        }
+        suppressed[city.id] = (suppressed[city.id] ?: 0L) + 1
+        return true
+    }
+
+    fun changed(world: UUID, point: CivPosition): Set<UUID> {
+        val affected = refused.filterValues { old -> old.world == world &&
+            kotlin.math.abs(point.x.toLong() - old.center.x) <= old.radius.toLong() + 1 &&
+            kotlin.math.abs(point.z.toLong() - old.center.z) <= old.radius.toLong() + 1 }.keys.toSet()
+        affected.forEach(refused::remove)
+        return affected
+    }
+
+    fun debug(city: UUID): Map<String, Any?> = mapOf("cached" to (city in refused),
+        "retry_at" to refused[city]?.until, "suppressed_searches" to (suppressed[city] ?: 0L))
+    fun retain(cities: Set<UUID>) { refused.keys.retainAll(cities); suppressed.keys.retainAll(cities) }
+    fun remove(city: UUID) { refused.remove(city) }
+    fun clear() { refused.clear(); suppressed.clear() }
+}
+
 /** Main-thread autonomous planning and retry lifecycle; the city authority commits every accepted design. */
 internal class CivsAutonomousDevelopment(
     private val plugin: Plugin,
@@ -41,6 +80,7 @@ internal class CivsAutonomousDevelopment(
     private val autonomyProgress = mutableMapOf<UUID, CivsAutonomyView>()
     private val autonomyRetryAt = mutableMapOf<UUID, Long>()
     private val autonomyPlanRetryAt = mutableMapOf<UUID, Long>()
+    private val searchFailures = CivsAutonomousSearchFailures()
     private data class UnpaidRecoveryCursor(val owner: UUID, val worldId: UUID, val layoutKey: String,
         val type: BuildingType, val buildingId: UUID,
         val skipPrepared: Int = 0) {
@@ -58,9 +98,11 @@ internal class CivsAutonomousDevelopment(
     fun progress(cityId: UUID): CivsAutonomyView? = autonomyProgress[cityId]
     fun debug(cityId: UUID): Map<String, Any?> = mapOf(
         "request" to autonomyRequests[cityId], "retry_at" to autonomyRetryAt[cityId],
+        "geometric_refusal" to searchFailures.debug(cityId),
         "placement" to autonomousPlacement.debug(cityId))
 
     fun paused(cityId: UUID) {
+        searchFailures.remove(cityId)
         developmentFinished(cityId)
         autonomyRequests.remove(cityId)
         autonomyRetryAt.remove(cityId)
@@ -69,6 +111,7 @@ internal class CivsAutonomousDevelopment(
     }
 
     fun reset() {
+        searchFailures.clear()
         (autonomyRequests.keys + autonomyProgress.keys + autonomyRetryAt.keys).toSet().forEach(developmentFinished)
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
@@ -81,6 +124,7 @@ internal class CivsAutonomousDevelopment(
     }
 
     fun cancel() {
+        searchFailures.clear()
         (autonomyRequests.keys + autonomyProgress.keys + autonomyRetryAt.keys).toSet().forEach(developmentFinished)
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
@@ -137,6 +181,7 @@ internal class CivsAutonomousDevelopment(
     fun pulse() {
         if (now() < nextAutonomyAt) return
         nextAutonomyAt = now() + 5_000
+        searchFailures.retain(cities.keys)
         unpaidRecoveryCursors.entries.removeIf { (cityId, cursor) ->
             val latest = cities[cityId]
             val plan = latest?.let(CivsSettlementPlans::current)
@@ -214,6 +259,7 @@ internal class CivsAutonomousDevelopment(
         }
         if (!infrastructure && ordinary == null) return
         if (!goal.ready) return
+        if (!infrastructure && searchFailures.blocked(city, goal, now())) return
         val request = UUID.randomUUID()
         autonomyRequests[city.id] = request
         autonomyProgress[city.id] = CivsAutonomyView("searching", goal.type, goal.targetLevel)
@@ -465,6 +511,9 @@ internal class CivsAutonomousDevelopment(
     private fun autonomyFailed(cityId: UUID, goal: CivAutonomyGoal, failure: Throwable) {
         val rejection = CivsDiagnostics.rejection(failure)
         val reason = rejection?.reason ?: "placement-failed"
+        // A saved recovery cursor deliberately advances to a different candidate on its next attempt.
+        if (cityId !in unpaidRecoveryCursors && !goal.type.isInfrastructure)
+            cities[cityId]?.let { searchFailures.remember(it, goal, reason, now()) }
         // An upkeep admission retry keeps its one-job yield; other failed searches release ordinary maintenance.
         if (reason != "city-busy") developmentFinished(cityId)
         autonomyRetryAt[cityId] = now() + if (reason in setOf("world-busy", "city-busy", "stale-development")) 5_000 else 30_000
@@ -483,6 +532,10 @@ internal class CivsAutonomousDevelopment(
             }
         }
         if (CivsDiagnostics.rejection(failure) == null) log("develop autonomous settlement $cityId", failure, cityId)
+    }
+
+    fun terrainChanged(world: UUID, point: CivPosition) {
+        searchFailures.changed(world, point).forEach(autonomyRetryAt::remove)
     }
 
     private fun rejectIf(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason) }

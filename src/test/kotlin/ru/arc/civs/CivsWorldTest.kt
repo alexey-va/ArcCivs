@@ -1432,6 +1432,88 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("a wired future-land survey waits for its complete temporary footprint before sampling unloaded columns") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), radius = 32, autonomy = CivAutonomy())
+            s.cities += city
+            var ready = false
+            val demands = mutableListOf<CivsChunkDemand>()
+            s.subject.scanChunks = { owner, world, keys ->
+                owner shouldBe city.owner
+                world shouldBe city.worldId
+                CivsChunkDemand(owner, world, keys, 0) { ready }.also(demands::add)
+            }
+            val field = s.subject.autonomousHeightField(city, building)
+            s.scheduler.tick(5)
+            field.isDone shouldBe false
+            demands.size shouldBe 1
+            demands.single().keys shouldBe CivsChunkArea.of(city).keys()
+            demands.single().closed shouldBe false
+            // Only the existing loading owner makes terrain available. The scan neither loads
+            // chunks itself nor turns the unavailable future land into a cached no-site result.
+            demands.single().keys.forEach { s.world.loadChunk(it.x, it.z) }
+            ready = true
+            repeat(100) { if (!field.isDone) s.scheduler.tick() }
+            val result = completed(field)
+            result.columns.size shouldBe 65 * 65
+            result.columns.values.all { it.loaded } shouldBe true
+            result.at(32, 0)!!.natural shouldBe true
+            demands.single().closed shouldBe true
+        }
+    }
+
+    test("scan demand remains held through detached planning and the owning final context check") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 100, 0), CivPosition(1, 105, 0)))
+                .copy(anchor = CivPosition(0, 104, 0), entrance = CivPosition(-1, 105, 0))
+            val demands = mutableListOf<CivsChunkDemand>()
+            s.subject.scanChunks = { owner, world, keys ->
+                CivsChunkDemand(owner, world, keys, 0) { true }.also(demands::add)
+            }
+            val work = mutableListOf<Runnable>()
+            val captured = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(work::add))
+            s.scheduler.tick()
+            work.size shouldBe 1
+            captured.isDone shouldBe false
+            demands.single().closed shouldBe false
+            CompletableFuture.runAsync { work.single().run() }.join()
+            captured.isDone shouldBe false
+            demands.single().closed shouldBe false
+            s.scheduler.tick()
+            requireNotNull(completed(captured)).fillCount shouldBe 3 * (104 - 63)
+            demands.single().closed shouldBe true
+            s.world.getBlockAt(0, 100, 0).type shouldBe Material.AIR
+        }
+    }
+
+    for (stop in listOf("cancel", "close"))
+    test("$stop releases a scan demand while late detached completion cannot resume native work") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 100, 0), CivPosition(1, 105, 0)))
+                .copy(anchor = CivPosition(0, 104, 0), entrance = CivPosition(-1, 105, 0))
+            val demands = mutableListOf<CivsChunkDemand>()
+            s.subject.scanChunks = { owner, world, keys ->
+                CivsChunkDemand(owner, world, keys, 0) { true }.also(demands::add)
+            }
+            val work = mutableListOf<Runnable>()
+            val captured = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(work::add))
+            s.scheduler.tick()
+            work.size shouldBe 1
+            if (stop == "cancel") CompletableFuture.runAsync { captured.cancel(false) }.join()
+            else s.subject.close()
+            captured.isCancelled shouldBe true
+            demands.single().closed shouldBe true
+            CompletableFuture.runAsync { work.single().run() }.join()
+            s.scheduler.tick(3)
+            captured.isCancelled shouldBe true
+            demands.size shouldBe 1
+            s.world.getBlockAt(0, 100, 0).type shouldBe Material.AIR
+        }
+    }
+
     test("height field resolves soil below bounded canopy and bare logs without changing either") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(worldBox(0, 0))

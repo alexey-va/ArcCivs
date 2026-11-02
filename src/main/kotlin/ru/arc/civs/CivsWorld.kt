@@ -21,6 +21,7 @@ import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.api.ArcSchematicBlock
 import ru.arc.paper.api.ArcSceneObservationService
+import ru.arc.paper.chunk.PaperChunkKey
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
@@ -41,7 +42,8 @@ import ru.arc.civs.CivsTerrainPolicy.FALLING_GROUND
 /**
  * Settlement-specific placement policy; Core remains the sole schematic mutation owner.
  * Requests may arrive on any thread. All Bukkit reads run in one lifecycle-owned timer,
- * sharing a time-bounded 2048-cell budget across at most four scans. No scan loads a chunk.
+ * sharing a time-bounded 2048-cell budget across at most four scans. The existing chunk
+ * lifecycle prepares each scan's temporary footprint before its first native read.
  * Explicit storage rack repair is the guarded maintenance mutation in the same native budget.
  * Final revalidation must follow publication of the durable, protected construction footprint.
  */
@@ -53,9 +55,12 @@ class CivsWorld(
     private val cities: () -> Collection<Settlement>,
 ) : AutoCloseable {
     internal var onTerrainChanged: (UUID, Collection<CivPosition>) -> Unit = { _, _ -> }
+    internal var scanChunks: ((UUID, UUID, Set<PaperChunkKey>) -> CivsChunkDemand)? = null
     private val roadWorld = CivsRoadWorld(plugin, cities, ::canModify) { closed }
     private val monitor = Any()
     private val pending = LinkedHashSet<CivsWorldScan<*>>()
+    private val scanFootprints = mutableMapOf<CivsWorldScan<*>, Set<PaperChunkKey>>()
+    private val scanDemands = mutableMapOf<CivsWorldScan<*>, CivsChunkDemand>()
     private var closed = false
     private var nextScan = 0
     private var tickSequence = 0L
@@ -67,7 +72,7 @@ class CivsWorld(
         cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         cells: List<ArcSchematicBlock>, previous: CivBuilding?, terrain: CivTerraformPlan? = null,
         adminPlacement: Boolean = false,
-    ): CompletableFuture<CivPlacementPlan> = admit {
+    ): CompletableFuture<CivPlacementPlan> = admit(terrainPoints(terrain)) {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
         Capture(cityId, owner, worldId, building, cells.toList(), previous, terrain = terrain, adminPlacement = adminPlacement)
     }
@@ -75,7 +80,7 @@ class CivsWorld(
     /** A new site reserves its marker; an owned queued upgrade only records a proposal until fresh activation. */
     fun captureSite(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         cells: List<ArcSchematicBlock>, previous: CivBuilding?,
-        terrain: CivTerraformPlan? = null, adminPlacement: Boolean = false): CompletableFuture<CivPlacementPlan> = admit {
+        terrain: CivTerraformPlan? = null, adminPlacement: Boolean = false): CompletableFuture<CivPlacementPlan> = admit(terrainPoints(terrain)) {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
         Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true,
             terrain = terrain, adminPlacement = adminPlacement, upgradeProposal = true)
@@ -84,7 +89,7 @@ class CivsWorld(
     /** Automatic admission never treats the creator's edit permission as permission to clear buildings. */
     fun captureAutonomousSite(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         cells: List<ArcSchematicBlock>, terrain: CivTerraformPlan? = null,
-        previous: CivBuilding? = null): CompletableFuture<CivPlacementPlan> = admit {
+        previous: CivBuilding? = null): CompletableFuture<CivPlacementPlan> = admit(terrainPoints(terrain)) {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
         Capture(cityId, owner, worldId, building, cells.toList(), previous,
             allowControlPlacement = true, strictAutonomous = true, terrain = terrain)
@@ -92,14 +97,16 @@ class CivsWorld(
 
     /** Only explicitly requested columns survey water; ordinary building searches retain their dry-only scan. */
     internal fun autonomousHeightField(city: Settlement, envelope: CivBuilding,
-        previous: CivBuilding? = null, waterColumns: Set<Long> = emptySet()): CompletableFuture<CivTerrainSurface> = admit {
+        previous: CivBuilding? = null, waterColumns: Set<Long> = emptySet()): CompletableFuture<CivTerrainSurface> =
+        admit(area = surveyArea(city)) {
         requireCivs(waterColumns.size <= CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS, "autonomy-search-budget")
         AutonomousHeightField(city, envelope, previous, waterColumns.toSet())
     }
 
-    /** Administrative discovery only: unavailable chunks remain unavailable until its explicit loader prepares them. */
+    /** Administrative discovery retains the same explicit bounded survey footprint until its result retires. */
     internal fun prospectiveHeightField(city: Settlement, envelope: CivBuilding,
-        columns: List<CivPosition>? = null): CompletableFuture<CivTerrainSurface> = admit {
+        columns: List<CivPosition>? = null): CompletableFuture<CivTerrainSurface> =
+        admit(columns.orEmpty(), if (columns == null) surveyArea(city) else null) {
         requireCivs(city.autonomy != null && city.buildings.singleOrNull()?.id == envelope.id &&
             envelope.type == BuildingType.TOWN_HALL && envelope.level == 1, "invalid-building")
         columns?.let { requested ->
@@ -111,7 +118,8 @@ class CivsWorld(
     }
 
     internal fun captureTerraform(city: Settlement, draft: CivTerraformDraft, executor: Executor,
-        previous: CivBuilding? = null): CompletableFuture<CivTerraformPlan> = admit {
+        previous: CivBuilding? = null): CompletableFuture<CivTerraformPlan> = admit(
+        (draft.columns.asSequence().map { CivPosition(it.x, it.floorY, it.z) } + draft.route.asSequence()).asIterable()) {
         TerraformCapture(city, draft, executor, previous)
     }
 
@@ -145,18 +153,21 @@ class CivsWorld(
 
     internal fun autonomousRoute(city: Settlement, envelope: CivBuilding, from: CivPosition,
         executor: Executor, terrain: CivTerraformPlan? = null,
-        previous: CivBuilding? = null): CompletableFuture<Unit> = admit {
+        previous: CivBuilding? = null): CompletableFuture<Unit> =
+        admit(terrainPoints(terrain) + from, CivsChunkArea.of(city)) {
         AutonomousRoute(city, envelope, from, executor, terrain, previous)
     }
 
     /** The service journals the batch and fences worker arrival before permitting each native write. */
     fun applyTerraform(plan: CivPlacementPlan, owner: UUID, batchBlocks: List<CivPlanBlock>, terrainStart: Int,
-        canAdvance: () -> Boolean, onPlaced: (CivPlanBlock) -> Unit): CompletableFuture<Unit> = admit {
+        canAdvance: () -> Boolean, onPlaced: (CivPlanBlock) -> Unit): CompletableFuture<Unit> =
+        admit(terrainPoints(plan.terrain) + batchBlocks.map { it.position }) {
         requireCivs(batchBlocks.size in 1..16, "invalid-plan")
         TerraformApply(plan, owner, batchBlocks.toList(), terrainStart, canAdvance, onPlaced)
     }
 
-    internal fun repairStorageRacks(city: Settlement, building: CivBuilding, cells: List<CivPlanBlock>): CompletableFuture<Map<String, Int>> = admit {
+    internal fun repairStorageRacks(city: Settlement, building: CivBuilding, cells: List<CivPlanBlock>): CompletableFuture<Map<String, Int>> =
+        admit(cells.map { it.position }) {
         requireCivs(cells.size in 1..512 && cells.groupBy { it.position }.values.all { alternatives ->
             alternatives.size in 1..2 && alternatives.map { it.before }.distinct().size == alternatives.size &&
                 alternatives.map { it.after }.distinct().size == 1
@@ -166,13 +177,13 @@ class CivsWorld(
 
     /** Inverse journal cells restore an older access route; no construction credit, drops or resources. */
     internal fun repairAutonomousAccess(city: Settlement,
-        repairs: List<CivAutonomousAccessRepair>): CompletableFuture<Map<String, Int>> = admit {
+        repairs: List<CivAutonomousAccessRepair>): CompletableFuture<Map<String, Int>> = admit(repairs.map { it.cell.position }) {
         requireCivs(repairs.size in 1..512 && repairs.map { it.cell.position }.distinct().size == repairs.size, "invalid-plan")
         val protected = city.building(repairs.first().protectedBuildingId) ?: throw CivsRejection("stale-building")
         AutonomousAccessRepair(city, protected, repairs.toList())
     }
 
-    fun revalidate(plan: CivPlacementPlan, owner: UUID): CompletableFuture<Unit> = admit {
+    fun revalidate(plan: CivPlacementPlan, owner: UUID): CompletableFuture<Unit> = admit(terrainPoints(plan.terrain)) {
         requireCivs(plan.blocks.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
         Revalidation(plan.copy(blocks = plan.blocks.toList()), owner)
     }
@@ -275,15 +286,45 @@ class CivsWorld(
     internal fun scanCities(): Collection<Settlement> = cities()
     internal fun retireScan(scan: CivsWorldScan<*>) { synchronized(monitor) { pending.remove(scan) } }
 
-    private fun <T> admit(create: () -> CivsWorldScan<T>): CompletableFuture<T> = synchronized(monitor) {
+    private fun terrainPoints(terrain: CivTerraformPlan?): List<CivPosition> =
+        terrain?.let { listOf(it.bounds.min, it.bounds.max) + it.route }.orEmpty()
+
+    private fun surveyArea(city: Settlement): CivsChunkArea = CivsChunkArea.of(city.copy(radius = city.radius.coerceIn(0, 127)))
+
+    private fun <T> admit(extra: Iterable<CivPosition> = emptyList(), area: CivsChunkArea? = null,
+        create: () -> CivsWorldScan<T>): CompletableFuture<T> = synchronized(monitor) {
         if (closed || timer == null) return@synchronized CompletableFuture.failedFuture(CivsRejection("world-closed"))
         pending.removeIf { it.future.isDone }
         if (pending.size >= MAX_SCANS) return@synchronized CompletableFuture.failedFuture(CivsRejection("world-busy"))
         try {
-            create().also { pending += it }.future
+            create().also { scan ->
+                val building = scan.building
+                var footprint = requireNotNull(CivsChunkArea.around(scan.worldId,
+                    listOfNotNull(building.bounds.min, building.bounds.max, building.entrance, building.control)))
+                CivsChunkArea.around(scan.worldId, extra)?.let { footprint = footprint.union(it) }
+                area?.let { footprint = footprint.union(it) }
+                scanFootprints[scan] = footprint.keys()
+                pending += scan
+                // Keep native ownership during detached planning and the final context check.
+                // Cancellation may arrive off-thread; close only marks demand for the loader's next pulse.
+                scan.future.whenComplete { _, _ -> synchronized(monitor) {
+                    scanDemands.remove(scan)?.close()
+                    scanFootprints.remove(scan)
+                    pending.remove(scan)
+                } }
+            }.future
         } catch (failure: RuntimeException) {
             CompletableFuture.failedFuture(failure)
         }
+    }
+
+    private fun chunksReady(scan: CivsWorldScan<*>): Boolean {
+        val request = scanChunks ?: return true
+        val demand = synchronized(monitor) {
+            if (scan.future.isDone) return false
+            scanDemands.getOrPut(scan) { request(scan.owner, scan.worldId, scanFootprints.getValue(scan)) }
+        }
+        return demand.ready()
     }
 
     private fun tick() {
@@ -296,13 +337,18 @@ class CivsWorld(
         }
         if (scans.isEmpty()) return
         val started = nanoTime()
-        scans.forEach { scan -> scan.guarded { scan.validateContext() } }
+        val loaded = scans.filter { scan ->
+            var ready = false
+            scan.guarded { scan.validateContext(); ready = chunksReady(scan) }
+            ready && !scan.future.isDone
+        }
+        if (loaded.isEmpty()) return
         var remaining = CELLS_PER_TICK
         // Keep the next participant across ticks even when one expensive cell exhausts the time budget.
-        while (remaining > 0 && scans.any { !it.future.isDone && it.ready() }) {
+        while (remaining > 0 && loaded.any { !it.future.isDone && it.ready() }) {
             if (remaining < CELLS_PER_TICK && nanoTime() - started >= NANOS_PER_TICK) break
-            val scan = scans[nextScan.mod(scans.size)]
-            nextScan = (nextScan + 1).mod(scans.size)
+            val scan = loaded[nextScan.mod(loaded.size)]
+            nextScan = (nextScan + 1).mod(loaded.size)
             if (scan.future.isDone || !scan.ready()) continue
             scan.guarded { scan.step() }
             remaining--
