@@ -12,8 +12,71 @@ import java.security.MessageDigest
 import kotlin.math.abs
 import org.bukkit.Bukkit
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.civs.CivsAutonomousTerraform.Node
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("route node hashing avoids repeated equality probes for graded coordinate collisions") {
+        val nodes = buildList {
+            for (x in -16..15) for (z in -15..15) for (rise in -4..4)
+                for (direction in 0..3) for (climbed in listOf(false, true))
+                    add(Node(x, 64 + rise, z - 31 * rise, direction, climbed))
+        }
+        nodes.size shouldBe 71_424
+        nodes.toSet().size shouldBe nodes.size
+        val a = Node(-7, 64, -33, 1, false)
+        val b = a.copy(y = a.y + 1, z = a.z - 31)
+        (a == b) shouldBe false
+        legacyTerraformNodeHash(a) shouldBe legacyTerraformNodeHash(b)
+        fun probes(legacy: Boolean): Long {
+            val counter = longArrayOf(0)
+            val table = HashMap<TerraformNodeProbe, Int>(nodes.size * 2)
+            nodes.forEachIndexed { index, node -> table[TerraformNodeProbe(node, legacy, counter)] = index }
+            counter[0] = 0
+            nodes.forEachIndexed { index, node ->
+                table[TerraformNodeProbe(node.copy(), legacy, counter)] shouldBe index
+            }
+            return counter[0]
+        }
+        val legacy = probes(true)
+        val current = probes(false)
+        withClue("equality probes: legacy=$legacy current=$current nodes=${nodes.size}") {
+            (current * 2 < legacy) shouldBe true
+        }
+    }
+
+    test("route node identity retains every full integer and arrival history field") {
+        val edge = Node(Int.MIN_VALUE, Int.MAX_VALUE, Int.MIN_VALUE, -1, false)
+        val nodes = listOf(edge, edge.copy(x = Int.MAX_VALUE), edge.copy(y = Int.MIN_VALUE),
+            edge.copy(z = Int.MAX_VALUE), edge.copy(direction = 3), edge.copy(climbed = true))
+        val table = nodes.withIndex().associate { it.value to it.index }
+        table.size shouldBe nodes.size
+        nodes.forEachIndexed { index, node -> table[node.copy()] shouldBe index }
+    }
+
+    test("a negative retained graded corridor keeps its exact route and search counters") {
+        val original = terraceCity()
+        val start = CivPosition(-160, 1, -320)
+        val points = (0..40).map { step -> start.copy(x = start.x + step,
+            y = start.y + when { step >= 36 -> 2; step >= 31 -> 1; else -> 0 }) }
+        val hall = original.buildings.single().copy(anchor = start.copy(y = 0), entrance = start,
+            bounds = CivBox(start.copy(x = start.x - 4, y = 0, z = start.z - 8),
+                start.copy(x = start.x + 4, y = 6, z = start.z - 1)), control = null)
+        val city = original.copy(center = start.copy(y = 0), buildings = listOf(hall))
+        val target = hall.copy(id = UUID(0, 192), type = BuildingType.GATE,
+            anchor = points.last().copy(y = points.last().y - 1), entrance = points.last(),
+            bounds = CivBox(points.last().copy(x = points.last().x + 1, y = 2),
+                points.last().copy(x = points.last().x + 1, y = 6)), phase = BuildingPhase.CONSTRUCTING)
+        val surface = CivTerrainSurface(-64, 320, points.associate {
+            civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(it.y - 1, natural = false)
+        })
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val route = CivsAutonomousTerraform.connection(city, target, surface,
+            CivAutonomousAccess(routes = mapOf(hall.id to points)), emptyList(), searches::add)
+        route shouldBe points
+        searches.single() shouldBe CivRouteSearchStats(41, 41, 1, 41,
+            searches.single().elapsedMillis, "found", points.first(), points.last())
+    }
+
     test("reserved optional shoulders never omit mandatory centerline body or apron guards") {
         val city = terraceCity()
         val building = terraceBuilder(city)
@@ -721,6 +784,24 @@ internal fun exportRoadSection(name: String, surface: CivTerrainSurface, route: 
     }
     Files.writeString(output.resolve("$name.json"), Gson().toJson(mapOf("name" to name,
         "sourceSha256" to hashes, "route" to route, "before" to rows(before), "after" to rows(after))))
+}
+
+/** Kotlin data-class hash used by the frozen 191 Node, before component mixing. */
+private fun legacyTerraformNodeHash(node: Node): Int {
+    var result = node.x
+    result = result * 31 + node.y
+    result = result * 31 + node.z
+    result = result * 31 + node.direction
+    return result * 31 + node.climbed.hashCode()
+}
+
+private class TerraformNodeProbe(private val node: Node, private val legacy: Boolean,
+    private val counter: LongArray) {
+    override fun hashCode(): Int = if (legacy) legacyTerraformNodeHash(node) else node.hashCode()
+    override fun equals(other: Any?): Boolean {
+        counter[0]++
+        return other is TerraformNodeProbe && node == other.node
+    }
 }
 
 private data class MildBarrierFixture(val city: Settlement, val target: CivBuilding,

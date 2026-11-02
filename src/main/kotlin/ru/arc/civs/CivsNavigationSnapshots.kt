@@ -26,17 +26,24 @@ internal data class CitizenSnapshotState(val shape: CitizenTerrainShape, val dyn
 /** Paper owns the immutable chunk copy. Palette discovery runs only on the worker. */
 internal class CitizenSnapshotChunk(val snapshot: ChunkSnapshot, val minimumY: Int, val maximumY: Int, val revision: Long = 0) {
     private val sections = ConcurrentHashMap<Int, Map<BlockData, CivPosition>>()
-    fun states(minY: Int, maxY: Int): Map<BlockData, CivPosition> = buildMap {
-        for (section in (maxOf(minY, minimumY) shr 4)..(minOf(maxY, maximumY - 1) shr 4)) {
-            putAll(sections.computeIfAbsent(section) {
-                buildMap {
-                    for (y in maxOf(minimumY, section * 16) until minOf(maximumY, section * 16 + 16))
-                        for (z in 0..15) for (x in 0..15) {
-                            val data = snapshot.getBlockData(x, y, z)
-                            putIfAbsent(data, CivPosition(snapshot.x * 16 + x, y, snapshot.z * 16 + z))
+    private val palettes = ConcurrentHashMap<Int, ConcurrentHashMap<Int, Map<BlockData, CivPosition>>>()
+    fun states(minY: Int, maxY: Int): Map<BlockData, CivPosition> {
+        val first = maxOf(minY, minimumY) shr 4
+        val last = minOf(maxY, maximumY - 1) shr 4
+        return palettes.computeIfAbsent(first) { ConcurrentHashMap() }.computeIfAbsent(last) {
+            buildMap {
+                for (section in first..last) {
+                    putAll(sections.computeIfAbsent(section) {
+                        buildMap {
+                            for (y in maxOf(minimumY, section * 16) until minOf(maximumY, section * 16 + 16))
+                                for (z in 0..15) for (x in 0..15) {
+                                    val data = snapshot.getBlockData(x, y, z)
+                                    putIfAbsent(data, CivPosition(snapshot.x * 16 + x, y, snapshot.z * 16 + z))
+                                }
                         }
+                    })
                 }
-            })
+            }
         }
     }
     fun data(point: CivPosition): BlockData = snapshot.getBlockData(point.x and 15, point.y, point.z and 15)

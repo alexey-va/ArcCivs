@@ -4,6 +4,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.types.shouldBeSameInstanceAs
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.util.BoundingBox
@@ -16,6 +17,74 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 class CivsNavigationSnapshotsTest : FunSpec({
+    test("snapshot captures reuse unchanged blocks and preserve the complete ordered neighbourhood map") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            for (base in listOf(-3, 2)) {
+                val terrain = flatSnapshotTerrain(base shr 4, base shr 4)
+                val probes = listOf(base, base + 1).map { x ->
+                    val node = CitizenSearchNode(x, 64.0, base)
+                    CitizenSearchProbe(node, node.point())
+                }
+                val captures = completeSnapshotCapture(terrain, probes, 1.0)
+                for (capture in captures) {
+                    val node = capture.probe.node
+                    val expected = buildMap {
+                        for (x in node.x - 1..node.x + 1) for (z in node.z - 1..node.z + 1)
+                            for (y in 61..67) put(CivPosition(x, y, z), terrain.blocks.getValue(CivPosition(x, y, z)))
+                    }
+                    capture.blocks shouldBe expected
+                    capture.blocks.keys.toList() shouldBe expected.keys.toList()
+                    capture.blocks.size shouldBe 63
+                    for ((point, block) in expected) capture.blocks[point] shouldBeSameInstanceAs block
+                    for (point in listOf(CivPosition(node.x - 2, 64, node.z), CivPosition(node.x + 2, 64, node.z),
+                        CivPosition(node.x, 60, node.z), CivPosition(node.x, 68, node.z),
+                        CivPosition(node.x, 64, node.z - 2), CivPosition(node.x, 64, node.z + 2),
+                        CivPosition(Int.MIN_VALUE, 64, node.z), CivPosition(Int.MAX_VALUE, 64, node.z))) {
+                        capture.blocks[point] shouldBe null
+                        capture.blocks.containsKey(point) shouldBe false
+                    }
+                }
+            }
+        }
+    }
+
+    test("overlapping snapshot captures share resolved costs while later cost knowledge leaves published captures unchanged") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val terrain = flatSnapshotTerrain(0, 0)
+            val probes = listOf(2, 3).map { x ->
+                val node = CitizenSearchNode(x, 64.0, 2)
+                CitizenSearchProbe(node, node.point())
+            }
+            val captures = completeSnapshotCapture(terrain, probes, 2.25)
+            val shared = CivPosition(3, 63, 2)
+            captures.first().blocks.getValue(shared).cost shouldBe 2.25
+            captures.first().blocks[shared] shouldBeSameInstanceAs captures.last().blocks[shared]
+            val oldValues = captures.map { it.blocks.toMap() }
+            val newlyCosted = captures.first().blocks.keys.first { it !in terrain.costs }
+            val policy = CitizenSnapshotPolicy({ p, _ -> p.y == 64 }, { _, _ -> true })
+            val next = CitizenSnapshotCapture(probes, terrain, policy, -64, 320, 32768, probes.size, false)
+                .advance(CitizenSnapshotInput(costs = mapOf(newlyCosted to Double.POSITIVE_INFINITY)))
+            requireNotNull(next.captures).first().blocks.getValue(newlyCosted).cost shouldBe Double.POSITIVE_INFINITY
+            captures.map { it.blocks } shouldBe oldValues
+            captures.first().blocks.getValue(newlyCosted).cost shouldBe 1.0
+        }
+    }
+
+    test("immutable chunk palette ranges reuse their merged state map and keep later section sample precedence") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val terrain = flatSnapshotTerrain(-1, -1)
+            val chunk = terrain.chunks.getValue(CitizenSnapshotKey(-1, -1))
+            val first = chunk.states(61, 67)
+            val stone = first.keys.single { it.material == Material.STONE }
+            val air = first.keys.single { it.material == Material.AIR }
+            first.getValue(stone) shouldBe CivPosition(-16, 48, -16)
+            first.getValue(air) shouldBe CivPosition(-16, 64, -16)
+            chunk.states(60, 68) shouldBeSameInstanceAs first
+            chunk.states(61, 63).getValue(stone) shouldBe CivPosition(-16, 48, -16)
+            chunk.states(64, 67).getValue(air) shouldBe CivPosition(-16, 64, -16)
+        }
+    }
+
     test("registered player block listeners ignore cancellation and batch accepted edits") {
         residentRuntime { h ->
             h.assignFarm()
@@ -259,3 +328,27 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 })
+
+private fun flatSnapshotTerrain(x: Int, z: Int): CitizenSnapshotTerrain {
+    val terrain = CitizenSnapshotTerrain()
+    val snapshot = CivsNavigationChunkSnapshotFixture(x, z, -64, 320, "capture-reuse", 0,
+        org.bukkit.Bukkit.createBlockData(Material.STONE), emptyMap())
+    val chunk = CitizenSnapshotChunk(snapshot, -64, 320)
+    terrain.chunks[CitizenSnapshotKey(x, z)] = chunk
+    chunk.states(61, 67).forEach { (data, _) ->
+        terrain.states[data] = CitizenSnapshotState(CitizenTerrainShape(false, false, false, false,
+            if (data.material.isAir) emptyList() else listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))), false)
+    }
+    return terrain
+}
+
+private fun completeSnapshotCapture(terrain: CitizenSnapshotTerrain, probes: List<CitizenSearchProbe>,
+    cost: Double): List<CitizenSearchCapture> {
+    val policy = CitizenSnapshotPolicy({ p, _ -> p.y == 64 }, { _, _ -> true })
+    val capture = CitizenSnapshotCapture(probes, terrain, policy, -64, 320, 32768, probes.size, false)
+    val request = capture.advance(CitizenSnapshotInput())
+    request.chunks shouldBe emptySet()
+    request.states shouldBe emptyMap()
+    request.dynamics shouldBe emptyMap()
+    return requireNotNull(capture.advance(CitizenSnapshotInput(costs = request.costs.associateWith { cost })).captures)
+}

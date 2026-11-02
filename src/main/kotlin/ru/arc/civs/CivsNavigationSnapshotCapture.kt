@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import org.bukkit.Material
 import org.bukkit.block.data.BlockData
+import java.util.AbstractMap.SimpleImmutableEntry
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.floor
@@ -33,6 +34,52 @@ internal data class CitizenSnapshotRequest(
     val capturedBlocks: Int = 0,
 )
 
+/** Fixed x/z/y order, with owned immutable keys and cell references instead of sixty-three map nodes. */
+private class CitizenSnapshotBlocks(
+    private val positions: List<CivPosition>,
+    private val cells: Array<CitizenTerrainBlock>,
+) : AbstractMap<CivPosition, CitizenTerrainBlock>() {
+    private val origin = positions.firstOrNull()
+    override val size: Int get() = cells.size
+
+    override fun get(key: CivPosition): CitizenTerrainBlock? {
+        val first = origin ?: return null
+        val x = key.x.toLong() - first.x
+        val y = key.y.toLong() - first.y
+        val z = key.z.toLong() - first.z
+        if (x !in 0L..2L || y !in 0L..6L || z !in 0L..2L) return null
+        return cells[(x.toInt() * 3 + z.toInt()) * 7 + y.toInt()]
+    }
+
+    override fun containsKey(key: CivPosition): Boolean = get(key) != null
+
+    override val entries: Set<Map.Entry<CivPosition, CitizenTerrainBlock>> = object : AbstractSet<Map.Entry<CivPosition, CitizenTerrainBlock>>() {
+        override val size: Int get() = cells.size
+        override fun iterator(): Iterator<Map.Entry<CivPosition, CitizenTerrainBlock>> = object : Iterator<Map.Entry<CivPosition, CitizenTerrainBlock>> {
+            private var next = 0
+            override fun hasNext(): Boolean = next < cells.size
+            override fun next(): Map.Entry<CivPosition, CitizenTerrainBlock> {
+                if (!hasNext()) throw NoSuchElementException()
+                val index = next++
+                return SimpleImmutableEntry(positions[index], cells[index])
+            }
+        }
+    }
+
+    /** Copy references only when needed; an older published capture never observes later cost knowledge. */
+    fun withCosts(resolve: (CivPosition, CitizenTerrainBlock) -> CitizenTerrainBlock): CitizenSnapshotBlocks {
+        var resolved: Array<CitizenTerrainBlock>? = null
+        for (index in cells.indices) {
+            val block = resolve(positions[index], cells[index])
+            if (block !== cells[index]) {
+                if (resolved == null) resolved = cells.copyOf()
+                resolved[index] = block
+            }
+        }
+        return resolved?.let { CitizenSnapshotBlocks(positions, it) } ?: this
+    }
+}
+
 /** Whole chunks are processed on the worker. Main resolves only palette exceptions and support costs. */
 internal class CitizenSnapshotCapture(
     probes: List<CitizenSearchProbe>,
@@ -44,11 +91,13 @@ internal class CitizenSnapshotCapture(
     private val maximumProbes: Int,
     private val connectedPrefetch: Boolean,
 ) {
+    private data class CapturedProbe(val probe: CitizenSearchProbe, val blocks: CitizenSnapshotBlocks,
+        val edges: List<CitizenSearchEdge>)
     private val probes = probes.toMutableList()
     private val requestedCount = probes.size
     private val prefetch = probes.none { it.incoming || it.node.initial }
     private val seen = probes.mapTo(hashSetOf()) { it.node }
-    private val completed = mutableListOf<CitizenSearchCapture>()
+    private val completed = mutableListOf<CapturedProbe>()
     private val requiredCosts = hashSetOf<CivPosition>()
     private val cancelled = AtomicBoolean()
     private var next = 0
@@ -107,13 +156,13 @@ internal class CitizenSnapshotCapture(
                 }
                 terrain.blocks[point] = block
             }
-            val blocks = positions.associateWith { terrain.blocks.getValue(it) }
+            val blocks = CitizenSnapshotBlocks(positions, Array(positions.size) { terrain.blocks.getValue(positions[it]) })
             val edges = citizenSearchCandidates(probe, blocks, minimumY, maximumY).map { edge ->
                 edge.copy(permitted = if (probe.incoming) policy.stepAllowed(edge.node.point(), probe.from)
                     else policy.stepAllowed(probe.from, edge.node.point()))
             }
             edges.forEach { edge -> requiredCosts += CivPosition(edge.node.x, citizenSupportY(edge.node.y), edge.node.z) }
-            completed += CitizenSearchCapture(probe, blocks, edges)
+            completed += CapturedProbe(probe, blocks, edges)
             if (prefetch && (next < requestedCount || connectedPrefetch)) for (edge in edges) {
                 if (probes.size >= maximumProbes) break
                 if (edge.permitted && probe.corridor?.contains(edge.node.point()) != false &&
@@ -128,9 +177,16 @@ internal class CitizenSnapshotCapture(
     private fun finish(): CitizenSnapshotRequest {
         val missing = requiredCosts.filterTo(linkedSetOf()) { it !in terrain.costs }
         if (missing.isNotEmpty()) return request(costs = missing.take(512).toSet())
-        return request(captures = completed.map { capture -> capture.copy(blocks = capture.blocks.mapValues { (point, block) ->
-            block.copy(cost = terrain.costs[point] ?: 1.0)
-        }) })
+        val resolved = hashMapOf<CivPosition, CitizenTerrainBlock>()
+        return request(captures = completed.map { capture ->
+            val blocks = capture.blocks.withCosts { point, block ->
+                resolved.getOrPut(point) {
+                    val cost = terrain.costs[point] ?: 1.0
+                    if (cost.toBits() == block.cost.toBits()) block else block.copy(cost = cost)
+                }
+            }
+            CitizenSearchCapture(capture.probe, blocks, capture.edges)
+        })
     }
 
     private fun material(point: CivPosition): Material? = if (point.y !in minimumY until maximumY) null

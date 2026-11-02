@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import it.unimi.dsi.fastutil.HashCommon
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet
@@ -431,7 +432,17 @@ internal object CivsAutonomousTerraform {
                 abs(it.x - building.entrance.x) + abs(it.z - building.entrance.z)
             }
 
-    private data class Node(val x: Int, val y: Int, val z: Int, val direction: Int = -1, val climbed: Boolean = false)
+    internal data class Node(val x: Int, val y: Int, val z: Int, val direction: Int = -1, val climbed: Boolean = false) {
+        override fun hashCode(): Int {
+            // A linear 31-based hash aliases distinct grades at y + 1, z - 31.
+            // Mix each full coordinate before combining the next; equality keeps every field.
+            var hash = HashCommon.mix(x)
+            hash = HashCommon.mix(hash xor y)
+            hash = HashCommon.mix(hash xor z)
+            hash = HashCommon.mix(hash xor direction)
+            return HashCommon.mix(hash xor climbed.hashCode())
+        }
+    }
     private data class Open(val node: Node, val cost: Int, val score: Int, val ordinal: Int)
     private data class HorizontalOpen(val key: Long, val distance: Int)
 
