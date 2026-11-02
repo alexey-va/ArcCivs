@@ -93,7 +93,7 @@ internal class CivsConstructionRuntime(
     fun loadLegacyRetries(records: Collection<Settlement>) {
         legacyPlacementRetries.clear()
         legacyPlacementRetries.addAll(records.mapNotNull { city -> city.construction?.takeIf {
-            it.phase == ConstructionPhase.PAUSED && it.failure in setOf("placement-failed", "chunk-unloaded", "chunks-unloaded", "world-unavailable")
+            it.phase == ConstructionPhase.PAUSED && it.failure in setOf("placement-failed", "chunk-unloaded", "chunks-unloaded", "world-unavailable", "world-busy")
         }?.id })
     }
 
@@ -232,7 +232,7 @@ internal class CivsConstructionRuntime(
             val w = plugin.server.getWorld(city.worldId) ?: continue
             if (!w.isChunkLoaded(b.entrance.x shr 4, b.entrance.z shr 4)) continue
             if (order.phase == ConstructionPhase.PAUSED && order.id in legacyPlacementRetries) {
-                // Older releases flattened temporary chunk unload into this generic failure. Try its current row once.
+                // Older releases persisted temporary world failures as a pause. Try the current row once.
                 legacyPlacementRetries -= order.id
                 mutate(city.id) { CivsRules.retryConstruction(it, it.owner, order.id) }
                     .whenComplete { _, failure -> if (failure != null) log("resume legacy construction ${order.id}", failure, city.id) }
@@ -561,11 +561,14 @@ internal class CivsConstructionRuntime(
         releasePlacement(cityId)
         if (closed || cityId in unhealthy || cities[cityId]?.pendingDeletion != null || cities[cityId]?.construction?.id != orderId) return
         val causes = generateSequence(failure) { it.cause }.take(16).toList()
+        val temporaryWorldFailure = causes.filterIsInstance<CivsRejection>().firstOrNull {
+            it.reason in setOf("chunk-unloaded", "chunks-unloaded", "world-unavailable", "world-busy")
+        }
         if (causes.filterIsInstance<ArcSchematicException>().any { it.reason == ArcSchematicFailure.WORLD_UNAVAILABLE } ||
-            causes.filterIsInstance<CivsRejection>().any { it.reason in setOf("chunk-unloaded", "chunks-unloaded", "world-unavailable") }) {
+            temporaryWorldFailure != null) {
             constructionRetryAfter[cityId] = now() + 5_000
             CivsDiagnostics.event("construction_waiting_world", "city" to cityId, "order" to orderId,
-                "batch" to cities[cityId]?.construction?.workDone, "reason" to "chunk-unloaded")
+                "batch" to cities[cityId]?.construction?.workDone, "reason" to (temporaryWorldFailure?.reason ?: "chunk-unloaded"))
             return
         }
         log("place construction $orderId", failure, cityId)

@@ -64,7 +64,7 @@ internal class CivsCitizenWork(
         if (!routes.canResetNightShelter(actor)) actor.nightHomeProgress.clear()
         actor.mealVisit?.let { visit ->
             if (visit.arrivedAt != null && (!life.lifeActorReady(actor) || visit.seat == null &&
-                !citizenArrived(actor.npc.location, visit.target.location(world)))) life.stopMeal(actor)
+                !visit.atTarget(actor.npc.location))) life.stopMeal(actor)
         }
         if (world.time in 12_000L..23_000L) {
             life.stopMeal(actor)

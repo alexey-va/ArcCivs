@@ -203,7 +203,8 @@ internal object CivsCarpentry {
             .distinctBy { it.cargo.id }.forEach { add(stock, it.cargo.material, it.cargo.amount) }
         val jobs = linkedMapOf<UUID, CivCraftJob>()
         fun outputsFit(batches: Collection<CivCraftJob>): Boolean {
-            val rooms = snapshot.stores.mapValues { CivSupplyRoom(it.value.capacity, snapshot.stackSizes) }
+            val rooms = snapshot.stores.mapValues { CivSupplyRoom(it.value.capacity, snapshot.stackSizes,
+                outputHeadroom = it.value.type in workshops) }
             val picked = linkedMapOf<UUID, MutableMap<String, Long>>()
             batches.forEach { job -> job.inputs.forEach { (material, count) ->
                 val carried = workers[job.workerId]?.carried?.get(material) ?: 0L

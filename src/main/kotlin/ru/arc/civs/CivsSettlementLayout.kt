@@ -647,7 +647,8 @@ internal object CivsSettlementLayout {
                     for (dy in 0..2) cells += CivSettlementBlock(floor.copy(y = floor.y + dy), "minecraft:barrier")
                 } else {
                     cells += CivSettlementBlock(floor, pathPavement(floor, pavedFloors, city.style, atTurn = floor in turns,
-                        downhill = routeOwners[floor]?.let { routeDownhill(floor, it) }))
+                        downhill = routeOwners[floor]?.let { routeDownhill(floor, it) }
+                            ?.takeIf { pavedFloors[key(it)] == it.y }))
                     for (dy in 1..2) cells += CivSettlementBlock(floor.copy(y = floor.y + dy), "minecraft:air")
                 }
                 transit += floor.copy(y = floor.y + 1)

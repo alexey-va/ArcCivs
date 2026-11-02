@@ -23,6 +23,7 @@ import org.bukkit.block.BlockState
 import org.bukkit.block.data.Ageable
 import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.type.Gate
+import org.bukkit.block.data.type.Slab
 import org.bukkit.block.data.type.Stairs
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
@@ -419,6 +420,136 @@ class CivsResidentsRuntimeTest : FunSpec({
             if (automatic) h.city.stock.food shouldBe 3L
             CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
             h.city.workers.single().completedCycles shouldBe 0L
+            h.deliveries shouldBe 0
+        }
+    }
+
+    for ((surface, feetY, feetZ) in listOf(
+        Triple("minecraft:dirt_path", 63.9375, 4.5),
+        Triple("minecraft:cobblestone_slab[type=bottom,waterlogged=false]", 63.5, 4.5),
+        Triple("minecraft:stone_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]", 63.5, 4.85)))
+    test("a carried meal keeps its exact fractional feet and consumes once surface=$surface") {
+        residentRuntime { h ->
+            h.navigationNow = 2_000
+            h.world.getBlockAt(4, 63, 4).blockData = Bukkit.createBlockData(surface)
+            // The lower stair half opens into a lower adjacent column, not a full-height bank.
+            if (feetZ > 4.5) h.world.getBlockAt(4, 63, 5).type = Material.AIR
+            val npc = h.owner.collisionActors().single()
+            val at = Location(h.world, 4.5, feetY, feetZ)
+            npc.teleport(at)
+            citizenPacketSupported(h.world, at.point()) shouldBe true
+            citizenPacketBodyClear(h.world, at.point(), false) shouldBe true
+            citizenStandable(h.world, CivPosition(at.blockX, at.blockY, at.blockZ)) shouldBe false
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(hunger = 14,
+                inventory = mapOf("BREAD" to 2L), life = CivResidentLife(awakeMinutes = 6)) })
+            val stock = h.city.stock
+            val teleports = h.teleports
+            var meals = 0
+            h.owner.finishResidentMeal = { cityId, plan ->
+                h.owner.validateResidentMeal(cityId, plan)
+                npc.location.toVector() shouldBe at.toVector()
+                h.city = CivsResidentLife.finishMeal(h.city, plan)
+                meals++
+                CompletableFuture.completedFuture(h.city)
+            }
+            h.owner.residentLifeEnabled = true
+            h.owner.pulse(2_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.eating"
+            h.owner.pulse(3_000)
+            h.owner.pulse(4_000)
+            h.owner.pulse(5_000)
+            meals shouldBe 0 // The existing meal contract requires four continuously observed seconds.
+            h.owner.pulse(6_000)
+            withClue(h.owner.debug(h.city.id, h.workerId)) { meals shouldBe 1 }
+            h.owner.pulse(7_000)
+            meals shouldBe 1
+            h.teleports shouldBe teleports
+            h.city.stock shouldBe stock
+            h.city.workers.single().hunger shouldBe 20
+            h.city.workers.single().life!!.meals shouldBe 1L
+            CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1L
+            h.city.workers.single().completedCycles shouldBe 0L
+            h.deliveries shouldBe 0
+        }
+    }
+
+    for (change in listOf("small-displacement", "support-removed", "body-blocked"))
+    test("a fractional meal rechecks its exact feet before a delayed receipt change=$change") {
+        residentRuntime { h ->
+            h.world.getBlockAt(4, 63, 4).type = Material.DIRT_PATH
+            val npc = h.owner.collisionActors().single()
+            val at = Location(h.world, 4.5, 63.9375, 4.5)
+            npc.teleport(at)
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(hunger = 14,
+                inventory = mapOf("BREAD" to 2L), life = CivResidentLife(awakeMinutes = 6)) })
+            val pending = CompletableFuture<Settlement>()
+            var proof: CivResidentMeal? = null
+            h.owner.finishResidentMeal = { cityId, plan ->
+                h.owner.validateResidentMeal(cityId, plan)
+                proof = plan
+                pending
+            }
+            h.owner.residentLifeEnabled = true
+            for (now in 2_000L..6_000L step 1_000) h.owner.pulse(now)
+            val accepted = requireNotNull(proof)
+            val before = h.city
+            when (change) {
+                "small-displacement" -> npc.teleport(at.clone().add(.1, 0.0, 0.0))
+                "support-removed" -> h.world.getBlockAt(4, 63, 4).type = Material.AIR
+                else -> h.world.getBlockAt(4, 64, 4).type = Material.STONE
+            }
+            shouldThrow<CivsRejection> { h.owner.validateResidentMeal(h.city.id, accepted) }.reason shouldBe "stale-meal"
+            h.city shouldBe before
+            CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 2L
+            h.city.workers.single().hunger shouldBe 14
+            h.city.workers.single().life!!.meals shouldBe 0L
+            h.deliveries shouldBe 0
+            pending.completeExceptionally(CivsRejection("stale-meal"))
+        }
+    }
+
+    test("a refused carried meal preserves the active courier search through repeated retries") {
+        residentRuntime { h ->
+            val (farm, courierId) = h.courierSource(material = "WHEAT", amount = 1)
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = null) })
+            h.idleReason = "searching-work"
+            h.owner.pulse(2_000)
+            val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last()) {
+                if (it == farm.id) mapOf("WHEAT" to 32L) else emptyMap()
+            })
+            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
+            val courier = h.owner.collisionActors().single { it.uniqueId == courierId }
+            courier.teleport(Location(h.world, 14.5, 64.0, .5))
+            h.holdNavigation = true
+            h.owner.pulse(3_000)
+            val route = requireNotNull(h.routeIdentity(courierId))
+            val motion = requireNotNull(h.routeMotion(courierId))
+            h.world.getBlockAt(14, 63, 0).blockData = Bukkit.createBlockData("minecraft:campfire[lit=true,waterlogged=false]")
+            courier.teleport(Location(h.world, 14.5, 63.4375, .5))
+            citizenPacketSupported(h.world, courier.location.point()) shouldBe true
+            citizenPacketBodyClear(h.world, courier.location.point(), false) shouldBe true
+            citizenPacketCampfireClear(h.world, courier.location.point()) shouldBe false
+            h.city = h.city.copy(workers = h.city.workers.map { if (it.id == courierId)
+                it.copy(hunger = 14, inventory = mapOf("BREAD" to 2L), life = CivResidentLife(awakeMinutes = 6)) else it })
+            val before = h.city
+            val teleports = h.teleports
+            h.owner.residentLifeEnabled = true
+            for (now in listOf(4_000L, 9_000L, 14_000L)) {
+                // The real courier handoff pulse runs meal admission without the independent environmental injury pulse.
+                h.owner.pulseFieldWork(now)
+                withClue(h.owner.debug(h.city.id, courierId)) {
+                    h.routeIdentity(courierId) shouldBe route
+                    h.routeMotion(courierId) shouldBe motion
+                    motion.searching shouldBe true
+                    h.mealState(courierId)["ticket"] shouldBe null
+                    h.mealState(courierId)["last_outcome"] shouldBe "session-unavailable"
+                    h.mealState(courierId)["last_outcome_at"] shouldBe now
+                }
+            }
+            h.teleports shouldBe teleports
+            h.city shouldBe before
+            h.pickups shouldBe 0
+            h.unloads shouldBe 0
             h.deliveries shouldBe 0
         }
     }
@@ -5223,9 +5354,11 @@ internal open class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
             }
             override fun getBoundingBox(): BoundingBox = if (type == Material.LADDER)
                 BoundingBox(x.toDouble(), y.toDouble(), z + 13.0 / 16.0, x + 1.0, y + 1.0, z + 1.0)
-            else BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + when (type) {
-                Material.AIR, Material.CAVE_AIR, Material.VOID_AIR -> 0.0
-                Material.FARMLAND, Material.DIRT_PATH -> .9375
+            else BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + when {
+                blockData is Slab && (blockData as Slab).type == Slab.Type.BOTTOM -> .5
+                type == Material.CAMPFIRE -> .4375
+                type.isAir -> 0.0
+                type == Material.FARMLAND || type == Material.DIRT_PATH -> .9375
                 else -> 1.0
             }, z + 1.0)
             override fun getCollisionShape(): VoxelShape = when {
@@ -5236,6 +5369,9 @@ internal open class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
                 }
                 type == Material.LADDER -> LADDER_SHAPE
                 type == Material.FARMLAND || type == Material.DIRT_PATH -> LOWERED_SHAPE
+                blockData is Slab && (blockData as Slab).type == Slab.Type.BOTTOM ->
+                    shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0)))
+                type == Material.CAMPFIRE -> shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .4375, 1.0)))
                 blockData is Stairs && (blockData as Stairs).half == Bisected.Half.BOTTOM &&
                     (blockData as Stairs).shape == Stairs.Shape.STRAIGHT -> {
                     val top = when ((blockData as Stairs).facing) {

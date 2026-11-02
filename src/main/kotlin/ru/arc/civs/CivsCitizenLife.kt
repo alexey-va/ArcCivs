@@ -358,13 +358,16 @@ internal class CivsCitizenLife(
             val plan = order ?: CivsResidentLife.mealPlan(city, worker, fallback, residentFoods) ?: return false
             val building = city.building(plan.buildingId) ?: return false
             val target = seat?.approach?.takeIf { order != null } ?: CivPosition(at.blockX, at.blockY, at.blockZ)
+            val hand = CivsEquipment.slots(worker)[4]?.stack() ?: ItemStack(citizenTool(actor.plan) ?: Material.AIR)
+            val candidate = CitizenMealVisit(plan, target, now, building, hand, seat = seat.takeIf { order != null },
+                foodSource = source.takeIf { order != null }, standing = at.point().takeIf { order == null })
+            // A rejected meal must not repeatedly retire an accepted work/cargo route.
+            if (!candidate.available(world)) return retryMeal(actor, now, "session-unavailable")
             workRuntime.rememberWorkDetour(actor)
             stopMeal(actor)
             routes.cancelRoute(actor)
             leisure.stopCamp(actor, "meal")
-            val hand = CivsEquipment.slots(worker)[4]?.stack() ?: ItemStack(citizenTool(actor.plan) ?: Material.AIR)
-            visit = CitizenMealVisit(plan, target, now, building, hand, seat = seat.takeIf { order != null },
-                foodSource = source.takeIf { order != null })
+            visit = candidate
             actor.mealVisit = visit
         } else if (visit.foodSource == null || visit.servedAt != null) {
             val current = CivsResidentLife.mealPlan(city, worker, visit.plan.buildingId, residentFoods, accepted = visit.plan)
@@ -375,12 +378,12 @@ internal class CivsCitizenLife(
         }
         val session = requireNotNull(visit)
         actor.cycle.deferWork(now)
-        if (now - session.startedAt > 60_000 || !citizenStandable(world, session.target) ||
-            session.seat?.let { !citizenDiningSeatClear(world, it) } == true) {
+        if (now - session.startedAt > 60_000 || !session.available(world) ||
+            session.standing != null && !session.atTarget(actor.npc.location)) {
             if (session.building.type == BuildingType.TAVERN) actor.mealVenueRetryAt = now + 30_000
             return retryMeal(actor, now, "session-unavailable")
         }
-        if (session.seatedFrom == null && !citizenArrived(actor.npc.location, session.target.location(world))) {
+        if (session.seatedFrom == null && !session.atTarget(actor.npc.location)) {
             runtime.statuses[worker.id] = "moving-to-tavern"
             if (actor.route?.let { it.completion != null || it.timedOut(now) } == true ||
                 actor.route == null && !routes.startRoute(actor, world, session.target, now)) {
@@ -439,7 +442,7 @@ internal class CivsCitizenLife(
             visit.foodSource != null && visit.servedAt == null ||
             visit.arrivedAt?.let { now - it >= plan.durationMillis } != true || now - visit.observedAt > 2_000 ||
             (if (visit.seat != null) !mealSeatStillSafe(actor)
-            else !citizenArrived(actor.npc.location, visit.target.location(actor.npc.world)))) throw CivsRejection("stale-meal")
+            else !visit.atTarget(actor.npc.location) || !visit.available(actor.npc.world))) throw CivsRejection("stale-meal")
     }
 
     fun lifeActorReady(actor: CitizenActor): Boolean = lifeActorUnavailable(actor) == null
@@ -594,6 +597,15 @@ internal data class CitizenMealVisit(var plan: CivResidentMeal, val target: CivP
     val seat: CitizenDiningSeat? = null, var seatedFrom: Location? = null,
     val foodSource: CivResidentFoodSource? = null, val ticket: UUID = UUID.randomUUID(),
     var seatedAt: Long? = null, var keeperId: UUID? = null, var servedAt: Long? = null,
-    var serviceRetryAt: Long = 0)
+    var serviceRetryAt: Long = 0,
+    /** A carried meal stays at the observed fractional feet; its integer cell is not a new route target. */
+    val standing: CitizenPoint? = null) {
+    fun available(world: World): Boolean = standing?.let {
+        citizenPacketSupported(world, it) && citizenPacketBodyClear(world, it, false) && citizenPacketCampfireClear(world, it)
+    } ?: (citizenStandable(world, target) && seat?.let { citizenDiningSeatClear(world, it) } != false)
+
+    fun atTarget(at: Location): Boolean = standing?.let { at.point() == it }
+        ?: citizenArrived(at, target.location(requireNotNull(at.world)))
+}
 internal data class CitizenMentorVisit(val teacherId: UUID, val age: Int, val target: CivPosition, val startedAt: Long,
     var arrivedAt: Long? = null, var observedAt: Long = 0)

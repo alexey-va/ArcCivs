@@ -36,6 +36,35 @@ class CivsSettlementLayoutTest : FunSpec({
         route.zipWithNext().all { (a, b) -> kotlin.math.abs(a.y - b.y) <= 1 } shouldBe true
     }
 
+    for (retainedGrade in listOf<Int?>(null, 65))
+    test("road paving ignores a downhill hint outside the final floor domain retainedGrade=$retainedGrade") {
+        val baseCity = layoutFixtureCity()
+        val route = listOf(CivPosition(12, 65, 12), CivPosition(13, 66, 12), CivPosition(14, 66, 12))
+        val lower = route.first().copy(y = route.first().y - 1)
+        val paid = retainedGrade?.let { grade ->
+            val floor = lower.copy(y = grade)
+            CivSettlementPiece(layoutId("retained-downhill"), BuildingType.ROAD,
+                CivBox(floor, floor.copy(y = grade + 2)), floor.copy(y = grade + 1, z = floor.z - 1),
+                listOf(CivSettlementBlock(floor, "minecraft:dirt_path"),
+                    CivSettlementBlock(floor.copy(y = grade + 1), "minecraft:air"),
+                    CivSettlementBlock(floor.copy(y = grade + 2), "minecraft:air")), listOf(floor.copy(y = grade + 1)))
+        }
+        val city = if (paid == null) baseCity else baseCity.copy(buildings = baseCity.buildings +
+            CivsInfrastructure.building(paid).copy(phase = BuildingPhase.ACTIVE))
+        val surface = layoutSurface(city, "flat").let { base -> base.copy(columns = base.columns +
+            route.associate { civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(it.y - 1, true) } +
+            (civsTerrainKey(lower.x, lower.z) to CivTerrainSurfaceColumn(retainedGrade ?: lower.y, false))) }
+        val frame = CivsSettlementLayout.frame(city).copy(wallObstacles = emptyList(), gates = emptyList())
+        val result = CivsSettlementLayout.infrastructure(city, frame, surface, listOf(route), listOfNotNull(paid))
+        result.rejected shouldBe emptyMap()
+        val fresh = result.pieces.filter { it.type == BuildingType.ROAD && it.id != paid?.id }
+        fresh.flatMap { it.transit }.toSet() shouldBe route.drop(1).toSet()
+        val cells = fresh.flatMap { it.blocks }.associate { it.position to it.after }
+        cells[route[1].copy(y = route[1].y - 1)] shouldBe "minecraft:dirt_path"
+        cells.keys.none { it.x == lower.x && it.z == lower.z } shouldBe true
+        if (paid != null) result.pieces.single { it.id == paid.id } shouldBe paid
+    }
+
     for ((facing, direction) in listOf("east" to (1 to 0), "west" to (-1 to 0),
         "south" to (0 to 1), "north" to (0 to -1)))
     test("paved $facing rises use style wood stairs and flat landings become dirt path") {

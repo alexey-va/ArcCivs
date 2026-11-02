@@ -5272,7 +5272,8 @@ class CivsServiceTest : FunSpec({
     for (chunkFailure in listOf(
         ArcSchematicException(ArcSchematicFailure.WORLD_UNAVAILABLE, "Schematic target chunk unloaded during mutation"),
         CivsRejection("chunks-unloaded"),
-    )) test("unloaded construction chunks wait and resume the paid row without another debit ${chunkFailure.javaClass.simpleName}") {
+        CivsRejection("world-busy"),
+    )) test("temporary construction world failures resume the paid row without another debit ${chunkFailure.javaClass.simpleName} ${CivsDiagnostics.rejection(chunkFailure)?.reason}") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true, stock = 7)
             h.start(); h.commit()
@@ -5295,10 +5296,11 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("a legacy generic placement failure gets one guarded retry after its chunk loads") {
+    for (reason in listOf("placement-failed", "world-busy"))
+    test("a legacy placement failure gets one guarded retry after its chunk loads reason=$reason") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(phase = ConstructionPhase.PAUSED, paid = true, stock = 7)
-            val recovering = placement.city.copy(construction = placement.city.construction!!.copy(failure = "placement-failed"))
+            val recovering = placement.city.copy(construction = placement.city.construction!!.copy(failure = reason))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(recovering))
             h.start(); h.paper.performTicks(20)
             h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.READY_TO_PLACE

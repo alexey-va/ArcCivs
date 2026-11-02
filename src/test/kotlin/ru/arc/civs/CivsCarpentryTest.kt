@@ -190,20 +190,22 @@ class CivsCarpentryTest : FunSpec({
         (replacement.id != job.id) shouldBe true
     }
 
-    test("one real empty slot cannot promise two different outputs and a full store admits none") {
+    test("one native output slot cannot promise two different outputs and reserved slots admit none") {
         val input = carpenterSnapshot("LADDER", 3).let { it.copy(
             requests = it.requests + CivSupplyRequest(CONSUMER, "OAK_PLANKS", 4, 0),
             craftWorkers = listOf(it.craftWorkers.single().copy(carried = mapOf("STICK" to 7L)),
                 it.craftWorkers.single().copy(workerId = UUID(0, 11), carried = mapOf("OAK_LOG" to 1L))),
-            stores = it.stores + (CARPENTER to it.stores.getValue(CARPENTER).copy(capacity = CivSupplyCapacity(1, emptyMap())))) }
+            stores = it.stores + (CARPENTER to it.stores.getValue(CARPENTER)
+                .copy(capacity = CivSupplyCapacity(3, emptyMap(), outputEmptySlots = 1)))) }
         craft(input).size shouldBe 1
         craft(input.copy(stores = input.stores + (CARPENTER to input.stores.getValue(CARPENTER)
-            .copy(capacity = CivSupplyCapacity(0, emptyMap()))))) shouldBe emptyMap()
+            .copy(capacity = CivSupplyCapacity(2, emptyMap(), outputEmptySlots = 0))))) shouldBe emptyMap()
     }
 
-    test("the last native slot first receives a log then becomes the output slot after pickup") {
+    test("the last native output slot first receives a log then becomes usable again after pickup") {
         var input = carpenterSnapshot("OAK_PLANKS", 4).let { it.copy(
-            stores = it.stores + (CARPENTER to it.stores.getValue(CARPENTER).copy(capacity = CivSupplyCapacity(1, emptyMap()))) +
+            stores = it.stores + (CARPENTER to it.stores.getValue(CARPENTER)
+                .copy(capacity = CivSupplyCapacity(3, emptyMap(), outputEmptySlots = 1))) +
                 (WAREHOUSE to it.stores.getValue(WAREHOUSE).copy(stock = mapOf("OAK_LOG" to 1L))),
             couriers = listOf(CivSupplyCourier(UUID(0, 20), WAREHOUSE, 0, CivPosition(10, 64, 0), mapOf("OAK_LOG" to 64L)))) }
         val first = allocateCivSupplies(input)
@@ -213,12 +215,46 @@ class CivsCarpentryTest : FunSpec({
         input = input.copy(craftJobs = first.crafts, couriers = emptyList(), stores = input.stores +
             (WAREHOUSE to input.stores.getValue(WAREHOUSE).copy(stock = emptyMap())) +
             (CARPENTER to input.stores.getValue(CARPENTER).copy(stock = mapOf("OAK_LOG" to 1L),
-                capacity = CivSupplyCapacity(0, mapOf("OAK_LOG" to 63L)))))
+                capacity = CivSupplyCapacity(2, mapOf("OAK_LOG" to 63L), outputEmptySlots = 0))))
         craft(input) shouldBe first.crafts
         val picked = input.copy(craftWorkers = input.craftWorkers.map { it.copy(carried = mapOf("OAK_LOG" to 1L)) },
             stores = input.stores + (CARPENTER to input.stores.getValue(CARPENTER).copy(stock = emptyMap(),
-                capacity = CivSupplyCapacity(1, emptyMap()))))
+                capacity = CivSupplyCapacity(3, emptyMap(), outputEmptySlots = 1))))
         craft(picked) shouldBe first.crafts
+    }
+
+    test("reserved native slots release a blocked blacksmith intent without consuming its carried inputs") {
+        val inputs = mapOf("IRON_INGOT" to 3L, "STICK" to 2L)
+        val ready = carpenterSnapshot("IRON_AXE", 1).let { it.copy(
+            stores = it.stores + (CARPENTER to it.stores.getValue(CARPENTER).copy(
+                type = BuildingType.BLACKSMITH, outputMaterial = "IRON_SHOVEL",
+                capacity = CivSupplyCapacity(8, emptyMap(), outputEmptySlots = 1))),
+            craftWorkers = it.craftWorkers.map { worker -> worker.copy(type = BuildingType.BLACKSMITH, carried = inputs) },
+            stackSizes = it.stackSizes + ("IRON_AXE" to 1)) }
+        val accepted = craft(ready)
+        accepted.values.single().material shouldBe "IRON_AXE"
+        val blocked = ready.copy(craftJobs = accepted, stores = ready.stores +
+            (CARPENTER to ready.stores.getValue(CARPENTER).copy(
+                capacity = CivSupplyCapacity(7, emptyMap(), outputEmptySlots = 0))))
+        craft(blocked) shouldBe emptyMap()
+        craft(blocked.copy(craftJobs = emptyMap())) shouldBe emptyMap()
+        blocked.craftWorkers.single().carried shouldBe inputs
+        blocked.stores.getValue(CARPENTER).stock shouldBe emptyMap()
+        // Capacity returning preserves a retained batch's exact identity and ingredients.
+        craft(blocked.copy(stores = ready.stores)) shouldBe accepted
+        val replacement = craft(blocked.copy(stores = ready.stores, craftJobs = emptyMap(), craftEpoch = UUID.randomUUID()))
+            .values.single()
+        (replacement.id != accepted.values.single().id) shouldBe true
+        replacement.inputs shouldBe inputs
+        replacement.cycle shouldBe accepted.values.single().cycle
+    }
+
+    test("a partial native output stack remains usable while empty slots are reserved") {
+        val input = carpenterSnapshot("OAK_PLANKS", 64, mapOf("OAK_PLANKS" to 60L)).let { it.copy(
+            stores = it.stores + (CARPENTER to it.stores.getValue(CARPENTER).copy(
+                capacity = CivSupplyCapacity(2, mapOf("OAK_PLANKS" to 4L), outputEmptySlots = 0))),
+            craftWorkers = it.craftWorkers.map { worker -> worker.copy(carried = mapOf("OAK_LOG" to 1L)) }) }
+        craft(input).values.single().material shouldBe "OAK_PLANKS"
     }
 
     test("a pinned chest keeps its ingredients reserved while the courier carries them to the workshop") {
