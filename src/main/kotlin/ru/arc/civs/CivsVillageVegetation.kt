@@ -176,18 +176,23 @@ internal class CivsVillageVegetation(
             cell.after == "minecraft:air" && cell.before.substringBefore('[') in logs
         }.map { it.position to it.before } }.toMap()
         val pending = frame.city.forestryJobs.orEmpty().values.flatMap { job -> job.cells.map(job::position) }.toHashSet()
-        val buildings = civsProtectedBuildings(frame.city)
+        val protectedBounds = civsProtectedBuildings(frame.city)
+            .filter { it.phase != BuildingPhase.ACTIVE || it.id !in expected }.map { it.bounds }.toList()
         val found = linkedMapOf<CivPosition, CivVegetationCell>()
         for (x in frame.area.min.x..frame.area.max.x) for (z in frame.area.min.z..frame.area.max.z) {
             if ((x to z) in frame.productiveGroves) continue
             val chunk = frame.chunks[(x shr 4) to (z shr 4)] ?: continue
-            val unknown = buildings.filter { b -> x in b.bounds.min.x..b.bounds.max.x &&
-                z in b.bounds.min.z..b.bounds.max.z && (b.phase != BuildingPhase.ACTIVE || b.id !in expected) }
+            val unknown = protectedBounds.filter { x in it.min.x..it.max.x && z in it.min.z..it.max.z }
             val top = chunk.getHighestBlockYAt(x and 15, z and 15).coerceAtMost(frame.maximumY - 1)
             for (y in top downTo maxOf(frame.minimumY, top - CivsForestry.MAX_HEIGHT)) {
                 val p = CivPosition(x, y, z)
-                if (p in authored || p in pending || p in frame.reserved ||
-                    unknown.any { y in it.bounds.min.y..it.bounds.max.y }) continue
+                if (p in authored || p in pending || p in frame.reserved) continue
+                var covered = false
+                for (i in unknown.indices) if (y in unknown[i].min.y..unknown[i].max.y) {
+                    covered = true
+                    break
+                }
+                if (covered) continue
                 val type = chunk.getBlockType(x and 15, y, z and 15)
                 if (type !in frame.logs && type !in frame.leaves) continue
                 val data = chunk.getBlockData(x and 15, y, z and 15)

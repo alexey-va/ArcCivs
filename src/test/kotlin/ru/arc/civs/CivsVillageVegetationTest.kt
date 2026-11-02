@@ -125,6 +125,27 @@ class CivsVillageVegetationTest : FunSpec({
         }
     }
 
+    test("one column protects inclusive construction and planned bounds across multiple heights") {
+        VillageVegetationFixture().use { h ->
+            val hall = h.city.buildings.single()
+            val constructing = hall.copy(id = UUID(0, 10), phase = BuildingPhase.CONSTRUCTING,
+                bounds = CivBox(CivPosition(-5, 64, -5), CivPosition(-5, 65, -5)))
+            val planned = hall.copy(id = UUID(0, 11),
+                bounds = CivBox(CivPosition(-5, 67, -5), CivPosition(-5, 68, -5)))
+            h.city = h.city.copy(buildings = h.city.buildings + constructing,
+                construction = CivConstruction(UUID(0, 12), planned.id, 1, 1, 0,
+                    ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = planned))
+            val leaves = (-5..-4).flatMap { x -> (63..70).map { y -> CivPosition(x, y, -5) } }
+            leaves.forEach { h.put(it, Material.OAK_LEAVES) }
+            h.startCapture()
+            h.finishCapture()
+            h.drain()
+            val protectedCells = leaves.filter { it.x == -5 && it.y in setOf(64, 65, 67, 68) }.toSet()
+            leaves.forEach { h.type(it) shouldBe if (it in protectedCells) Material.OAK_LEAVES else Material.AIR }
+            h.notifications shouldBe leaves.toSet() - protectedCells
+        }
+    }
+
     test("a detached sweep clears natural trees and preserves authored timber leaves inventories and denied cells") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val plugin = paper.createSimplePlugin("VillageVegetationTest")
