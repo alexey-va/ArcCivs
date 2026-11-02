@@ -456,6 +456,7 @@ internal object CivsAutonomousTerraform {
         val columns = Long2ObjectOpenHashMap<CivTerrainSurfaceColumn>(surface.columns)
         val retained = Long2ObjectOpenHashMap<CivPosition>(standing)
         val preferred = LongOpenHashSet(preferredRoads)
+        val horizontalAllowed = Long2IntOpenHashMap()
         val distances = hashMapOf<CivPosition, Long2IntOpenHashMap>()
     }
 
@@ -499,13 +500,19 @@ internal object CivsAutonomousTerraform {
             return maxOf(horizontal, vertical) * 6 + vertical * 8 + unshared * 4
         }
         fun allowed(x: Int, y: Int, z: Int): Boolean {
-            if (!city.contains(x, z) || y <= surface.minHeight || y + 2 >= surface.maxHeight) return false
-            val p = CivPosition(x, y, z)
-            if ((CivsAutonomousGeometry.horizontalContains(building.bounds, p) && !civsPublicTransit(building, x, z, allowPlanned = true)) ||
-                obstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }) return false
+            if (y <= surface.minHeight || y + 2 >= surface.maxHeight) return false
             val key = civsTerrainKey(x, z)
-            if (goalApproach.contains(key) && y != target.y) return false
             val native = columns.get(key) ?: return false
+            var horizontal = prepared.horizontalAllowed.get(key)
+            if (horizontal == 0) {
+                // Static XZ predicates are shared across grades and depots; cache only captured columns.
+                val p = CivPosition(x, 0, z)
+                horizontal = if (city.contains(x, z) &&
+                    !(CivsAutonomousGeometry.horizontalContains(building.bounds, p) && !civsPublicTransit(building, x, z, allowPlanned = true)) &&
+                    obstacles.none { CivsAutonomousGeometry.horizontalContains(it, p) }) 1 else -1
+                prepared.horizontalAllowed.put(key, horizontal)
+            }
+            if (horizontal < 0 || goalApproach.contains(key) && y != target.y) return false
             retained.get(key)?.let { return native.loaded && y == it.y - 1 }
             return native.loaded && native.natural && abs(native.groundY - y) <= MAXIMUM_CHANGE
         }

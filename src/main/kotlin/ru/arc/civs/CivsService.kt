@@ -358,6 +358,8 @@ class CivsService(
             checkSpace = { worldId, center -> buildingRequests.checkSettlementSpace(worldId, center) },
             retainLoaded = chunkLoading::retainLoaded, found = buildingRequests::foundAutomatic,
             chunksReady = chunkLoading::handoffReady,
+            bootstrapAllowed = testingPermissions::allowed,
+            bootstrapFailure = testingPermissions::handoffFailure,
             capture = if (planningExecutor !== executor)
                 CivsVillageSearchCapture(plugin.dataFolder.toPath(), plugin.pluginMeta.version, plugin.logger) else null)
         storage.residentFoods = residentFoods
@@ -398,7 +400,7 @@ class CivsService(
                 activeCities.associate { city -> city.id to (residentChunks[city.id].orEmpty() + cityPlans.chunkPositions(city.id)) })
             testingPermissions.pulse(if (ready()) cities.values.filter { it.pendingDeletion == null }.mapNotNull { city ->
                 plugin.server.getWorld(city.worldId)?.let { city.owner to it.name }
-            } else emptyList())
+            } + villageSites.bootstrapSubjects() else emptyList())
             resumeCityActions()
             if (ready()) supply.pulse()
             if (ready()) forestryLeafLoot.pulse()
@@ -425,6 +427,15 @@ class CivsService(
         rejectIf(reference.autonomy == null || reference.pendingDeletion != null, "invalid-reference-city")
         rejectIf(!testingAllowed(reference), "not-authorized")
         return villageSites.search(reference, count, prefix, batch = batch).thenApply { it }
+    }
+
+    internal fun foundVillageAt(owner: UUID, worldName: String, style: String, name: String,
+        anchor: CivPosition): CompletableFuture<Any> {
+        checkMain()
+        rejectIf(!ready(), "not-ready")
+        val target = plugin.server.getWorld(worldName) ?: throw CivsRejection("world-unavailable")
+        rejectIf(target.name !in settings.worlds, "world-not-allowed")
+        return villageSites.bootstrap(CivVillageBootstrap(owner, target.uid, style, name, anchor)).thenApply { it }
     }
 
     internal fun villageSearchStatus(): Map<String, Any?> = villageSites.status()

@@ -46,8 +46,40 @@ class CivsCommand(
         CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
     private val refitWarehouse: (UUID, UUID, String?) -> CompletableFuture<Map<String, Any?>> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("not-ready")) },
+    private val foundVillageAt: (UUID, String, String, String, CivPosition) -> CompletableFuture<Any> = { _, _, _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("village-search-unavailable")) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
+        if (args.firstOrNull() == "found-village-at") {
+            val owner = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val worldName = args.getOrNull(2)
+            val style = args.getOrNull(3)
+            val name = args.getOrNull(4)
+            val coordinates = args.drop(5).map { it.toIntOrNull() }
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                args.size != 8 || owner == null || worldName.isNullOrBlank() || style.isNullOrBlank() ||
+                    name.isNullOrBlank() || name.length > 32 || name.any(Char::isISOControl) ||
+                    coordinates.any { it == null } -> "invalid-village-search-arguments"
+                hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
+                else -> null
+            }
+            fun reply(value: Any) = sender.sendMessage("ARCCIVS_VILLAGE_BOOTSTRAP " + Gson().toJson(value))
+            if (error != null) reply(mapOf("state" to "failed", "error" to error))
+            else runCatching { foundVillageAt(requireNotNull(owner), requireNotNull(worldName), requireNotNull(style),
+                requireNotNull(name), CivPosition(requireNotNull(coordinates[0]), requireNotNull(coordinates[1]), requireNotNull(coordinates[2]))) }
+                .onSuccess { future ->
+                    reply(mapOf("state" to "accepted", "owner" to owner, "world" to worldName, "name" to name,
+                        "source" to "explicit-bootstrap-anchor", "requested" to 1))
+                    future.whenCompleteSync(tasks) { result, failure ->
+                        if (failure == null && result != null) reply(mapOf("source" to "explicit-bootstrap-anchor", "result" to result))
+                        else reply(mapOf("state" to "failed", "error" to
+                            (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "village-search-failed")))
+                    }
+                }.onFailure { reply(mapOf("state" to "failed", "error" to
+                    (CivsDiagnostics.rejection(it)?.reason ?: "village-search-failed"))) }
+            return true
+        }
         if (args.firstOrNull() in setOf("found-villages", "village-search-status", "village-search-cancel")) {
             val status = args.firstOrNull() == "village-search-status"
             val cancel = args.firstOrNull() == "village-search-cancel"
@@ -360,7 +392,7 @@ class CivsCommand(
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
             return (listOf("preview", "villages") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
-                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "village-search-status", "village-search-cancel", "refit-gate", "refit-warehouse", "infill-wall") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
+                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "found-village-at", "village-search-status", "village-search-cancel", "refit-gate", "refit-warehouse", "infill-wall") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         private fun settlementFileLine(path: Path? = null, failure: Throwable? = null): String =

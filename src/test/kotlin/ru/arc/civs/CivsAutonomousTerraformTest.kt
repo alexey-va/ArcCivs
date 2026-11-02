@@ -15,6 +15,40 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.civs.CivsAutonomousTerraform.Node
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("route preparation checks each static public column once across candidate heights including blocked columns") {
+        for (permitted in listOf(true, false)) {
+            val original = terraceCity()
+            val hall = original.buildings.single().copy(anchor = CivPosition(0, 0, 0), entrance = CivPosition(0, 1, 0),
+                bounds = CivBox(CivPosition(-4, 0, 2), CivPosition(-2, 5, 5)), control = null)
+            val city = original.copy(center = CivPosition(0, 0, 0), buildings = listOf(hall))
+            var transitReads = 0
+            val transit = object : AbstractList<CivPosition>() {
+                override val size: Int get() = 1
+                override fun get(index: Int): CivPosition {
+                    require(index == 0)
+                    transitReads++
+                    return CivPosition(if (permitted) 1 else 7, 1, 0)
+                }
+            }
+            val target = hall.copy(id = UUID(0, 194), type = BuildingType.GATE,
+                anchor = CivPosition(1, 0, 0), entrance = CivPosition(3, 3, 0),
+                bounds = CivBox(CivPosition(1, 0, 0), CivPosition(1, 5, 0)), transit = transit)
+            val surface = CivTerrainSurface(-64, 320, (0..3).associate { x ->
+                civsTerrainKey(x, 0) to CivTerrainSurfaceColumn((x - 1).coerceAtLeast(0), natural = true)
+            })
+            val searches = mutableListOf<CivRouteSearchStats>()
+            if (permitted) {
+                val route = CivsAutonomousTerraform.connection(city, target, surface, CivAutonomousAccess(), emptyList(), searches::add)
+                route shouldBe listOf(CivPosition(0, 1, 0), CivPosition(1, 1, 0), CivPosition(2, 2, 0), CivPosition(3, 3, 0))
+                // A one-column-wide corridor has no alternate horizontal arrival: extra states are different heights.
+                (searches.single().enqueued > route.size) shouldBe true
+            } else shouldThrow<CivsRejection> {
+                CivsAutonomousTerraform.connection(city, target, surface, CivAutonomousAccess(), emptyList(), searches::add)
+            }.reason shouldBe "autonomy-no-path"
+            transitReads shouldBe 1
+        }
+    }
+
     test("connection shares one detached surface preparation across source depots") {
         val original = terraceCity()
         val hall = original.buildings.single().copy(anchor = CivPosition(-3, 0, 0),

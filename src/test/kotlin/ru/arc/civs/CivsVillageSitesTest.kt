@@ -240,6 +240,64 @@ class CivsVillageSiteRejectionDetailsTest : FunSpec({
 })
 
 class CivsVillageSitesTest : FunSpec({
+    test("the first explicit village waits for real permission then uses one native candidate and idempotent founding") {
+        villageScenario { s ->
+            s.cities.clear()
+            s.bootstrapAllowed = false
+            val request = CivVillageBootstrap(s.reference.owner, s.world.uid, "nordic", "LabTown", CivPosition(32, 63, -48))
+            val result = s.subject.bootstrap(request)
+            (s.subject.bootstrap(request) === result) shouldBe true
+            s.subject.bootstrapSubjects() shouldBe listOf(s.reference.owner to s.world.name)
+            s.tick(5)
+            s.loads shouldBe emptyList()
+            s.surveys shouldBe 0
+            s.admissions shouldBe emptyList()
+            s.bootstrapAllowed = true
+            s.until { result.isDone }
+            result.join().complete shouldBe true
+            result.join().examined shouldBe 1
+            s.coarseCities.size shouldBe 1
+            s.coarseCities.single().buildings.single().anchor shouldBe request.anchor
+            s.fullCities.size shouldBe 1
+            s.siteProofs.size shouldBe 1
+            val admitted = s.admissions.single().city
+            admitted.name shouldBe request.name
+            admitted.owner shouldBe request.owner
+            admitted.worldId shouldBe request.worldId
+            admitted.buildings.single().phase shouldBe BuildingPhase.SITE
+            admitted.workers shouldBe emptyList()
+            admitted.construction shouldBe null
+            admitted.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
+            CivsVillageSiteScoring.completeProfile(requireNotNull(admitted.autonomy?.plan)) shouldBe true
+            val loads = s.loads.size
+            val repeated = s.subject.bootstrap(request)
+            s.until { repeated.isDone }
+            repeated.join().complete shouldBe true
+            repeated.join().created.single().existing shouldBe true
+            s.admissions.size shouldBe 1
+            s.loads.size shouldBe loads
+            s.cities shouldBe listOf(admitted)
+            s.registry.activeLeaseCount shouldBe 0
+            s.subject.bootstrapSubjects() shouldBe emptyList()
+        }
+    }
+
+    test("first village permission denial and cancellation never generate or found") {
+        for (cancel in listOf(false, true)) villageScenario { s ->
+            s.cities.clear()
+            s.bootstrapAllowed = false
+            val request = CivVillageBootstrap(s.reference.owner, s.world.uid, "nordic", "LabTown", CivPosition(0, 63, 0))
+            val result = s.subject.bootstrap(request)
+            if (cancel) s.subject.cancel() else s.bootstrapDenied = "not-authorized"
+            s.until { result.isDone }
+            result.join().complete shouldBe false
+            result.join().reason shouldBe if (cancel) "cancelled" else "not-authorized"
+            s.loads shouldBe emptyList()
+            s.admissions shouldBe emptyList()
+            s.cities shouldBe emptyList()
+        }
+    }
+
     test("a fifth default village retry prefers supported acacia and preserves the four existing towns") {
         villageScenario { s ->
             every { s.blueprints.availableStyles(any()) } returns
@@ -1686,6 +1744,8 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
         every { server.getWorld(worldId) } returns world
         every { world.uid } returns worldId
         every { world.name } returns "arc_civs_test"
+        every { world.minHeight } returns -64
+        every { world.maxHeight } returns 320
         every { world.isChunkLoaded(any(), any()) } answers { firstArg<Int>() to arg<Int>(1) in loaded }
         every { world.loadChunk(any<Int>(), any<Int>()) } answers { loaded += firstArg<Int>() to arg<Int>(1); Unit }
         // The surrounding Paper fixture supplies the owning-thread contract; no chunk geometry is needed by this loader test.
@@ -1707,6 +1767,8 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     var holdLoads = false
     var requireLeasedSurvey = false
     var chunksReady = true
+    var bootstrapAllowed = true
+    var bootstrapDenied: String? = null
     var handoffFailure: String? = null
     var surveys = 0
     var retainFailure: Throwable? = null
@@ -1803,7 +1865,8 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
                     future.complete(immediateChunk)
                 }
                 future
-            }, nanoTime = { 0 }, clock = { 1_000 }, chunksReady = {
+            }, nanoTime = { 0 }, clock = { 1_000 }, bootstrapAllowed = { _, _ -> bootstrapAllowed },
+            bootstrapFailure = { _, _ -> bootstrapDenied }, chunksReady = {
                 handoffFailure?.let { throw CivsRejection(it) }
                 chunksReady
             })

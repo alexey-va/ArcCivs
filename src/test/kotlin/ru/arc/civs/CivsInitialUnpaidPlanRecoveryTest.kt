@@ -163,9 +163,17 @@ class CivsDevelopedUnpaidPlanRecoveryTest : FunSpec({
             s.city shouldBe s.before
             s.constructionAdmissions shouldBe 0
             s.reserveItems() shouldBe s.beforeItems
+            val declined = requireNotNull(s.selected)
             s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
-            s.forecasts shouldBe 1
+            s.finish { s.subject.debug(s.city.id)["request"] == null }
+            // The complete forecast refused this candidate; the next one retains fresh native proof.
+            s.forecasts shouldBe 2
+            (requireNotNull(s.selected) == declined) shouldBe false
+            s.volumeCaptures.contains(requireNotNull(s.selected)) shouldBe true
             s.saves shouldBe emptyList()
+            s.city shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
         }
     }
 
@@ -198,12 +206,8 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
             s.forecasts shouldBe 1
             s.reserveItems() shouldBe s.beforeItems
 
+            // The refusal belongs to the declined candidate, not the next proven choice.
             s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
-            s.finish { s.subject.debug(s.city.id)["request"] == null }
-            s.forecasts shouldBe 1
-            s.saves shouldBe emptyList()
-
-            s.time += 270_001; s.subject.pulse(); s.scheduler.tick()
             s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
             val replacement = s.forecastDesigns.last()
             (replacement == declined) shouldBe false
@@ -483,10 +487,19 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
             (s.unreservedDrafts.size <= CivsAutonomousPlacement.MAXIMUM_OPTIONS) shouldBe true
             if (failure == "payload-only") s.volumeCaptures.isNotEmpty() shouldBe true
             s.reserveItems() shouldBe s.beforeItems
+            val declined = if (failure == "no-full-forecast") requireNotNull(s.selected) else null
             s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
-            // Ordinary retries remain guarded; the existing five-minute plan backoff prevents another full recovery.
-            s.forecasts shouldBe if (failure == "no-full-forecast") 1 else 0
+            s.finish { s.subject.debug(s.city.id)["request"] == null }
+            // Exhausted searches retain their TTL; a refused full forecast advances to a distinct candidate.
+            s.forecasts shouldBe if (failure == "no-full-forecast") 2 else 0
+            if (declined != null) {
+                (requireNotNull(s.selected) == declined) shouldBe false
+                s.volumeCaptures.contains(requireNotNull(s.selected)) shouldBe true
+            }
             s.saves shouldBe emptyList()
+            s.city shouldBe s.before
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
         }
     }
 

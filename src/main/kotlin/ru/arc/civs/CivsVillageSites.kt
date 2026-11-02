@@ -21,6 +21,13 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+/** An explicit console request is an authority/anchor, never a synthetic saved reference city. */
+internal data class CivVillageBootstrap(val owner: UUID, val worldId: UUID, val style: String,
+    val name: String, val anchor: CivPosition) {
+    val id: UUID get() = UUID.nameUUIDFromBytes(listOf("arccivs-bootstrap", owner, worldId, style, name,
+        anchor.x, anchor.y, anchor.z).joinToString("\u0000").toByteArray(Charsets.UTF_8))
+}
+
 internal data class CivVillageSiteAdmission(val city: Settlement, val blueprint: CivBlueprint,
     val terrain: CivTerraformPlan?, val current: () -> Boolean)
 
@@ -191,6 +198,8 @@ internal class CivsVillageSites(
     private val clock: () -> Long = System::currentTimeMillis,
     private val chunksReady: (Settlement) -> Boolean = { true },
     private val capture: CivsVillageSearchCapture? = null,
+    private val bootstrapAllowed: (UUID, String) -> Boolean = { _, _ -> false },
+    private val bootstrapFailure: (UUID, String) -> String? = { _, _ -> null },
 ) : AutoCloseable {
     private data class Candidate(val point: CivPosition, val score: CivVillageTerrainScore)
     private data class LoadReply(val operation: UUID, val group: UUID, val key: PaperChunkKey,
@@ -201,8 +210,14 @@ internal class CivsVillageSites(
         val pending = hashSetOf<PaperChunkKey>()
         var failure: Throwable? = null
     }
-    private class Search(val reference: Settlement, val count: Int, val prefix: String, val forcedStyle: String?, val batch: Int,
-        val token: LifecycleTaskScope.Token) {
+    private class Search(val reference: Settlement?, val count: Int, val prefix: String, val forcedStyle: String?, val batch: Int,
+        val token: LifecycleTaskScope.Token, val bootstrap: CivVillageBootstrap? = null) {
+        val referenceId = bootstrap?.id ?: requireNotNull(reference).id
+        val owner = bootstrap?.owner ?: requireNotNull(reference).owner
+        val worldId = bootstrap?.worldId ?: requireNotNull(reference).worldId
+        fun cityId(ordinal: Int) = CivsVillageSiteScoring.id(referenceId, prefix, ordinal)
+        fun name(ordinal: Int) = bootstrap?.name ?: "$prefix$ordinal"
+        var authorized = bootstrap == null
         val id = UUID.randomUUID()
         val result = CompletableFuture<CivVillageSitesResult>()
         val rejected = sortedMapOf<String, Int>()
@@ -212,7 +227,7 @@ internal class CivsVillageSites(
         val templates = mutableMapOf<Int, Map<BuildingType, Pair<CivBuilding, CivBuilding>>>()
         val invalidStyles = mutableSetOf<String>()
         val shortlist = mutableListOf<Candidate>()
-        val candidates = CivsVillageSiteScoring.candidates(reference, prefix, page = batch / 4)
+        val candidates = bootstrap?.let { listOf(it.anchor) } ?: CivsVillageSiteScoring.candidates(requireNotNull(reference), prefix, page = batch / 4)
         val leases = linkedMapOf<PaperChunkKey, PaperChunkTicketLease>()
         var phase = "templates"
         var examined = 0
@@ -263,7 +278,7 @@ internal class CivsVillageSites(
         if (batch !in 0..MAXIMUM_BATCH) return CompletableFuture.failedFuture(CivsRejection("invalid-village-search-arguments"))
         val cleanPrefix = prefix.trim()
         active?.let {
-            if (!it.finishing && it.reference.id == reference.id && it.count == count && it.prefix == cleanPrefix &&
+            if (!it.finishing && it.bootstrap == null && it.referenceId == reference.id && it.count == count && it.prefix == cleanPrefix &&
                 it.forcedStyle == style && it.batch == batch) return it.result
             return CompletableFuture.failedFuture(CivsRejection("world-busy"))
         }
@@ -296,8 +311,44 @@ internal class CivsVillageSites(
         return search.result
     }
 
+    fun bootstrap(request: CivVillageBootstrap): CompletableFuture<CivVillageSitesResult> {
+        check(Bukkit.isPrimaryThread())
+        active?.let {
+            if (!it.finishing && it.bootstrap == request) return it.result
+            return CompletableFuture.failedFuture(CivsRejection("world-busy"))
+        }
+        if (closed || timer == null || !ready()) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
+        if (request.name.isBlank() || request.name != request.name.trim() || request.name.length > 32 || request.name.any(Char::isISOControl))
+            return CompletableFuture.failedFuture(CivsRejection("invalid-name"))
+        val target = plugin.server.getWorld(request.worldId)
+            ?: return CompletableFuture.failedFuture(CivsRejection("world-unavailable"))
+        if (target.name !in settings.worlds) return CompletableFuture.failedFuture(CivsRejection("world-not-allowed"))
+        if (request.style !in supportedStyles()) return CompletableFuture.failedFuture(CivsRejection("blueprint-unavailable"))
+        if (request.anchor.y !in target.minHeight until target.maxHeight ||
+            kotlin.math.abs(request.anchor.x.toLong()) > 29_999_000 || kotlin.math.abs(request.anchor.z.toLong()) > 29_999_000)
+            return CompletableFuture.failedFuture(CivsRejection("outside-world"))
+        val search = Search(null, 1, request.name, request.style, 0, tasks.token(), request)
+        active = search
+        search.phase = "awaiting-testing-permission"
+        return search.result
+    }
+
+    private fun startBootstrap(search: Search) {
+        val existing = cities().firstOrNull { it.id == search.cityId(1) }
+        if (cities().any { it.id != search.cityId(1) && it.name.equals(search.name(1), ignoreCase = true) })
+            return finish(search, "city-name-conflict")
+        if (existing != null) {
+            if (existing.owner != search.owner || existing.worldId != search.worldId || existing.name != search.name(1) ||
+                existing.style != search.forcedStyle || existing.autonomy == null || existing.pendingDeletion != null)
+                return finish(search, "city-conflict")
+            search.created[1] = receipt(existing, null, true)
+            return finish(search, null)
+        }
+        prepareStyle(search)
+    }
+
     fun status(): Map<String, Any?> = active?.let { search -> mapOf(
-        "active" to true, "operation" to search.id, "reference" to search.reference.id, "phase" to search.phase,
+        "active" to true, "operation" to search.id, "reference" to search.referenceId, "phase" to search.phase,
         "batch" to search.batch,
         "requested" to search.count, "created" to search.created.values.toList(), "styles" to search.selectedStyles,
         "examined" to search.examined, "candidates" to search.candidates.size, "shortlist" to search.shortlist.size,
@@ -312,9 +363,17 @@ internal class CivsVillageSites(
         active?.let { finish(it, reason) }
     }
 
+    /** Keeps the first owner's existing permission cache warm before there is any saved city. */
+    fun bootstrapSubjects(): List<Pair<UUID, String>> = active?.bootstrap?.let { request ->
+        plugin.server.getWorld(request.worldId)?.let { listOf(request.owner to it.name) }
+    }.orEmpty()
+
     private fun context(search: Search): Boolean = !closed && active === search && !search.finishing &&
-        !search.result.isDone && tasks.isCurrent(search.token) && ready() && cities().any {
-            it.id == search.reference.id && it.owner == search.reference.owner && it.worldId == search.reference.worldId &&
+        !search.result.isDone && tasks.isCurrent(search.token) && ready() && if (search.bootstrap != null) {
+            plugin.server.getWorld(search.worldId)?.let { target -> target.name in settings.worlds &&
+                (!search.authorized || bootstrapAllowed(search.owner, target.name)) } == true
+        } else cities().any {
+            it.id == search.referenceId && it.owner == search.owner && it.worldId == search.worldId &&
                 it.pendingDeletion == null && it.autonomy != null
         }
 
@@ -342,12 +401,12 @@ internal class CivsVillageSites(
         val requests = CivsAutonomy.profile.associateWith { type ->
             val id = UUID.nameUUIDFromBytes("arccivs-village-template/${search.id}/$style/$type".toByteArray(Charsets.UTF_8))
             val entry = blueprints.autonomousSource(style, type)
-            val first = if (entry == null) blueprints.prepare(style, type, 1, id, search.reference.worldId,
-                CivPosition(0, 0, 0), 2, 0) else blueprints.prepareEntry(entry, id, search.reference.worldId, CivPosition(0, 0, 0), 2, 0)
+            val first = if (entry == null) blueprints.prepare(style, type, 1, id, search.worldId,
+                CivPosition(0, 0, 0), 2, 0) else blueprints.prepareEntry(entry, id, search.worldId, CivPosition(0, 0, 0), 2, 0)
             first.thenCompose { initial ->
                 val maximum = blueprints.maximumLevel(initial.building)
                 val last = if (maximum == 1) CompletableFuture.completedFuture(initial)
-                    else blueprints.prepareUpgrade(initial.building, maximum, search.reference.worldId)
+                    else blueprints.prepareUpgrade(initial.building, maximum, search.worldId)
                 last.thenApply { initial.building to it.building }
             }
         }
@@ -360,11 +419,11 @@ internal class CivsVillageSites(
     }
 
     private fun draft(search: Search, ordinal: Int, anchor: CivPosition): Settlement {
-        val id = CivsVillageSiteScoring.id(search.reference.id, search.prefix, ordinal)
+        val id = search.cityId(ordinal)
         val hallId = UUID.nameUUIDFromBytes("arccivs-village-hall/$id".toByteArray(Charsets.UTF_8))
         val hall = CivsSettlementPlans.at(search.templates.getValue(ordinal).getValue(BuildingType.TOWN_HALL).first,
             anchor, 0, hallId)
-        return CivsAutonomy.found(id, search.reference.owner, "${search.prefix}$ordinal", search.reference.worldId,
+        return CivsAutonomy.found(id, search.owner, search.name(ordinal), search.worldId,
             hall.control ?: hall.entrance, settings.radius, search.selectedStyles.getValue(ordinal), hall, clock())
             .copy(settings = CivSettlementSettings(chunkLoading = true, immortalResidents = true, autoConstructionMaterials = false))
     }
@@ -500,7 +559,7 @@ internal class CivsVillageSites(
                                         if (!CivsVillageSiteScoring.completeProfile(plan)) throw CivsRejection("autonomy-no-site")
                                         return plan to CivsVillageSiteScoring.usableTreeColumns(city, plan, surface)
                                     }
-                                    capture?.prove(search.id, search.reference.id, city, preparedSurface, selected) { inspect -> prepare(inspect) }
+                                    capture?.prove(search.id, search.referenceId, city, preparedSurface, selected) { inspect -> prepare(inspect) }
                                         ?: prepare()
                                 }, executor)
                                 await(search, proof, failed = { error ->
@@ -623,9 +682,18 @@ internal class CivsVillageSites(
             return
         }
         if (!context(search)) return finish(search, "not-ready")
+        if (!search.authorized) {
+            if (++search.ticks > MAXIMUM_TICKS) return finish(search, "village-search-timeout")
+            val target = plugin.server.getWorld(search.worldId) ?: return finish(search, "world-unavailable")
+            bootstrapFailure(search.owner, target.name)?.let { return finish(search, it) }
+            if (!bootstrapAllowed(search.owner, target.name)) return
+            search.authorized = true
+            runCatching { startBootstrap(search) }.onFailure { finish(search, rejection(it)) }
+            return
+        }
         search.handoff?.let { cityId ->
             val city = cities().firstOrNull { it.id == cityId }
-            if (city == null || city.owner != search.reference.owner || city.worldId != search.reference.worldId ||
+            if (city == null || city.owner != search.owner || city.worldId != search.worldId ||
                 city.autonomy == null || city.pendingDeletion != null || city.settings?.chunkLoading == false)
                 return finish(search, "village-handoff-invalidated")
             // A committed town must keep these leases until its ordinary owner has every required chunk.
@@ -638,7 +706,7 @@ internal class CivsVillageSites(
         }
         if (++search.ticks > MAXIMUM_TICKS) return finish(search, "village-search-timeout")
         val group = search.group ?: return
-        val target = plugin.server.getWorld(search.reference.worldId) ?: return finish(search, "world-unavailable")
+        val target = plugin.server.getWorld(search.worldId) ?: return finish(search, "world-unavailable")
         val started = nanoTime()
         var admissions = 0
         while (admissions < 2 && nanoTime() - started < 1_000_000L) {
@@ -729,13 +797,13 @@ internal class CivsVillageSites(
 
     private fun complete(search: Search, reason: String?) {
         for (ordinal in 1..search.count) if (ordinal !in search.created) {
-            val id = CivsVillageSiteScoring.id(search.reference.id, search.prefix, ordinal)
-            cities().firstOrNull { it.id == id && it.owner == search.reference.owner &&
-                it.worldId == search.reference.worldId && it.autonomy != null && it.pendingDeletion == null }?.let {
+            val id = search.cityId(ordinal)
+            cities().firstOrNull { it.id == id && it.owner == search.owner &&
+                it.worldId == search.worldId && it.autonomy != null && it.pendingDeletion == null }?.let {
                 search.created[ordinal] = receipt(it, null, true)
             }
         }
-        val result = CivVillageSitesResult(search.id, search.reference.id, search.reference.worldId, search.count,
+        val result = CivVillageSitesResult(search.id, search.referenceId, search.worldId, search.count,
             search.created.values.toList(), search.rejected.toMap(), search.examined,
             search.created.size == search.count && search.handoff == null,
             if (search.releaseFailed) "chunk-release-failed" else reason, search.rejectedSites.toList(), search.batch)
