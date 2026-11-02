@@ -4,6 +4,10 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.mockk
 import org.bukkit.Location
+import org.bukkit.Material
+import org.bukkit.block.Barrel
+import org.bukkit.inventory.ItemStack
+import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsCitizenOutputReturnTest : FunSpec({
@@ -83,6 +87,130 @@ class CivsCitizenOutputReturnTest : FunSpec({
                 if (scenario == "paused") actor.cycle.pause("route-unreachable", 1_000, false)
                 if (scenario == "no-capacity") citizenHasCapacity(city, plan) shouldBe false
                 couriers.sourceOffersCargo(actor, city, worker) shouldBe (scenario != "searching")
+            }
+        }
+    }
+
+    test("a waiting paid batch admits enough matching surplus without changing the ordinary stack threshold") {
+        residentRuntime { h ->
+            val quarry = h.assignQuarry()
+            val target = quarry.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, production = null,
+                phase = BuildingPhase.CONSTRUCTING, anchor = CivPosition(30, 64, 0), entrance = CivPosition(30, 64, 0),
+                control = null, bounds = CivBox(CivPosition(28, 64, -2), CivPosition(32, 68, 2)))
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.WAITING_MATERIALS,
+                Stock(), plannedBuilding = target, batches = CivConstructionBatches(2, 16),
+                materials = mapOf("COBBLESTONE" to 128L, "RAW_IRON" to 12L),
+                payment = CivConstructionPayment(awaiting = mapOf("COBBLESTONE" to 12L)))
+            val runtime = CitizenRuntime(h.paper.createSimplePlugin("PaidBatchOutputPolicy")) { listOf(h.city) }
+            val couriers = CivsCitizenCouriers(runtime, { error("unused routes") }, { error("unused leisure") },
+                { error("unused work") }, { error("unused logistics") }, CivsPaths(), CivsResidentFoods.BREAD_ONLY,
+                { _, _ -> null }, CivsNavigationSettings())
+            for (scenario in listOf("matching", "below-batch", "no-wait", "no-order", "foreign-material", "paused-order",
+                "ordinary-full-stack", "large-batch")) {
+                val count = when (scenario) { "below-batch" -> 43; "ordinary-full-stack", "large-batch" -> 96; else -> 71 }
+                val worker = h.city.workers.single().copy(items = List(CivsEquipment.SLOTS) { slot -> when (slot) {
+                    4 -> CivResidentItem("IRON_PICKAXE", 1)
+                    6 -> CivResidentItem("COBBLESTONE", minOf(count, 64))
+                    7 -> (count - 64).takeIf { it > 0 }?.let { CivResidentItem("COBBLESTONE", it) }
+                    8 -> CivResidentItem("RAW_IRON", 1)
+                    else -> null
+                } })
+                val currentOrder = when (scenario) {
+                    "no-order", "ordinary-full-stack" -> null
+                    "no-wait" -> order.copy(phase = ConstructionPhase.READY_TO_PLACE, payment = CivConstructionPayment())
+                    "foreign-material" -> order.copy(payment = CivConstructionPayment(awaiting = mapOf("RAW_IRON" to 12L)))
+                    "paused-order" -> order.copy(phase = ConstructionPhase.PAUSED, failure = "world-busy")
+                    "large-batch" -> order.copy(payment = CivConstructionPayment(awaiting = mapOf("COBBLESTONE" to 128L)))
+                    else -> order
+                }
+                val city = h.city.copy(workers = listOf(worker), construction = currentOrder,
+                    buildings = h.city.buildings + if (currentOrder == null) target.copy(phase = BuildingPhase.SITE) else target)
+                val plan = CitizenPlan(CitizenToken(quarry.id, worker.completedCycles, worker.nextDeliveryAt, null),
+                    requireNotNull(quarry.control), requireNotNull(quarry.control), BuildingType.QUARRY, 0, "searching-work")
+                val actor = CitizenActor(city.id, worker.id, city.worldId, mockk(relaxed = true), plan)
+                CivsLogistics.workerExcess(city, worker) shouldBe mapOf("COBBLESTONE" to count - 32L, "RAW_IRON" to 1L)
+                couriers.sourceOffersCargo(actor, city, worker) shouldBe
+                    (scenario in setOf("matching", "ordinary-full-stack", "large-batch"))
+                CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe count.toLong()
+                CivsEquipment.plainCount(worker, "RAW_IRON") shouldBe 1L
+            }
+        }
+    }
+
+    test("a searching miner walks home and returns a waiting batch surplus once while retaining its work reserve") {
+        residentRuntime { h ->
+            val quarry = h.assignQuarry()
+            val target = quarry.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, production = null,
+                phase = BuildingPhase.CONSTRUCTING, anchor = CivPosition(30, 64, 4), entrance = CivPosition(30, 64, 4),
+                control = null, bounds = CivBox(CivPosition(28, 64, 2), CivPosition(32, 68, 6)))
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.WAITING_MATERIALS,
+                Stock(), plannedBuilding = target, batches = CivConstructionBatches(2, 16), materials = mapOf("COBBLESTONE" to 12L),
+                payment = CivConstructionPayment(awaiting = mapOf("COBBLESTONE" to 12L)))
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + target, construction = order,
+                workers = h.city.workers.map { it.copy(completedCycles = 1_238, items = List(CivsEquipment.SLOTS) { slot -> when (slot) {
+                    4 -> CivResidentItem("IRON_PICKAXE", 1)
+                    6 -> CivResidentItem("COBBLESTONE", 64)
+                    7 -> CivResidentItem("COBBLESTONE", 7)
+                    8 -> CivResidentItem("LADDER", 16)
+                    9 -> CivResidentItem("TORCH", 8)
+                    else -> null
+                } }) }))
+            h.idleReason = "searching-work"
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 28.5, 64.0, .5))
+            val start = actor.location.clone()
+            val control = requireNotNull(quarry.control)
+            val barrel = (h.world.getBlockAt(control.x, control.y, control.z).state as Barrel).inventory
+            barrel.setItem(0, ItemStack(Material.COBBLESTONE, 32))
+            val pending = CompletableFuture<Settlement>()
+            var requests = 0
+            h.owner.returnResidentOutputs = { cityId, workerId, buildingId ->
+                buildingId shouldBe quarry.id
+                h.owner.requireStorageArrival(cityId, workerId, buildingId)
+                requests++
+                pending
+            }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            requests shouldBe 0
+            for (tick in 1..200) {
+                h.navigate()
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (requests > 0) break
+            }
+            requests shouldBe 1
+            (actor.location.distance(start) > 4.0) shouldBe true
+            CivsEquipment.plainCount(h.city.workers.single(), "COBBLESTONE") shouldBe 71L
+            barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
+            CivsStorage(h.paper.createSimplePlugin("PaidBatchOutputReturn")) { emptyArray() }.use { storage ->
+                val before = h.city
+                val worker = before.workers.single()
+                val id = UUID.randomUUID()
+                storage.reserve(before, id)
+                val returned = storage.prepareResidentReturn(before, worker.id, quarry.id)
+                CivsEquipment.plainCount(returned.worker, "COBBLESTONE") shouldBe 32L
+                CivsEquipment.plainCount(returned.worker, "LADDER") shouldBe 16L
+                CivsEquipment.plainCount(returned.worker, "TORCH") shouldBe 8L
+                returned.worker.items!![4] shouldBe worker.items!![4]
+                returned.worker.completedCycles shouldBe worker.completedCycles
+                val after = before.copy(workers = listOf(returned.worker), inventory = returned.plan.inventoryAfter,
+                    revision = before.revision + 1)
+                val receipt = CivInventoryTransaction(id, before.id, before.revision, after, returned.plan.changes).validated()
+                storage.seal(receipt)
+                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                barrel.contents.filterNotNull().filter { it.type == Material.COBBLESTONE }.sumOf { it.amount } shouldBe 71
+                h.city = after
+                pending.complete(after)
+                h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
+                h.owner.pulse(requireNotNull(h.navigationNow) + 2_000)
+                requests shouldBe 1
+                h.city.construction shouldBe order
+                h.city.workers.single().completedCycles shouldBe 1_238L
+                h.deliveries shouldBe 0
+                h.pickups shouldBe 0
+                h.unloads shouldBe 0
+                storage.unlock(id)
             }
         }
     }

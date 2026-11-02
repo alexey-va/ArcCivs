@@ -123,6 +123,10 @@ internal class CivsCitizenCouriers(
         if (excess.isEmpty()) return false
         if (actor.outputFullPause?.let { it.buildingId == worker.assignment } == true) return true
         if (CivsAutonomy.legacyStock(city)) return true
+        // A waiting paid order may use a smaller complete batch; workerExcess still protects profession reserves.
+        val awaiting = city.construction?.takeIf { it.phase == ConstructionPhase.WAITING_MATERIALS }?.payment?.awaiting.orEmpty()
+        if (awaiting.any { (material, required) -> required > 0 &&
+                (excess[material] ?: 0L) >= minOf(required, CivsLogistics.MAX_CARGO) }) return true
         val searchingMine = actor.plan.type == BuildingType.QUARRY && actor.plan.idleReason == "searching-work" &&
             actor.plan.token.assignmentId == worker.assignment && worker.assignment?.let(city::building)?.type == BuildingType.QUARRY
         // Bounded quarry discovery is active work, not a reason to carry a single block home.
