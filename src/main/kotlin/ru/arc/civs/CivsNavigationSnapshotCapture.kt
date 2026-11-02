@@ -122,24 +122,27 @@ internal class CitizenSnapshotCapture(
                 for (x in probe.node.x - 1..probe.node.x + 1) for (z in probe.node.z - 1..probe.node.z + 1)
                     for (by in y - 3..y + 3) add(CivPosition(x, by, z))
             }
-            val missingChunks = positions.asSequence().filter { it.y in minimumY until maximumY }
-                .map { CitizenSnapshotKey(it.x shr 4, it.z shr 4) }
-                .filter { it !in terrain.chunks && it !in terrain.unavailable }.toSet()
+            val chunkKeys = if (positions.isEmpty()) emptyList() else buildList(4) {
+                for (cx in ((probe.node.x - 1) shr 4)..((probe.node.x + 1) shr 4))
+                    for (cz in ((probe.node.z - 1) shr 4)..((probe.node.z + 1) shr 4)) add(CitizenSnapshotKey(cx, cz))
+            }
+            val missingChunks = if (minimumY < maximumY && y - 3 < maximumY && y + 3 >= minimumY)
+                chunkKeys.filterTo(linkedSetOf()) { it !in terrain.chunks && it !in terrain.unavailable }
+                else emptySet()
             if (missingChunks.isNotEmpty()) return request(chunks = missingChunks)
-            for (cx in ((probe.node.x - 1) shr 4)..((probe.node.x + 1) shr 4))
-                for (cz in ((probe.node.z - 1) shr 4)..((probe.node.z + 1) shr 4)) {
-                    val chunk = terrain.chunks[CitizenSnapshotKey(cx, cz)] ?: continue
-                    for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4)) {
-                        val section = CitizenSnapshotSectionKey(cx, sy, cz)
-                        if (section !in terrain.sections) {
-                            terrain.sections[section] = chunk.revision
-                            newSections[section] = chunk.revision
-                        }
+            for (key in chunkKeys) {
+                val chunk = terrain.chunks[key] ?: continue
+                for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4)) {
+                    val section = CitizenSnapshotSectionKey(key.x, sy, key.z)
+                    if (section !in terrain.sections) {
+                        terrain.sections[section] = chunk.revision
+                        newSections[section] = chunk.revision
                     }
                 }
+            }
             // Palette discovery scans a detached whole chunk once, shared by every route using that snapshot.
             val missingStates = linkedMapOf<BlockData, CivPosition>()
-            positions.map { CitizenSnapshotKey(it.x shr 4, it.z shr 4) }.distinct().forEach { key ->
+            for (key in chunkKeys) {
                 terrain.chunks[key]?.states(y - 3, y + 3)?.forEach { (data, sample) ->
                     if (data !in terrain.states && missingStates.size < 256) missingStates.putIfAbsent(data, sample)
                 }

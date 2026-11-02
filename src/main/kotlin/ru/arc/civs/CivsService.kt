@@ -81,7 +81,8 @@ class CivsService(
         { id, transform -> afterCityAvailable(id) { mutate(id, transform = transform) } },
         { city, design -> admitRoadDevelopment(city) { buildingRequests.commitAutonomousDesign(city, design) } }, { construction.pulse() }, clock,
         developmentFinished = roadMaintenance::developmentFinished,
-        storageCapacityPressure = ::storageCapacityPressure)
+        storageCapacityPressure = ::storageCapacityPressure,
+        developmentAdmission = roadMaintenance::admitDevelopment)
     private val physics = CivsPhysics(plugin, tasks)
     private val controlCleanup = CivsControlCleanup(plugin) { owner, block -> world.canModify(owner, block) }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)

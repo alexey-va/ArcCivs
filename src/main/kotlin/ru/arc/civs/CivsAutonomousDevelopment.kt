@@ -99,6 +99,7 @@ internal class CivsAutonomousDevelopment(
     private val clock: () -> Long,
     private val developmentFinished: (UUID) -> Unit = {},
     private val storageCapacityPressure: (Settlement) -> Boolean = { false },
+    private val developmentAdmission: (Settlement) -> Boolean = { true },
 ) {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -282,11 +283,15 @@ internal class CivsAutonomousDevelopment(
             }
             return
         }
-        if (!infrastructure && ordinary == null) return
-        if (!goal.ready) return
+        if (!infrastructure && ordinary == null) { developmentFinished(city.id); return }
+        if (!goal.ready) { developmentFinished(city.id); return }
         val recovery = unpaidRecoveryCursors[city.id]?.takeIf { !infrastructure && it.type == goal.type }
         if (searchFailures.blocked(city, goal, now(), recovery?.skipPrepared)) return
         if (recovery != null && now() < (autonomyPlanRetryAt[city.id] ?: 0L)) return
+        if (!developmentAdmission(city)) {
+            autonomyFailed(city.id, goal, CivsRejection("city-busy"))
+            return
+        }
         val request = UUID.randomUUID()
         autonomyRequests[city.id] = request
         autonomyProgress[city.id] = CivsAutonomyView("searching", goal.type, goal.targetLevel)
@@ -361,7 +366,7 @@ internal class CivsAutonomousDevelopment(
                 if (infrastructure) autonomyLayoutChecked[city.id] = city.buildings.toList() to (now() + 300_000)
                 if (CivsDiagnostics.rejection(failure)?.reason == "autonomy-layout-complete") {
                     autonomyProgress.remove(city.id)
-                    if (ordinary == null) developmentFinished(city.id)
+                    developmentFinished(city.id)
                     CivsDiagnostics.event("autonomous_layout_complete", "city" to city.id,
                         "pieces" to city.buildings.count { it.type.isInfrastructure })
                     if (ordinary == null) pulseAutonomousDecoration(city)
@@ -482,6 +487,7 @@ internal class CivsAutonomousDevelopment(
                 } }.getOrElse { failed(it); return@planning }.whenCompleteSync(tasks) { _, saveFailure ->
                     if (saveFailure != null) { failed(saveFailure); return@whenCompleteSync }
                     if (!autonomyRequests.remove(city.id, request)) return@whenCompleteSync
+                    developmentFinished(city.id)
                     unpaidRecoveryCursors.remove(city.id)
                     autonomyProgress.remove(city.id)
                     autonomyRetryAt.remove(city.id)

@@ -320,6 +320,109 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
+    test("snapshot chunk requests preserve footprint order and require a world height overlap") {
+        val cases = buildList {
+            for (base in listOf(15, 0, -16)) for (y in listOf(-68, -67, -64, 64, 319, 322, 323))
+                add(CitizenSearchNode(base, y.toDouble(), base))
+            add(CitizenSearchNode(Int.MAX_VALUE, 64.0, 0))
+            add(CitizenSearchNode(0, 64.0, Int.MIN_VALUE))
+            add(CitizenSearchNode(0, Int.MAX_VALUE.toDouble(), 0))
+            add(CitizenSearchNode(0, Int.MIN_VALUE.toDouble(), 0))
+        }
+        for (node in cases) withClue("node=$node") {
+            val y = node.y.toInt()
+            val positions = buildList {
+                for (x in node.x - 1..node.x + 1) for (z in node.z - 1..node.z + 1)
+                    for (by in y - 3..y + 3) add(CivPosition(x, by, z))
+            }
+            val expected = positions.filter { it.y in -64 until 320 }
+                .map { CitizenSnapshotKey(it.x shr 4, it.z shr 4) }.distinct()
+            val policy = CitizenSnapshotPolicy({ _, _ -> true }, { _, _ -> true })
+            val request = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), CitizenSnapshotTerrain(),
+                policy, -64, 320, 32768, 1, false).advance(CitizenSnapshotInput())
+            request.chunks.toList() shouldBe expected
+            request.sections shouldBe emptyMap()
+            request.states shouldBe emptyMap()
+            request.dynamics shouldBe emptyMap()
+            if (expected.isEmpty()) {
+                val capture = requireNotNull(request.captures).single()
+                capture.blocks.keys.toList() shouldBe positions
+                capture.blocks.values.all { it == CitizenTerrainBlock.UNAVAILABLE.copy(cost = 1.0) } shouldBe true
+                request.capturedBlocks shouldBe positions.size
+            } else request.capturedBlocks shouldBe 0
+        }
+    }
+
+    test("boundary chunk state and dynamic continuations retain samples revisions and ordered captured cells") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val stone = org.bukkit.Bukkit.createBlockData(Material.STONE)
+            val air = org.bukkit.Bukkit.createBlockData(Material.AIR)
+            val snow = org.bukkit.Bukkit.createBlockData(Material.SNOW)
+            val fullBox = listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+            for (base in listOf(15, -16)) withClue("base=$base") {
+                val node = CitizenSearchNode(base, 64.0, base)
+                val probe = CitizenSearchProbe(node, node.point())
+                val positions = buildList {
+                    for (x in base - 1..base + 1) for (z in base - 1..base + 1)
+                        for (y in 61..67) add(CivPosition(x, y, z))
+                }
+                val keys = positions.map { CitizenSnapshotKey(it.x shr 4, it.z shr 4) }.distinct()
+                keys.size shouldBe 4
+                val unavailable = keys.last()
+                val dynamic = listOf(CivPosition(base - 1, 64, base - 1), CivPosition(base - 1, 65, base - 1))
+                val chunks = keys.dropLast(1).mapIndexed { index, key ->
+                    val cells = if (index == 0) dynamic.associate { p -> CivPosition(p.x and 15, p.y, p.z and 15) to snow }
+                        else emptyMap()
+                    key to CitizenSnapshotChunk(CivsNavigationChunkSnapshotFixture(key.x, key.z, -64, 320,
+                        "capture-boundary", 0, stone, cells), -64, 320, index + 100L)
+                }.toMap()
+                val terrain = CitizenSnapshotTerrain()
+                val policy = CitizenSnapshotPolicy({ p, material -> material(p) != Material.SNOW }, { _, _ -> true })
+                val capture = CitizenSnapshotCapture(listOf(probe), terrain, policy, -64, 320, 32768, 1, false)
+                capture.advance(CitizenSnapshotInput()).chunks.toList() shouldBe keys
+                var request = capture.advance(CitizenSnapshotInput(chunks = mapOf(keys.first() to chunks.getValue(keys.first())),
+                    unavailable = setOf(unavailable)))
+                request.chunks.toList() shouldBe keys.subList(1, 3)
+                request = capture.advance(CitizenSnapshotInput(chunks = chunks.filterKeys { it != keys.first() }))
+                val samples = linkedMapOf(stone to CivPosition(keys.first().x * 16, 48, keys.first().z * 16),
+                    air to CivPosition(keys.first().x * 16, 64, keys.first().z * 16), snow to dynamic.first())
+                request.states.entries.toList() shouldBe samples.entries.toList()
+                request.sections.entries.map { it.key to it.value } shouldBe chunks.flatMap { (key, chunk) ->
+                    listOf(CitizenSnapshotSectionKey(key.x, 3, key.z) to chunk.revision,
+                        CitizenSnapshotSectionKey(key.x, 4, key.z) to chunk.revision)
+                }
+                val states = samples.mapValues { (data, _) -> CitizenSnapshotState(
+                    CitizenTerrainShape(false, false, false, false, if (data.material.isAir) emptyList() else fullBox), data == snow) }
+                request = capture.advance(CitizenSnapshotInput(states = mapOf(stone to states.getValue(stone))))
+                request.states.entries.toList() shouldBe samples.filterKeys { it != stone }.entries.toList()
+                request.sections shouldBe emptyMap()
+                request = capture.advance(CitizenSnapshotInput(states = states.filterKeys { it != stone }))
+                request.dynamics.keys.toList() shouldBe dynamic
+                val boxes = dynamic.mapIndexed { index, p ->
+                    p to listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, .25 + index * .5, 1.0))
+                }.toMap()
+                request = capture.advance(CitizenSnapshotInput(dynamics = mapOf(dynamic.first() to boxes.getValue(dynamic.first()))))
+                request.dynamics.keys.toList() shouldBe dynamic.drop(1)
+                request = capture.advance(CitizenSnapshotInput(dynamics = mapOf(dynamic.last() to boxes.getValue(dynamic.last()))))
+                request.capturedBlocks shouldBe 63
+                request.costs.isNotEmpty() shouldBe true
+                val costs = request.costs.associateWith { 2.25 }
+                val completed = requireNotNull(capture.advance(CitizenSnapshotInput(costs = costs)).captures).single()
+                completed.blocks.keys.toList() shouldBe positions
+                for ((point, block) in completed.blocks) {
+                    if (CitizenSnapshotKey(point.x shr 4, point.z shr 4) == unavailable)
+                        block shouldBe CitizenTerrainBlock.UNAVAILABLE.copy(cost = 1.0)
+                    else {
+                        block.loaded shouldBe true
+                        block.allowed shouldBe (point !in dynamic)
+                        block.boxes shouldBe (boxes[point] ?: if (point.y <= 63) fullBox else emptyList())
+                        block.cost shouldBe (costs[point] ?: 1.0)
+                    }
+                }
+            }
+        }
+    }
+
     test("snapshot captures reuse unchanged blocks and preserve the complete ordered neighbourhood map") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
             for (base in listOf(-3, 2)) {

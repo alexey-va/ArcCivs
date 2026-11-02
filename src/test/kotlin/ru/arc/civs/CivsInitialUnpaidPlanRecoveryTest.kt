@@ -209,6 +209,7 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
             // The refusal belongs to the declined candidate, not the next proven choice.
             s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
             s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
+            s.developmentWaiting shouldBe false
             val replacement = s.forecastDesigns.last()
             (replacement == declined) shouldBe false
             s.forecastDesigns shouldBe listOf(declined, replacement)
@@ -625,6 +626,7 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     val forecast = CompletableFuture<CivTerrainSurface>()
     val saves = mutableListOf<Settlement>()
     var constructionAdmissions = 0
+    var developmentWaiting = false
     var reservedCaptures = 0
     var unreservedSurfaces = 0
     var forecasts = 0
@@ -683,7 +685,8 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
                 CompletableFuture.failedFuture<Unit>(CivsRejection("city-busy"))
             }
         },
-        pulseConstruction = {}, clock = { time })
+        pulseConstruction = {}, clock = { time }, developmentFinished = { developmentWaiting = false },
+        developmentAdmission = { developmentWaiting = true; true })
 
     init {
         nativeWorld.loadChunk(control.x shr 4, control.z shr 4)
