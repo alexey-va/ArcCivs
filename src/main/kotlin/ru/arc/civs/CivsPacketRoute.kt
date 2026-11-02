@@ -466,23 +466,8 @@ internal class CitizenPacketRoute(
         return point
     }
 
-    /** Inspect each crossed column's interior; touching a grid corner does not cross its diagonal cell. */
-    private fun flatSupportClear(from: CitizenPoint, to: CitizenPoint): Boolean {
-        val boundaries = sortedSetOf(0.0, 1.0)
-        for ((start, end) in listOf(from.x to to.x, from.z to to.z)) {
-            if (start == end) continue
-            for (edge in floor(min(start, end)).toInt() + 1..floor(max(start, end)).toInt()) {
-                val fraction = (edge - start) / (end - start)
-                if (fraction > 0.0 && fraction < 1.0) boundaries += fraction
-            }
-        }
-        return citizenPacketSupported(world, to) && boundaries.zipWithNext().all { (first, second) ->
-            val fraction = (first + second) / 2
-            // The two axes can report the same grid corner a few floating-point units apart.
-            second - first <= .000000001 || citizenPacketSupported(world, CitizenPoint(from.x + (to.x - from.x) * fraction, from.y,
-                from.z + (to.z - from.z) * fraction))
-        }
-    }
+    private fun flatSupportClear(from: CitizenPoint, to: CitizenPoint): Boolean =
+        citizenFlatSupportClear(from, to) { citizenPacketSupported(world, it) }
 
     private fun gravityStep(entry: Waypoint, y: Double): Boolean = entry.profileTerrain == null && entry.point.y < y - .0001 &&
         entry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&

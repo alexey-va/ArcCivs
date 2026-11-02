@@ -893,6 +893,53 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("flat routes from offset feet choose supported approaches to every stair facing") {
+        MockBukkitTestRuntime.open().use {
+            for (turns in 0..3) {
+                fun rotate(x: Double, z: Double): Pair<Double, Double> {
+                    var point = x to z
+                    repeat(turns) { point = -point.second to point.first }
+                    return point
+                }
+                val terrain = ResidentRouteTerrain()
+                val stairCenter = rotate(-.5, -.5)
+                val stair = CivPosition(kotlin.math.floor(stairCenter.first).toInt(), 63,
+                    kotlin.math.floor(stairCenter.second).toInt())
+                terrain.blocks[stair] = Material.OAK_STAIRS
+                val highCorners = listOf(-1.0 to -1.0, -.5 to -1.0, -1.0 to 0.0, -.5 to 0.0)
+                    .map { (x, z) -> rotate(x, z) }
+                terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                    BoundingBox(highCorners.minOf { it.first } - stair.x, .5,
+                        highCorners.minOf { it.second } - stair.z,
+                        highCorners.maxOf { it.first } - stair.x, 1.0,
+                        highCorners.maxOf { it.second } - stair.z))
+                val start = rotate(.066, .066)
+                var at = Location(terrain.world, start.first, 64.0, start.second)
+                val target = Location(terrain.world, stairCenter.first, 64.0, stairCenter.second)
+                val route = CitizenPacketRoute(terrain.world, at, target,
+                    { p -> p.y == 64 && p.x in -3..3 && p.z in -3..3 }, { _, _ -> true }, { 1.0 })
+                route.prepare()
+                route.failure shouldBe null
+                repeat(160) {
+                    route.move(at, .8) { true }?.let { next ->
+                        (next.distance(at) <= .172001) shouldBe true
+                        next.y shouldBe 64.0
+                        citizenPacketSupported(terrain.world, next.point()) shouldBe true
+                        citizenPacketBodyClear(terrain.world, next.point(), false) shouldBe true
+                        citizenPacketStepClear(terrain.world, at.point(), next.point(), false) shouldBe true
+                        at = next
+                    }
+                }
+                withClue("rotation=$turns failure=${route.failure} nodes=${route.nodeCount}") {
+                    route.failure shouldBe null
+                    route.finished shouldBe true
+                    at.distanceSquared(target) shouldBe 0.0
+                    (route.forwardProgress > 0.0) shouldBe true
+                }
+            }
+        }
+    }
+
     test("bottom stairs spend the same horizontal stride as flat travel in every facing and direction") {
         MockBukkitTestRuntime.open().use {
             for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1))

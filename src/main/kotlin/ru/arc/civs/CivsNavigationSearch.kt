@@ -425,6 +425,10 @@ private class CitizenSearchGeometry(
     fun stepClear(from: CitizenPoint, to: CitizenPoint, action: CitizenRouteAction): Boolean {
         if (!citizenStepHeightAllowed(from.y, to.y) ||
             citizenSlideBody(Vector(from.x, from.y, from.z), Vector(to.x, to.y, to.z), .299, 1.798, .299, bodies) != null) return false
+        // An endpoint can stand on a stair's high half while its flat approach crosses the low half.
+        // Reject that edge in the graph instead of repeatedly handing it to stricter packet movement.
+        if (action == CitizenRouteAction.WALK && from.y == to.y &&
+            !citizenFlatSupportClear(from, to, ::supported)) return false
         // Enter/settle onto the ladder centre before changing height, including fractional starts.
         if (action == CitizenRouteAction.CLIMB || action == CitizenRouteAction.LADDER_ENTER) {
             val centre = CitizenPoint(to.x, from.y, to.z)
@@ -437,6 +441,20 @@ private class CitizenSearchGeometry(
             return segmentClear(from, aboveFrom, from) && segmentClear(aboveFrom, aboveTo, from) && segmentClear(aboveTo, to, from)
         }
         return segmentClear(from, to, from)
+    }
+
+    private fun supported(point: CitizenPoint): Boolean {
+        val x = floor(point.x).toInt()
+        val z = floor(point.z).toInt()
+        val y = floor(point.y + .001).toInt()
+        if (y <= minimumY || y >= maximumY) return false
+        val feet = blocks[CivPosition(x, y, z)]?.takeIf { it.loaded } ?: return false
+        if (feet.climbable) return true
+        val by = citizenSupportY(point.y)
+        val block = blocks[CivPosition(x, by, z)]?.takeIf { it.loaded && !it.liquid && !it.door } ?: return false
+        return block.boxes.any {
+            abs(by + it.maxY - point.y) <= .13 && point.x - x in it.minX..it.maxX && point.z - z in it.minZ..it.maxZ
+        }
     }
 
     private fun segmentClear(from: CitizenPoint, to: CitizenPoint, occupied: CitizenPoint): Boolean {

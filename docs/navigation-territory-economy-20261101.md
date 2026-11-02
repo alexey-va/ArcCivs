@@ -7,3 +7,12 @@ Direct before/after amounts remain separately 0 Vault, 0 premium tokens and 0 pl
 Faster navigation may restore legitimate output per hour. Its live magnitude is unknown before activation; the old planner baseline mean is about9.16s and max236.83s across admitted jobs, not a production measurement. Keep native route latency and ordinary paid construction/cargo commits separate from a money-income claim. Existing global supply extraction caps and per-action resource/food costs remain in force. Current SELL and planned SELL-to-contract are separate flows; no item price or savings estimate is assumed.
 
 Release decision: deliver the requested repair, preserve exact inventory conservation and existing productive groves, and observe ordinary movement and commits after activation. Source/tests, delivered artifact, active version and client acceptance are recorded separately in the rollout receipt.
+
+## Flat support consistency in185
+
+Detached search now checks the same crossed support columns as native flat movement.
+On an exact891-cell stair capture the old path failed its first native step; the
+corrected local route arrives in10ticks. No physics, collision, arrival, credit,
+recipe or yield rule is relaxed. Direct Vault, premium-token and player-XP deltas
+remain separately zero; actual full-trip throughput and downstream SELL income
+are unmeasured. Native full-route and deposit acceptance remain separate.

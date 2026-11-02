@@ -374,12 +374,13 @@ class CivsSettlementLayoutTest : FunSpec({
             (0..23).filter { it !in 11..12 }.flatMap { x -> (30..32).map { z -> civsTerrainKey(x, z) } }.toSet()
     }
 
-    test("generated gate leaves face the crossing and start open for every rotation and supported wood") {
+    test("generated gate profiles keep clear crossings and supported roofs for every rotation and wood") {
         for (rotation in listOf(0, 90, 180, 270)) for (style in listOf("caledonia", "nordic", "medievaloak")) {
             val city = layoutFixtureCity(rotation).copy(style = style)
             val frame = CivsSettlementLayout.frame(city)
             val surface = layoutSurface(city, "flat")
             val plan = CivsSettlementLayout.infrastructure(city, frame, surface, emptyList())
+            plan.rejected shouldBe emptyMap()
             for (gate in frame.gates) {
                 val piece = plan.pieces.single { it.type == BuildingType.GATE &&
                     it.bounds.min.x == gate.passage.min.x && it.bounds.min.z == gate.passage.min.z }
@@ -389,10 +390,49 @@ class CivsSettlementLayoutTest : FunSpec({
                 val leaves = piece.blocks.filter { it.after.contains("_fence_gate[") }
                 val span = if (horizontal) gate.passage.max.x - gate.passage.min.x + 1
                     else gate.passage.max.z - gate.passage.min.z + 1
-                leaves.size shouldBe span - if (CivsGateRefit.versioned(CivsInfrastructure.building(piece))) 2 else 0
-                leaves.forEach { leaf ->
-                    leaf.after shouldBe expected
-                    piece.transit.any { it == leaf.position } shouldBe true
+                val cells = piece.blocks.associate { it.position to it.after }
+                val floorY = piece.bounds.min.y
+                fun point(across: Int, y: Int, depth: Int) = if (horizontal)
+                    CivPosition(piece.bounds.min.x + across, y, piece.bounds.min.z + depth) else
+                    CivPosition(piece.bounds.min.x + depth, y, piece.bounds.min.z + across)
+                val fullTransit = (0 until span).flatMap { across -> (0..4).map { depth -> point(across, floorY + 1, depth) } }.toSet()
+                fullTransit.forEach { cells[it.copy(y = floorY)] shouldBe "minecraft:cobblestone" }
+                if (style == "caledonia") {
+                    CivsGateRefit.profileVersion(CivsInfrastructure.building(piece)) shouldBe 3
+                    leaves shouldBe emptyList()
+                    val posts = listOf(0, span - 1).flatMap { across -> (1..3).map { depth -> point(across, floorY + 1, depth) } }.toSet()
+                    posts.size shouldBe 6
+                    piece.transit.toSet() shouldBe fullTransit - posts
+                    for (feet in piece.transit) for (dy in 0..2)
+                        cells[feet.copy(y = feet.y + dy)] shouldBe "minecraft:air"
+                    posts.forEach { foot ->
+                        cells[foot] shouldBe "minecraft:stone_bricks"
+                        for (y in foot.y + 1 until piece.bounds.max.y - 1)
+                            cells[foot.copy(y = y)] shouldBe "minecraft:dark_oak_log[axis=y]"
+                    }
+                    for (across in 0 until span) for (depth in 1..3) {
+                        cells[point(across, piece.bounds.max.y - 1, depth)] shouldBe
+                            "minecraft:dark_oak_log[axis=${if (horizontal) "x" else "z"}]"
+                        val roofFacing = if (horizontal) { if (depth == 1) "south" else "north" }
+                            else { if (depth == 1) "east" else "west" }
+                        cells[point(across, piece.bounds.max.y, depth)] shouldBe if (depth == 2)
+                            "minecraft:dark_oak_slab[type=top,waterlogged=false]" else
+                            "minecraft:dark_oak_stairs[facing=$roofFacing,half=bottom,shape=straight,waterlogged=false]"
+                    }
+                } else {
+                    CivsGateRefit.profileVersion(CivsInfrastructure.building(piece)) shouldBe 0
+                    leaves.size shouldBe span
+                    piece.transit.toSet() shouldBe fullTransit
+                    leaves.forEach { leaf ->
+                        leaf.after shouldBe expected
+                        piece.transit.any { it == leaf.position } shouldBe true
+                    }
+                    for (feet in piece.transit) for (dy in 0..3) {
+                        val crossing = if (horizontal) feet.z == gate.center.z else feet.x == gate.center.x
+                        cells[feet.copy(y = feet.y + dy)] shouldBe if (dy == 0 && crossing) expected else "minecraft:air"
+                    }
+                    for (across in 0 until span) cells[point(across, piece.bounds.max.y, 2)] shouldBe
+                        if (style == "nordic") "minecraft:cobblestone" else "minecraft:stone_bricks"
                 }
             }
         }

@@ -144,6 +144,24 @@ internal fun citizenPacketSupported(world: World, point: CitizenPoint): Boolean 
     }
 }
 
+/** Planning and packet movement inspect the same crossed column interiors, including offset starts. */
+internal fun citizenFlatSupportClear(from: CitizenPoint, to: CitizenPoint, supported: (CitizenPoint) -> Boolean): Boolean {
+    val boundaries = sortedSetOf(0.0, 1.0)
+    for ((start, end) in listOf(from.x to to.x, from.z to to.z)) {
+        if (start == end) continue
+        for (edge in floor(min(start, end)).toInt() + 1..floor(max(start, end)).toInt()) {
+            val fraction = (edge - start) / (end - start)
+            if (fraction > 0.0 && fraction < 1.0) boundaries += fraction
+        }
+    }
+    return supported(to) && boundaries.zipWithNext().all { (first, second) ->
+        val fraction = (first + second) / 2
+        // The two axes can report the same grid corner a few floating-point units apart.
+        second - first <= .000000001 || supported(CitizenPoint(from.x + (to.x - from.x) * fraction, from.y,
+            from.z + (to.z - from.z) * fraction))
+    }
+}
+
 /** Low campfire collision shapes are solid footholds but unsafe for the whole resident body. */
 internal fun citizenPacketCampfireClear(world: World, point: CitizenPoint, from: CitizenPoint? = null,
                                        halfWidth: Double = .299, height: Double = 1.8): Boolean {

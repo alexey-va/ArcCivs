@@ -1,5 +1,5 @@
 {
-  "title": "ArcCivs181 navigation territory cleanup and exact-slot control relocation",
+  "title": "ArcCivs181-185 navigation territory maintenance and exact-slot control relocation",
   "assumptions": [
     "Runtime0.1.180 is the baseline.0.1.181 changes navigation, natural vegetation maintenance and physical control placement; production rates, recipe quantities, reward chances and paid accepted jobs are unchanged.",
     "Participants1/7/16 settlements and maintenance events1/100/10000 per settlement-day are sensitivity inputs, not measured throughput. Every direct currency and player XP amount is zero before and after.",
@@ -7,7 +7,8 @@
     "Control relocation moves exact existing native slots and NBT from one27-slot barrel to another; no resource reward, item refund or inventory rewrite is allowed. Per-item conservation is checked by native receipt tests, not an invented exchange rate.",
     "Bulk chunk snapshots and faster routing can increase completed legitimate work per hour. The scale is unmeasured before delivery; per-action yields, debits, resident skill and existing supply caps are unchanged. Native comparable route and paid-commit observations are required separately.",
     "Existing-gate maintenance issues no items or resources. Future generated flat-gate material sinks are assessed separately in gate-refit-economy-20261101.json; stepped existing gates retain their exact native floor.",
-    "No combined currency unit or item SELL quote is used. Active SELL/AutoSell and planned SELL-to-contract remain separate; no downstream sales, savings or new earning potential are inferred from zero direct money mint."
+    "No combined currency unit or item SELL quote is used. Active SELL/AutoSell and planned SELL-to-contract remain separate; no downstream sales, savings or new earning potential are inferred from zero direct money mint.",
+    "185 aligns detached flat WALK admission with unchanged native crossed-support checks. An exact891-cell stair capture previously produced first-frame path-changed with zero motion; the corrected local replay arrives in10ticks. This is a local geometry regression, not a measured full live trip or earning multiplier. All direct currency, item, Stock, XP and per-action quantities remain unchanged."
   ],
   "scenario_order": [
     "low",
