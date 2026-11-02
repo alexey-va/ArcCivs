@@ -606,6 +606,119 @@ class CivsSupplyDispatcherTest : FunSpec({
     }
 })
 
+class CivsUpkeepSupplyPriorityTest : FunSpec({
+    val collectionTask = CivSupplyTask(SUPPLY_QUARRY, null, SUPPLY_WAREHOUSE, "COBBLESTONE", false)
+    val logsTask = CivSupplyTask(SUPPLY_TAVERN, null, SUPPLY_WAREHOUSE, "OAK_LOG", false)
+    val ages = mapOf(logsTask to 0L, collectionTask to 100L)
+
+    test("unmet upkeep collects ordinary quarry surplus before older unrelated goods then delivers sixteen") {
+        val input = upkeepCollectionFixture().copy(constructionTargets = mapOf(SUPPLY_WAREHOUSE to SUPPLY_TAVERN))
+        val allocated = allocateCivSupplies(input, ages, now = 200)
+        val collection = allocated.plans.values.single()
+        collection.cargo.material shouldBe "COBBLESTONE"
+        collection.cargo.amount shouldBe 64L
+        collection.cargo.sourceBuildingId shouldBe SUPPLY_QUARRY
+        collection.destinationBuildingId shouldBe SUPPLY_WAREHOUSE
+        collection.cargo.directInput shouldBe false
+        allocated.served shouldBe setOf(collectionTask)
+        val unloaded = input.copy(stores = input.stores + mapOf(
+            SUPPLY_QUARRY to input.stores.getValue(SUPPLY_QUARRY).copy(stock = mapOf("COBBLESTONE" to 67L)),
+            SUPPLY_WAREHOUSE to input.stores.getValue(SUPPLY_WAREHOUSE).copy(stock = mapOf("COBBLESTONE" to 64L))),
+            couriers = input.couriers.map { it.copy(cycle = it.cycle + 1) })
+        val delivery = allocateCivSupplies(unloaded, ages, now = 300).plans.values.single()
+        delivery.cargo.sourceBuildingId shouldBe SUPPLY_WAREHOUSE
+        delivery.destinationBuildingId shouldBe SUPPLY_TARGET
+        delivery.cargo.amount shouldBe 16L
+        delivery.cargo.directInput shouldBe false
+        input.stores.getValue(SUPPLY_QUARRY).stock shouldBe mapOf("COBBLESTONE" to 131L)
+    }
+
+    test("warehouse stock hut-bound transit and assigned warehouse incoming remove collection promotion") {
+        val input = upkeepCollectionFixture()
+        val two = input.copy(couriers = input.couriers + input.couriers.single().copy(workerId = SUPPLY_SECOND))
+        val plans = allocateCivSupplies(two, ages, now = 200).plans
+        plans.getValue(SUPPLY_COURIER).cargo.material shouldBe "COBBLESTONE"
+        plans.getValue(SUPPLY_SECOND).cargo.material shouldBe "OAK_LOG"
+        val supplied = input.copy(requests = input.requests.map { it.copy(inTransit = 16) })
+        allocateCivSupplies(supplied, ages, now = 200).plans.values.single().cargo.material shouldBe "OAK_LOG"
+        val stocked = two.copy(stores = two.stores + (SUPPLY_WAREHOUSE to
+            two.stores.getValue(SUPPLY_WAREHOUSE).copy(stock = mapOf("COBBLESTONE" to 16L))))
+        val stockedPlans = allocateCivSupplies(stocked, ages, now = 200).plans
+        stockedPlans.getValue(SUPPLY_COURIER).cargo.sourceBuildingId shouldBe SUPPLY_WAREHOUSE
+        stockedPlans.getValue(SUPPLY_COURIER).cargo.amount shouldBe 16L
+        stockedPlans.getValue(SUPPLY_SECOND).cargo.material shouldBe "OAK_LOG"
+        val picked = plans.getValue(SUPPLY_COURIER).let { it.copy(carrying = true,
+            cargo = it.cargo.copy(inventoryBacked = true)) }
+        val carrying = input.copy(couriers = two.couriers.filterNot { it.workerId == SUPPLY_COURIER },
+            retained = mapOf(SUPPLY_COURIER to picked), stores = input.stores + (SUPPLY_QUARRY to
+                input.stores.getValue(SUPPLY_QUARRY).copy(stock = mapOf("COBBLESTONE" to 67L))))
+        val carryingPlans = allocateCivSupplies(carrying, ages, now = 200).plans
+        carryingPlans.getValue(SUPPLY_COURIER) shouldBe picked
+        carryingPlans.getValue(SUPPLY_SECOND).cargo.material shouldBe "OAK_LOG"
+    }
+
+    for (condition in listOf("source reserve", "full hut", "distant hut", "active construction", "ordinary input"))
+    test("upkeep collection is not promoted for $condition") {
+        val original = upkeepCollectionFixture()
+        val hut = original.stores.getValue(SUPPLY_TARGET)
+        val input = when (condition) {
+            "source reserve" -> original.copy(stores = original.stores + (SUPPLY_QUARRY to
+                original.stores.getValue(SUPPLY_QUARRY).copy(stock = mapOf("COBBLESTONE" to 32L))))
+            "full hut" -> original.copy(stores = original.stores + (hut.id to hut.copy(capacity = CivSupplyCapacity(0, emptyMap()))))
+            "distant hut" -> original.copy(stores = original.stores + (hut.id to hut.copy(control =
+                original.stores.getValue(SUPPLY_WAREHOUSE).control.copy(x = 0))))
+            "active construction" -> original.copy(constructionId = UUID(0, 701))
+            else -> original.copy(stores = original.stores + (hut.id to hut.copy(type = BuildingType.FORESTER)))
+        }
+        allocateCivSupplies(input, ages, now = 200).plans.values.single().cargo.material shouldBe "OAK_LOG"
+    }
+
+    test("upkeep priority preserves the producer reserve and native warehouse and hut capacity") {
+        val input = upkeepCollectionFixture()
+        val quarry = input.stores.getValue(SUPPLY_QUARRY)
+        val warehouse = input.stores.getValue(SUPPLY_WAREHOUSE)
+        val hut = input.stores.getValue(SUPPLY_TARGET)
+        val short = input.copy(stores = input.stores + (quarry.id to quarry.copy(stock = mapOf("COBBLESTONE" to 35L))))
+        allocateCivSupplies(short, ages, now = 200).plans.values.single().cargo.amount shouldBe 3L
+        val partialWarehouse = input.copy(stores = input.stores + (warehouse.id to warehouse.copy(
+            capacity = CivSupplyCapacity(0, mapOf("COBBLESTONE" to 7L)))))
+        allocateCivSupplies(partialWarehouse, ages, now = 200).plans.values.single().cargo.amount shouldBe 7L
+        val partialHut = input.copy(stores = input.stores + mapOf(warehouse.id to warehouse.copy(stock = mapOf("COBBLESTONE" to 64L)),
+            hut.id to hut.copy(capacity = CivSupplyCapacity(0, mapOf("COBBLESTONE" to 4L)))))
+        allocateCivSupplies(partialHut, ages, now = 200).plans.values.single().let {
+            it.cargo.sourceBuildingId shouldBe warehouse.id
+            it.destinationBuildingId shouldBe hut.id
+            it.cargo.amount shouldBe 4L
+        }
+    }
+
+    test("upkeep collection shares ordinary delivery priority and keeps its existing waiting age") {
+        val original = upkeepCollectionFixture()
+        val input = original.copy(stores = original.stores + (SUPPLY_WAREHOUSE to original.stores.getValue(SUPPLY_WAREHOUSE)
+            .copy(stock = mapOf("BREAD" to 4L))), requests = original.requests + CivSupplyRequest(SUPPLY_TAVERN, "BREAD", 4, 0),
+            couriers = original.couriers.map { it.copy(bagRoom = it.bagRoom + ("BREAD" to 64L)) },
+            stackSizes = original.stackSizes + ("BREAD" to 64))
+        val olderMeal = CivSupplyTask(null, null, SUPPLY_TAVERN, "BREAD", false)
+        allocateCivSupplies(input, ages + (olderMeal to 0L), now = 200).plans.values.single().cargo.material shouldBe "BREAD"
+    }
+
+    test("a carried log shipment stays exact while the next free courier collects upkeep cobblestone") {
+        val input = upkeepCollectionFixture()
+        val courier = input.couriers.single()
+        val source = input.stores.getValue(SUPPLY_TAVERN)
+        val warehouse = input.stores.getValue(SUPPLY_WAREHOUSE)
+        val cargo = CivCargo(CivsLogistics.shipmentId(input.cityId, courier.workerId, courier.cycle, source.id, warehouse.id, "OAK_LOG"),
+            warehouse.id, source.id, warehouse.id, source.entrance, "OAK_LOG", 64, inventoryBacked = true)
+        val carried = CivCourierPlan(cargo, warehouse.id, warehouse.entrance, true)
+        val carrying = input.copy(couriers = listOf(courier.copy(workerId = SUPPLY_SECOND)),
+            retained = mapOf(courier.workerId to carried), stores = input.stores + (source.id to source.copy(stock = mapOf("OAK_LOG" to 64L))))
+        val result = allocateCivSupplies(carrying, ages, now = 200).plans
+        result.getValue(courier.workerId) shouldBe carried
+        result.getValue(SUPPLY_SECOND).cargo.material shouldBe "COBBLESTONE"
+        result.getValue(SUPPLY_SECOND).cargo.amount shouldBe 64L
+    }
+})
+
 class CivsReadyWorkToolPriorityTest : FunSpec({
     test("an older demanded ready tool gets the next free courier after unchanged carried cargo") {
         val input = readyToolPriorityFixture()
@@ -903,6 +1016,19 @@ private fun constructionCollectionFixture(): CivSupplySnapshot {
             mapOf("COBBLESTONE" to 64L, "BREAD" to 64L))),
         emptyList(), emptyMap(), mapOf("COBBLESTONE" to 64, "BREAD" to 64),
         constructionTargets = mapOf(warehouse.id to builder.id), maximumTransferDistance = 256)
+}
+
+private fun upkeepCollectionFixture(): CivSupplySnapshot {
+    val original = constructionCollectionFixture()
+    val warehouse = original.stores.getValue(SUPPLY_WAREHOUSE).copy(stock = emptyMap(), capacity = CivSupplyCapacity(16, emptyMap()))
+    val quarry = original.stores.getValue(SUPPLY_QUARRY).copy(stock = mapOf("COBBLESTONE" to 131L),
+        capacity = CivSupplyCapacity(16, emptyMap(), outputEmptySlots = 14))
+    val logs = original.stores.getValue(SUPPLY_TAVERN).copy(type = BuildingType.FORESTER, stock = mapOf("OAK_LOG" to 128L),
+        desiredStock = emptyMap(), outputMaterial = "OAK_LOG", capacity = CivSupplyCapacity(16, emptyMap(), outputEmptySlots = 14))
+    return original.copy(stores = original.stores + mapOf(warehouse.id to warehouse, quarry.id to quarry, logs.id to logs),
+        requests = listOf(CivSupplyRequest(SUPPLY_TARGET, "COBBLESTONE", 16, 0)),
+        couriers = original.couriers.map { it.copy(bagRoom = mapOf("COBBLESTONE" to 64L, "OAK_LOG" to 64L)) },
+        stackSizes = mapOf("COBBLESTONE" to 64, "OAK_LOG" to 64))
 }
 
 private fun supplyFixture(): CivSupplySnapshot {

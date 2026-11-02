@@ -584,17 +584,20 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         reserve(worker, plan, key)
         rejectedRetained.remove(worker)
     }
-    data class Candidate(val plan: CivCourierPlan, val key: CivSupplyTask, val distance: Double)
+    data class Candidate(val plan: CivCourierPlan, val key: CivSupplyTask, val distance: Double,
+        val upkeepCollection: Boolean = false)
     val ordered = snapshot.couriers.sortedWith(compareBy<CivSupplyCourier> { lastAssigned[it.workerId] ?: Long.MIN_VALUE }
         .thenBy { it.cycle }.thenBy { it.workerId.toString() })
     fun distance(a: CivPosition, b: CivPosition): Double = sqrt((a.x.toDouble() - b.x).let { it * it } +
         (a.y.toDouble() - b.y).let { it * it } + (a.z.toDouble() - b.z).let { it * it })
-    fun constructionCollectionNeed(warehouse: CivSupplyStore, material: String): Long {
+    fun collectionNeed(warehouse: CivSupplyStore, material: String, construction: Boolean = true): Long {
+        if (!construction && snapshot.constructionId != null) return 0
         val required = demand.entries.sumOf { (key, count) ->
-            val target = stores[snapshot.constructionTargets[warehouse.id] ?: key.target]
-            if (key.construction && key.material == material && target != null &&
+            val target = stores[if (construction) snapshot.constructionTargets[warehouse.id] ?: key.target else key.target]
+            if (key.construction == construction && key.material == material && target != null &&
+                (construction || target.type == BuildingType.BUILDER_HUT) &&
                 distance(warehouse.control, target.control) <= snapshot.maximumTransferDistance &&
-                roomFor(target.id, material, required = true) > 0) count else 0L
+                roomFor(target.id, material, required = construction) > 0) count else 0L
         }
         val incoming = assigned.values.filter { it.destinationBuildingId == warehouse.id && it.cargo.material == material }
             .sumOf { it.cargo.amount }
@@ -612,7 +615,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         } else if (producer?.buildingId == source.id) excess[key.worker]?.get(key.material) ?: 0L else 0L
         if (available > 0 && source.id != warehouse.id &&
             distance(producer?.meeting ?: source.control, warehouse.control) <= snapshot.maximumTransferDistance &&
-            (!key.construction || constructionCollectionNeed(warehouse, key.material) > 0)) seen += key
+            (!key.construction || collectionNeed(warehouse, key.material) > 0)) seen += key
     }
     for (courier in ordered) {
         checkBudget()
@@ -621,7 +624,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         val candidates = mutableListOf<Candidate>()
         fun offer(source: CivSupplyStore, target: CivSupplyStore, material: String, quantity: Long,
                   key: CivSupplyTask, producer: CivSupplyWorkerSource? = null, redistribution: Boolean = false,
-                  directInput: Boolean = false) {
+                  directInput: Boolean = false, upkeepCollection: Boolean = false) {
             checkBudget()
             val from = producer?.meeting ?: source.control
             if (source.id == target.id || distance(from, target.control) > snapshot.maximumTransferDistance) return
@@ -637,7 +640,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
                 redistribution = redistribution, directInput = directInput)
             val plan = CivCourierPlan(cargo, target.id, target.entrance, false)
             if (CivSupplyTrip.of(plan) in blockedTrips || redistribution && !redistributionReady(plan)) return
-            candidates += Candidate(plan, key, distance(courier.position, from) + distance(from, target.control))
+            candidates += Candidate(plan, key, distance(courier.position, from) + distance(from, target.control), upkeepCollection)
         }
         for ((key, needed) in demand) {
             val targetId = if (key.construction) snapshot.constructionTargets[warehouse.id] ?: key.target else key.target
@@ -673,9 +676,10 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
                 val count = (available - (source.desiredStock[material] ?: 0)).coerceAtLeast(0)
                 if (count > 0) {
                     val key = CivSupplyTask(source.id, null, warehouse.id, material, false)
-                    val needed = constructionCollectionNeed(warehouse, material)
+                    val needed = collectionNeed(warehouse, material)
                     if (needed > 0) offer(source, warehouse, material, minOf(count, needed), key.copy(construction = true))
-                    offer(source, warehouse, material, count, key)
+                    offer(source, warehouse, material, count, key,
+                        upkeepCollection = collectionNeed(warehouse, material, construction = false) > 0)
                 }
             }
         }
@@ -721,7 +725,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         val selected = candidates.minWithOrNull(compareBy<Candidate> {
             if (missingWorkTool(it)) -1 else if (it.plan.cargo.redistribution) 3
             else if (it.key.construction || constructionBufferRecovery(it)) 0
-            else if (capacityRecovery(it) || it.key.source == null) 1 else 2
+            else if (capacityRecovery(it) || it.key.source == null || it.upkeepCollection) 1 else 2
         }.thenBy { if (it.key.construction && it.key.source != null) 1 else 0 }
             .thenBy { ages[it.key] ?: now }.thenBy { if (capacityRecovery(it)) 0 else 1 }
             .thenBy { it.distance }.thenBy { it.plan.cargo.id.toString() }) ?: continue
