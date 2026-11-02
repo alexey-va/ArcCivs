@@ -28,6 +28,10 @@ class CivsStore(
     private val ioLock = Any()
     private var cityIndex: Map<UUID, CityIndex>? = null
     private var deletedCityIndex: Map<UUID, CivsDeletedCity>? = null
+    // Recent order/retained/preview plans only, never whole villages. All access stays under ioLock.
+    private val planCache = object : LinkedHashMap<UUID, CivPlacementPlan>(4, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<UUID, CivPlacementPlan>): Boolean = size > 4
+    }
     private val consumedItems = CivsConsumedItems()
     private var closed = false
 
@@ -36,6 +40,8 @@ class CivsStore(
     }
 
     fun load(): CompletableFuture<List<Settlement>> = submit {
+        // Explicit reload observes administrator file edits, including after a failed city rescan.
+        planCache.clear()
         reloadCityIndex(trustedRoot()) to requireNotNull(deletedCityIndex).values.toList()
     }.thenCompose { (legacy, deleted) -> network?.loadOwned(legacy, deleted) ?: CompletableFuture.completedFuture(legacy) }
 
@@ -145,18 +151,23 @@ class CivsStore(
             it.copy(blocks = it.blocks.toList(), route = it.route.toList(), waterFoundations = it.waterFoundations?.toList())
         })
         return submit {
+            // A failed atomic write can have reached rename; never retain its previous cached value.
+            planCache.remove(snapshot.id)
             validatePlan(snapshot)
             val trustedRoot = trustedRoot()
-            requireNotNull(planStore(trustedRoot, snapshot.id).write(PlanDocument(SCHEMA_VERSION, snapshot)).plan)
+            cachePlan(requireNotNull(planStore(trustedRoot, snapshot.id).write(PlanDocument(SCHEMA_VERSION, snapshot)).plan))
         }
     }
 
+    /** Reuse owned committed plans until save/delete or explicit load(); no disk polling on a hit. */
     fun loadPlan(id: UUID): CompletableFuture<CivPlacementPlan?> = submit {
+        planCache[id]?.let { return@submit it }
         val trustedRoot = trustedRoot()
-        planStore(trustedRoot, id).loadOrNull()?.plan
+        planStore(trustedRoot, id).loadOrNull()?.plan?.let(::cachePlan)
     }
 
     fun deletePlan(id: UUID): CompletableFuture<Boolean> = submit {
+        planCache.remove(id)
         val trustedRoot = trustedRoot()
         val store = planStore(trustedRoot, id)
         val existing = store.loadOrNull() ?: return@submit false
@@ -468,6 +479,14 @@ class CivsStore(
             transaction.validated()
         },
     )
+
+    /** Freeze the validated readback once; sharing it must not let a caller alter later loads. */
+    private fun cachePlan(plan: CivPlacementPlan): CivPlacementPlan = plan.copy(
+        building = plan.building.copy(transit = plan.building.transit?.let { java.util.List.copyOf(it) }),
+        blocks = java.util.List.copyOf(plan.blocks),
+        terrain = plan.terrain?.let { it.copy(blocks = java.util.List.copyOf(it.blocks),
+            route = java.util.List.copyOf(it.route), waterFoundations = it.waterFoundations?.let { java.util.List.copyOf(it) }) },
+    ).also { planCache[it.id] = it }
 
     private fun snapshotBuilding(building: CivBuilding) = building.copy(transit = building.transit?.toList())
 

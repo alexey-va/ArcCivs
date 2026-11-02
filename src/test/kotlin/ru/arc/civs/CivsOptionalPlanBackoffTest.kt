@@ -15,14 +15,14 @@ import java.util.logging.Logger
 
 class CivsOptionalPlanBackoffTest : FunSpec({
     for ((reason, retry) in listOf("autonomy-no-site" to 30_001L, "world-busy" to 5_001L))
-    test("optional full plan $reason leaves the existing quarry upgrade eligible after its ordinary retry") {
+    test("optional infrastructure $reason leaves a planless quarry upgrade eligible after its ordinary retry") {
         OptionalPlanHarness().use { h ->
+            h.infrastructureFailure = reason
             val before = h.city
             val quarry = requireNotNull(h.quarry)
             CivsAutonomy.nextGoal(before)?.let { Triple(it.type, it.targetLevel, it.buildingId) } shouldBe
                 Triple(BuildingType.QUARRY, 2, quarry.id)
             h.start()
-            h.failPlan(reason)
             h.city shouldBe before
             h.time = retry - 5_001
             h.pulse()
@@ -37,32 +37,36 @@ class CivsOptionalPlanBackoffTest : FunSpec({
             h.city.inventory shouldBe before.inventory
             h.city.autonomy shouldBe before.autonomy
             h.development.progress(before.id)?.stage shouldBe "queued"
-            verify(exactly = 1) { h.placement.plan(any()) }
-            verify(exactly = 0) { h.placement.infrastructure(any()) }
+            verify(exactly = 0) { h.placement.plan(any()) }
+            verify(exactly = 1) { h.placement.infrastructure(any()) }
             verify(exactly = 0) { h.placement.search(any(), any(), any(), any(), any(), any(), any()) }
         }
     }
 
-    test("an optional layout backoff does not bypass an ordinary upgrade refusal and expires at the same deadline") {
+    test("an optional infrastructure backoff does not bypass an ordinary upgrade refusal and expires at the same deadline") {
         OptionalPlanHarness().use { h ->
+            h.infrastructureFailure = "autonomy-no-site"
             h.upgradeFailure = "lands-denied"
             val before = h.city
-            h.start(); h.failPlan("autonomy-no-site")
+            h.start()
             h.time = 30_001; h.pulse()
             h.upgrades shouldBe listOf(requireNotNull(h.quarry).id to 2)
             h.committed shouldBe emptyList()
             h.city shouldBe before
             h.development.progress(before.id)?.reason shouldBe "lands-denied"
             h.time = 300_001; h.pulse()
-            verify(exactly = 2) { h.placement.plan(any()) }
+            verify(exactly = 0) { h.placement.plan(any()) }
+            verify(exactly = 2) { h.placement.infrastructure(any()) }
             h.upgrades.size shouldBe 1
             h.committed shouldBe emptyList()
+            h.city shouldBe before
         }
     }
 
-    test("intervening building geometry invalidates the failed optional layout check") {
+    test("intervening building geometry invalidates the failed optional infrastructure check") {
         OptionalPlanHarness().use { h ->
-            h.start(); h.failPlan("autonomy-no-site")
+            h.infrastructureFailure = "autonomy-no-site"
+            h.start()
             val hall = h.city.buildings.first()
             fun moved(p: CivPosition) = p.copy(x = p.x + 1)
             h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
@@ -70,20 +74,27 @@ class CivsOptionalPlanBackoffTest : FunSpec({
                     control = it.control?.let(::moved), bounds = CivBox(moved(it.bounds.min), moved(it.bounds.max)))
             }))
             h.development.pulseAccessRepair(); h.drain()
+            val afterMove = h.city
             h.time = 30_001; h.pulse()
-            verify(exactly = 1) { h.placement.infrastructure(any()) }
+            verify(exactly = 0) { h.placement.plan(any()) }
+            verify(exactly = 2) { h.placement.infrastructure(any()) }
             h.upgrades shouldBe emptyList()
             h.committed shouldBe emptyList()
+            h.city shouldBe afterMove
         }
     }
 
-    test("a missing new plot retains its full plan retry instead of borrowing the existing upgrade exemption") {
+    test("a missing new plot retries only its single-goal search when the unchanged refusal expires") {
         OptionalPlanHarness(newPlot = true).use { h ->
             CivsAutonomy.nextGoal(h.city)?.let { it.type to it.buildingId } shouldBe (BuildingType.WAREHOUSE to null)
             val before = h.city
-            h.start(); h.failPlan("autonomy-no-site")
+            h.start(); h.failSearch("autonomy-no-site")
+            h.time = 30_001; h.pulse()
+            verify(exactly = 1) { h.placement.search(any(), BuildingType.WAREHOUSE, 1, any(), any(), any(), any()) }
+            h.city shouldBe before
             h.time = 300_001; h.pulse()
-            verify(exactly = 2) { h.placement.plan(any()) }
+            verify(exactly = 0) { h.placement.plan(any()) }
+            verify(exactly = 2) { h.placement.search(any(), BuildingType.WAREHOUSE, 1, any(), any(), any(), any()) }
             h.upgrades shouldBe emptyList()
             h.committed shouldBe emptyList()
             h.city shouldBe before
@@ -93,8 +104,9 @@ class CivsOptionalPlanBackoffTest : FunSpec({
     test("a town without an ordinary existing goal retains its normal infrastructure retry") {
         OptionalPlanHarness(noOrdinary = true).use { h ->
             CivsAutonomy.nextGoal(h.city) shouldBe null
-            h.start(); h.failPlan("autonomy-no-site")
+            h.start()
             h.time = 30_001; h.pulse()
+            verify(exactly = 0) { h.placement.plan(any()) }
             verify(exactly = 1) { h.placement.infrastructure(any()) }
             h.upgrades shouldBe emptyList()
             h.committed shouldBe emptyList()
@@ -117,12 +129,13 @@ private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean 
     val quarry get() = city.buildings.firstOrNull { it.type == BuildingType.QUARRY && it.level == 1 }
     var time = 0L
     var upgradeFailure: String? = null
+    var infrastructureFailure = "autonomy-layout-complete"
     val upgrades = mutableListOf<Pair<UUID, Int>>()
     val committed = mutableListOf<UUID>()
     private val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler)
     val placement = mockk<CivsAutonomousPlacement>()
-    private val planned = CompletableFuture<CivSettlementPlan>()
+    private val searched = CompletableFuture<CivAutonomousDesign>()
     private val blueprints = mockk<CivsBlueprints>()
     private val plugin = mockk<Plugin>()
     private val mutation: (UUID, (Settlement) -> Settlement) -> CompletableFuture<Settlement> = { _, change ->
@@ -141,8 +154,9 @@ private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean 
                 every { blueprint.building } returns building.copy(level = level, phase = BuildingPhase.CONSTRUCTING)
             })
         }
-        every { placement.plan(any()) } returns planned
-        every { placement.infrastructure(any()) } returns CompletableFuture.failedFuture(CivsRejection("autonomy-layout-complete"))
+        every { placement.plan(any()) } returns CompletableFuture.failedFuture(CivsRejection("unexpected-full-plan"))
+        every { placement.search(any(), any(), any(), any(), any(), any(), any()) } returns searched
+        every { placement.infrastructure(any()) } answers { CompletableFuture.failedFuture(CivsRejection(infrastructureFailure)) }
         every { placement.debug(any()) } returns emptyMap()
     }
     val development = CivsAutonomousDevelopment(plugin, tasks, mockk(), blueprints, placement, Executor(Runnable::run),
@@ -156,7 +170,7 @@ private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean 
         }, {}, { time })
     fun start() { development.pulseAccessRepair(); drain(); pulse() }
     fun pulse() { development.pulse(); drain() }
-    fun failPlan(reason: String) { planned.completeExceptionally(CivsRejection(reason)); drain() }
+    fun failSearch(reason: String) { searched.completeExceptionally(CivsRejection(reason)); drain() }
     fun drain() {
         var count = 0
         while (scheduler.pendingCount() > 0) { check(count++ < 20); scheduler.executeAll() }
