@@ -7,6 +7,7 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeSameInstanceAs
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.block.data.BlockData
 import org.bukkit.util.BoundingBox
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.BudgetedTaskQueue
@@ -15,6 +16,7 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import java.util.UUID
 
@@ -423,6 +425,110 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
+    test("mixed cached cells wait for every dynamic shape before adding new cells and keep shared references") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val dynamic = listOf(CivPosition(4, 64, 1), CivPosition(4, 65, 3))
+            val terrain = flatSnapshotTerrain(0, 0, dynamic.associateWith { org.bukkit.Bukkit.createBlockData(Material.SNOW) })
+            val first = CitizenSearchNode(2, 64.0, 2)
+            completeSnapshotCapture(terrain, listOf(CitizenSearchProbe(first, first.point())), 1.0)
+            val cached = terrain.blocks.toMap()
+            var allowedReads = 0
+            val policy = CitizenSnapshotPolicy({ p, _ -> allowedReads++; p.y == 64 }, { _, _ -> true })
+            val node = CitizenSearchNode(3, 64.0, 2)
+            val capture = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), terrain,
+                policy, -64, 320, 84, 1, false)
+            var request = capture.advance(CitizenSnapshotInput())
+            request.dynamics.keys.toList() shouldBe dynamic
+            terrain.blocks.size shouldBe 63
+            allowedReads shouldBe 0
+            val shapes = dynamic.mapIndexed { index, point -> point to listOf(
+                CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, .25 + index * .5, 1.0)) }.toMap()
+            request = capture.advance(CitizenSnapshotInput(dynamics = mapOf(dynamic.first() to shapes.getValue(dynamic.first()))))
+            request.dynamics.keys.toList() shouldBe dynamic.drop(1)
+            terrain.blocks.size shouldBe 63
+            allowedReads shouldBe 0
+            for ((point, block) in cached) terrain.blocks[point] shouldBeSameInstanceAs block
+            request = capture.advance(CitizenSnapshotInput(dynamics = mapOf(dynamic.last() to shapes.getValue(dynamic.last()))))
+            terrain.blocks.size shouldBe 84
+            allowedReads shouldBe 21
+            val completed = requireNotNull(capture.advance(CitizenSnapshotInput(
+                costs = request.costs.associateWith { 1.0 })).captures).single()
+            completed.blocks.keys.toList() shouldBe buildList {
+                for (x in 2..4) for (z in 1..3) for (y in 61..67) add(CivPosition(x, y, z))
+            }
+            for ((point, block) in cached) if (point in completed.blocks) completed.blocks[point] shouldBeSameInstanceAs block
+            dynamic.forEach { completed.blocks.getValue(it).boxes shouldBe shapes.getValue(it) }
+        }
+    }
+
+    test("cancelling a pending dynamic capture keeps cached cells and rejects late shape input") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val point = CivPosition(4, 64, 2)
+            val terrain = flatSnapshotTerrain(0, 0, mapOf(point to org.bukkit.Bukkit.createBlockData(Material.SNOW)))
+            val first = CitizenSearchNode(2, 64.0, 2)
+            completeSnapshotCapture(terrain, listOf(CitizenSearchProbe(first, first.point())), 1.0)
+            val cached = terrain.blocks.toMap()
+            val node = CitizenSearchNode(3, 64.0, 2)
+            val policy = CitizenSnapshotPolicy({ p, _ -> p.y == 64 }, { _, _ -> true })
+            val capture = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), terrain,
+                policy, -64, 320, 84, 1, false)
+            capture.advance(CitizenSnapshotInput()).dynamics.keys shouldBe setOf(point)
+            capture.cancel()
+            shouldThrow<CancellationException> { capture.advance(CitizenSnapshotInput(dynamics = mapOf(point to emptyList()))) }
+            terrain.blocks shouldBe cached
+            terrain.dynamics shouldBe emptyMap()
+        }
+    }
+
+    test("a fully cached neighbourhood completes at the block limit without reevaluating cell policy") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val terrain = flatSnapshotTerrain(0, 0)
+            val node = CitizenSearchNode(2, 64.0, 2)
+            val probes = listOf(CitizenSearchProbe(node, node.point()))
+            val before = completeSnapshotCapture(terrain, probes, 1.0).single()
+            val policy = CitizenSnapshotPolicy({ _, _ -> error("Cached cell policy must remain unchanged") }, { _, _ -> true })
+            val request = CitizenSnapshotCapture(probes, terrain, policy, -64, 320, 63, 1, false).advance(CitizenSnapshotInput())
+            request.capturedBlocks shouldBe 63
+            val completed = requireNotNull(request.captures).single()
+            completed.blocks shouldBe before.blocks
+            for ((point, block) in before.blocks) completed.blocks[point] shouldBeSameInstanceAs block
+        }
+    }
+
+    test("requested new cells enforce the block limit in existing cell order after cached cells") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val terrain = flatSnapshotTerrain(0, 0)
+            val first = CitizenSearchNode(2, 64.0, 2)
+            completeSnapshotCapture(terrain, listOf(CitizenSearchProbe(first, first.point())), 1.0)
+            val cached = terrain.blocks.keys.toSet()
+            val node = CitizenSearchNode(3, 64.0, 2)
+            val policy = CitizenSnapshotPolicy({ p, _ -> p.y == 64 }, { _, _ -> true })
+            val capture = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), terrain,
+                policy, -64, 320, 64, 1, false)
+            shouldThrow<CitizenNavigationCaptureLimit> { capture.advance(CitizenSnapshotInput()) }
+            terrain.blocks.keys - cached shouldBe setOf(CivPosition(4, 61, 1))
+            terrain.blocks.size shouldBe 64
+        }
+    }
+
+    test("a partial prefetched neighbourhood at the block limit publishes only completed requested probes") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val terrain = flatSnapshotTerrain(0, 0)
+            val node = CitizenSearchNode(2, 64.0, 2)
+            val probe = CitizenSearchProbe(node, node.point())
+            val policy = CitizenSnapshotPolicy({ p, _ -> p.y == 64 }, { _, _ -> true })
+            val capture = CitizenSnapshotCapture(listOf(probe), terrain, policy, -64, 320, 64, 2, false)
+            val request = capture.advance(CitizenSnapshotInput())
+            request.capturedBlocks shouldBe 64
+            val completed = requireNotNull(capture.advance(CitizenSnapshotInput(
+                costs = request.costs.associateWith { 1.0 })).captures)
+            completed.size shouldBe 1
+            completed.single().probe shouldBe probe
+            completed.single().blocks.size shouldBe 63
+            terrain.blocks.keys - completed.single().blocks.keys shouldBe setOf(CivPosition(0, 61, 0))
+        }
+    }
+
     test("snapshot captures reuse unchanged blocks and preserve the complete ordered neighbourhood map") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
             for (base in listOf(-3, 2)) {
@@ -735,15 +841,15 @@ class CivsNavigationSnapshotsTest : FunSpec({
     }
 })
 
-private fun flatSnapshotTerrain(x: Int, z: Int): CitizenSnapshotTerrain {
+private fun flatSnapshotTerrain(x: Int, z: Int, cells: Map<CivPosition, BlockData> = emptyMap()): CitizenSnapshotTerrain {
     val terrain = CitizenSnapshotTerrain()
     val snapshot = CivsNavigationChunkSnapshotFixture(x, z, -64, 320, "capture-reuse", 0,
-        org.bukkit.Bukkit.createBlockData(Material.STONE), emptyMap())
+        org.bukkit.Bukkit.createBlockData(Material.STONE), cells)
     val chunk = CitizenSnapshotChunk(snapshot, -64, 320)
     terrain.chunks[CitizenSnapshotKey(x, z)] = chunk
     chunk.states(61, 67).forEach { (data, _) ->
         terrain.states[data] = CitizenSnapshotState(CitizenTerrainShape(false, false, false, false,
-            if (data.material.isAir) emptyList() else listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))), false)
+            if (data.material.isAir) emptyList() else listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))), data.material == Material.SNOW)
     }
     return terrain
 }

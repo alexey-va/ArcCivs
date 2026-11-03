@@ -148,16 +148,19 @@ internal class CitizenSnapshotCapture(
                 }
             }
             if (missingStates.isNotEmpty()) return request(states = missingStates)
+            val cells = Array<CitizenTerrainBlock?>(positions.size) { terrain.blocks[positions[it]] }
             val dynamic = linkedMapOf<CivPosition, BlockData>()
-            for (point in positions) {
-                if (point in terrain.blocks || point.y !in minimumY until maximumY) continue
+            for (index in positions.indices) {
+                val point = positions[index]
+                if (cells[index] != null || point.y !in minimumY until maximumY) continue
                 val chunk = terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)] ?: continue
                 val data = chunk.data(point)
                 if (terrain.states.getValue(data).dynamic && point !in terrain.dynamics) dynamic[point] = data
             }
             if (dynamic.isNotEmpty()) return request(dynamics = dynamic)
-            for (point in positions) {
-                if (point in terrain.blocks) continue
+            for (index in positions.indices) {
+                if (cells[index] != null) continue
+                val point = positions[index]
                 if (terrain.blocks.size >= maximumBlocks) {
                     if (next < requestedCount) throw CitizenNavigationCaptureLimit()
                     next = probes.size
@@ -172,8 +175,9 @@ internal class CitizenSnapshotCapture(
                         if (state.dynamic) terrain.dynamics.getValue(point) else shape.boxes)
                 }
                 terrain.blocks[point] = block
+                cells[index] = block
             }
-            val blocks = CitizenSnapshotBlocks(positions, Array(positions.size) { terrain.blocks.getValue(positions[it]) })
+            val blocks = CitizenSnapshotBlocks(positions, cells.requireNoNulls())
             val edges = citizenSearchCandidates(probe, blocks, minimumY, maximumY).map { edge ->
                 edge.copy(permitted = if (probe.incoming) policy.stepAllowed(edge.node.point(), probe.from)
                     else policy.stepAllowed(probe.from, edge.node.point()))
