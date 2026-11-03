@@ -81,7 +81,12 @@ class CivsMatureSettlementInfillTest : FunSpec({
         reserved.none { CivsAutonomousGeometry.horizontalContains(it.building.bounds, occupied) } shouldBe true
         val denied = fixture.surface.copy(columns = fixture.surface.columns.mapValues { (_, value) -> value.copy(natural = false) })
         CivsAutonomousTerraform.options(city, reserved, denied) shouldBe emptyList()
-        CivsSettlementLayout.infill(city, house.copy(type = BuildingType.FARM), house.copy(type = BuildingType.FARM)) shouldBe emptyList()
+        val farm = house.copy(type = BuildingType.FARM)
+        val farmYards = CivsSettlementLayout.infill(city, farm, farm, access)
+        (farmYards.size in 1..64) shouldBe true
+        farmYards.none { CivsAutonomousGeometry.horizontalContains(it.building.bounds, occupied) } shouldBe true
+        CivsAutonomousTerraform.options(city, farmYards, denied) shouldBe emptyList()
+        CivsSettlementLayout.infill(city.copy(autonomy = null), farm, farm) shouldBe emptyList()
     }
 })
 
