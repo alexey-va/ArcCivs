@@ -2611,6 +2611,259 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("bootstrap residents sleep at actual fractional ground instead of an admissible unreachable SITE floor") {
+        residentRuntime { h ->
+            val hall = h.bootstrapShelterHome()
+            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            val hut = hall.copy(id = UUID.randomUUID(), type = BuildingType.BUILDER_HUT, schematicId = "builder1",
+                anchor = CivPosition(12, 64, 0), entrance = CivPosition(12, 64, 0), control = CivPosition(12, 64, 0),
+                bounds = CivBox(CivPosition(10, 64, -2), CivPosition(14, 68, 2)), phase = BuildingPhase.CONSTRUCTING)
+            val order = CivConstruction(UUID.randomUUID(), hut.id, 1, 2, 0, ConstructionPhase.WAITING_MATERIALS,
+                Stock(), plannedBuilding = hut, batches = CivConstructionBatches(2, 16), materials = mapOf("STONE" to 1L),
+                payment = CivConstructionPayment(awaiting = mapOf("STONE" to 1L)), workCredit = 0)
+            val nonHomes = listOf(BuildingType.FORESTER, BuildingType.QUARRY).mapIndexed { index, type ->
+                hut.copy(id = UUID.randomUUID(), type = type, phase = BuildingPhase.ACTIVE,
+                    anchor = CivPosition(20 + index * 6, 64, 0), entrance = CivPosition(20 + index * 6, 64, 0), control = null,
+                    bounds = CivBox(CivPosition(18 + index * 6, 64, -2), CivPosition(22 + index * 6, 68, 2)))
+            }
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(hall, hut) + nonHomes, construction = order,
+                workers = h.city.workers.map { it.copy(assignment = hut.id, nextDeliveryAt = 1, homeId = hall.id,
+                    items = List(CivsEquipment.SLOTS) { slot -> if (slot == 6) CivResidentItem("STONE", 4) else null }) } +
+                    List(4) { CivWorker(UUID.randomUUID(), "Neighbour$it", null, homeId = hall.id) }))
+            h.owner.pulse(2_000)
+            h.owner.pulse(2_500) // The normal owner admits only two new residents per pulse.
+            val actors = h.owner.collisionActors().toList()
+            actors.size shouldBe 5
+            val origins = actors.mapIndexed { index, npc ->
+                val feet = Location(h.world, -9.85 + index * 5, 64.0, 10.15)
+                npc.teleport(feet)
+                npc.uniqueId to feet
+            }.toMap()
+            // Exercise the unchanged production reservation: its high non-control candidate really is admissible.
+            val oldTarget = requireNotNull(h.reserveShelter())
+            oldTarget.y shouldBe 68
+            citizenControlClear(h.city, oldTarget) shouldBe true
+            citizenStandable(h.world, oldTarget) shouldBe true
+            val builder = h.actor()
+            builder.sheltering = true
+            builder.pendingChunkTarget = oldTarget
+            val before = h.city
+            val captures = h.world.chunkSnapshotCaptures
+            h.navigationNow = 3_000
+            h.world.time = 13_000
+            h.owner.pulse(3_000)
+            builder.pendingChunkTarget shouldBe null
+            for (tick in 1..720) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                for (npc in actors) {
+                    withClue("worker=${npc.uniqueId} ${h.navigationState(npc.uniqueId)}") {
+                        npc.pose shouldBe PacketNpcPose.SLEEPING
+                        h.owner.residentFeet(npc.uniqueId) shouldBe origins.getValue(npc.uniqueId)
+                        h.routeIdentity(npc.uniqueId) shouldBe null
+                    }
+                }
+            }
+            h.world.chunkSnapshotCaptures shouldBe captures
+            h.pendingNavigationWorkers shouldBe 0
+            h.city shouldBe before
+            h.deliveries shouldBe 0
+            h.groundRequests shouldBe emptyList()
+            h.homeDeposits shouldBe emptyList()
+            val bodies = actors.map(::runtimeSleepingBody)
+            for (first in bodies.indices) for (second in first + 1 until bodies.size)
+                bodies[first].overlaps(bodies[second]) shouldBe false
+            // Finishing the first home preserves a safe current sleeper until dawn.
+            h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == hall.id) it.copy(phase = BuildingPhase.ACTIVE) else it })
+            h.owner.pulse(40_000)
+            actors.all { it.pose == PacketNpcPose.SLEEPING } shouldBe true
+            h.world.time = 1_000
+            h.owner.pulse(41_000)
+            for (npc in actors) {
+                npc.pose shouldBe PacketNpcPose.STANDING
+                npc.location.toVector() shouldBe origins.getValue(npc.uniqueId).toVector()
+            }
+            h.world.time = 13_000
+            h.owner.pulse(42_000)
+            val target = requireNotNull(h.routeTarget())
+            target.y shouldBe 68.0
+            hall.bounds.contains(target.blockX, target.blockY, target.blockZ) shouldBe true
+            actors.single { it.uniqueId == h.workerId }.pose shouldBe PacketNpcPose.STANDING
+        }
+    }
+
+    for (unsafe in listOf("unsupported", "fluid", "hazard", "climb", "log", "leaves", "control", "body-chunk", "city-boundary"))
+    test("bootstrap shelter stays awake without routing or relocation on unsafe current feet kind=$unsafe") {
+        residentRuntime { h ->
+            h.bootstrapShelterHome()
+            val npc = h.owner.collisionActors().single()
+            val origin = when (unsafe) {
+                "control" -> Location(h.world, .5, 69.0, .5)
+                "body-chunk" -> Location(h.world, 15.5, 64.0, 15.5)
+                "city-boundary" -> Location(h.world, 16.7, 64.0, 16.7)
+                else -> Location(h.world, 8.8, 64.0, 8.2)
+            }
+            when (unsafe) {
+                "unsupported" -> for (x in origin.blockX - 1..origin.blockX + 1) for (z in origin.blockZ - 1..origin.blockZ + 1)
+                    h.world.getBlockAt(x, 63, z).type = Material.AIR
+                "fluid" -> h.world.getBlockAt(origin.blockX, 64, origin.blockZ).type = Material.WATER
+                "hazard" -> h.world.getBlockAt(origin.blockX, 63, origin.blockZ).type = Material.MAGMA_BLOCK
+                "climb" -> h.world.getBlockAt(origin.blockX, 64, origin.blockZ).type = Material.LADDER
+                "log" -> h.world.getBlockAt(origin.blockX, 63, origin.blockZ).type = Material.OAK_LOG
+                "leaves" -> h.world.getBlockAt(origin.blockX, 63, origin.blockZ).type = Material.OAK_LEAVES
+                "body-chunk" -> {
+                    h.world.unloadChunk(1, 0)
+                    h.world.unloadChunk(0, 1)
+                    h.world.unloadChunk(1, 1)
+                    citizenPacketSupported(h.world, origin.point()) shouldBe true
+                    citizenPacketBodyClear(h.world, origin.point(), false) shouldBe true
+                }
+                "city-boundary" -> h.city = h.city.copy(radius = 16)
+            }
+            npc.teleport(origin)
+            val before = h.city
+            val captures = h.world.chunkSnapshotCaptures
+            val teleports = h.teleports
+            h.world.time = 13_000
+            h.owner.pulse(2_000)
+            npc.pose shouldBe PacketNpcPose.STANDING
+            npc.location shouldBe origin
+            h.teleports shouldBe teleports
+            h.owner.status(h.workerId) shouldBe if (unsafe == "hazard") "workers.status.injury-pending" else "workers.status.sheltering"
+            if (unsafe == "hazard") h.hits shouldBe 1
+            h.routeIdentity() shouldBe null
+            h.world.chunkSnapshotCaptures shouldBe captures
+            h.city shouldBe before
+            h.deliveries shouldBe 0
+            if (unsafe == "unsupported") {
+                repeat(30) { h.navigate() }
+                npc.location.y shouldBe 63.0
+                h.routeIdentity() shouldBe null
+            }
+        }
+    }
+
+    test("unsafe bootstrap residents cannot starve a safe neighbour or sleep through an occupied body") {
+        residentRuntime { h ->
+            h.bootstrapShelterHome()
+            h.city = h.city.copy(workers = h.city.workers + List(8) { CivWorker(UUID.randomUUID(), "Neighbour$it", null) })
+            repeat(4) { h.owner.pulse(2_000 + it * 1_000L) }
+            val actors = h.owner.collisionActors().toList()
+            actors.size shouldBe 9
+            val last = actors.last()
+            actors.dropLast(1).forEach { it.teleport(Location(h.world, 8.5, 64.0, 8.5)) }
+            val safe = Location(h.world, 22.8, 64.0, 8.2)
+            last.teleport(safe)
+            h.world.time = 13_000
+            h.owner.pulse(7_000)
+            actors.all { it.pose == PacketNpcPose.STANDING } shouldBe true
+            h.owner.pulse(8_000)
+            last.pose shouldBe PacketNpcPose.SLEEPING
+            h.owner.residentFeet(last.uniqueId) shouldBe safe
+            actors.dropLast(1).all { it.pose == PacketNpcPose.STANDING && h.routeIdentity(it.uniqueId) == null } shouldBe true
+            val blocked = actors.first()
+            val overlapping = safe.clone().add(-1.0, 0.0, 0.0)
+            blocked.teleport(overlapping)
+            citizenStandingBounds(overlapping, blocked.scale).overlaps(runtimeSleepingBody(last)) shouldBe true
+            repeat(3) { h.owner.pulse(9_000 + it * 1_000L) }
+            blocked.pose shouldBe PacketNpcPose.STANDING
+            blocked.location shouldBe overlapping
+            h.routeIdentity(blocked.uniqueId) shouldBe null
+            h.deliveries shouldBe 0
+        }
+    }
+
+    for (mode in listOf("manual", "alarm", "house", "tavern"))
+    test("bootstrap current-feet policy preserves ordinary home travel mode=$mode") {
+        residentRuntime { h ->
+            val hall = h.bootstrapShelterHome()
+            for (x in -1..2) for (z in -1..1) h.world.loadChunk(x, z)
+            val home = if (mode in setOf("house", "tavern")) hall.copy(id = UUID.randomUUID(), phase = BuildingPhase.ACTIVE,
+                type = if (mode == "house") BuildingType.HOUSE else BuildingType.TAVERN,
+                anchor = CivPosition(22, 64, 0), entrance = CivPosition(22, 64, 0), control = null,
+                bounds = CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2))) else hall
+            h.city = h.city.copy(autonomy = if (mode == "manual") null else h.city.autonomy,
+                buildings = if (home == hall) listOf(hall) else listOf(hall, home),
+                workers = h.city.workers.map { it.copy(homeId = home.id) })
+            val npc = h.owner.collisionActors().single()
+            val origin = Location(h.world, 8.8, 64.0, 8.2)
+            npc.teleport(origin)
+            if (mode == "alarm") {
+                h.owner.residentLifeEnabled = true
+                h.monsterAt(10.5, 8.2)
+            }
+            h.owner.pulse(2_000)
+            h.world.time = 13_000
+            h.owner.pulse(3_000)
+            if (mode == "alarm") h.owner.status(h.workerId) shouldBe "workers.status.alarm-shelter"
+            npc.pose shouldBe PacketNpcPose.STANDING
+            npc.location shouldBe origin
+            val target = requireNotNull(h.routeTarget())
+            home.bounds.contains(target.blockX, target.blockY, target.blockZ) shouldBe true
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("bootstrap shelter follows each resident's selected home when the first house is already active") {
+        residentRuntime { h ->
+            val hall = h.bootstrapShelterHome()
+            for (x in -1..2) for (z in -1..1) h.world.loadChunk(x, z)
+            val house = hall.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, schematicId = "house1",
+                phase = BuildingPhase.ACTIVE, anchor = CivPosition(22, 64, 0), entrance = CivPosition(22, 64, 0), control = null,
+                bounds = CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2)))
+            val neighbour = CivWorker(UUID.randomUUID(), "Neighbour", null, homeId = house.id)
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(hall, house),
+                workers = h.city.workers.map { it.copy(homeId = hall.id) } + neighbour))
+            citizenHomeBuilding(h.city, h.city.workers.first()) shouldBe hall
+            citizenHomeBuilding(h.city, neighbour) shouldBe house
+            h.owner.pulse(2_000)
+            val actors = h.owner.collisionActors().associateBy { it.uniqueId }
+            actors.size shouldBe 2
+            val origin = Location(h.world, 8.8, 64.0, 8.2)
+            actors.getValue(h.workerId).teleport(origin)
+            actors.getValue(neighbour.id).teleport(Location(h.world, 12.8, 64.0, 10.2))
+            val before = h.city
+            h.world.time = 13_000
+            h.owner.pulse(3_000)
+            actors.getValue(h.workerId).pose shouldBe PacketNpcPose.SLEEPING
+            h.owner.residentFeet(h.workerId) shouldBe origin
+            h.routeIdentity(h.workerId) shouldBe null
+            actors.getValue(neighbour.id).pose shouldBe PacketNpcPose.STANDING
+            val target = requireNotNull(h.routeTarget(neighbour.id))
+            house.bounds.contains(target.blockX, target.blockY, target.blockZ) shouldBe true
+            h.city shouldBe before
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("bootstrap night shelter waits for an accepted ground-item receipt") {
+        residentRuntime { h ->
+            h.bootstrapShelterHome()
+            h.collectionEnabled = true
+            val npc = h.owner.collisionActors().single()
+            val origin = Location(h.world, 8.8, 64.0, 8.2)
+            npc.teleport(origin)
+            val item = h.groundAt(origin.clone().add(.5, 0.0, 0.0))
+            val before = h.city
+            h.owner.pulse(2_000)
+            h.world.time = 13_000
+            for (now in listOf(3_000L, 4_000L, 40_000L)) {
+                h.owner.pulse(now)
+                h.owner.status(h.workerId) shouldBe "workers.status.loading-cargo"
+                npc.pose shouldBe PacketNpcPose.STANDING
+                npc.location shouldBe origin
+                h.groundRequests shouldBe listOf(listOf(item.uniqueId))
+                h.city shouldBe before
+            }
+            h.pendingGroundCollection.complete(h.city)
+            h.owner.pulse(41_000)
+            npc.pose shouldBe PacketNpcPose.SLEEPING
+            h.owner.residentFeet(h.workerId) shouldBe origin
+            h.groundRequests shouldBe listOf(listOf(item.uniqueId))
+            h.deliveries shouldBe 0
+        }
+    }
+
     test("three residents reserve separate full sleeping bodies and release their places at dawn") {
         residentRuntime { h ->
             // Home positions in chunk -1 need the same loaded one-chunk search
@@ -5153,6 +5406,20 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     }
     fun phase(worker: UUID = workerId): CitizenPhase =
         ((owner.debug(city.id, worker)["entries"] as List<*>).single() as Map<*, *>)["phase"] as CitizenPhase
+    fun actor(worker: UUID = workerId): CitizenActor = (field(owner, "actors") as Map<*, *>)[worker] as CitizenActor
+    fun reserveShelter(worker: UUID = workerId): CivPosition? =
+        (field(owner, "shelter") as CivsCitizenShelters).reserveShelter(actor(worker), city,
+            city.workers.first { it.id == worker }, world)
+    fun bootstrapShelterHome(): CivBuilding {
+        val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }.copy(phase = BuildingPhase.SITE,
+            anchor = CivPosition(0, 68, 0), entrance = CivPosition(0, 68, 0), control = CivPosition(0, 68, 0),
+            bounds = CivBox(CivPosition(-4, 68, -4), CivPosition(4, 72, 4)))
+        // Native support above the real Y64 ground, with no stairs or ladder reaching the future floor.
+        for (x in -4..4) for (z in -4..4) world.getBlockAt(x, 67, z).type = Material.STONE
+        world.getBlockAt(0, 68, 0).type = Material.BARREL
+        city = city.copy(autonomy = CivAutonomy(), buildings = city.buildings.map { if (it.id == hall.id) hall else it })
+        return hall
+    }
     /** Read-only identity distinguishes an accepted pending route from a silent replacement. */
     fun routeIdentity(worker: UUID = workerId): Any? =
         (field(owner, "actors") as Map<*, *>)[worker]?.let { field(it, "route") }
@@ -5319,6 +5586,8 @@ internal open class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
     val threatEntities = mutableListOf<Entity>()
     val particles = mutableListOf<Triple<Particle, Int, Location>>()
     val sounds = mutableListOf<Triple<Sound, Float, Float>>()
+    var chunkSnapshotCaptures = 0
+        private set
     private val cells = mutableMapOf<Coordinate, BlockMock>()
     private val chunkFixtures = mutableMapOf<Pair<Int, Int>, ChunkMock>()
     init { setName("resident-runtime") }
@@ -5413,11 +5682,13 @@ internal open class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
         super.getChunkAt(x, z, generate)
         return chunkFixtures.getOrPut(x to z) {
             object : ChunkMock(this@ResidentRuntimeWorld, x, z) {
-                override fun getChunkSnapshot(height: Boolean, biome: Boolean, temperature: Boolean, light: Boolean): org.bukkit.ChunkSnapshot =
-                    CivsNavigationChunkSnapshotFixture(x, z, minHeight, maxHeight, name, fullTime,
+                override fun getChunkSnapshot(height: Boolean, biome: Boolean, temperature: Boolean, light: Boolean): org.bukkit.ChunkSnapshot {
+                    chunkSnapshotCaptures++
+                    return CivsNavigationChunkSnapshotFixture(x, z, minHeight, maxHeight, name, fullTime,
                         Bukkit.createBlockData(Material.STONE), cells.filterKeys { it.x shr 4 == x && it.z shr 4 == z }
                             .mapKeys { CivPosition(it.key.x and 15, it.key.y, it.key.z and 15) }
                             .mapValues { it.value.blockData.clone() })
+                }
                 override fun getTileEntities(filter: Predicate<in Block>, useSnapshot: Boolean): Collection<BlockState> = emptyList()
             }
         }

@@ -44,6 +44,37 @@ internal class CivsCitizenShelters(
             actor.returningToWarehouse = false
             actor.sheltering = true
         }
+        if (actor.sleeping) {
+            actor.nightHomeProgress.clear()
+            runtime.statuses[actor.workerId] = "sleeping"
+            if (sleepStillSafe(actor)) return
+            if (!wake(actor)) return
+        }
+        if (city.autonomy != null && world.time in 12_000L..23_000L && !actor.alarmSheltering && actor.attacker == null &&
+            citizenHomeBuilding(city, worker)?.phase != BuildingPhase.ACTIVE) {
+            // A future home floor need not be reachable. Admit only actual grounded feet until this resident's selected home is built.
+            routes.cancelRoute(actor)
+            actor.shelter = null
+            actor.shelterPose = null
+            actor.nightHomeProgress.clear()
+            runtime.statuses[actor.workerId] = "sheltering"
+            if (runtime.wanderBudget <= 0) return
+            runtime.wanderBudget--
+            citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+            val origin = actor.npc.location
+            val current = CivPosition(origin.blockX, origin.blockY, origin.blockZ)
+            if (!citizenControlClear(city, current) || !citizenIdleTerrain(world, current, city.buildings)) return
+            val occupied = collisions.shelterOccupied(actor)
+            if (occupied.any(citizenStandingBounds(origin, actor.npc.scale)::overlaps)) return
+            val pose = citizenSleepPose(world, origin, actor.npc.scale) { body ->
+                body.minX >= city.center.x.toDouble() - city.radius && body.maxX <= city.center.x.toDouble() + city.radius + 1.0 &&
+                    body.minZ >= city.center.z.toDouble() - city.radius && body.maxZ <= city.center.z.toDouble() + city.radius + 1.0 &&
+                    occupied.none(body::overlaps)
+            } ?: return
+            actor.shelter = current
+            sleep(actor, origin, pose)
+            return
+        }
         if (!actor.sleeping && actor.shelter?.let { point ->
                 !citizenStandable(world, point) || actor.shelterPose?.let { !citizenSleepClear(world, it.bounds) } != false ||
                     actor.shelterPose?.let { pose -> collisions.shelterOccupied(actor).any(pose.bounds::overlaps) } == true ||
@@ -61,30 +92,12 @@ internal class CivsCitizenShelters(
         }
         runtime.statuses[actor.workerId] = if (actor.sleeping) "sleeping" else "sheltering"
         val target = actor.shelter ?: run { actor.nightHomeProgress.clear(); return }
-        if (actor.sleeping) {
-            actor.nightHomeProgress.clear()
-            if (sleepStillSafe(actor)) return
-            if (!wake(actor)) return
-            runtime.statuses[actor.workerId] = "sheltering"
-        }
         if (citizenArrived(actor.npc.location, target.location(world))) {
             // Arrival has a tolerance; validate the observed feet, not the target's centre.
             val origin = actor.npc.location
             val pose = shelterPose(actor, city, worker, origin, collisions.shelterOccupied(actor))
             if (pose != null) {
-                routes.cancelRoute(actor)
-                actor.sleepOrigin = origin
-                actor.sleepPose = pose
-                actor.shelterPose = pose
-                actor.npc.sleepingBed = null
-                actor.npc.teleport(pose.position)
-                actor.npc.headYaw = pose.position.yaw
-                actor.npc.pose = PacketNpcPose.SLEEPING
-                actor.sleeping = true
-                actor.nightHomeProgress.clear()
-                runtime.statuses[actor.workerId] = "sleeping"
-                CivsDiagnostics.event("citizen_sleep", "city" to actor.cityId, "worker" to actor.workerId,
-                    "action" to "sleep_requested", "target" to target)
+                sleep(actor, origin, pose)
                 return
             }
             // Finish the short walk if only the arrival-tolerance position overlaps.
@@ -114,6 +127,22 @@ internal class CivsCitizenShelters(
             // Cancelling it here used to restart the same impossible route every pulse.
             if (!routes.retryPreparation(actor, route, now)) routes.recoverNavigation(actor, route.target, now)
         }
+    }
+
+    private fun sleep(actor: CitizenActor, origin: Location, pose: CitizenSleepPose) {
+        routes.cancelRoute(actor)
+        actor.sleepOrigin = origin
+        actor.sleepPose = pose
+        actor.shelterPose = pose
+        actor.npc.sleepingBed = null
+        actor.npc.teleport(pose.position)
+        actor.npc.headYaw = pose.position.yaw
+        actor.npc.pose = PacketNpcPose.SLEEPING
+        actor.sleeping = true
+        actor.nightHomeProgress.clear()
+        runtime.statuses[actor.workerId] = "sleeping"
+        CivsDiagnostics.event("citizen_sleep", "city" to actor.cityId, "worker" to actor.workerId,
+            "action" to "sleep_requested", "target" to actor.shelter)
     }
 
     fun shelterPose(actor: CitizenActor, city: Settlement, worker: CivWorker, feet: Location,
