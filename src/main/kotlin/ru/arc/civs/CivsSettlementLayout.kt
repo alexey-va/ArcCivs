@@ -206,7 +206,8 @@ internal object CivsSettlementLayout {
     fun infill(city: Settlement, current: CivBuilding, future: CivBuilding,
         access: CivAutonomousAccess = CivAutonomousAccess(), frame: CivSettlementFrame = frame(city),
         eligible: (CivBuilding) -> Boolean = { true }): List<CivsAutonomousCandidate> {
-        if (current.type in exteriorTypes || current.type.isInfrastructure)
+        if (current.type.isInfrastructure || current.type in exteriorTypes &&
+            (current.type != BuildingType.FARM || city.autonomy == null))
             return emptyList()
         // At the largest frame: 71 * 71 * 4 = 20,164 detached placements, with at most 64 results.
         val choices = buildList {
@@ -239,7 +240,8 @@ internal object CivsSettlementLayout {
                 key(b.entrance.x + front.x * distance, b.entrance.z + front.z * distance) in frontageKeys[turns].orEmpty()
             }
         }
-        val exterior = current.type in exteriorTypes
+        // Farm frontage remains exterior; an autonomous farm may also use an ordinary bounded inner yard.
+        val exterior = reserveUnbuiltStreets && current.type in exteriorTypes
         // Small raw worksites use an available flank while the new quarter still needs wide farm parcels.
         // This only ranks the existing finite candidates; terrain, spacing and depot reach still admit them.
         val preserveWideBay = current.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY) && frame.halfWidth > 56 &&

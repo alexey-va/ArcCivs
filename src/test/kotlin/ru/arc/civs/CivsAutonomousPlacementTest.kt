@@ -25,12 +25,13 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsAutonomousFamilyFallbackTest : FunSpec({
-    test("a reachable infill reaches native capture before sixty four gradeable frontage refusals exhaust the budget") {
+    for (type in listOf(BuildingType.CRUSHER, BuildingType.FARM))
+    test("a reachable $type infill reaches native capture before sixty four gradeable frontage refusals exhaust the budget") {
         InfrastructurePlacementScenario(56).use { s ->
             val entry = "civs/v2/fixture/crusher/preferred/l1"
-            val id = s.familyCatalog(linkedMapOf(entry to 0))
-            val current = familyPlacementBlueprint(entry, id, s.city.worldId, CivPosition(0, 0, 0), 0, 1, 0).building
-            val future = familyPlacementBlueprint(entry, id, s.city.worldId, CivPosition(0, 0, 0), 0, 3, 0).building
+            val id = s.familyCatalog(linkedMapOf(entry to 0), type)
+            val current = familyPlacementBlueprint(entry, id, s.city.worldId, CivPosition(0, 0, 0), 0, 1, 0).building.copy(type = type)
+            val future = familyPlacementBlueprint(entry, id, s.city.worldId, CivPosition(0, 0, 0), 0, 3, 0).building.copy(type = type)
             val frontage = CivsSettlementLayout.candidates(s.city, current, future)
             (CivsAutonomousTerraform.options(s.city, frontage, s.surface).size >= 64) shouldBe true
             val front = frontage.mapTo(hashSetOf()) { it.building.anchor.copy(y = 0) to it.building.rotation }
@@ -39,12 +40,38 @@ class CivsAutonomousFamilyFallbackTest : FunSpec({
                 CompletableFuture.failedFuture(CivsRejection(if ((draft.building.anchor.copy(y = 0) to draft.building.rotation) in front)
                     "lands-denied" else "test-selected-infrastructure-draft"))
             }
-            spatialFailure(s.planner.search(s.city, BuildingType.CRUSHER, 1, id)) shouldBe "test-selected-infrastructure-draft"
+            spatialFailure(s.planner.search(s.city, type, 1, id)) shouldBe "test-selected-infrastructure-draft"
             ((s.drafts.last().building.anchor.copy(y = 0) to s.drafts.last().building.rotation) in front) shouldBe false
             @Suppress("UNCHECKED_CAST")
             val terminal = (s.planner.debug(s.city.id)["last"] as List<Map<String, Any?>>).single()
             terminal["candidate_source"] shouldBe "infill"
             (terminal["attempted"] as Int in 33..64) shouldBe true
+            s.accessLoads shouldBe 1
+            verify(exactly = 1) { s.world.autonomousHeightField(any(), any(), any()) }
+        }
+    }
+
+    test("farm frontage infill and alternate families share exactly sixty four attempts") {
+        InfrastructurePlacementScenario(56).use { s ->
+            val preferred = "civs/v2/fixture/farm/preferred/l1"
+            val compact = "civs/v2/fixture/farm/compact/l1"
+            val id = s.familyCatalog(linkedMapOf(preferred to 0, compact to 0), BuildingType.FARM)
+            every { s.world.captureTerraform(any(), any(), any(), any()) } answers {
+                s.drafts += arg<CivTerraformDraft>(1)
+                CompletableFuture.failedFuture(CivsRejection("lands-denied"))
+            }
+            spatialFailure(s.planner.search(s.city, BuildingType.FARM, 1, id)) shouldBe "autonomy-no-site"
+            @Suppress("UNCHECKED_CAST")
+            val terminal = (s.planner.debug(s.city.id)["last"] as List<Map<String, Any?>>).single()
+            terminal["attempted"] shouldBe CivsAutonomousPlacement.MAXIMUM_OPTIONS
+            terminal["families_tried"] shouldBe listOf(preferred, compact)
+            val frame = CivsSettlementLayout.frame(s.city)
+            for (entry in listOf(preferred, compact)) {
+                val drafts = s.drafts.filter { it.building.schematicId == entry }
+                drafts.any { CivsAutonomousGeometry.overlaps(it.building.bounds, frame.core) } shouldBe true
+                drafts.any { !CivsAutonomousGeometry.overlaps(it.building.bounds, frame.core) } shouldBe true
+            }
+            (s.drafts.size <= CivsAutonomousPlacement.MAXIMUM_OPTIONS) shouldBe true
             s.accessLoads shouldBe 1
             verify(exactly = 1) { s.world.autonomousHeightField(any(), any(), any()) }
         }
@@ -881,20 +908,22 @@ private class InfrastructurePlacementScenario(halfWidth: Int = 24) : AutoCloseab
     override fun close() { planner.close(); tasks.close() }
 }
 
-private fun InfrastructurePlacementScenario.familyCatalog(families: Map<String, Int>): UUID {
+private fun InfrastructurePlacementScenario.familyCatalog(families: Map<String, Int>, type: BuildingType = BuildingType.CRUSHER): UUID {
     val id = UUID.randomUUID()
-    every { blueprints.autonomousSource(any(), BuildingType.CRUSHER) } returns families.keys.first()
-    every { blueprints.autonomousAlternatives(any(), BuildingType.CRUSHER) } returns families.keys.drop(1)
+    every { blueprints.autonomousSource(any(), type) } returns families.keys.first()
+    every { blueprints.autonomousAlternatives(any(), type) } returns families.keys.drop(1)
     every { blueprints.maximumLevel(any()) } returns 3
     every { blueprints.prepareEntry(any(), any(), any(), any(), any(), any()) } answers {
         val entry = firstArg<String>()
-        CompletableFuture.completedFuture(familyPlacementBlueprint(entry, arg(1), arg(2), arg(3), arg<Int?>(5) ?: 0,
-            1, families.getValue(entry)))
+        val blueprint = familyPlacementBlueprint(entry, arg(1), arg(2), arg(3), arg<Int?>(5) ?: 0,
+            1, families.getValue(entry))
+        CompletableFuture.completedFuture(blueprint.copy(building = blueprint.building.copy(type = type)))
     }
     every { blueprints.prepareUpgrade(any(), any(), any()) } answers {
         val building = firstArg<CivBuilding>()
-        CompletableFuture.completedFuture(familyPlacementBlueprint(building.schematicId, building.id, arg(2),
-            building.anchor, building.rotation, arg(1), families.getValue(building.schematicId)))
+        val blueprint = familyPlacementBlueprint(building.schematicId, building.id, arg(2),
+            building.anchor, building.rotation, arg(1), families.getValue(building.schematicId))
+        CompletableFuture.completedFuture(blueprint.copy(building = blueprint.building.copy(type = type)))
     }
     return id
 }

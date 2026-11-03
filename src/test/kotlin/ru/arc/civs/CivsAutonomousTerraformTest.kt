@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import io.kotest.assertions.withClue
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
@@ -15,6 +16,124 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.civs.CivsAutonomousTerraform.Node
 
 class CivsAutonomousTerraformTest : FunSpec({
+    for (rotation in listOf(0, 90, 180, 270))
+    test("a composite farm reserves its field padding but reaches its declared apron at rotation $rotation") {
+        CivsWorksiteLayouts.installCatalog(mapOf(COMPOSITE_FARM to compositeFarmSite()))
+        try {
+            val city = terraceCity()
+            val building = compositeFarm(city, rotation)
+            val surface = terraceSurface { _, _ -> 64 }
+            val searches = mutableListOf<CivRouteSearchStats>()
+            val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface,
+                inspectRoute = searches::add)
+            draft.route.last() shouldBe building.entrance
+            searches.single().outcome shouldBe "found"
+            val inside = draft.route.filter { CivsAutonomousGeometry.horizontalContains(building.bounds, it) }
+            inside.isNotEmpty() shouldBe true
+            val apron = CivsAutonomousGeometry.approach(building)
+            inside.all { it in apron && !CivsWorksiteLayouts.isField(building, it.x, it.z) } shouldBe true
+            val cells = terraceCapture(draft, surface)
+            checkTerrace(CivsAutonomousTerraform.materialize(draft, cells), draft, cells)
+        } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+    }
+
+    for (blocked in listOf("structure", "soil", "irrigation", "wall", "other-building", "outside-city",
+        "unloaded", "nonnatural", "missing-metadata", "different-entrance"))
+    test("a padded farm apron still rejects $blocked before route expansion") {
+        val site = compositeFarmSite()
+        when (blocked) {
+            "structure" -> site.getAsJsonObject("schematicBounds").add("max", JsonParser.parseString("[1,2,0]"))
+            "soil" -> site.getAsJsonObject("farm").getAsJsonArray("soilCells").add(JsonParser.parseString("[0,0,0]"))
+            "irrigation" -> site.getAsJsonObject("farm").getAsJsonArray("irrigationCells").add(JsonParser.parseString("[0,0,0]"))
+            "different-entrance" -> site.add("entrance", JsonParser.parseString("[1,1,0]"))
+        }
+        CivsWorksiteLayouts.installCatalog(mapOf(COMPOSITE_FARM to site))
+        try {
+            val original = terraceCity()
+            val building = compositeFarm(original)
+            val entry = building.entrance
+            val obstruction = CivBox(entry.copy(y = 64), entry.copy(y = 68))
+            val city = when (blocked) {
+                "outside-city" -> original.copy(radius = 8)
+                "other-building" -> original.copy(buildings = original.buildings + original.buildings.single().copy(
+                    id = UUID(0, 206), type = BuildingType.HOUSE, bounds = obstruction, entrance = entry))
+                else -> original
+            }
+            val surface = terraceSurface { _, _ -> 64 }.let { field -> when (blocked) {
+                "unloaded", "nonnatural" -> field.copy(columns = field.columns + (civsTerrainKey(entry.x, entry.z) to
+                    CivTerrainSurfaceColumn(64, natural = blocked != "nonnatural", loaded = blocked != "unloaded")))
+                else -> field
+            } }
+            if (blocked == "missing-metadata") CivsWorksiteLayouts.installCatalog(emptyMap())
+            val searches = mutableListOf<CivRouteSearchStats>()
+            shouldThrow<CivsRejection> { CivsAutonomousTerraform.connection(city, building, surface,
+                CivAutonomousAccess(), if (blocked == "wall") listOf(obstruction) else emptyList(), searches::add)
+            }.reason shouldBe "autonomy-no-path"
+            searches.single().outcome shouldBe "route-target-blocked"
+            searches.single().expanded shouldBe 0
+        } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+    }
+
+    test("a farm apron does not open the rest of its empty merged reservation") {
+        CivsWorksiteLayouts.installCatalog(mapOf(COMPOSITE_FARM to compositeFarmSite()))
+        try {
+            val original = terraceCity()
+            val building = compositeFarm(original)
+            val hall = original.buildings.single().copy(anchor = CivPosition(-14, 64, 18),
+                entrance = CivPosition(-14, 65, 18), bounds = CivBox(CivPosition(-20, 64, 10), CivPosition(-15, 70, 16)))
+            val city = original.copy(buildings = listOf(hall))
+            val surface = CivTerrainSurface(-64, 320, (-14..0).associate {
+                civsTerrainKey(it, 18) to CivTerrainSurfaceColumn(64, true)
+            })
+            val searches = mutableListOf<CivRouteSearchStats>()
+            shouldThrow<CivsRejection> { CivsAutonomousTerraform.connection(city, building, surface,
+                CivAutonomousAccess(), emptyList(), searches::add) }.reason shouldBe "autonomy-no-path"
+            searches.single().outcome shouldBe "route-disconnected"
+            searches.single().expanded shouldBe 0
+        } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+    }
+
+    for (barrier in listOf("nonnatural", "unloaded", "structure"))
+    test("a complete horizontal field rejects a disconnected $barrier strip without expanding heights") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { _, _ -> 64 }.let { original -> original.copy(columns = original.columns.mapValues { (key, c) ->
+            if (key.toInt() != 8) c else c.copy(natural = barrier != "nonnatural", loaded = barrier != "unloaded")
+        }) }
+        val obstacles = if (barrier == "structure") listOf(CivBox(CivPosition(-48, 64, 8), CivPosition(48, 70, 8))) else emptyList()
+        val searches = mutableListOf<CivRouteSearchStats>()
+        shouldThrow<CivsRejection> { CivsAutonomousTerraform.connection(city, building, surface,
+            CivAutonomousAccess(), obstacles, searches::add) }.reason shouldBe "autonomy-no-path"
+        searches.single().outcome shouldBe "route-disconnected"
+        searches.single().expanded shouldBe 0
+    }
+
+    test("a source absent from the reverse field keeps the existing legal first step") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { _, _ -> 64 }.let {
+            it.copy(columns = it.columns - civsTerrainKey(0, 0))
+        }
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val route = CivsAutonomousTerraform.connection(city, building, surface, CivAutonomousAccess(), emptyList(), searches::add)
+        searches.map { it.outcome } shouldBe listOf("found")
+        route.first() shouldBe city.buildings.single().entrance
+        route.last() shouldBe building.entrance
+        route.drop(1).all { surface.at(it.x, it.z)?.let { c -> c.loaded && c.natural } == true } shouldBe true
+    }
+
+    test("an excluded source cannot jump to a component whose only first column has an unreachable grade") {
+        val city = terraceCity()
+        val building = terraceBuilder(city).copy(anchor = CivPosition(1, 67, 0), entrance = CivPosition(1, 68, 0),
+            rotation = 90, bounds = CivBox(CivPosition(2, 67, -2), CivPosition(8, 75, 2)))
+        val surface = CivTerrainSurface(-64, 320, mapOf(civsTerrainKey(1, 0) to CivTerrainSurfaceColumn(67, true)))
+        val searches = mutableListOf<CivRouteSearchStats>()
+        shouldThrow<CivsRejection> { CivsAutonomousTerraform.connection(city, building, surface,
+            CivAutonomousAccess(), emptyList(), searches::add) }.reason shouldBe "autonomy-no-path"
+        searches.single().outcome shouldBe "route-disconnected"
+        searches.single().expanded shouldBe 0
+    }
+
     test("route preparation checks each static public column once across candidate heights including blocked columns") {
         for (permitted in listOf(true, false)) {
             val original = terraceCity()
@@ -79,7 +198,8 @@ class CivsAutonomousTerraformTest : FunSpec({
         val route = CivsAutonomousTerraform.connection(city, target, CivTerrainSurface(-64, 320, columns),
             CivAutonomousAccess(), emptyList(), searches::add)
         route shouldBe (8 downTo 0).map { CivPosition(it, 1, 0) }
-        searches.map { it.outcome } shouldBe listOf("route-exhausted", "found")
+        searches.map { it.outcome } shouldBe listOf("route-disconnected", "found")
+        searches.first().expanded shouldBe 0
         fullSurfaceIterations shouldBe 1
     }
 
@@ -926,6 +1046,24 @@ private fun checkMildBarrierRoute(fixture: MildBarrierFixture, route: List<CivPo
         abs(requireNotNull(fixture.surface.at(point.x, point.z)).groundY - (point.y - 1)) <= CivsAutonomousTerraform.MAXIMUM_CHANGE
     } shouldBe true
     route.zipWithNext().all { (a, b) -> abs(a.x - b.x) + abs(a.z - b.z) == 1 && abs(a.y - b.y) <= 1 } shouldBe true
+}
+
+private const val COMPOSITE_FARM = "civs/v2/fixture/side-field/0123456789abcdef0123/level1"
+
+private fun compositeFarmSite() = JsonParser.parseString("""{
+    "schematicBounds":{"min":[-2,0,-4],"max":[1,2,-1]},"entrance":[0,1,0],
+    "farm":{"soilCells":[[4,0,-7],[12,0,1]],"irrigationCells":[[8,0,-3]]}
+}""").asJsonObject
+
+private fun compositeFarm(city: Settlement, rotation: Int = 180): CivBuilding {
+    val anchor = when (rotation) {
+        0 -> CivPosition(0, 64, -18); 90 -> CivPosition(18, 64, 0)
+        180 -> CivPosition(0, 64, 18); else -> CivPosition(-18, 64, 0)
+    }
+    val template = CivBuilding(UUID(0, 205), BuildingType.FARM, 1, CivPosition(0, 0, 0), 0, COMPOSITE_FARM,
+        CivBox(CivPosition(-2, 0, -4), CivPosition(1, 2, -1)), CivPosition(0, 1, 0), BuildingPhase.CONSTRUCTING)
+    val building = CivsSettlementPlans.at(template, anchor, rotation, template.id)
+    return building.copy(bounds = CivsAutonomousGeometry.futureBounds(city, building))
 }
 
 private fun terraceCity(): Settlement {

@@ -160,6 +160,40 @@ class CivsSettlementLayoutTest : FunSpec({
         }
     }
 
+    test("only an autonomous farm may use bounded inner yards while keeping the full future envelope and reservations") {
+        val base = layoutFixtureCity().copy(radius = 128, autonomy = CivAutonomy(layoutHalfWidth = 74))
+        val neighbor = layoutFixtureBuilding(BuildingType.HOUSE, CivPosition(28, 64, 24))
+        val city = base.copy(buildings = base.buildings + neighbor)
+        val frame = CivsSettlementLayout.frame(city)
+        val road = (0..45).map { CivPosition(0, 65, it) }
+        val port = CivBox(CivPosition(-30, 64, -30), CivPosition(-20, 72, -20))
+        val access = CivAutonomousAccess(mapOf(base.buildings.single().id to road), reservedFortificationPorts = listOf(port))
+        val farm = layoutFixtureBuilding(BuildingType.FARM)
+        val future = farm.copy(level = 3, bounds = CivBox(CivPosition(-10, -2, -30), CivPosition(10, 14, -1)))
+        val choices = CivsSettlementLayout.infill(city, farm, future, access, frame)
+        (choices.size in 1..64) shouldBe true
+        choices shouldBe CivsSettlementLayout.infill(city, farm, future, access, frame)
+        val occupied = city.buildings.map { CivsAutonomousGeometry.futureBounds(city, it) } + port
+        val protected = city.buildings.flatMap(CivsAutonomousGeometry::approach) + road
+        for ((building) in choices) {
+            val bounds = building.bounds
+            (minOf(bounds.max.x - bounds.min.x, bounds.max.z - bounds.min.z) >= 20) shouldBe true
+            (maxOf(bounds.max.x - bounds.min.x, bounds.max.z - bounds.min.z) >= 29) shouldBe true
+            (bounds.min.x >= frame.core.min.x + 4 && bounds.max.x <= frame.core.max.x - 4 &&
+                bounds.min.z >= frame.core.min.z + 4 && bounds.max.z <= frame.core.max.z - 4) shouldBe true
+            occupied.none { CivsAutonomousGeometry.overlaps(bounds, it, 2) } shouldBe true
+            protected.none { CivsAutonomousGeometry.horizontalContains(bounds, it) } shouldBe true
+            frame.wallObstacles.none { CivsAutonomousGeometry.overlaps(bounds, it, 2) } shouldBe true
+            CivsAutonomousGeometry.overlaps(bounds, frame.court) shouldBe false
+            CivsRules.workRouteWithinReach(city, building.entrance) shouldBe true
+        }
+        CivsSettlementLayout.infill(city.copy(autonomy = null), farm, future, access, frame) shouldBe emptyList()
+        for (type in listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.ROAD)) {
+            val template = layoutFixtureBuilding(type)
+            CivsSettlementLayout.infill(city, template, template, access, frame) shouldBe emptyList()
+        }
+    }
+
     test("mixed civic plots face the retained street with short links and full upgrade clearance") {
         var city = layoutFixtureCity().copy(autonomy = CivAutonomy())
         val source = layoutFixtureBuilding(BuildingType.WAREHOUSE, CivPosition(40, 64, 24), 90)
@@ -251,7 +285,7 @@ class CivsSettlementLayoutTest : FunSpec({
         (runCatching { CivsAutonomousTerraform.draft(city, option, blocked, access, frame.wallObstacles,
             inspectRoute = searches::add) }.exceptionOrNull() as? CivsRejection)?.reason shouldBe "autonomy-no-path"
         searches.size shouldBe 2
-        searches.all { it.from == start && it.expanded == 1 && it.outcome == "route-exhausted" } shouldBe true
+        searches.all { it.from == start && it.expanded == 0 && it.outcome == "route-disconnected" } shouldBe true
     }
 
     test("an unstarted legacy ring fits around pinned buildings and a persisted ring never shifts") {

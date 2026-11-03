@@ -439,7 +439,8 @@ internal class CivsAutonomousPlacement(
                 templates = pair
                 candidates = CivsSettlementLayout.candidates(city, pair.first, pair.second, access, frame())
                 frontageCandidates = candidates.size
-                if (distributedFamily && candidates.isNotEmpty() && type !in CivsSettlementLayout.exteriorTypes)
+                if (distributedFamily && candidates.isNotEmpty() &&
+                    (type !in CivsSettlementLayout.exteriorTypes || type == BuildingType.FARM && city.autonomy != null))
                     infillAt = attempted + (familyLimit - attempted) / 2
                 if (candidates.isEmpty()) candidates = infill()
                 captureSurface()

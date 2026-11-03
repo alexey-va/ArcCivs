@@ -176,7 +176,7 @@ internal object CivsAutonomousTerraform {
         }
         val routeObstacles = obstacles + additionalObstacles + portObstacles
         val routeFailures = sortedMapOf<String, Int>()
-        val preparedRoute by lazy { RoutePreparation(surface, standing, preferredRoads) }
+        val preparedRoute by lazy { RoutePreparation(surface, standing, preferredRoads, building) }
         // A short facing link may lack room to grade into the flat apron; the ordinary guarded search can approach from the side.
         val route = reservedRoute?.also { points ->
             if (points.isEmpty() || points.size > MAXIMUM_ROUTE_LENGTH || points.last() != building.entrance ||
@@ -295,7 +295,7 @@ internal object CivsAutonomousTerraform {
         val obstacles = city.buildings.filter { it.id != building.id }
             .flatMap { civsRouteObstacles(city, it) } + additionalObstacles
         val standing = access.standing(city, building.id)
-        val prepared = RoutePreparation(surface, standing, emptySet())
+        val prepared = RoutePreparation(surface, standing, emptySet(), building)
         return sources(city, building).asSequence().mapNotNull {
             route(city, building, surface, obstacles, standing, it, inspect = inspectRoute, prepared = prepared)
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
@@ -433,7 +433,7 @@ internal object CivsAutonomousTerraform {
         val road = access.infrastructure.filter { it.type == BuildingType.ROAD }.flatMap { it.transit }
             .associateBy { civsTerrainKey(it.x, it.z) }
         val roadPreference by lazy { preferred + road.keys }
-        val roadPreparation by lazy { RoutePreparation(surface, standing, roadPreference) }
+        val roadPreparation by lazy { RoutePreparation(surface, standing, roadPreference, building) }
         for (distance in 2..6) {
             val join = road[civsTerrainKey(entry.x + dx * distance, entry.z + dz * distance)] ?: continue
             if (civsTerrainKey(join.x - dz, join.z - dx) !in road ||
@@ -468,10 +468,26 @@ internal object CivsAutonomousTerraform {
     private data class HorizontalOpen(val key: Long, val distance: Int)
 
     /** One immutable input family; every source depot shares its maps and each destination's reverse field. */
-    private class RoutePreparation(surface: CivTerrainSurface, standing: Map<Long, CivPosition>, preferredRoads: Set<Long>) {
+    private class RoutePreparation(surface: CivTerrainSurface, standing: Map<Long, CivPosition>, preferredRoads: Set<Long>,
+        building: CivBuilding) {
         val columns = Long2ObjectOpenHashMap<CivTerrainSurfaceColumn>(surface.columns)
         val retained = Long2ObjectOpenHashMap<CivPosition>(standing)
         val preferred = LongOpenHashSet(preferredRoads)
+        // A side field's reservation rectangle can cover the declared door without occupying its apron.
+        // This exception is static for the building, including searches to intermediate road joins.
+        val entranceApron = LongOpenHashSet().apply {
+            val site = CivsWorksiteLayouts.site(building) ?: return@apply
+            val bounds = site.getAsJsonObject("schematicBounds") ?: return@apply
+            val entrance = site["entrance"] ?: return@apply
+            if (CivsWorksiteLayouts.point(building, CivsWorksiteLayouts.vector(entrance)) != building.entrance) return@apply
+            val a = CivsWorksiteLayouts.point(building, CivsWorksiteLayouts.vector(bounds["min"]))
+            val b = CivsWorksiteLayouts.point(building, CivsWorksiteLayouts.vector(bounds["max"]))
+            CivsAutonomousGeometry.approach(building).forEach { p ->
+                if (CivsAutonomousGeometry.horizontalContains(building.bounds, p) &&
+                    (p.x !in minOf(a.x, b.x)..maxOf(a.x, b.x) || p.z !in minOf(a.z, b.z)..maxOf(a.z, b.z)) &&
+                    !CivsWorksiteLayouts.isField(building, p.x, p.z)) add(civsTerrainKey(p.x, p.z))
+            }
+        }
         val horizontalAllowed = Long2IntOpenHashMap()
         val distances = hashMapOf<CivPosition, Long2IntOpenHashMap>()
     }
@@ -480,7 +496,7 @@ internal object CivsAutonomousTerraform {
         standing: Map<Long, CivPosition>, from: CivPosition, preferredRoads: Set<Long> = emptySet(),
         inspect: (CivRouteSearchStats) -> Unit = {},
         destination: CivPosition = building.entrance,
-        prepared: RoutePreparation = RoutePreparation(surface, standing, preferredRoads),
+        prepared: RoutePreparation = RoutePreparation(surface, standing, preferredRoads, building),
         rejected: (String) -> Unit = {}): List<CivPosition>? {
         val started = System.nanoTime()
         val start = Node(from.x, from.y - 1, from.z)
@@ -524,11 +540,13 @@ internal object CivsAutonomousTerraform {
                 // Static XZ predicates are shared across grades and depots; cache only captured columns.
                 val p = CivPosition(x, 0, z)
                 horizontal = if (city.contains(x, z) &&
-                    !(CivsAutonomousGeometry.horizontalContains(building.bounds, p) && !civsPublicTransit(building, x, z, allowPlanned = true)) &&
+                    !(CivsAutonomousGeometry.horizontalContains(building.bounds, p) && !prepared.entranceApron.contains(key) &&
+                        !civsPublicTransit(building, x, z, allowPlanned = true)) &&
                     obstacles.none { CivsAutonomousGeometry.horizontalContains(it, p) }) 1 else -1
                 prepared.horizontalAllowed.put(key, horizontal)
             }
-            if (horizontal < 0 || goalApproach.contains(key) && y != target.y) return false
+            if (horizontal < 0 || goalApproach.contains(key) && y != target.y ||
+                prepared.entranceApron.contains(key) && y != building.entrance.y - 1) return false
             retained.get(key)?.let { return native.loaded && y == it.y - 1 }
             return native.loaded && native.natural && abs(native.groundY - y) <= MAXIMUM_CHANGE
         }
@@ -542,8 +560,11 @@ internal object CivsAutonomousTerraform {
                 val key = entry.longKey
                 val native = entry.value
                 val x = (key shr 32).toInt(); val z = key.toInt()
-                val y = retained.get(key)?.y?.minus(1) ?: if (goalApproach.contains(key)) target.y
-                    else native.groundY.coerceIn(surface.minHeight + 1, surface.maxHeight - 3)
+                val y = retained.get(key)?.y?.minus(1) ?: when {
+                    goalApproach.contains(key) -> target.y
+                    prepared.entranceApron.contains(key) -> building.entrance.y - 1
+                    else -> native.groundY.coerceIn(surface.minHeight + 1, surface.maxHeight - 3)
+                }
                 if (allowed(x, y, z)) floors.put(key, y)
             }
             val targetKey = civsTerrainKey(target.x, target.z)
@@ -596,6 +617,14 @@ internal object CivsAutonomousTerraform {
         }
         if (start == target) return finish(listOf(from), "found")
         if (!allowed(target.x, target.y, target.z)) return finish(null, "route-target-blocked")
+        if (columns.size <= MAXIMUM_SURFACE_COLUMNS) {
+            val distances = horizontalDistances
+            // The source itself is exempt from allowed(); retain any legal first step into the target component.
+            if (!distances.containsKey(civsTerrainKey(start.x, start.z)) && DIRECTIONS.none { (dx, dz) ->
+                val x = start.x + dx; val z = start.z + dz
+                distances.containsKey(civsTerrainKey(x, z)) && (-1..1).any { allowed(x, start.y + it, z) }
+            }) return finish(null, "route-disconnected")
+        }
         val ancestorColumns = LongOpenHashSet()
         while (open.isNotEmpty() && expanded < MAXIMUM_ROUTE_NODES) {
             val current = open.remove()
