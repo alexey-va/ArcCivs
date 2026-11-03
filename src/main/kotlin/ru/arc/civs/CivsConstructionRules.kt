@@ -43,7 +43,7 @@ internal object CivsConstructionRules {
         }
         CivsRules.check(!CivsSnapshotValidation.intersectsApproach(city, plan), "building-overlap")
         CivsRules.check(CivsSnapshotValidation.validBuilding(city, plan) && city.buildings.none { it.id != plan.id && it.bounds.overlaps(plan.bounds) }, "invalid-building")
-        CivsRules.check(workRouteWithinReach(city, plan.entrance), "work-route-too-long")
+        CivsRules.check(workRouteWithinReach(city, plan.entrance, plan.type.isInfrastructure), "work-route-too-long")
         CivsRules.check(city.stock.covers(reserved.cost), "not-enough-resources")
         val remaining = city.stock - reserved.cost
         // Both basic producers remain affordable until their own construction has been reserved.
@@ -57,14 +57,15 @@ internal object CivsConstructionRules {
     }
 
     /** Same nearest available depot and three-dimensional entrance distance as citizenPlan. */
-    internal fun workRouteWithinReach(city: Settlement, entrance: CivPosition): Boolean {
+    internal fun workRouteWithinReach(city: Settlement, entrance: CivPosition, infrastructure: Boolean = false): Boolean {
         val nearestSquared = city.buildings.filter(CivsRules::isDepot).minOfOrNull {
             val dx = it.entrance.x.toDouble() - entrance.x
             val dy = it.entrance.y.toDouble() - entrance.y
             val dz = it.entrance.z.toDouble() - entrance.z
             dx * dx + dy * dy + dz * dz
         }
-        return nearestSquared != null && nearestSquared <= CivsRules.MAX_WORK_ROUTE_DISTANCE.toDouble() * CivsRules.MAX_WORK_ROUTE_DISTANCE
+        val maximum = if (infrastructure) CivsLogistics.maximumTransferDistance(city) else CivsRules.MAX_WORK_ROUTE_DISTANCE
+        return nearestSquared != null && nearestSquared <= maximum.toDouble() * maximum
     }
 
     fun beginPlacement(city: Settlement, actor: UUID, orderId: UUID): Settlement {

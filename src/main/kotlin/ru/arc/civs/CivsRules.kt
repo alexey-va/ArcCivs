@@ -259,7 +259,7 @@ object CivsRules {
         check(!CivsSnapshotValidation.intersectsApproach(city, site), "building-overlap")
         check(CivsSnapshotValidation.validBuilding(city, site) && city.buildings.none { it.bounds.overlaps(site.bounds) } &&
             city.construction?.plannedBuilding?.bounds?.overlaps(site.bounds) != true, "invalid-building")
-        check(workRouteWithinReach(city, site.entrance), "work-route-too-long")
+        check(workRouteWithinReach(city, site.entrance, site.type.isInfrastructure), "work-route-too-long")
         val queue = if (city.construction != null || city.constructionQueue.orEmpty().isNotEmpty())
             city.constructionQueue.orEmpty() + site.id else city.constructionQueue
         return changed(city, city.copy(buildings = city.buildings + site, constructionQueue = queue))
@@ -531,8 +531,8 @@ object CivsRules {
 
     fun reserveBuild(city: Settlement, actor: UUID, building: CivBuilding, order: CivConstruction): Settlement =
         CivsConstructionRules.reserveBuild(city, actor, building, order)
-    internal fun workRouteWithinReach(city: Settlement, entrance: CivPosition): Boolean =
-        CivsConstructionRules.workRouteWithinReach(city, entrance)
+    internal fun workRouteWithinReach(city: Settlement, entrance: CivPosition, infrastructure: Boolean = false): Boolean =
+        CivsConstructionRules.workRouteWithinReach(city, entrance, infrastructure)
     fun beginPlacement(city: Settlement, actor: UUID, orderId: UUID): Settlement = CivsConstructionRules.beginPlacement(city, actor, orderId)
     fun payBatch(city: Settlement, actor: UUID, orderId: UUID, batch: Int, materials: Map<String, Long>): Settlement =
         CivsConstructionRules.payBatch(city, actor, orderId, batch, materials)
