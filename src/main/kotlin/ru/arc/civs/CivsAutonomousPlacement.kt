@@ -283,6 +283,10 @@ internal class CivsAutonomousPlacement(
         @Volatile private var frontageCandidates = 0
         @Volatile private var infillCandidates = 0
         @Volatile private var candidateSource = "frontage"
+        private var distributedFamily = false
+        private var familyLimit = MAXIMUM_OPTIONS
+        private var infillAt = MAXIMUM_OPTIONS
+        private var infillOptions = IntRange.EMPTY
         @Volatile private var gradingSamples = emptyList<Map<String, Any>>()
         @Volatile private var routeRefreshed = false
         @Volatile private var nativeTerrainRejected = false
@@ -415,6 +419,12 @@ internal class CivsAutonomousPlacement(
         private fun loadTemplates(entry: String?) {
             phase = "catalog"
             resolvedCatalogEntry = entry
+            val remaining = if (initialPlan == null) remainingFamilies() else null
+            distributedFamily = remaining != null
+            familyLimit = attempted + if (remaining?.hasNext() == true) minOf(MAXIMUM_OPTIONS / 2, MAXIMUM_OPTIONS - attempted)
+                else MAXIMUM_OPTIONS - attempted
+            infillAt = familyLimit
+            infillOptions = IntRange.EMPTY
             if (entry != null) familiesTried = familiesTried + entry
             val current = if (entry != null) blueprints.prepareEntry(entry, buildingId, city.worldId,
                 CivPosition(0, 0, 0), 2, 0) else blueprints.prepare(city.style, type, level, buildingId, city.worldId,
@@ -429,18 +439,24 @@ internal class CivsAutonomousPlacement(
                 templates = pair
                 candidates = CivsSettlementLayout.candidates(city, pair.first, pair.second, access, frame())
                 frontageCandidates = candidates.size
+                if (distributedFamily && candidates.isNotEmpty() && type !in CivsSettlementLayout.exteriorTypes)
+                    infillAt = attempted + (familyLimit - attempted) / 2
                 if (candidates.isEmpty()) candidates = infill()
                 captureSurface()
             }
         }
 
-        /** A new, unreserved site may change family; accepted geometry and all native budgets stay fixed. */
-        private fun nextFamily(): Boolean {
+        private fun remainingFamilies(): Iterator<String>? {
             if (resolvedCatalogEntry == null || catalogEntry != null || infrastructure || pinned != null || previous != null ||
                 reservation != null || adopted != null || city.autonomy?.plan != null || level != 1 ||
-                city.building(buildingId) != null || attempted >= MAXIMUM_OPTIONS) return false
-            val remaining = alternatives ?: blueprints.autonomousAlternatives(city.style, type)
+                city.building(buildingId) != null || attempted >= MAXIMUM_OPTIONS) return null
+            return alternatives ?: blueprints.autonomousAlternatives(city.style, type)
                 .filterNot { it == resolvedCatalogEntry }.distinct().take(MAXIMUM_OPTIONS).iterator().also { alternatives = it }
+        }
+
+        /** A new, unreserved site may change family; accepted geometry and all native budgets stay fixed. */
+        private fun nextFamily(): Boolean {
+            val remaining = remainingFamilies() ?: return false
             if (!remaining.hasNext()) return false
             candidates = emptyList()
             options = emptyList()
@@ -494,7 +510,8 @@ internal class CivsAutonomousPlacement(
         private fun gradeSurface() {
             phase = "grading"
             options = if (infrastructure && pinned != null) listOf(CivTerraformOption(pinned.building, 0))
-                else grade(candidates).take(MAXIMUM_OPTIONS - attempted)
+                else grade(candidates).take(familyLimit - attempted)
+            infillOptions = if (candidateSource == "infill") options.indices else IntRange.EMPTY
             if (preferredTerrace) {
                 val oldY = requireNotNull(initialPlan).plots.single { it.building.id == buildingId }.building.anchor.y
                 options = options.sortedWith(compareBy<CivTerraformOption> {
@@ -506,7 +523,15 @@ internal class CivsAutonomousPlacement(
 
         private fun attempt() {
             if (result.isDone) return
-            if (next >= options.size || attempted >= MAXIMUM_OPTIONS) {
+            if (infillAt < familyLimit && !infillTried && templates != null && attempted < familyLimit &&
+                (attempted >= infillAt || next >= options.size)) {
+                val extra = infill()
+                candidates = candidates + extra
+                val added = grade(extra).take(familyLimit - attempted)
+                infillOptions = next until next + added.size
+                options = (options.take(next) + added + options.drop(next)).take(next + familyLimit - attempted)
+            }
+            if (next >= options.size || attempted >= familyLimit || attempted >= MAXIMUM_OPTIONS) {
                 if (preferredTerrace && attempted < MAXIMUM_OPTIONS) {
                     preferredTerrace = false
                     candidates = emptyList(); options = emptyList(); next = 0
@@ -515,20 +540,24 @@ internal class CivsAutonomousPlacement(
                     return
                 }
                 // Every tier and family shares this detached surface and the original 64-attempt budget.
-                if (!infillTried && templates != null && attempted < MAXIMUM_OPTIONS) {
+                if (!infillTried && templates != null && attempted < familyLimit) {
                     val extra = infill()
                     candidates = candidates + extra
-                    options = options + grade(extra).take(MAXIMUM_OPTIONS - attempted)
+                    val added = grade(extra).take(familyLimit - attempted)
+                    infillOptions = next until next + added.size
+                    options = options + added
                     if (next < options.size) { attempt(); return }
                 }
+                if (distributedFamily && attempted < MAXIMUM_OPTIONS && nextFamily()) return
                 val reason = when {
                     rejections.containsKey("chunks-unloaded") && rejections.size == 1 -> "chunks-unloaded"
                     rejections.containsKey("autonomy-search-budget") -> "autonomy-search-budget"
                     else -> "autonomy-no-site"
                 }
-                if (reason == "autonomy-no-site" && nextFamily()) return
+                if (!distributedFamily && reason == "autonomy-no-site" && nextFamily()) return
                 return fail(reason)
             }
+            if (distributedFamily) candidateSource = if (next in infillOptions || frontageCandidates == 0) "infill" else "frontage"
             val option = options[next++]
             attempted++
             if (preferredTerrace) preferredAttempts++

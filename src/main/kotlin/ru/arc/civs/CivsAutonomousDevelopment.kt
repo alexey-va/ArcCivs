@@ -580,7 +580,6 @@ internal class CivsAutonomousDevelopment(
 
     fun terrainChanged(world: UUID, point: CivPosition) {
         searchFailures.changed(world, point).forEach { cityId ->
-            autonomyRetryAt.remove(cityId)
             autonomyPlanRetryAt.remove(cityId)
             autonomyLayoutChecked.remove(cityId)
             unpaidRecoveryCursors.remove(cityId)

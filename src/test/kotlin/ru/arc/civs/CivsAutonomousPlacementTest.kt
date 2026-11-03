@@ -5,6 +5,8 @@ import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import io.mockk.verify
 import org.bukkit.Material
 import org.bukkit.block.Barrel
@@ -23,6 +25,129 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsAutonomousFamilyFallbackTest : FunSpec({
+    test("a reachable infill reaches native capture before sixty four gradeable frontage refusals exhaust the budget") {
+        InfrastructurePlacementScenario(56).use { s ->
+            val entry = "civs/v2/fixture/crusher/preferred/l1"
+            val id = s.familyCatalog(linkedMapOf(entry to 0))
+            val current = familyPlacementBlueprint(entry, id, s.city.worldId, CivPosition(0, 0, 0), 0, 1, 0).building
+            val future = familyPlacementBlueprint(entry, id, s.city.worldId, CivPosition(0, 0, 0), 0, 3, 0).building
+            val frontage = CivsSettlementLayout.candidates(s.city, current, future)
+            (CivsAutonomousTerraform.options(s.city, frontage, s.surface).size >= 64) shouldBe true
+            val front = frontage.mapTo(hashSetOf()) { it.building.anchor.copy(y = 0) to it.building.rotation }
+            every { s.world.captureTerraform(any(), any(), any(), any()) } answers {
+                val draft = arg<CivTerraformDraft>(1).also(s.drafts::add)
+                CompletableFuture.failedFuture(CivsRejection(if ((draft.building.anchor.copy(y = 0) to draft.building.rotation) in front)
+                    "lands-denied" else "test-selected-infrastructure-draft"))
+            }
+            spatialFailure(s.planner.search(s.city, BuildingType.CRUSHER, 1, id)) shouldBe "test-selected-infrastructure-draft"
+            ((s.drafts.last().building.anchor.copy(y = 0) to s.drafts.last().building.rotation) in front) shouldBe false
+            @Suppress("UNCHECKED_CAST")
+            val terminal = (s.planner.debug(s.city.id)["last"] as List<Map<String, Any?>>).single()
+            terminal["candidate_source"] shouldBe "infill"
+            (terminal["attempted"] as Int in 33..64) shouldBe true
+            s.accessLoads shouldBe 1
+            verify(exactly = 1) { s.world.autonomousHeightField(any(), any(), any()) }
+        }
+    }
+
+    for (reason in listOf("autonomy-no-path", "autonomy-search-budget", "chunks-unloaded"))
+    test("a preferred family's $reason candidates cannot starve a reachable alternate") {
+        InfrastructurePlacementScenario(56).use { s ->
+            val preferred = "civs/v2/fixture/crusher/preferred/l1"
+            val compact = "civs/v2/fixture/crusher/compact/l1"
+            val id = s.familyCatalog(linkedMapOf(preferred to 0, compact to 0))
+            val current = familyPlacementBlueprint(preferred, id, s.city.worldId, CivPosition(0, 0, 0), 0, 1, 0).building
+            val future = familyPlacementBlueprint(preferred, id, s.city.worldId, CivPosition(0, 0, 0), 0, 3, 0).building
+            (CivsAutonomousTerraform.options(s.city, CivsSettlementLayout.candidates(s.city, current, future), s.surface).size >= 64) shouldBe true
+            every { s.world.captureTerraform(any(), any(), any(), any()) } answers {
+                val draft = arg<CivTerraformDraft>(1).also(s.drafts::add)
+                CompletableFuture.failedFuture(CivsRejection(if (draft.building.schematicId == preferred) reason
+                    else "test-selected-infrastructure-draft"))
+            }
+            spatialFailure(s.planner.search(s.city, BuildingType.CRUSHER, 1, id)) shouldBe "test-selected-infrastructure-draft"
+            s.drafts.last().building.schematicId shouldBe compact
+            @Suppress("UNCHECKED_CAST")
+            val terminal = (s.planner.debug(s.city.id)["last"] as List<Map<String, Any?>>).single()
+            terminal["families_tried"] shouldBe listOf(preferred, compact)
+            (terminal["attempted"] as Int in 33..64) shouldBe true
+            (terminal["infill_candidates"] as Int > 0) shouldBe true
+            s.accessLoads shouldBe 1
+            verify(exactly = 1) { s.world.autonomousHeightField(any(), any(), any()) }
+        }
+    }
+
+    for (infillCount in listOf(0, 1))
+    test("a single family's $infillCount infill candidates leave its later frontage available") {
+        InfrastructurePlacementScenario(56).use { s ->
+            val entry = "civs/v2/fixture/crusher/preferred/l1"
+            val id = s.familyCatalog(linkedMapOf(entry to 0))
+            val current = familyPlacementBlueprint(entry, id, s.city.worldId, CivPosition(0, 0, 0), 0, 1, 0).building
+            val future = familyPlacementBlueprint(entry, id, s.city.worldId, CivPosition(0, 0, 0), 0, 3, 0).building
+            val frontage = CivsSettlementLayout.candidates(s.city, current, future)
+            val options = CivsAutonomousTerraform.options(s.city, frontage, s.surface)
+            (options.size >= 64) shouldBe true
+            val target = options.drop(40).take(16).firstNotNullOfOrNull { option ->
+                runCatching { CivsAutonomousTerraform.draft(s.city, option, s.surface, s.access,
+                    CivsSettlementLayout.frame(s.city).wallObstacles).building }.getOrNull()
+            } ?: error("Fixture needs a reachable late frontage")
+            val seen = frontage.mapTo(hashSetOf()) { it.building.anchor to it.building.rotation }
+            val infill = CivsSettlementLayout.infill(s.city, current, future, eligible = {
+                (it.anchor to it.rotation) !in seen }).take(infillCount)
+            infill.size shouldBe infillCount
+            every { s.world.captureTerraform(any(), any(), any(), any()) } answers {
+                val draft = arg<CivTerraformDraft>(1).also(s.drafts::add)
+                CompletableFuture.failedFuture(CivsRejection(if (draft.building == target)
+                    "test-selected-infrastructure-draft" else "lands-denied"))
+            }
+            mockkObject(CivsSettlementLayout)
+            try {
+                every { CivsSettlementLayout.infill(any(), any(), any(), any(), any(), any()) } returns infill
+                spatialFailure(s.planner.search(s.city, BuildingType.CRUSHER, 1, id)) shouldBe "test-selected-infrastructure-draft"
+                s.drafts.last().building shouldBe target
+                @Suppress("UNCHECKED_CAST")
+                val terminal = (s.planner.debug(s.city.id)["last"] as List<Map<String, Any?>>).single()
+                terminal["candidate_source"] shouldBe "frontage"
+                (terminal["attempted"] as Int in 41..64) shouldBe true
+            } finally { unmockkObject(CivsSettlementLayout) }
+        }
+    }
+
+    test("a direct surface failure does not consume an alternate family") {
+        InfrastructurePlacementScenario().use { s ->
+            val preferred = "civs/v2/fixture/crusher/preferred/l1"
+            val compact = "civs/v2/fixture/crusher/compact/l1"
+            val id = s.familyCatalog(linkedMapOf(preferred to 0, compact to 0))
+            every { s.world.autonomousHeightField(any(), any(), any(), any()) } returns
+                CompletableFuture.failedFuture(CivsRejection("chunks-unloaded"))
+            spatialFailure(s.planner.search(s.city, BuildingType.CRUSHER, 1, id)) shouldBe "chunks-unloaded"
+            s.drafts shouldBe emptyList()
+            verify(exactly = 0) { s.blueprints.prepareEntry(compact, any(), any(), any(), any(), any()) }
+        }
+    }
+
+    test("an explicit catalog entry retains its exact family through every native refusal") {
+        InfrastructurePlacementScenario().use { s ->
+            val preferred = "civs/v2/fixture/decoration/preferred/l1"
+            val compact = "civs/v2/fixture/decoration/compact/l1"
+            val id = s.familyCatalog(linkedMapOf(preferred to 0, compact to 0))
+            every { s.blueprints.maximumLevel(any()) } returns 1
+            every { s.blueprints.autonomousAlternatives(any(), BuildingType.DECORATION) } returns listOf(compact)
+            every { s.blueprints.prepareEntry(any(), any(), any(), any(), any(), any()) } answers {
+                val blueprint = familyPlacementBlueprint(firstArg(), arg(1), arg(2), arg(3), arg<Int?>(5) ?: 0, 1, 0)
+                CompletableFuture.completedFuture(blueprint.copy(building = blueprint.building.copy(type = BuildingType.DECORATION)))
+            }
+            every { s.world.captureTerraform(any(), any(), any(), any()) } answers {
+                s.drafts += arg<CivTerraformDraft>(1)
+                CompletableFuture.failedFuture(CivsRejection("lands-denied"))
+            }
+            spatialFailure(s.planner.decoration(s.city, preferred, id)) shouldBe "autonomy-no-site"
+            s.drafts.isNotEmpty() shouldBe true
+            s.drafts.all { it.building.schematicId == preferred } shouldBe true
+            verify(exactly = 0) { s.blueprints.autonomousAlternatives(any(), any()) }
+            verify(exactly = 0) { s.blueprints.prepareEntry(compact, any(), any(), any(), any(), any()) }
+        }
+    }
+
     test("a new catalog search tries a compact capable family after the preferred envelope cannot fit") {
         InfrastructurePlacementScenario().use { s ->
             val preferred = "civs/v2/fixture/crusher/preferred/l1"
@@ -65,7 +190,8 @@ class CivsAutonomousFamilyFallbackTest : FunSpec({
         }
     }
 
-    test("all families share one sixty four draft and native attempt budget") {
+    for ((refusal, expected) in listOf("lands-denied" to "autonomy-no-site", "autonomy-search-budget" to "autonomy-search-budget"))
+    test("all families share one sixty four draft and native attempt budget after $refusal") {
         InfrastructurePlacementScenario().use { s ->
             s.city = s.city.copy(autonomy = CivAutonomy(layoutHalfWidth = 32))
             val preferred = "civs/v2/fixture/crusher/preferred/l1"
@@ -83,10 +209,10 @@ class CivsAutonomousFamilyFallbackTest : FunSpec({
             }
             every { s.world.captureTerraform(any(), any(), any(), any()) } answers {
                 s.drafts += arg<CivTerraformDraft>(1)
-                CompletableFuture.failedFuture(CivsRejection("lands-denied"))
+                CompletableFuture.failedFuture(CivsRejection(refusal))
             }
             val result = s.planner.search(s.city, BuildingType.CRUSHER, 1, id)
-            spatialFailure(result) shouldBe "autonomy-no-site"
+            spatialFailure(result) shouldBe expected
             s.drafts.map { it.building.schematicId }.toSet() shouldBe setOf(preferred, compact)
             s.drafts.all { it.building.id == id } shouldBe true
             (s.drafts.size <= CivsAutonomousPlacement.MAXIMUM_OPTIONS) shouldBe true
@@ -730,8 +856,8 @@ private fun spatialFortificationPlot(template: CivFortificationTemplate): CivSet
 }
 
 /** Real catalog and terraform draft; stop at the native boundary so selection has no world side effects. */
-private class InfrastructurePlacementScenario : AutoCloseable {
-    var city = spatialCity(UUID.randomUUID()).copy(autonomy = CivAutonomy(layoutHalfWidth = 24))
+private class InfrastructurePlacementScenario(halfWidth: Int = 24) : AutoCloseable {
+    var city = spatialCity(UUID.randomUUID()).copy(autonomy = CivAutonomy(layoutHalfWidth = halfWidth))
     var access = CivAutonomousAccess()
     var surface = CivTerrainSurface(-64, 320, buildMap {
         for (x in -96..96) for (z in -96..96) put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(64, true))

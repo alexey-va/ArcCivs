@@ -183,6 +183,29 @@ class CivsOptionalPlanBackoffTest : FunSpec({
         }
     }
 
+    test("relevant terrain edits invalidate geometry without bypassing the thirty second failure floor") {
+        OptionalPlanHarness(newPlot = true).use { h ->
+            val before = h.city
+            h.start(); h.failSearch("autonomy-no-path")
+            h.development.debug(h.city.id)["retry_at"] shouldBe 30_000L
+            val point = h.city.center.copy(x = h.city.center.x + h.city.radius)
+            for (at in listOf(5_001L, 10_001L, 15_001L, 20_001L, 25_001L)) {
+                h.time = at
+                h.development.terrainChanged(h.city.worldId, point)
+                h.development.debug(h.city.id)["retry_at"] shouldBe 30_000L
+                @Suppress("UNCHECKED_CAST")
+                val refusal = h.development.debug(h.city.id)["geometric_refusal"] as Map<String, Any?>
+                refusal["cached"] shouldBe false
+                h.pulse()
+                verify(exactly = 1) { h.placement.search(any(), BuildingType.WAREHOUSE, 1, any(), any(), any(), any()) }
+            }
+            h.time = 30_001; h.pulse()
+            verify(exactly = 2) { h.placement.search(any(), BuildingType.WAREHOUSE, 1, any(), any(), any(), any()) }
+            h.committed shouldBe emptyList()
+            h.city shouldBe before
+        }
+    }
+
     test("a town without an ordinary existing goal retains its normal infrastructure retry") {
         OptionalPlanHarness(noOrdinary = true).use { h ->
             CivsAutonomy.nextGoal(h.city) shouldBe null
