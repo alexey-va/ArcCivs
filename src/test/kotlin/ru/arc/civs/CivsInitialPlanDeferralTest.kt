@@ -1,9 +1,12 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import io.mockk.verify
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
@@ -16,6 +19,70 @@ import java.util.concurrent.Executor
 import java.util.logging.Logger
 
 class CivsInitialPlanDeferralTest : FunSpec({
+    test("a smaller proved next forester can reach ordinary native admission when wider unadopted forecasts have no path") {
+        InitialPlanHarness().use { h ->
+            val hut = h.hutDesign().blueprint.building.copy(phase = BuildingPhase.ACTIVE)
+            h.city = h.city.copy(buildings = h.city.buildings + hut)
+            val before = h.city
+            CivsAutonomy.nextGoal(before)?.type shouldBe BuildingType.FORESTER
+            val infra = CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure"))
+            val noPath = CivsRejection("autonomy-no-path")
+            h.start()
+            val failure = shouldThrow<CivsRejection> {
+                growthWithWidths(before) { width -> throw if (width == 40) infra else noPath }
+            }
+            h.rejectPlan(failure)
+            h.time = 5_001; h.pulse()
+            h.searches.size shouldBe 1
+            val forester = CivsSettlementPlans.at(settlementPlanTemplates().getValue(BuildingType.FORESTER).first,
+                before.center.copy(x = before.center.x + 40), 0, UUID(213, 1))
+            val design = CivAutonomousDesign(CivBlueprint(forester, before.worldId, mockk(relaxed = true),
+                emptyList(), emptyList(), byteArrayOf(1)))
+            h.captureFailure = CivsRejection("protected-terrain")
+            h.searches.single().complete(design); h.drain()
+            verify(exactly = 1) { h.world.captureAutonomousSite(before.id, before.owner, before.worldId,
+                forester, emptyList(), null) }
+            h.city shouldBe before
+            h.saves shouldBe 0
+            h.development.progress(before.id)?.reason shouldBe "protected-terrain"
+        }
+    }
+
+    test("an unavailable world or storage immediately stops growth even after an earlier completed plot proof") {
+        InitialPlanHarness().use { h ->
+            for (reason in listOf("chunks-unloaded", "storage-unavailable", "autonomy-search-budget")) {
+                val seen = mutableListOf<Int>()
+                val stop = CivsRejection(reason)
+                val failure = shouldThrow<CivsRejection> { growthWithWidths(h.city) { width ->
+                    seen += width
+                    if (width == 32) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure"))
+                    throw stop
+                } }
+                (failure === stop) shouldBe true
+                seen shouldBe listOf(32, 40)
+            }
+        }
+    }
+
+    test("an adopted or already expanded quarter retains its last forecast refusal; a valid later width still wins") {
+        InitialPlanHarness().use { h ->
+            val infra = CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure"))
+            val noPath = CivsRejection("autonomy-no-path")
+            val success = h.plan()
+            val autonomy = requireNotNull(h.city.autonomy)
+            for (state in listOf(autonomy.copy(plan = success), autonomy.copy(layoutHalfWidth = 40))) {
+                val city = h.city.copy(autonomy = state)
+                val first = CivsSettlementGrowth.halfWidths(city).first()
+                val failure = shouldThrow<CivsRejection> { growthWithWidths(city) { width ->
+                    throw if (width == first) infra else noPath
+                } }
+                (failure === noPath) shouldBe true
+            }
+            val plan = growthWithWidths(h.city) { width -> if (width == 32) throw infra else success }
+            (plan === success) shouldBe true
+        }
+    }
+
     test("a rejected unadopted perimeter lets the first hut reach ordinary native capture and SITE queue without credit") {
         InitialPlanHarness().use { h ->
             val before = h.city
@@ -145,7 +212,17 @@ class CivsInitialPlanDeferralTest : FunSpec({
     }
 })
 
-private class InitialPlanHarness : AutoCloseable {
+/** The width sequence is the only stub; prepareGrowth still owns refusal ordering and stopping. */
+private fun growthWithWidths(city: Settlement, result: (Int) -> CivSettlementPlan): CivSettlementPlan {
+    mockkObject(CivsSettlementPlans)
+    try {
+        every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers { result(arg(6)) }
+        return CivsSettlementPlans.prepareGrowth(city, emptyMap(), CivTerrainSurface(-64, 320, emptyMap()),
+            CivAutonomousAccess(), CivsSettlementGrowth.profile(city))
+    } finally { unmockkObject(CivsSettlementPlans) }
+}
+
+internal class InitialPlanHarness : AutoCloseable {
     var city = settlementPlanCity().let { base -> CivsAutonomy.found(base.id, base.owner, "Compact founding", base.worldId,
         base.center, 96, base.style, base.buildings.single(), 1_000) }
         // The native founding reserve has already been materialized before autonomous development is admitted.

@@ -296,14 +296,14 @@ internal class CivsAutonomousDevelopment(
                             "reason" to rejection.reason, "details" to rejection.values,
                             "retry_at" to autonomyPlanRetryAt[city.id])
                     } else autonomyFailed(city.id, goal, failure)
-                } else mutateWhenAvailable(city.id) { current ->
+                } else runCatching { mutateWhenAvailable(city.id) { current ->
                     rejectIf(autonomyRequests[city.id] != request || civsPlanBoardLayoutKey(current) != key ||
                         current.construction != null || current.constructionQueue.orEmpty().isNotEmpty(),
                         "stale-development")
                     CivsRules.validate(current.copy(revision = current.revision + 1,
                         autonomy = requireNotNull(current.autonomy).copy(layoutHalfWidth = requireNotNull(plan).halfWidth,
                             plan = CivsSettlementPlans.detached(plan))))
-                }.whenCompleteSync(tasks) { _, saveFailure ->
+                } }.getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { _, saveFailure ->
                     autonomyRequests.remove(city.id, request)
                     if (saveFailure != null) autonomyFailed(city.id, goal, saveFailure)
                     else {

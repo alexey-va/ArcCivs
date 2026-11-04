@@ -19,6 +19,56 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
+class CivsAutonomousPlanHandoffTest : FunSpec({
+    test("a synchronous plan persistence rejection releases the request and retries without committing the plan") {
+        initialRecoveryScenario { s ->
+            s.city = s.city.copy(autonomy = s.city.autonomy!!.copy(plan = null,
+                layoutHalfWidth = CivsSettlementGrowth.initialHalfWidth(s.city)))
+            val before = s.city
+            s.synchronousHandoffFailure = CivsRejection("stale-development")
+            s.holdForecast = true
+            s.start()
+            s.forecasts shouldBe 1
+            s.developmentWaiting shouldBe true
+
+            val callbackFailure = runCatching {
+                s.forecast.complete(s.surface)
+                s.finish { s.subject.debug(before.id)["request"] == null }
+            }.exceptionOrNull()
+            s.handoffAttempts shouldBe 1
+            withClue("Successful forecast handoff failed: $callbackFailure; debug=${s.subject.debug(before.id)}") {
+                s.subject.debug(before.id)["request"] shouldBe null
+                callbackFailure shouldBe null
+            }
+            s.subject.progress(before.id)?.reason shouldBe "stale-development"
+            s.subject.debug(before.id)["retry_at"] shouldBe s.time + 5_000
+            s.developmentWaiting shouldBe false
+            s.city shouldBe before
+            s.saves shouldBe emptyList()
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+
+            s.time += 4_999
+            s.subject.pulse(); s.scheduler.tick()
+            s.forecasts shouldBe 1
+            s.synchronousHandoffFailure = null
+            s.holdForecast = false
+            s.time++
+            s.subject.pulse()
+            s.finish { s.saves.isNotEmpty() && s.subject.debug(before.id)["request"] == null }
+            s.forecasts shouldBe 2
+            s.handoffAttempts shouldBe 2
+            s.saves.size shouldBe 1
+            val adopted = requireNotNull(CivsSettlementPlans.current(s.city))
+            CivsSettlementGrowth.covers(s.city, adopted) shouldBe true
+            s.city.copy(revision = before.revision, autonomy = before.autonomy) shouldBe before
+            s.developmentWaiting shouldBe false
+            s.constructionAdmissions shouldBe 0
+            s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+})
+
 class CivsCompatibleUnpaidPlanRecoveryTest : FunSpec({
     test("a compatible horizontal forester replacement keeps the accepted unpaid outline and paid access") {
         initialRecoveryScenario(targetType = BuildingType.FORESTER, permuteUnpaidHouses = true) { s ->
@@ -725,6 +775,8 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     var closed = false
     var failure: String? = null
     var holdForecast = false
+    var synchronousHandoffFailure: Throwable? = null
+    var handoffAttempts = 0
     val forecast = CompletableFuture<CivTerrainSurface>()
     val saves = mutableListOf<Settlement>()
     var constructionAdmissions = 0
@@ -779,7 +831,11 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         isPlacing = { false }, ready = { true }, isClosed = { closed },
         loadAutonomousPlans = { CompletableFuture.completedFuture(paidPlans) }, settlementActive = { true },
         afterCityAvailable = { _, action -> action() },
-        mutate = { _, transform -> save(transform) }, mutateWhenAvailable = { _, transform -> save(transform) },
+        mutate = { _, transform -> save(transform) }, mutateWhenAvailable = { _, transform ->
+            handoffAttempts++
+            synchronousHandoffFailure?.let { throw it }
+            save(transform)
+        },
         commitAutonomousDesign = { actual, design ->
             constructionAdmissions++
             world.captureAutonomousSite(actual.id, actual.owner, actual.worldId,

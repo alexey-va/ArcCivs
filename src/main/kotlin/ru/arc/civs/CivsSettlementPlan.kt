@@ -163,14 +163,20 @@ internal object CivsSettlementPlans {
         surface: CivTerrainSurface, retained: CivAutonomousAccess, profile: List<BuildingType>,
         fortification: CivFortificationTemplate? = null): CivSettlementPlan {
         var last: CivsRejection? = null
+        val compactFounding = city.autonomy?.let {
+            it.plan == null && it.layoutHalfWidth == CivsSettlementGrowth.initialHalfWidth(city)
+        } == true
+        var deferredInfrastructure: CivsRejection? = null
         for (width in CivsSettlementGrowth.halfWidths(city)) {
             try { return prepare(city, templates, surface, retained, fortification, profile, width) }
             catch (failure: CivsRejection) {
                 if (failure.reason !in setOf("autonomy-no-site", "autonomy-layout-obstructed", "autonomy-no-path")) throw failure
+                if (compactFounding && deferredInfrastructure == null && failure.reason == "autonomy-layout-obstructed" &&
+                    failure.values["stage"] == "infrastructure") deferredInfrastructure = failure
                 last = failure
             }
         }
-        throw requireNotNull(last)
+        throw requireNotNull(deferredInfrastructure ?: last)
     }
 
     private fun prepareOnce(city: Settlement, templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>,
