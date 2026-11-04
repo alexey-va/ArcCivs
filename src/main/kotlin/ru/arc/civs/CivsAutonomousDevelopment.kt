@@ -109,6 +109,8 @@ internal class CivsAutonomousDevelopment(
     private val autonomyProgress = mutableMapOf<UUID, CivsAutonomyView>()
     private val autonomyRetryAt = mutableMapOf<UUID, Long>()
     private val autonomyPlanRetryAt = mutableMapOf<UUID, Long>()
+    private data class DeferredInitialPlan(val owner: UUID, val layoutKey: String)
+    private val deferredInitialPlans = mutableMapOf<UUID, DeferredInitialPlan>()
     private val searchFailures = CivsAutonomousSearchFailures()
     private data class UnpaidRecoveryCursor(val owner: UUID, val worldId: UUID, val layoutKey: String,
         val type: BuildingType, val buildingId: UUID,
@@ -138,6 +140,7 @@ internal class CivsAutonomousDevelopment(
         autonomyRetryAt.remove(cityId)
         autonomyProgress.remove(cityId)
         unpaidRecoveryCursors.remove(cityId)
+        deferredInitialPlans.remove(cityId)
     }
 
     fun reset() {
@@ -148,6 +151,7 @@ internal class CivsAutonomousDevelopment(
         autonomyProgress.clear()
         autonomyRetryAt.clear()
         autonomyPlanRetryAt.clear()
+        deferredInitialPlans.clear()
         unpaidRecoveryCursors.clear()
         autonomousAccessChecked.clear()
         autonomousAccessRetryAt.clear()
@@ -160,6 +164,7 @@ internal class CivsAutonomousDevelopment(
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
         unpaidRecoveryCursors.clear()
+        deferredInitialPlans.clear()
     }
 
     fun accessReady(city: Settlement): Boolean = city.autonomy == null ||
@@ -213,6 +218,12 @@ internal class CivsAutonomousDevelopment(
         if (now() < nextAutonomyAt) return
         nextAutonomyAt = now() + 5_000
         searchFailures.retain(cities.keys)
+        deferredInitialPlans.entries.removeIf { (cityId, evidence) ->
+            val latest = cities[cityId]
+            latest == null || latest.pendingDeletion != null || latest.autonomy?.paused != false ||
+                latest.autonomy.plan != null || latest.owner != evidence.owner ||
+                now() >= (autonomyPlanRetryAt[cityId] ?: 0L) || civsPlanBoardLayoutKey(latest) != evidence.layoutKey
+        }
         unpaidRecoveryCursors.entries.removeIf { (cityId, cursor) ->
             val latest = cities[cityId]
             val plan = latest?.let(CivsSettlementPlans::current)
@@ -253,7 +264,7 @@ internal class CivsAutonomousDevelopment(
         val compactFounding = city.autonomy?.layoutHalfWidth == CivsSettlementGrowth.initialHalfWidth(city)
         val extendPlan = ordinary != null && existing == null && !infrastructure && (adopted != null || compactFounding) &&
             (adopted == null || CivsSettlementPlans.next(city, goal.type) == null && CivsSettlementPlans.needsExtension(city))
-        if (extendPlan && now() < (autonomyPlanRetryAt[city.id] ?: 0L)) return
+        if (extendPlan && now() < (autonomyPlanRetryAt[city.id] ?: 0L) && city.id !in deferredInitialPlans) return
         if (extendPlan && now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
             if (!developmentAdmission(city)) {
                 autonomyFailed(city.id, goal, CivsRejection("city-busy"))
@@ -261,6 +272,7 @@ internal class CivsAutonomousDevelopment(
             }
             val request = UUID.randomUUID()
             val key = civsPlanBoardLayoutKey(city)
+            deferredInitialPlans.remove(city.id)
             autonomyRequests[city.id] = request
             autonomyProgress[city.id] = CivsAutonomyView("planning", goal.type, goal.targetLevel)
             runCatching { autonomousPlacement.plan(civsPlanBoardCapture(city)) }
@@ -268,9 +280,22 @@ internal class CivsAutonomousDevelopment(
                 if (autonomyRequests[city.id] != request) return@whenCompleteSync
                 if (failure != null) {
                     autonomyRequests.remove(city.id)
-                    autonomyPlanRetryAt[city.id] = now() + if (CivsDiagnostics.rejection(failure)?.reason in
+                    val rejection = CivsDiagnostics.rejection(failure)
+                    autonomyPlanRetryAt[city.id] = now() + if (rejection?.reason in
                         setOf("world-busy", "chunks-unloaded", "stale-development")) 30_000 else 300_000
-                    autonomyFailed(city.id, goal, failure)
+                    val latest = cities[city.id]
+                    if (compactFounding && adopted == null && city.autonomy?.plan == null &&
+                        rejection?.reason == "autonomy-layout-obstructed" && rejection.values["stage"] == "infrastructure" &&
+                        !closed && ready() && latest != null && latest.owner == city.owner && latest.autonomy?.paused == false &&
+                        latest.pendingDeletion == null && latest.autonomy.plan == null && civsPlanBoardLayoutKey(latest) == key) {
+                        // Only rejected unadopted infrastructure is deferred. Each ordinary site still proves its native work.
+                        deferredInitialPlans[city.id] = DeferredInitialPlan(city.owner, key)
+                        developmentFinished(city.id)
+                        autonomyProgress.remove(city.id)
+                        CivsDiagnostics.event("autonomous_initial_plan_deferred", "city" to city.id,
+                            "reason" to rejection.reason, "details" to rejection.values,
+                            "retry_at" to autonomyPlanRetryAt[city.id])
+                    } else autonomyFailed(city.id, goal, failure)
                 } else mutateWhenAvailable(city.id) { current ->
                     rejectIf(autonomyRequests[city.id] != request || civsPlanBoardLayoutKey(current) != key ||
                         current.construction != null || current.constructionQueue.orEmpty().isNotEmpty(),

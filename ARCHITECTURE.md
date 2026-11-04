@@ -1093,8 +1093,8 @@ Transient schematic WORLD_UNAVAILABLE/chunk-unloaded failures preserve the curre
 ## Constructed medieval layout and Mine V5
 
 `CivsSettlementLayout` and `CivsAutonomousTerraform` provide the shared detached
-placement and grading rules. `CivAutonomy.plan` optionally persists the complete
-ordinary profile: stable building IDs, exact anchors, rotations and entrances,
+placement and grading rules. `CivAutonomy.plan` optionally persists the currently
+needed ordinary profile: stable building IDs, exact anchors, rotations and entrances,
 maximum upgrade/work-field envelopes, graded routes, walls and directed gates.
 These reservations are not SITE records, stock, work slots or paid receipts. Old
 cities without the optional field retain their existing state; invalid or obsolete
@@ -1112,7 +1112,7 @@ crossings. The result is packed into the existing wall/gate rectangles; water,
 occupied footprints and unsafe grades are not made buildable. An accepted legacy
 infrastructure frame remains pinned. Adoption requires a complete perimeter, no
 rejected infrastructure pieces and at most 192 infrastructure pieces alongside
-the 34 ordinary sites. The unchanged city codec also admits a measured native
+the reserved ordinary sites. The unchanged city codec also admits a measured native
 171-piece plan and a padded 192-piece mature town with 28 residents.
 
 The separator first tries the unchanged ordinary core. An unfortified frame with
@@ -1133,13 +1133,13 @@ checks remain in force. Separator clearance preserves actual loaded dirt-path
 shoulders within one column of a retained route, at its native surface and within
 one step of the recorded floor, using the same predicate as infrastructure.
 
-Automatic founding first proves the ordinary complete 34-site profile. Only an
-exact HOUSE no-site refusal may try one smaller existing same-style house family
-with the same supported maximum level. The union of its real current and maximum
-envelopes must have a smaller footprint. The complete profile, infrastructure and native founding proofs
-then run again once; no partial village, alternate population rule or free
-construction is introduced. Diagnostic terrain exports survey water depth in the
-same core/current-gate/retained-gate domain as the runtime planner.
+Automatic founding ranks the surrounding terrain and proves the actual town-hall
+foundation and full native schematic volume. It reserves only that verified hall;
+future ordinary goals prove their own sites when needed. The maximum 34-site
+profile is a planning capacity, not a prerequisite for admitting a new village.
+Population, construction payment and native protection rules remain unchanged.
+Diagnostic terrain exports survey water depth in the same core/current-gate/
+retained-gate domain as the runtime planner.
 
 New civic plots first face straight segments of retained streets inside the core,
 with the entire upgrade envelope and three-block street corridor reserved. The
@@ -1157,10 +1157,10 @@ can supply one additional terrace level alongside the three ordinary levels.
 Conflicting grades add no level; fixed placements and the existing terrain,
 cut/fill, route-reach and 64-option limits remain authoritative.
 Automatic founding validates the entire native schematic volume after the manual
-foundation journal, before complete-layout proof. The journal covers changed
+foundation journal, before its ordinary founding admission. The journal covers changed
 terrain and cannot authorize replacing preserved non-natural support blocks.
 A read-only terrain refusal may try one hall terrace four blocks higher with
-the same identity and horizontal position; foundation, volume and full-plan
+the same identity and horizontal position; foundation and volume
 proofs run again. Failed final founding never retries a different height, and
 its fresh native capture remains authoritative for placement.
 When a wider core puts the ordinary exterior flank beyond the unchanged work
@@ -1171,7 +1171,12 @@ The board and runtime consume this same persisted geometry. Reserved SITE
 admission and later activation retain the adopted route and upgrade envelope while
 refreshing native before-images. Infrastructure reads the adopted walls, gates and
 roads, and retains accepted pieces unchanged. A failed full-plan attempt backs off;
-ordinary single-site growth remains available during that backoff. When optional
+ordinary single-site growth remains available during that backoff. A compact
+village with no saved plan may also use this path after a current, typed refusal
+of its prospective infrastructure. Only that unadopted forecast is deferred:
+each real building still passes ordinary terrain, route, native capture and queue
+admission, and a strict forecast is retried after the bounded backoff. Other
+forecast errors and adopted plans keep their existing admission rules. When optional
 layout planning precedes an existing active building upgrade, its failure also
 defers that unchanged layout check so the upgrade can retain ordinary priority.
 Required plans for new parcels keep their admission rules. Paid work and
