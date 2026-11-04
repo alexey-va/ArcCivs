@@ -210,12 +210,18 @@ object CivsAutonomy {
     }
 
     /** Recover a missing critical profession after deaths, without interrupting accepted work. */
-    internal fun criticalAssignment(city: Settlement, canReassign: (UUID) -> Boolean): Pair<UUID, UUID>? {
+    internal fun criticalAssignment(city: Settlement, canReassign: (UUID) -> Boolean): Pair<UUID, UUID>? =
+        criticalAssignment(city, upkeepBuilderNeeded = false, canReassign = canReassign)
+
+    internal fun criticalAssignment(city: Settlement, upkeepBuilderNeeded: Boolean,
+        canReassign: (UUID) -> Boolean): Pair<UUID, UUID>? {
         if (city.autonomy?.paused != false || city.pendingDeletion != null) return null
         fun unstaffed(building: CivBuilding) = CivsRules.slots(city, building) > 0 &&
             city.workers.none { it.assignment == building.id }
-        val builder = if (missingBuilderForAcceptedWork(city)) {
-            city.buildings.firstOrNull { CivsRules.isBuilder(city, it) && CivsRules.builderCanWork(city, it) && unstaffed(it) }
+        val acceptedBuilderNeeded = missingBuilderForAcceptedWork(city)
+        val builder = if (acceptedBuilderNeeded || upkeepBuilderNeeded) {
+            city.buildings.firstOrNull { CivsRules.isBuilder(city, it) && CivsRules.builderCanWork(city, it) && unstaffed(it) &&
+                (acceptedBuilderNeeded || it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE) }
         } else null
         val hungryFarm = city.buildings.firstOrNull { it.type == BuildingType.FARM && legacyStock(city) && city.stock.food < CivsRules.RECRUIT_FOOD &&
             CivsRules.productionAvailable(city, it) && unstaffed(it) }
@@ -250,7 +256,8 @@ object CivsAutonomy {
                 !(city.construction != null && worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true) &&
                 (target.type != BuildingType.TAVERN || worker.assignment?.let(city::building)?.type != BuildingType.TAVERN ||
                     city.workers.count { it.assignment == worker.assignment } > 1) &&
-                dispensable(city, worker, preserveRaw = urgent == null || returningTavernkeeper) && canReassign(worker.id)
+                dispensable(city, worker, preserveRaw = upkeepBuilderNeeded && !acceptedBuilderNeeded ||
+                    urgent == null || returningTavernkeeper) && canReassign(worker.id)
         } ?: return null
         return worker.id to target.id
     }

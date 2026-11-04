@@ -214,7 +214,9 @@ class CivsService(
     private val residentLife = CivsResidentLifeRuntime(plugin, tasks, citizens, chunkLoading, settings.viewerRange,
         { cities }, busy, unhealthy, ::settlementActive,
         { id, action -> afterCityAvailable(id, action) }, { id, action -> afterCityAvailable(id, action) },
-        { id, transform -> mutate(id, transform = transform) }, clock, residentFoods)
+        { id, transform -> mutate(id, transform = transform) }, clock, residentFoods,
+        maintenanceAssignment = roadMaintenance::maintenanceAssignment,
+        maintenanceHeld = roadMaintenance::holdsAssignment)
 
     private val placement: CivsPlacementSession
     private val buildingRequests: CivsBuildingRequests
@@ -891,7 +893,8 @@ class CivsService(
                 "source_building" to upkeep.source.id, "floor" to upkeep.floor,
                 "before" to surfaceChange?.before, "after" to upkeep.after,
                 "surface_changed" to (surfaceChange != null),
-                "cleared_cover" to work.changes.count { it.position != upkeep.floor },
+                "cleared_cover" to work.changes.count { it.position.y > upkeep.floor.y },
+                "foundation_blocks" to work.changes.count { it.position.y < upkeep.floor.y },
                 "stone_spent" to receipt.stockBefore.stone - tx.after.stock.stone,
                 "native_cobblestone_spent" to (work.inputs["COBBLESTONE"] ?: 0L),
                 "recovery_path" to recoveryPath)
@@ -1105,7 +1108,7 @@ class CivsService(
         plugin.server.onlinePlayers.forEach({ player -> placement.refreshBoundary(player) })
         if (ready()) {
             cities.values.asSequence().filter { it.id !in busy && it.id !in unhealthy && it.pendingDeletion == null }
-                .forEach(roadMaintenance::backfillSurfaces)
+                .forEach { city -> roadMaintenance.backfillSurfaces(city) { citizens.canReassign(city.id, it) } }
             inventoryJournal.recover()
             pulseCorpses()
             deletion.pulseDeletions()

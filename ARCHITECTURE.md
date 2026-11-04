@@ -1270,6 +1270,16 @@ Other blocks or liquids inside the gap refuse the repair. Foundation work may us
 a reachable standing point up to three blocks below the floor under the ordinary
 body, support and approach checks. It never grants remote arrival. Healthy columns
 consume nothing again; old receipts retain their existing shape and payment.
+A physical town with an empty active builder hut can request a safe adult for a
+specific native maintenance target through ordinary critical staffing. The existing
+bounded road observation first proves a candidate under a read-only prospective
+assignment; that candidate grants no items, arrival or work. Only the ordinary
+durable assignment enables a fresh work capture and its existing payment journal.
+The single pending or selected column holds its worker through this handoff and
+defers new development; stale, unfundable or failed work releases the claim with
+bounded retry. Healthy roads leave staffing unchanged. Cargo and active resident
+episodes remain protected, and upkeep does not borrow the last raw producers or
+warehouse courier. Ordinary staffing can return the worker to the tavern afterward.
 A physical builder retaining an upkeep target still travels for missing inputs.
 Without a construction order it uses the existing selected upkeep requirements
 and ordinary native pickup from its assigned hut, bounded by the existing

@@ -23,6 +23,8 @@ internal class CivsResidentLifeRuntime(
     private val mutate: (UUID, (Settlement) -> Settlement) -> CompletableFuture<Settlement>,
     private val clock: () -> Long,
     private val foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
+    private val maintenanceAssignment: (Settlement, (UUID) -> Boolean) -> Pair<UUID, UUID>? = { _, _ -> null },
+    private val maintenanceHeld: (Settlement, UUID) -> Boolean = { _, _ -> false },
 ) {
     private val cities get() = settlements()
     private val populationMinuteAt = mutableMapOf<UUID, Long>()
@@ -165,13 +167,16 @@ internal class CivsResidentLifeRuntime(
     }
 
     fun pulseAutoAssignments() {
+        fun canReassign(city: Settlement, worker: UUID) = citizens.canReassign(city.id, worker) && !maintenanceHeld(city, worker)
         val city = cities.values.firstOrNull { city ->
             city.autonomy?.paused != true && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
-                CivsRules.needsAutoAssignment(city) { citizens.canReassign(city.id, it) } &&
-                settlementActive(city)
+                settlementActive(city) && (maintenanceAssignment(city) { citizens.canReassign(city.id, it) } != null ||
+                    CivsRules.needsAutoAssignment(city) { canReassign(city, it) })
         } ?: return
         runCatching { mutate(city.id) { current ->
-            CivsRules.autoAssign(current, current.owner, now()) { citizens.canReassign(current.id, it) }
+            val maintenance = maintenanceAssignment(current) { citizens.canReassign(current.id, it) }
+            if (maintenance != null) CivsRules.assign(current, current.owner, maintenance.first, maintenance.second, now())
+            else CivsRules.autoAssign(current, current.owner, now()) { canReassign(current, it) }
         } }.onSuccess { future ->
             future.whenCompleteSync(tasks) { saved, failure ->
                 if (failure != null) log("auto assign residents ${city.id}", failure, city.id)

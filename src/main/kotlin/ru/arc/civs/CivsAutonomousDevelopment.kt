@@ -465,19 +465,19 @@ internal class CivsAutonomousDevelopment(
         fun current(): Settlement {
             val latest = cities[city.id] ?: throw CivsRejection("stale-development")
             rejectIf(closed || !ready() || autonomyRequests[city.id] != request || city.id in unhealthy || isPlacing(city.id) ||
-                unpaidRecoveryCursors[city.id] !== cursor || !cursor.matches(latest) ||
+                !cursor.matches(latest) ||
                 unpaidPlot(latest, oldPlan, goal.type)?.building?.id != oldPlot.building.id, "stale-development")
             return latest
         }
-        fun failed(failure: Throwable) {
+        fun failed(failure: Throwable, memoOwned: Boolean = unpaidRecoveryCursors[city.id] === cursor,
+            candidate: Int? = cursor.skipPrepared) {
             if (autonomyRequests[city.id] != request) return
-            CivsDiagnostics.rejection(failure)?.let {
-                searchFailures.remember(city, goal, it.reason, now(),
-                    if (city.id in unpaidRecoveryCursors) cursor.skipPrepared else null)
+            if (memoOwned) CivsDiagnostics.rejection(failure)?.let {
+                searchFailures.remember(city, goal, it.reason, now(), candidate)
             }
             val latest = cities[city.id]
             if (latest == null || !cursor.matches(latest) || unpaidPlot(latest, oldPlan, goal.type)?.building?.id != oldPlot.building.id)
-                unpaidRecoveryCursors.remove(city.id)
+                unpaidRecoveryCursors.remove(city.id, cursor)
             if (autonomyRequests.remove(city.id, request)) autonomyFailed(city.id, goal, failure)
         }
         val snapshot = runCatching { civsPlanBoardCapture(current()) }.getOrElse { failed(it); return }
@@ -487,9 +487,10 @@ internal class CivsAutonomousDevelopment(
             if (autonomyRequests[city.id] != request) return@whenCompleteSync
             if (searchFailure != null) {
                 val rejection = CivsDiagnostics.rejection(searchFailure)
-                if (rejection?.reason in setOf("autonomy-no-site", "autonomy-search-budget"))
-                    unpaidRecoveryCursors.remove(city.id, cursor)
-                failed(searchFailure)
+                val exhausted = rejection?.reason in setOf("autonomy-no-site", "autonomy-search-budget") &&
+                    unpaidRecoveryCursors[city.id] === cursor && unpaidRecoveryCursors.remove(city.id, cursor)
+                failed(searchFailure, exhausted || unpaidRecoveryCursors[city.id] === cursor,
+                    if (exhausted) null else cursor.skipPrepared)
                 return@whenCompleteSync
             }
             val latest = runCatching { current() }.getOrElse { failed(it); return@whenCompleteSync }
@@ -499,13 +500,15 @@ internal class CivsAutonomousDevelopment(
                 if (autonomyRequests[city.id] != request) return@planning
                 if (planFailure != null) {
                     val rejection = CivsDiagnostics.rejection(planFailure)
+                    var memoOwned = unpaidRecoveryCursors[city.id] === cursor
                     if (rejection?.reason in setOf("autonomy-layout-obstructed", "autonomy-no-site") ||
                         rejection?.reason == "autonomy-search-budget" && rejection.values["stage"] == "dry-perimeter") {
                         runCatching { current() }.getOrElse { failed(it); return@planning }
-                        unpaidRecoveryCursors[city.id] = cursor.copy(skipPrepared = cursor.skipPrepared + 1)
-                        autonomyPlanRetryAt[city.id] = now() + 30_000L
+                        memoOwned = unpaidRecoveryCursors[city.id] === cursor && unpaidRecoveryCursors.replace(city.id, cursor,
+                            cursor.copy(skipPrepared = cursor.skipPrepared + 1))
+                        if (memoOwned) autonomyPlanRetryAt[city.id] = now() + 30_000L
                     }
-                    failed(planFailure)
+                    failed(planFailure, memoOwned)
                     return@planning
                 }
                 val accepted = requireNotNull(plan)

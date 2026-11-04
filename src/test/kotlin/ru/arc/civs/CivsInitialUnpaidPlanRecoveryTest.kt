@@ -203,6 +203,70 @@ class CivsDevelopedUnpaidPlanRecoveryTest : FunSpec({
     }
 })
 
+class CivsUnpaidRecoveryTerrainInvalidationTest : FunSpec({
+    for (target in listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER)) {
+        test("terrain outside captured $target work can invalidate the cursor while its original forecast still adopts") {
+            initialRecoveryScenario(continuation = true, targetType = target,
+                draftRefusal = target == BuildingType.FORESTER) { s ->
+                s.holdForecast = true
+                s.start(); s.finish { s.forecasts == 1 }
+                val candidate = requireNotNull(s.selected)
+                invalidateRecoveryCacheOutsideCapture(s)
+                s.forecast.complete(s.surface)
+                s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
+                val plan = requireNotNull(s.city.autonomy?.plan)
+                plan.revision shouldBe s.oldPlan.revision + 1
+                plan.plots.single { it.building.id == s.oldTarget.id }.building shouldBe candidate.copy(phase = BuildingPhase.SITE)
+                plan.routes[s.oldTarget.id.toString()] shouldBe s.selectedRoute
+                s.forecasts shouldBe 1
+                s.nativeProofs shouldBe listOf(candidate)
+                s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
+                s.constructionAdmissions shouldBe 0
+                s.developmentWaiting shouldBe false
+                s.reserveItems() shouldBe s.beforeItems
+            }
+        }
+
+        test("a refused $target forecast cannot resurrect its invalidated cursor or refusal and restarts from ordinal zero") {
+            initialRecoveryScenario(continuation = true, targetType = target,
+                draftRefusal = target == BuildingType.FORESTER) { s ->
+                s.holdForecast = true
+                s.start(); s.finish { s.forecasts == 1 }
+                val candidate = requireNotNull(s.selected)
+                invalidateRecoveryCacheOutsideCapture(s)
+                s.holdForecast = false
+                s.forecast.completeExceptionally(CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure")))
+                s.finish { s.subject.debug(s.city.id)["request"] == null }
+                (s.subject.debug(s.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe false
+                s.subject.progress(s.city.id)?.reason shouldBe "autonomy-layout-obstructed"
+                s.saves shouldBe emptyList()
+                s.city shouldBe s.before
+                s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
+                s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
+                // The first proven choice is proved again; the externally invalidated skip was not advanced.
+                s.forecastDesigns shouldBe listOf(candidate, candidate)
+                s.nativeProofs shouldBe listOf(candidate, candidate)
+                s.forecasts shouldBe 2
+                s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
+                s.constructionAdmissions shouldBe 0
+                s.reserveItems() shouldBe s.beforeItems
+            }
+        }
+    }
+})
+
+private fun invalidateRecoveryCacheOutsideCapture(s: InitialRecoveryScenario) {
+    val request = s.subject.debug(s.city.id)["request"]
+    (request != null) shouldBe true
+    (s.subject.debug(s.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe true
+    val point = s.city.center.copy(x = s.city.center.x + s.city.radius, z = s.city.center.z + s.city.radius)
+    s.volumeCells.isNotEmpty() shouldBe true
+    s.volumeCells.flatten().none { it.position.x == point.x && it.position.z == point.z } shouldBe true
+    s.subject.terrainChanged(s.city.worldId, point)
+    (s.subject.debug(s.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe false
+    s.subject.debug(s.city.id)["request"] shouldBe request
+}
+
 class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
     test("recovery continuation forecasts the next native proven choice after a complete layout refusal") {
         initialRecoveryScenario(continuation = true) { s ->
@@ -284,6 +348,12 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
             s.saves shouldBe emptyList()
             s.city shouldBe s.before
             s.reserveItems() shouldBe s.beforeItems
+
+            val exhaustedSurfaces = s.unreservedSurfaces
+            s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
+            s.unreservedSurfaces shouldBe exhaustedSurfaces
+            s.forecasts shouldBe 1
+            s.saves shouldBe emptyList()
 
             s.failure = null
             s.time += 300_001; s.subject.pulse(); s.scheduler.tick()
