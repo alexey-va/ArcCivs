@@ -12,7 +12,7 @@
     "All 26 sell-to-city bundles are priced one emerald; city-to-player quantity is exactly half. Rate map below. Existing outstanding demands and native reserves cap offers.",
     "No currency conversion to Vault/tokens, no XP reward. Same-material round trip loses half of the goods. Logs/planks ratio4, wheat/bread ratio3, ore/furnace ratio1 retained in bundle ratios.",
     "City gross per-day emerald outflow is bounded by physical treasury, which only purchases by players or actual manual physical deposits replenish; multi-account does not bypass this.",
-    "Initial settlement treasury emeralds remain whatever native contents already exist; zero grants. Auto testing issuance stays identified and does not mint emeralds."
+    "Initial treasury is unchanged; zero emerald grants. Pre-existing normal Auto native-material grants remain separate and unchanged; ordinary settlements do not receive them."
   ],
   "currencies": {
     "vault": {

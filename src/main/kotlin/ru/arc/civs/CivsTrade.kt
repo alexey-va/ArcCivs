@@ -93,9 +93,13 @@ internal object CivsTrade {
                 available.merge(it.material, it.amount.toLong(), Math::addExact)
             }
         }
+        val autoBuffer = city.autonomy != null &&
+            city.construction?.let { it.payment != null && it.materials == null } != true
         return buildList {
             bids.forEach { (material, bid) ->
-                val reserve = desired[material] ?: 0L
+                val operational = desired[material] ?: 0L
+                // Commerce alone keeps one next-cycle batch; the supply planner never sees this reserve.
+                val reserve = if (autoBuffer && operational > 0L) Math.addExact(operational, bid.toLong()) else operational
                 val current = available[material] ?: 0L
                 if ((stock["EMERALD"] ?: 0L) > 0 && reserve - current >= bid)
                     add(CivTradeOffer(material, CivTradeDirection.SELL, bid))

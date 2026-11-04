@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.207 to0.1.208 Auto commerce buffer, lab",
+  "participants": [
+    1,
+    5,
+    15
+  ],
+  "assumptions": [
+    "Activity assumptions, not measured: low/base/high 2/8/24 trades per active hour, 0.5/1/2 hours per player-day.",
+    "Every trade transfers exactly one existing emerald between player and one native settlement treasury; no issued currency, initial funding, top-up or virtual purse.",
+    "All 26 sell-to-city bundles are priced one emerald; city-to-player quantity is exactly half. Rate map below. Existing outstanding demands and native reserves cap offers.",
+    "No currency conversion to Vault/tokens, no XP reward. Same-material round trip loses half of the goods. Logs/planks ratio4, wheat/bread ratio3, ore/furnace ratio1 retained in bundle ratios.",
+    "City gross per-day emerald outflow is bounded by physical treasury, which only purchases by players or actual manual physical deposits replenish; multi-account does not bypass this.",
+    "Initial treasury is unchanged; zero emerald grants. Pre-existing normal Auto native-material grants remain separate and unchanged; ordinary settlements do not receive them.",
+    "Native0.1.207 observations: two non-owner BUY trades succeeded, physical emeralds transferred player→market; neither funded Auto market offered SELL after native stock refresh. This is one QA journey, not income telemetry.",
+    "Before: Auto shortfall against operational reserve D is immediately refilled by the existing Auto privilege. After: commerce alone protects R=D+one existing bid bundle for materials with proven D>0. Shared snapshots, ordinary settlements and Auto grants retain D unchanged.",
+    "No buffer during an unknown paid construction bill: fallback observed.stock protects existing contents and is not proved demand. Buffer is one per material per city, never per store, builder or account.",
+    "For cobblestone D16 and S16, bid64 gives R80 and one SELL64. S80 closes both sides; S79 after real consumption does not reopen SELL64; BUY32 starts only at S112. Same R guards both directions.",
+    "At fixed D, at most one additional bid bundle per material relative to prior reserve; at most26 eligible types, initial payout bounded by min(actual treasury E, eligible types). New payouts need real consumption of a complete bid; changing accounts does not multiply the target.",
+    "All26 rates, one-emerald quotes and two-to-one bid/ask quantity spread remain unchanged. Native goods only transfer. Existing Auto item grants remain a separate old flow; commerce buffer does not request a new grant.",
+    "Gross transfer scenarios remain low/base/high1/8/48 per player-day; these are assumptions with finite native stock/treasury constraints, not measured new income. Vault/tokens/XP mint/burn and disposable income stay0.",
+    "Same-material or listed crafting round trips retain their prior loss. External villager/ESG exchange profitability is not established and remains an observation gap; production is outside activation scope."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "emerald": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "physical_treasury_exchange",
+          "kind": "transfer",
+          "source": "ArcCivs/CivsTrade",
+          "basis": "Gross transfer assumption both before and after; buffer changes finite offer availability, not mint or unit prices.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              8,
+              48
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              8,
+              48
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "rates_items_per_emerald_player_sells": {
+    "OAK_LOG": 32,
+    "SPRUCE_LOG": 32,
+    "BIRCH_LOG": 32,
+    "DARK_OAK_LOG": 32,
+    "ACACIA_LOG": 32,
+    "JUNGLE_LOG": 32,
+    "MANGROVE_LOG": 32,
+    "CHERRY_LOG": 32,
+    "OAK_PLANKS": 128,
+    "SPRUCE_PLANKS": 128,
+    "BIRCH_PLANKS": 128,
+    "DARK_OAK_PLANKS": 128,
+    "ACACIA_PLANKS": 128,
+    "JUNGLE_PLANKS": 128,
+    "MANGROVE_PLANKS": 128,
+    "CHERRY_PLANKS": 128,
+    "COBBLESTONE": 64,
+    "COBBLED_DEEPSLATE": 64,
+    "STONE": 64,
+    "COAL": 16,
+    "CHARCOAL": 16,
+    "RAW_IRON": 16,
+    "IRON_INGOT": 8,
+    "BREAD": 16,
+    "WHEAT": 48,
+    "GLASS": 32
+  },
+  "commerce_buffer_limit": {
+    "before_bids_per_demanded_material": 0,
+    "after_bids_per_demanded_material": 1,
+    "maximum_priced_materials": 26,
+    "unknown_paid_bill_buffer": false,
+    "manual_settlement_buffer": false
+  }
+}
