@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import java.util.UUID
@@ -41,8 +42,15 @@ class CivsPerimeterEnvelopeTest : FunSpec({
         adapted.core shouldBe frame.core
         adapted.halfWidth shouldBe 74
         adapted.wallObstacles.any { it.min.z < frame.core.min.z } shouldBe true
-        val infrastructure = CivsSettlementLayout.infrastructure(city, adapted, surface, routes.values.toList())
-        infrastructure.perimeterClosed shouldBe true
+        // These routes have no retained receipt. As in full planning, reconnect the provisional
+        // approach after the separator chooses a sound gate junction around the protected chain.
+        val connected = routes.keys.map { id -> CivsAutonomousTerraform.connection(city,
+            requireNotNull(city.building(id)), surface, CivAutonomousAccess(),
+            adapted.wallObstacles + CivsSettlementLayout.gateConnectionObstacles(adapted)) }
+        val infrastructure = CivsSettlementLayout.infrastructure(city, adapted, surface, connected)
+        withClue("Gates=${adapted.gates}; rejected=${infrastructure.rejected}; samples=${infrastructure.rejectionSamples}: ") {
+            infrastructure.perimeterClosed shouldBe true
+        }
         infrastructure.rejected shouldBe emptyMap()
         (infrastructure.pieces.size <= CivsRules.MAX_INFRASTRUCTURE) shouldBe true
         Gson().toJson(listOf(city, frame, surface, routes)) shouldBe before

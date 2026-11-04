@@ -75,7 +75,9 @@ internal object CivsSettlementPerimeter {
                 it.groundY == it.waterTopY && it.waterTopY.toLong() - it.waterBottomY in 1L..CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH.toLong() ||
                 retainedFloors[civsTerrainKey(p.x, p.z)] == it.groundY && it.topY == it.groundY) } == true &&
             occupied.none { CivsAutonomousGeometry.horizontalContains(it, p) }
-        val gateRadius = if (frame.fortified) 2 else 1
+        // A new ordinary gate reserves two solid flanks around its actual three-wide core.
+        // Paid/adopted footprints never pass through this new separator branch.
+        val gateRadius = 2
         fun gateClear(p: CivPosition) = (-gateRadius..gateRadius).all { dx -> (-gateRadius..gateRadius).all { dz ->
             clear(p.copy(x = p.x + dx, z = p.z + dz))
         } }
@@ -171,17 +173,149 @@ internal object CivsSettlementPerimeter {
             if (frame.fortified) p.copy(y = city.center.y) in wallCells else
                 index(p.x, p.z)?.let { reachable[it * 2] && !reachable[it * 2 + 1] } == true
         } }.distinctBy { civsTerrainKey(it.x, it.z) }.toMutableList()
+        val retainedPoints = retainedRoutes.flatten()
+        val retainedColumns = retainedPoints.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val retainedNativeColumns = retainedFloors.keys.mapTo(hashSetOf()) { (it shr 32).toInt() to it.toInt() }
+        if (!frame.fortified) crossing.sortBy { if (civsTerrainKey(it.x, it.z) in retainedColumns) 0 else 1 }
+        fun collar(center: CivPosition, alongX: Boolean): Pair<Set<CivPosition>, Set<CivPosition>>? {
+            fun at(across: Int, normal: Int) = center.copy(
+                x = center.x + if (alongX) across else normal,
+                z = center.z + if (alongX) normal else across)
+            fun across(p: CivPosition) = if (alongX) p.x - center.x else p.z - center.z
+            fun normal(p: CivPosition) = if (alongX) p.z - center.z else p.x - center.x
+            val patch = (-3..3).flatMap { a -> (-3..3).map { n -> at(a, n) } }.toSet()
+            if (patch.any { index(it.x, it.z) == null }) return null
+            val old = cutCells.intersect(patch)
+            val ends = old.filter { p -> neighbours.any { (dx, dz) ->
+                val q = p.copy(x = p.x + dx, z = p.z + dz)
+                q !in patch && q in cutCells
+            } }.groupBy(::across)
+            // Every unchanged attachment must meet one of the two solid-wing ends. A branch
+            // leaving through an open approach needs a larger redesign and is refused here.
+            if (ends.keys != setOf(-3, 3)) return null
+            val caps = buildSet {
+                for (a in listOf(-3, 3)) {
+                    val positions = ends.getValue(a).map(::normal)
+                    for (n in minOf(0, positions.min())..maxOf(0, positions.max())) add(at(a, n))
+                }
+            }
+            if (caps.any { !clear(it) || !gentle(it) || seeds[index(it.x, it.z)!!] ||
+                    civsTerrainKey(it.x, it.z) in retainedFloors }) return null
+            val passage = CivBox(at(-2, -2), at(2, 2))
+            val open = CivsInfrastructureRebuild.openColumns(passage, alongX)
+            val solid = patch.filterTo(hashSetOf()) { CivsAutonomousGeometry.horizontalContains(passage, it) &&
+                (it.x to it.z) !in open }
+            if (solid.any { seeds[index(it.x, it.z)!!] || civsTerrainKey(it.x, it.z) in retainedFloors }) return null
+            // Seal only the intended core for this local topology proof. Flood at most 49 cells;
+            // outside labels come from the existing cut, not another world or route search.
+            val sealed = solid + caps + (-1..1).map { at(it, 0) }
+            val unseen = (patch - sealed).toMutableSet()
+            while (unseen.isNotEmpty()) {
+                val start = unseen.first(); unseen.remove(start)
+                val queue = ArrayDeque<CivPosition>(); queue += start
+                var inside = false; var outside = false; var seed = false
+                while (queue.isNotEmpty()) {
+                    val p = queue.removeFirst()
+                    seed = seed || seeds[index(p.x, p.z)!!]
+                    for ((dx, dz) in neighbours) {
+                        val q = p.copy(x = p.x + dx, z = p.z + dz)
+                        if (q in patch) {
+                            if (unseen.remove(q)) queue += q
+                        } else if (q !in cutCells) {
+                            val i = index(q.x, q.z) ?: return null
+                            if (reachable[i * 2]) inside = true else outside = true
+                        }
+                    }
+                }
+                if (inside && outside || seed && !inside) return null
+            }
+            return old to (caps + (-2..2).map { at(it, 0) })
+        }
         val gates = mutableListOf<CivSettlementGate>()
         while (crossing.isNotEmpty()) {
             val first = crossing.removeAt(0)
             val group = mutableListOf(first)
-            var grew: Boolean
-            do {
-                val adjacent = crossing.filter { p -> group.any {
-                    abs(it.x - p.x) <= gateRadius * 2 && abs(it.z - p.z) <= gateRadius * 2 } }
-                group += adjacent; crossing.removeAll(adjacent.toSet()); grew = adjacent.isNotEmpty()
-            } while (grew)
-            val passage = CivBox(CivPosition(group.minOf { it.x } - gateRadius, city.center.y, group.minOf { it.z } - gateRadius),
+            if (frame.fortified) {
+                var grew: Boolean
+                do {
+                    val adjacent = crossing.filter { p -> group.any {
+                        abs(it.x - p.x) <= gateRadius * 2 && abs(it.z - p.z) <= gateRadius * 2 } }
+                    group += adjacent; crossing.removeAll(adjacent.toSet()); grew = adjacent.isNotEmpty()
+                } while (grew)
+            } else {
+                // Keep one local entry, not a wide opening spanning every nearby road. Anchoring
+                // distance to the chosen crossing prevents chains from merging distant exits.
+                val nearby = crossing.filter { abs(it.x - first.x) + abs(it.z - first.z) <= 16 }
+                group += nearby
+                crossing.removeAll(nearby.toSet())
+            }
+            var selectedCollar: Pair<Set<CivPosition>, Set<CivPosition>>? = null
+            val ordinary = if (frame.fortified) null else run {
+                val reasons = sortedMapOf<String, Int>()
+                val paidGroup = group.any { civsTerrainKey(it.x, it.z) in retainedColumns }
+                val collars = mutableListOf<Pair<CivSettlementGate, Boolean>>()
+                fun reject(reason: String) { reasons.merge(reason, 1, Int::plus) }
+                fun candidate(center: CivPosition): CivSettlementGate? {
+                    if (!gateClear(center)) { reject("clearance"); return null }
+                    if (gates.any { abs(it.center.x - center.x) + abs(it.center.z - center.z) <= 16 }) {
+                        reject("spacing"); return null
+                    }
+                    val passage = CivBox(center.copy(x = center.x - 2, z = center.z - 2),
+                        center.copy(x = center.x + 2, z = center.z + 2))
+                    for (direction in 0..1) {
+                        val alongX = direction == 0
+                        fun at(across: Int, normal: Int) = center.copy(
+                            x = center.x + if (alongX) across else normal,
+                            z = center.z + if (alongX) normal else across)
+                        val a = at(0, -3); val b = at(0, 3)
+                        val ai = index(a.x, a.z) ?: continue
+                        val bi = index(b.x, b.z) ?: continue
+                        if (!clear(a) || !clear(b) || reachable[ai * 2] != reachable[ai * 2 + 1] ||
+                            reachable[bi * 2] != reachable[bi * 2 + 1] || reachable[ai * 2] == reachable[bi * 2]) {
+                            reject("approach"); continue
+                        }
+                        val open = CivsInfrastructureRebuild.openColumns(passage, alongX)
+                        val nearby = group + crossing.filter { abs(it.x - center.x) + abs(it.z - center.z) <= 16 }
+                        if (nearby.any { civsTerrainKey(it.x, it.z) in retainedColumns &&
+                                !CivsAutonomousGeometry.horizontalContains(passage, it) } ||
+                            retainedPoints.any { CivsAutonomousGeometry.horizontalContains(passage, it) && (it.x to it.z) !in open } ||
+                            retainedNativeColumns.any { (x, z) -> x in passage.min.x..passage.max.x &&
+                                z in passage.min.z..passage.max.z && (x to z) !in open }) {
+                            reject("retained-route"); continue
+                        }
+                        val gate = CivSettlementGate(Math.floorMod(direction - frame.rotation / 90, 4), center, passage)
+                        // Prefer an unchanged straight separator. Only a paid crossing can require
+                        // the bounded endcap correction after every strict candidate was tried.
+                        if ((-3..3).any { at(it, 0) !in cutCells } ||
+                            (-2..2).any { a -> (-2..2).any { n -> n != 0 && at(a, n) in cutCells } }) {
+                            if (paidGroup) collars += gate to alongX
+                            reject("junction"); continue
+                        }
+                        return gate
+                    }
+                    return null
+                }
+                val candidates = cutCells.sortedWith(compareBy<CivPosition> {
+                    abs(it.x - first.x) + abs(it.z - first.z) }.thenBy { it.x }.thenBy { it.z })
+                // A cramped crossing may need a longer ordinary approach to the nearest sound
+                // junction. Search this already bounded cut once; never widen the aperture.
+                candidates.firstNotNullOfOrNull(::candidate) ?: collars.firstNotNullOfOrNull { (gate, alongX) ->
+                    collar(gate.center, alongX)?.let { selectedCollar = it; gate }
+                } ?: run {
+                    throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "gate-junction",
+                        "first" to "${first.x},${first.z}", "group" to group.joinToString(";") { "${it.x},${it.z}" },
+                        "selected" to gates.joinToString(";") { "${it.center.x},${it.center.z}" },
+                        "near_cut" to candidates.asSequence().filter { abs(it.x - first.x) + abs(it.z - first.z) <= 8 }
+                            .take(64).joinToString(";") { "${it.x},${it.z}" }) +
+                        reasons.mapKeys { "candidate_${it.key}" }.mapValues { it.value.toString() })
+                }
+            }
+            selectedCollar?.let { (old, replacement) ->
+                cutCells.removeAll(old); cutCells.addAll(replacement)
+                wallCells.removeAll(old); wallCells.addAll(replacement)
+            }
+            val passage = ordinary?.passage ?: CivBox(
+                CivPosition(group.minOf { it.x } - gateRadius, city.center.y, group.minOf { it.z } - gateRadius),
                 CivPosition(group.maxOf { it.x } + gateRadius, city.center.y, group.maxOf { it.z } + gateRadius))
             for (x in passage.min.x..passage.max.x) for (z in passage.min.z..passage.max.z)
                 if (!clear(CivPosition(x, city.center.y, z)))
@@ -191,11 +325,16 @@ internal object CivsSettlementPerimeter {
             val before = route.getOrElse((at - 1).coerceAtLeast(0)) { first }
             val after = route.getOrElse(at + 1) { first }
             val worldDirection = if (abs(after.x - before.x) > abs(after.z - before.z)) 1 else 0
-            gates += CivSettlementGate(Math.floorMod(worldDirection - frame.rotation / 90, 4),
+            gates += ordinary ?: CivSettlementGate(Math.floorMod(worldDirection - frame.rotation / 90, 4),
                 first.copy(x = (passage.min.x + passage.max.x) / 2, z = (passage.min.z + passage.max.z) / 2), passage)
+            if (ordinary != null) crossing.removeAll { abs(it.x - ordinary.center.x) + abs(it.z - ordinary.center.z) <= 16 }
+            // The other local crossings remain cut cells and become ordinary walls. Only their
+            // new unpaid routes may be reconnected by the caller, through this fixed aperture.
             wallCells.removeAll { CivsAutonomousGeometry.horizontalContains(passage, it) }
         }
         if (gates.isEmpty() || gates.size > 8) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "dry-gates"))
+        if (!frame.fortified && wallCells.any { civsTerrainKey(it.x, it.z) in retainedFloors })
+            throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-road-wall"))
         val walls = mutableListOf<CivBox>()
         while (wallCells.isNotEmpty()) {
             val start = wallCells.minWith(compareBy<CivPosition> { it.z }.thenBy { it.x })

@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
@@ -15,18 +16,25 @@ import java.util.logging.Logger
 
 class CivsReservedPlotFallbackTest : FunSpec({
     val base by lazy { settlementPlanCity().copy(radius = 128) }
-    val plan by lazy { CivsSettlementPlans.prepare(base, settlementPlanTemplates(), settlementPlanSurface(base), CivAutonomousAccess()) }
+    val plan by lazy { CivsSettlementPlans.prepare(base, settlementPlanTemplates(),
+        settlementPlanSurface(base.copy(radius = 127)), CivAutonomousAccess()) }
 
     for (type in listOf(BuildingType.FORESTER, BuildingType.FARM))
     test("a refused first $type reservation queues the valid second without changing adopted intent") {
-        ReservedFallbackHarness(base, plan, type).use { h ->
+        ReservedFallbackHarness(base, plan, type, withReachableDepot = type == BuildingType.FORESTER).use { h ->
             h.replies[h.plots[0].building.id] = CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
             val before = h.city
             val paid = h.paidPlans.toList()
             h.start()
             h.attempted shouldBe h.plots.take(2).map { it.building.id }
             h.committed shouldBe listOf(h.plots[1].building.id)
-            h.city.constructionQueue shouldBe listOf(h.plots[1].building.id)
+            withClue("Reserved $type: progress=${h.development.progress(h.city.id)}; debug=${h.development.debug(h.city.id)}; " +
+                "attempted=${h.attempted}; committed=${h.committed}; queue=${h.city.constructionQueue}; target=${h.plots[1].building}; " +
+                "route=${plan.routes[h.plots[1].building.id.toString()]}; sources=" +
+                h.city.buildings.filter { CivsRules.isDepot(it) || it.type == BuildingType.TOWN_HALL }
+                    .map { listOf(it.id, it.type, it.phase, it.entrance) }) {
+                h.city.constructionQueue shouldBe listOf(h.plots[1].building.id)
+            }
             h.city.building(h.plots[1].building.id) shouldBe h.plots[1].building.copy(phase = BuildingPhase.SITE)
             h.city.buildings.filterNot { it.id == h.plots[1].building.id } shouldBe before.buildings
             h.city.autonomy shouldBe before.autonomy
@@ -100,13 +108,21 @@ class CivsReservedPlotFallbackTest : FunSpec({
     }
 })
 
-private class ReservedFallbackHarness(base: Settlement, plan: CivSettlementPlan, type: BuildingType) : AutoCloseable {
+private class ReservedFallbackHarness(base: Settlement, plan: CivSettlementPlan, type: BuildingType,
+    withReachableDepot: Boolean = false) : AutoCloseable {
     val plots = plan.plots.filter { it.building.type == type }
+    // A later reserved resource site may rely on the town's already built adopted warehouse.
+    private val establishedDepot = if (!withReachableDepot) null else plan.plots.first { plot ->
+        plot.building.type == BuildingType.WAREHOUSE && plots.take(2).all { target ->
+            CivsRules.workRouteWithinReach(base.copy(buildings = base.buildings + plot.building.copy(phase = BuildingPhase.ACTIVE)),
+                target.building.entrance)
+        }
+    }.building.copy(phase = BuildingPhase.ACTIVE)
     var city = base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
         buildings = base.buildings.map { it.copy(phase = BuildingPhase.SITE) } +
             CivsAutonomy.baseProfile.takeWhile { it != type }.filterNot { it == BuildingType.TOWN_HALL }.map { previous ->
                 plan.plots.first { it.building.type == previous }.building.copy(phase = BuildingPhase.ACTIVE)
-            }, autonomy = base.autonomy!!.copy(plan = plan, layoutHalfWidth = plan.halfWidth))
+            } + listOfNotNull(establishedDepot), autonomy = base.autonomy!!.copy(plan = plan, layoutHalfWidth = plan.halfWidth))
     val paidPlans = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map { building ->
         CivPlacementPlan(building.id, city.id, city.worldId, building, emptyList(), terrain = CivTerraformPlan(
             building.bounds, emptyList(), plan.routes.getValue(building.id.toString()), building.anchor.y, 0, 0))
@@ -126,6 +142,12 @@ private class ReservedFallbackHarness(base: Settlement, plan: CivSettlementPlan,
         runCatching { transform(city) }.fold({ city = it; CompletableFuture.completedFuture(it) }, { CompletableFuture.failedFuture(it) })
     }
     init {
+        establishedDepot?.let { depot ->
+            val adopted = plan.plots.single { it.building.id == depot.id }.building
+            city.building(depot.id) shouldBe adopted.copy(phase = BuildingPhase.ACTIVE)
+            paidPlans.single { it.building.id == depot.id }.terrain!!.route shouldBe plan.routes.getValue(depot.id.toString())
+            plots.take(2).all { CivsRules.workRouteWithinReach(city, it.building.entrance) } shouldBe true
+        }
         every { plugin.logger } returns Logger.getLogger("CivsReservedPlotFallbackTest")
         every { blueprints.maximumLevel(any()) } answers { firstArg<CivBuilding>().type.maxLevel }
         every { placement.reserved(any(), any()) } answers {

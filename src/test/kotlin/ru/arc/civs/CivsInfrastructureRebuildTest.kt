@@ -47,9 +47,9 @@ class CivsInfrastructureRebuildTest : FunSpec({
         }
     }
 
-    test("piers use an unused side column and a completely occupied edge is refused") {
+    test("side forecourts retain paid access but a route through a solid wing is refused") {
         val (city, source) = legacyInfrastructureGate(7, true)
-        val edge = source.building.transit!!.filter { it.x == source.building.bounds.min.x && it.z == 22 }
+        val edge = source.building.transit!!.filter { it.x == source.building.bounds.min.x && it.z == 20 }
         val target = CivsInfrastructureRebuild.proposal(city, source, edge)
         target.building.transit!!.containsAll(edge) shouldBe true
         shouldThrow<CivsRejection> { CivsInfrastructureRebuild.proposal(city, source,

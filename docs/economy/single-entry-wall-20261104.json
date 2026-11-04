@@ -1,0 +1,345 @@
+{
+  "version": 1,
+  "participants": [
+    1,
+    5,
+    15
+  ],
+  "prices": [],
+  "title": "ArcCivs one-entry continuous wall: exact seven structural projects and separate native earthwork",
+  "assumptions": [
+    "The corrected native30block surveyed-section proposal has292changedcells:139new item-bearing cells and153removed cells. The complete seven owned structural proposals were then exported by actual Kotlin code from23retainedplans:696changedcells,313newitem-bearingcells,383removals.",
+    "Before means leave the already paid existing infrastructure unchanged: zero new item sink. After means one ordinary captured paid reconstruction of all seven structural projects; earlier work is historical, neither refunded nor charged again.",
+    "Unchanged cells are excluded by CivsMaterials.required; removals consume0 and refund0. All charged slabs here are single slabs1item each. Current required() preserves five vanilla item IDs; STONE_BRICKS are not COBBLESTONE.",
+    "Low/base/high1/5/15 settlements each perform one full seven-project cluster in a week. One seventh event per participant-day expresses this bounded one-time scenario; it is not repeatable player income or measured activity.",
+    "No currency prices, payout, recipe, production rate, work speed, multiplier, AutoSupplies mode or trade quote rules change. Direct net changes separately0Vault,0tokens,0EMERALD,0playerXP. Native items are construction sinks, never a monetary exchange rate.",
+    "All23retainedplans were read; eight affected route owners have no body conflict in this prototype, and none crosses the lower gate. Final current-state native route/protection/source capture and ordinary journal/save fences remain necessary before any placement.",
+    "Visible joins and closure replace only proven owned infrastructure or the separately admitted seam. Full fresh30875cell client snapshot16:15:05-16:18:28Z matches all touched source preimages apart from5allowedcanonicalfenceconnectionflags. No arbitrary terrain replacement or salvage.",
+    "The313items are the full STRUCTURAL bill, not an all-inclusive excavation/foundation quote. Ordinary Terraform for the new six-column seam still performs fresh native capture and may add its normal material charges; actual earthwork is recorded separately at admission. Existing bounds, per-item prices, protection and journals remain unchanged.",
+    "The first private concept was corrected before production geometry:43unowned dirt cuts removed, each wall column now starts at its retained authored minimum, canonical post phase restored. Moving the plinth onto already authored stone changes the exact bill; do not subtract43 from the first concept total.",
+    "The last5cell prototype correction uses canonical retained per-column floor/clearance, producing292diff without changing139placeditems. The seven-project full structural total replaces the overlapping section total in flows; do not sum139and313.",
+    "The existing unfinished south perimeter afterz9522 lies outside these seven owned projects. This model does not price or claim closure of the whole historic city; ordinary later wall development is separate."
+  ],
+  "currencies": {
+    "item_cobblestone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "one_time_full_structural_reconstruction",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Exact seven full Kotlin structural proposals; native vanilla item units; once per settlement/week scenario; ordinary Terraform separate.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "138",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_log": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "one_time_full_structural_reconstruction",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Exact seven full Kotlin structural proposals; native vanilla item units; once per settlement/week scenario; ordinary Terraform separate.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "39",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_planks": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "one_time_full_structural_reconstruction",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Exact seven full Kotlin structural proposals; native vanilla item units; once per settlement/week scenario; ordinary Terraform separate.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "88",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_slab": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "one_time_full_structural_reconstruction",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Exact seven full Kotlin structural proposals; native vanilla item units; once per settlement/week scenario; ordinary Terraform separate.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "38",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_stone_bricks": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "one_time_full_structural_reconstruction",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Exact seven full Kotlin structural proposals; native vanilla item units; once per settlement/week scenario; ordinary Terraform separate.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "10",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "emerald": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    }
+  },
+  "measured_items": {
+    "unchanged_existing_section": {},
+    "proposed_surveyed_section": {
+      "COBBLESTONE": 48,
+      "OAK_PLANKS": 42,
+      "OAK_LOG": 24,
+      "OAK_SLAB": 15,
+      "STONE_BRICKS": 10
+    },
+    "proposed_full_structural_projects": {
+      "OAK_LOG": 39,
+      "OAK_PLANKS": 88,
+      "STONE_BRICKS": 10,
+      "COBBLESTONE": 138,
+      "OAK_SLAB": 38
+    },
+    "native_terraform_seam": "not included; ordinary current-state quote pending at admission"
+  },
+  "prototype_recipe_sha256": "71023a20b6ff84f73c60151de2de0d00f49fc364d26d918583f694a351283c00",
+  "prototype_changes_sha256": "31821dd1649b03d9ed62e0ddc4049c563bdcf6fcd431e3c334c16c5644a08a7b",
+  "full_piece_export_sha256": "5e605d76088235eeea3264766a9eac722ae8f5bb296003b33b8b035f82e5353f"
+}

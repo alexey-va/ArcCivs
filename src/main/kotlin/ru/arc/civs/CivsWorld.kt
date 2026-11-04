@@ -235,6 +235,9 @@ class CivsWorld(
     internal fun captureRoadUpkeep(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep,
         registerSurface: ((UUID, CivPosition) -> Unit)? = null): CivWorldWork? =
         roadWorld.captureRoadUpkeep(city, worker, upkeep, registerSurface)
+    internal fun captureRoadUpkeepAvoiding(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep,
+        registerSurface: ((UUID, CivPosition) -> Unit)?, rejectedStandings: Set<CivPosition>): CivWorldWork? =
+        roadWorld.captureRoadUpkeep(city, worker, upkeep, registerSurface, rejectedStandings)
     internal fun validateRoadUpkeep(city: Settlement, work: CivWorldWork) = roadWorld.validateRoadUpkeep(city, work)
 
     /** Called only for Core's accepted writes; no synthetic barrel impacts or block mutations. */
@@ -874,6 +877,47 @@ class CivsWorld(
         }
     }
 
+    /** A small cursor inside ordinary capture/revalidation, never a separate planner or world writer. */
+    private inner class GateReadiness(val gate: CivBuilding) {
+        private val lines = CivsInfrastructureRebuild.readyLines(gate)
+        private val core = lines.flatMap { it.drop(1).dropLast(1) }.distinct()
+        private val approaches = lines.flatMap { listOf(it.first(), it.last()) }.flatMap { p ->
+            (-1..1).map { dy -> p.copy(y = p.y + dy) }
+        }.distinct()
+        private val samples = (core.flatMap { p -> (-1..2).map { dy -> p.copy(y = p.y + dy) to (dy == -1) } } +
+            approaches.flatMap { p -> (-1..1).map { dy -> p.copy(y = p.y + dy) to (dy == -1) } }).distinct()
+        private val observed = hashMapOf<Pair<CivPosition, Boolean>, Boolean>()
+        private var cursor = 0
+        val columns: List<CivPosition> get() = lines.flatten()
+
+        fun step(read: (CivPosition) -> Block): Boolean {
+            if (cursor < samples.size) {
+                val sample = samples[cursor++]
+                val block = read(sample.first)
+                observed[sample] = if (sample.second) routeTerraformSupport(block) else passableTerraform(block)
+                return false
+            }
+            fun stands(p: CivPosition, head: Int = 1) = (-1..head).all { dy ->
+                observed[p.copy(y = p.y + dy) to (dy == -1)] == true
+            }
+            requireCivs(core.all { stands(it, 2) }, "gate-refit-exit-not-ready")
+            requireCivs(lines.any { line ->
+                line.drop(1).dropLast(1).zipWithNext().all { (a, b) -> kotlin.math.abs(a.y - b.y) <= 1 } &&
+                    listOf(line.first(), line.last()).all { p -> (-1..1).any { dy -> stands(p.copy(y = p.y + dy)) } }
+            }, "gate-refit-exit-not-ready")
+            return true
+        }
+    }
+
+    /** Add only the proved survivor's few approach columns before the normal chunk demand is created. */
+    private fun includeGateReadiness(scan: CivsWorldScan<*>, gate: CivBuilding): GateReadiness = GateReadiness(gate).also { proof ->
+        synchronized(monitor) {
+            requireCivs(scanDemands[scan] == null, "stale-building")
+            val extra = requireNotNull(CivsChunkArea.around(scan.worldId, proof.columns)).keys()
+            scanFootprints[scan] = scanFootprints.getValue(scan) + extra
+        }
+    }
+
     private inner class Capture(
         cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         private val cells: List<ArcSchematicBlock>, private val previous: CivBuilding?,
@@ -899,6 +943,8 @@ class CivsWorld(
         private var waterY: Int? = null
         private var terrainIndex = 0
         private var routeIndex = 0
+        private var gateReadiness: GateReadiness? = null
+        private var gateReady = false
 
         init {
             requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan")
@@ -935,15 +981,22 @@ class CivsWorld(
         override fun validateIdentity(city: Settlement?) {
             if (city?.autonomy != null && !adminPlacement) strictAutonomous = true
             requireCivs(city?.building(building.id) == previous, "invalid-building")
-            if (previous != null) requireCivs(previous.id == building.id && previous.type == building.type &&
+            if (previous != null) requireCivs(previous.id == building.id &&
+                (previous.type == building.type || city != null && CivsInfrastructureRebuild.refit(city, previous, building)) &&
                 previous.entrance == building.entrance && previous.rotation == building.rotation &&
                 (previous.phase == BuildingPhase.ACTIVE && (previous.level + 1 == building.level ||
                     CivsPlanBoardBlueprint.refit(previous, building) || CivsInfrastructureRebuild.refit(previous, building)) ||
                     previous.level == building.level && previous.phase == BuildingPhase.SITE), "invalid-building")
             if (previous != null) requireCivs(civsContainsBox(building.bounds, previous.bounds), "upgrade-footprint-changed")
+            if (previous?.type == BuildingType.GATE && building.type == BuildingType.WALL) {
+                val survivor = requireNotNull(CivsInfrastructureRebuild.closureSurvivor(requireNotNull(city), previous, building))
+                requireCivs(gateReadiness == null || gateReadiness!!.gate == survivor, "stale-building")
+                if (gateReadiness == null) gateReadiness = includeGateReadiness(this, survivor)
+            }
         }
 
         override fun step() {
+            gateReadiness?.let { if (!gateReady) { gateReady = it.step(::read); return } }
             if (waterIndex < waterFoundations.size) {
                 val f = waterFoundations[waterIndex]
                 val y = waterY ?: f.bottomY
@@ -1102,24 +1155,33 @@ class CivsWorld(
             waterColumns[civsTerrainKey(cell.position.x, cell.position.z)]?.takeIf { it.contains(cell.position) }
         }.distinctBy { civsTerrainKey(it.x, it.z) }
         private var waterIndex = 0
+        private var gateReadiness: GateReadiness? = null
+        private var gateReady = false
         init {
             requireCivs(!CivsBlueprints.hasAuthoredControl(building) || plan.blocks.none { it.position == building.control }, "invalid-plan")
             civsValidateWaterFoundations(plan, complete = false)
         }
         override fun validateIdentity(city: Settlement?) {
             val current = city?.building(building.id)
-            requireCivs(current == null || current == building || current.type == building.type &&
+            requireCivs(current == null || current == building ||
+                (current.type == building.type || CivsInfrastructureRebuild.refit(city, current, building)) &&
                 current.entrance == building.entrance && current.rotation == building.rotation &&
                 (current.level + 1 == building.level || CivsPlanBoardBlueprint.refit(current, building) ||
                     CivsInfrastructureRebuild.refit(current, building)) &&
                 current.phase == BuildingPhase.ACTIVE, "invalid-building")
             if (current != null) requireCivs(civsContainsBox(building.bounds, current.bounds), "upgrade-footprint-changed")
+            if (current?.type == BuildingType.GATE && building.type == BuildingType.WALL) {
+                val survivor = requireNotNull(CivsInfrastructureRebuild.closureSurvivor(requireNotNull(city), current, building))
+                requireCivs(gateReadiness == null || gateReadiness!!.gate == survivor, "stale-building")
+                if (gateReadiness == null) gateReadiness = includeGateReadiness(this, survivor)
+            }
             city?.construction?.let {
                 requireCivs(it.id == plan.id && it.buildingId == building.id && it.plannedBuilding == building, "invalid-plan")
             }
         }
 
         override fun step() {
+            gateReadiness?.let { if (!gateReady) { gateReady = it.step(::read); return } }
             if (waterIndex < waterFoundations.size) {
                 val f = waterFoundations[waterIndex++]
                 val bed = read(CivPosition(f.x, f.bottomY, f.z))

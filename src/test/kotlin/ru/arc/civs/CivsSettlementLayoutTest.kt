@@ -341,8 +341,8 @@ class CivsSettlementLayoutTest : FunSpec({
             if (piece.type == BuildingType.WALL) piece.transit shouldBe emptyList()
             else {
                 piece.transit.map { civsTerrainKey(it.x, it.z) }.distinct().size shouldBe piece.transit.size
-                piece.transit.size shouldBe (piece.bounds.max.x - piece.bounds.min.x + 1) *
-                    (piece.bounds.max.z - piece.bounds.min.z + 1) - if (piece.type == BuildingType.GATE) 2 else 0
+                if (piece.type != BuildingType.GATE) piece.transit.size shouldBe
+                    (piece.bounds.max.x - piece.bounds.min.x + 1) * (piece.bounds.max.z - piece.bounds.min.z + 1)
                 (piece.transit.size <= 256) shouldBe true
             }
             if (piece.type == BuildingType.GATE) {
@@ -507,7 +507,8 @@ class CivsSettlementLayoutTest : FunSpec({
                 CivsInfrastructureRebuild.stage(building) shouldBe 1
                 CivsGateRefit.validTransit(building) shouldBe true
                 piece.blocks.none { it.after.contains("_fence_gate[") } shouldBe true
-                val posts = listOf(0, span - 1).map { point(it, floorY + 1, 2) }.toSet()
+                val posts = (0 until span).filter { it !in (span - 3) / 2..(span - 3) / 2 + 2 }
+                    .flatMap { across -> (1..3).map { depth -> point(across, floorY + 1, depth) } }.toSet()
                 piece.transit.toSet() shouldBe fullTransit - posts
                 for (feet in piece.transit) for (dy in 0..2)
                     cells[feet.copy(y = feet.y + dy)] shouldBe "minecraft:air"

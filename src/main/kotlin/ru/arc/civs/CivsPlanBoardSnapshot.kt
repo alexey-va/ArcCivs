@@ -73,7 +73,8 @@ internal fun requireQueuedDesign(plan: CivPlacementPlan, city: Settlement, build
     require(plan.id == queuedDesignId(building) && plan.cityId == city.id && plan.worldId == city.worldId)
     require(if (building.phase == BuildingPhase.SITE)
         plan.building.copy(phase = BuildingPhase.SITE, production = building.production) == building
-    else building.phase == BuildingPhase.ACTIVE && plan.building.id == building.id && plan.building.type == building.type &&
+    else building.phase == BuildingPhase.ACTIVE && plan.building.id == building.id &&
+        (plan.building.type == building.type || CivsInfrastructureRebuild.refit(city, building, plan.building)) &&
         plan.building.phase == BuildingPhase.CONSTRUCTING && (plan.building.level == building.level + 1 ||
             CivsPlanBoardBlueprint.refit(building, plan.building) || CivsInfrastructureRebuild.refit(building, plan.building)) &&
         plan.building.entrance == building.entrance && plan.building.rotation == building.rotation &&

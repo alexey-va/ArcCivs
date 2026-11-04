@@ -1,0 +1,2697 @@
+{
+  "version": 1,
+  "title": "ArcCivs NEW ordinary gate aperture stage1:3x3 to5x5",
+  "assumptions": [
+    "Prospective geometry decision before footprint edit. Before is the unreleased v5 candidate3x3/one-wide-core; after is the proposed5x5/three-wide-core, under the SAME existing gate recipe and material prices. Neither row claims current live211income.",
+    "Only NEW UNPAID ordinary min-cut passages are changed. Paid/adopted footprints and routes remain unchanged; the separate fortified radius2/depth9 branch is unchanged. Initial fresh villages remain halfwidth32/protection96, not enlarged to fit gates.",
+    "Exact flat AIR-baseline structural state counts come from enumerating the current gate/Materials loops; all slabs single. Native Terraform, terrain grading, replacement wall strips and reconnected roads are separate ordinary quotes, not included here.",
+    "Low/base/high1/5/15 settlements each build one new gate in a hypothetical week. Each stage is a SEPARATE alternative, not three simultaneous activities; do not sum the stage scenarios.",
+    "Local near crossing groups use one coherent passage, with remaining contour cells becoming wall. Do not infer total town savings from73versus45: gate count, wall and road costs also change and need the admitted native plan.",
+    "Direct monetary and XP changes separately0Vault,0tokens,0EMERALD,0playerXP. No refunds, payout, recipe rates, work speed or AutoSupplies policy changes. Native material quantities are item sinks, not invented money exchange rates. Existing SELL and future contracts remain separate."
+  ],
+  "participants": [
+    1,
+    5,
+    15
+  ],
+  "currencies": {
+    "item_cobblestone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_unpaid_gate_structure",
+          "kind": "burn",
+          "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+          "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "9",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "25",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_stone_bricks": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_unpaid_gate_structure",
+          "kind": "burn",
+          "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+          "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_log": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_unpaid_gate_structure",
+          "kind": "burn",
+          "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+          "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "21",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "27",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_stairs": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_unpaid_gate_structure",
+          "kind": "burn",
+          "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+          "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "10",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_slab": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "new_unpaid_gate_structure",
+          "kind": "burn",
+          "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+          "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "5",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "emerald": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    }
+  },
+  "prices": [],
+  "measured_items": {
+    "before": {
+      "COBBLESTONE": 9,
+      "STONE_BRICKS": 6,
+      "OAK_LOG": 21,
+      "OAK_STAIRS": 6,
+      "OAK_SLAB": 3
+    },
+    "after": {
+      "COBBLESTONE": 25,
+      "STONE_BRICKS": 6,
+      "OAK_LOG": 27,
+      "OAK_STAIRS": 10,
+      "OAK_SLAB": 5
+    }
+  },
+  "separate_stage_assessments": {
+    "2": {
+      "version": 1,
+      "title": "ArcCivs NEW ordinary gate aperture stage2:3x3 to5x5",
+      "assumptions": [
+        "Prospective geometry decision before footprint edit. Before is the unreleased v5 candidate3x3/one-wide-core; after is the proposed5x5/three-wide-core, under the SAME existing gate recipe and material prices. Neither row claims current live211income.",
+        "Only NEW UNPAID ordinary min-cut passages are changed. Paid/adopted footprints and routes remain unchanged; the separate fortified radius2/depth9 branch is unchanged. Initial fresh villages remain halfwidth32/protection96, not enlarged to fit gates.",
+        "Exact flat AIR-baseline structural state counts come from enumerating the current gate/Materials loops; all slabs single. Native Terraform, terrain grading, replacement wall strips and reconnected roads are separate ordinary quotes, not included here.",
+        "Low/base/high1/5/15 settlements each build one new gate in a hypothetical week. Each stage is a SEPARATE alternative, not three simultaneous activities; do not sum the stage scenarios.",
+        "Local near crossing groups use one coherent passage, with remaining contour cells becoming wall. Do not infer total town savings from73versus45: gate count, wall and road costs also change and need the admitted native plan.",
+        "Direct monetary and XP changes separately0Vault,0tokens,0EMERALD,0playerXP. No refunds, payout, recipe rates, work speed or AutoSupplies policy changes. Native material quantities are item sinks, not invented money exchange rates. Existing SELL and future contracts remain separate."
+      ],
+      "participants": [
+        1,
+        5,
+        15
+      ],
+      "currencies": {
+        "item_cobblestone": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "9",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "25",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "item_stone_bricks": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "12",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "12",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "item_oak_log": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "15",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "21",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "item_oak_stairs": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "6",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "10",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "item_oak_slab": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "3",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "5",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "vault": {
+          "minor_per_unit": 100,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": []
+        },
+        "tokens": {
+          "minor_per_unit": 100,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": []
+        },
+        "emerald": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": []
+        },
+        "xp": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": []
+        }
+      },
+      "prices": [],
+      "measured_items": {
+        "before": {
+          "COBBLESTONE": 9,
+          "STONE_BRICKS": 12,
+          "OAK_LOG": 15,
+          "OAK_STAIRS": 6,
+          "OAK_SLAB": 3
+        },
+        "after": {
+          "COBBLESTONE": 25,
+          "STONE_BRICKS": 12,
+          "OAK_LOG": 21,
+          "OAK_STAIRS": 10,
+          "OAK_SLAB": 5
+        }
+      }
+    },
+    "3": {
+      "version": 1,
+      "title": "ArcCivs NEW ordinary gate aperture stage3:3x3 to5x5",
+      "assumptions": [
+        "Prospective geometry decision before footprint edit. Before is the unreleased v5 candidate3x3/one-wide-core; after is the proposed5x5/three-wide-core, under the SAME existing gate recipe and material prices. Neither row claims current live211income.",
+        "Only NEW UNPAID ordinary min-cut passages are changed. Paid/adopted footprints and routes remain unchanged; the separate fortified radius2/depth9 branch is unchanged. Initial fresh villages remain halfwidth32/protection96, not enlarged to fit gates.",
+        "Exact flat AIR-baseline structural state counts come from enumerating the current gate/Materials loops; all slabs single. Native Terraform, terrain grading, replacement wall strips and reconnected roads are separate ordinary quotes, not included here.",
+        "Low/base/high1/5/15 settlements each build one new gate in a hypothetical week. Each stage is a SEPARATE alternative, not three simultaneous activities; do not sum the stage scenarios.",
+        "Local near crossing groups use one coherent passage, with remaining contour cells becoming wall. Do not infer total town savings from73versus45: gate count, wall and road costs also change and need the admitted native plan.",
+        "Direct monetary and XP changes separately0Vault,0tokens,0EMERALD,0playerXP. No refunds, payout, recipe rates, work speed or AutoSupplies policy changes. Native material quantities are item sinks, not invented money exchange rates. Existing SELL and future contracts remain separate."
+      ],
+      "participants": [
+        1,
+        5,
+        15
+      ],
+      "currencies": {
+        "item_cobblestone": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "9",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "25",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "item_stone_bricks": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "27",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "33",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "item_oak_log": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": false,
+                "amount_per_event": {
+                  "value": "0",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": false,
+                "amount_per_event": {
+                  "value": "0",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "item_oak_stairs": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "6",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "10",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "item_oak_slab": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": [
+            {
+              "id": "new_unpaid_gate_structure",
+              "kind": "burn",
+              "source": "CivsSettlementLayout.gate/CivsInfrastructureRebuild.gate/CivsMaterials.required",
+              "basis": "One new ordinary gate/week; stage alternative; flat AIR-baseline structural bill only.",
+              "before": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "3",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              },
+              "after": {
+                "enabled": true,
+                "amount_per_event": {
+                  "value": "5",
+                  "unit": "major"
+                },
+                "events_per_player_day": [
+                  "0.142857142857142857",
+                  "0.142857142857142857",
+                  "0.142857142857142857"
+                ]
+              }
+            }
+          ]
+        },
+        "vault": {
+          "minor_per_unit": 100,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": []
+        },
+        "tokens": {
+          "minor_per_unit": 100,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": []
+        },
+        "emerald": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": []
+        },
+        "xp": {
+          "minor_per_unit": 1,
+          "disposable_per_player_day": {
+            "before": [
+              "0",
+              "0",
+              "0"
+            ],
+            "after": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "flows": []
+        }
+      },
+      "prices": [],
+      "measured_items": {
+        "before": {
+          "COBBLESTONE": 9,
+          "STONE_BRICKS": 27,
+          "OAK_LOG": 0,
+          "OAK_STAIRS": 6,
+          "OAK_SLAB": 3
+        },
+        "after": {
+          "COBBLESTONE": 25,
+          "STONE_BRICKS": 33,
+          "OAK_LOG": 0,
+          "OAK_STAIRS": 10,
+          "OAK_SLAB": 5
+        }
+      }
+    }
+  },
+  "stage_calculator_deltas": {
+    "1": {
+      "item_cobblestone": [
+        "-15.999999999999999984",
+        "-79.999999999999999920",
+        "-239.999999999999999760"
+      ],
+      "item_stone_bricks": [
+        "0E-18",
+        "0E-18",
+        "0E-18"
+      ],
+      "item_oak_log": [
+        "-5.999999999999999994",
+        "-29.999999999999999970",
+        "-89.999999999999999910"
+      ],
+      "item_oak_stairs": [
+        "-3.999999999999999996",
+        "-19.999999999999999980",
+        "-59.999999999999999940"
+      ],
+      "item_oak_slab": [
+        "-1.999999999999999998",
+        "-9.999999999999999990",
+        "-29.999999999999999970"
+      ],
+      "vault": [
+        "0",
+        "0",
+        "0"
+      ],
+      "tokens": [
+        "0",
+        "0",
+        "0"
+      ],
+      "emerald": [
+        "0",
+        "0",
+        "0"
+      ],
+      "xp": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "2": {
+      "item_cobblestone": [
+        "-15.999999999999999984",
+        "-79.999999999999999920",
+        "-239.999999999999999760"
+      ],
+      "item_stone_bricks": [
+        "0E-18",
+        "0E-18",
+        "0E-18"
+      ],
+      "item_oak_log": [
+        "-5.999999999999999994",
+        "-29.999999999999999970",
+        "-89.999999999999999910"
+      ],
+      "item_oak_stairs": [
+        "-3.999999999999999996",
+        "-19.999999999999999980",
+        "-59.999999999999999940"
+      ],
+      "item_oak_slab": [
+        "-1.999999999999999998",
+        "-9.999999999999999990",
+        "-29.999999999999999970"
+      ],
+      "vault": [
+        "0",
+        "0",
+        "0"
+      ],
+      "tokens": [
+        "0",
+        "0",
+        "0"
+      ],
+      "emerald": [
+        "0",
+        "0",
+        "0"
+      ],
+      "xp": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "3": {
+      "item_cobblestone": [
+        "-15.999999999999999984",
+        "-79.999999999999999920",
+        "-239.999999999999999760"
+      ],
+      "item_stone_bricks": [
+        "-5.999999999999999994",
+        "-29.999999999999999970",
+        "-89.999999999999999910"
+      ],
+      "item_oak_log": [
+        "0",
+        "0",
+        "0"
+      ],
+      "item_oak_stairs": [
+        "-3.999999999999999996",
+        "-19.999999999999999980",
+        "-59.999999999999999940"
+      ],
+      "item_oak_slab": [
+        "-1.999999999999999998",
+        "-9.999999999999999990",
+        "-29.999999999999999970"
+      ],
+      "vault": [
+        "0",
+        "0",
+        "0"
+      ],
+      "tokens": [
+        "0",
+        "0",
+        "0"
+      ],
+      "emerald": [
+        "0",
+        "0",
+        "0"
+      ],
+      "xp": [
+        "0",
+        "0",
+        "0"
+      ]
+    }
+  },
+  "prospective_paid_road_collar": {
+    "1": {
+      "assessment": {
+        "version": 1,
+        "participants": [
+          1,
+          5,
+          15
+        ],
+        "currencies": {
+          "item_cobblestone": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "4",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "5",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_stone_bricks": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_log": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "3",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_stairs": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_slab": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "4",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "4",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "vault": {
+            "minor_per_unit": 100,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "tokens": {
+            "minor_per_unit": 100,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "emerald": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "xp": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "item_oak_planks": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "8",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "8",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "prices": [],
+        "title": "Prospective paid-road collar outside-gate wall columns: stage 1",
+        "assumptions": [
+          "Before geometry edit: hypothetical refused candidate has four outside-gate columns; proposed NEW-only collar has five. This is not measured live delivery, not a refund, and never overwrites an actual paid wall.",
+          "Exact flat fixture example: common (7,-3); before vertical (4,1),(4,2),(4,3); after horizontal cap (4,3)..(7,3). Gate5x5/transit19/recipe unchanged. Existing wallColumn post phase and single slabs; oak fixture palette, each item separate.",
+          "Stages are separate alternatives, one correction per settlement/week at low/base/high1/5/15. Native preimages, merged axes, terrain, other styles and route quotes remain separate normal admission, so this is not a total city quote.",
+          "No economic policy/rate/refund/AutoSupplies/work-speed change. Direct deltas separately0Vault,0tokens,0EMERALD,0XP. Actual cut cells/protection/retained three-wide road proof remain required."
+        ],
+        "measured_items": {
+          "before": {
+            "item_cobblestone": 4,
+            "item_oak_planks": 8,
+            "item_oak_slab": 4
+          },
+          "after": {
+            "item_cobblestone": 5,
+            "item_oak_planks": 8,
+            "item_oak_slab": 4,
+            "item_oak_log": 3
+          },
+          "totals": [
+            16,
+            20
+          ]
+        }
+      },
+      "calculator_weekly_net_deltas": {
+        "item_cobblestone": [
+          "-0.999999999999999999",
+          "-4.999999999999999995",
+          "-14.999999999999999985"
+        ],
+        "item_stone_bricks": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ],
+        "item_oak_log": [
+          "-2.999999999999999997",
+          "-14.999999999999999985",
+          "-44.999999999999999955"
+        ],
+        "item_oak_stairs": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ],
+        "item_oak_slab": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ],
+        "vault": [
+          "0",
+          "0",
+          "0"
+        ],
+        "tokens": [
+          "0",
+          "0",
+          "0"
+        ],
+        "emerald": [
+          "0",
+          "0",
+          "0"
+        ],
+        "xp": [
+          "0",
+          "0",
+          "0"
+        ],
+        "item_oak_planks": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ]
+      }
+    },
+    "2": {
+      "assessment": {
+        "version": 1,
+        "participants": [
+          1,
+          5,
+          15
+        ],
+        "currencies": {
+          "item_cobblestone": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "4",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "5",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_stone_bricks": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "8",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "10",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_log": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "4",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "5",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_stairs": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_slab": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "4",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "5",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "vault": {
+            "minor_per_unit": 100,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "tokens": {
+            "minor_per_unit": 100,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "emerald": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "xp": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "item_oak_planks": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "prices": [],
+        "title": "Prospective paid-road collar outside-gate wall columns: stage 2",
+        "assumptions": [
+          "Before geometry edit: hypothetical refused candidate has four outside-gate columns; proposed NEW-only collar has five. This is not measured live delivery, not a refund, and never overwrites an actual paid wall.",
+          "Exact flat fixture example: common (7,-3); before vertical (4,1),(4,2),(4,3); after horizontal cap (4,3)..(7,3). Gate5x5/transit19/recipe unchanged. Existing wallColumn post phase and single slabs; oak fixture palette, each item separate.",
+          "Stages are separate alternatives, one correction per settlement/week at low/base/high1/5/15. Native preimages, merged axes, terrain, other styles and route quotes remain separate normal admission, so this is not a total city quote.",
+          "No economic policy/rate/refund/AutoSupplies/work-speed change. Direct deltas separately0Vault,0tokens,0EMERALD,0XP. Actual cut cells/protection/retained three-wide road proof remain required."
+        ],
+        "measured_items": {
+          "before": {
+            "item_cobblestone": 4,
+            "item_stone_bricks": 8,
+            "item_oak_log": 4,
+            "item_oak_slab": 4
+          },
+          "after": {
+            "item_cobblestone": 5,
+            "item_stone_bricks": 10,
+            "item_oak_log": 5,
+            "item_oak_slab": 5
+          },
+          "totals": [
+            20,
+            25
+          ]
+        }
+      },
+      "calculator_weekly_net_deltas": {
+        "item_cobblestone": [
+          "-0.999999999999999999",
+          "-4.999999999999999995",
+          "-14.999999999999999985"
+        ],
+        "item_stone_bricks": [
+          "-1.999999999999999998",
+          "-9.999999999999999990",
+          "-29.999999999999999970"
+        ],
+        "item_oak_log": [
+          "-0.999999999999999999",
+          "-4.999999999999999995",
+          "-14.999999999999999985"
+        ],
+        "item_oak_stairs": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ],
+        "item_oak_slab": [
+          "-0.999999999999999999",
+          "-4.999999999999999995",
+          "-14.999999999999999985"
+        ],
+        "vault": [
+          "0",
+          "0",
+          "0"
+        ],
+        "tokens": [
+          "0",
+          "0",
+          "0"
+        ],
+        "emerald": [
+          "0",
+          "0",
+          "0"
+        ],
+        "xp": [
+          "0",
+          "0",
+          "0"
+        ],
+        "item_oak_planks": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ]
+      }
+    },
+    "3": {
+      "assessment": {
+        "version": 1,
+        "participants": [
+          1,
+          5,
+          15
+        ],
+        "currencies": {
+          "item_cobblestone": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "4",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "5",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_stone_bricks": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "15",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "18",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_log": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_stairs": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "item_oak_slab": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          },
+          "vault": {
+            "minor_per_unit": 100,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "tokens": {
+            "minor_per_unit": 100,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "emerald": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "xp": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": []
+          },
+          "item_oak_planks": {
+            "minor_per_unit": 1,
+            "disposable_per_player_day": {
+              "before": [
+                "0",
+                "0",
+                "0"
+              ],
+              "after": [
+                "0",
+                "0",
+                "0"
+              ]
+            },
+            "flows": [
+              {
+                "id": "new_unpaid_collar_wall_columns",
+                "kind": "burn",
+                "source": "CivsInfrastructureRebuild.wallColumn/CivsSettlementLayout.infrastructure",
+                "basis": "One prospective collar/week; separate stage alternative; flat outside-gate structural columns only.",
+                "before": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                },
+                "after": {
+                  "enabled": true,
+                  "amount_per_event": {
+                    "value": "0",
+                    "unit": "major"
+                  },
+                  "events_per_player_day": [
+                    "0.142857142857142857",
+                    "0.142857142857142857",
+                    "0.142857142857142857"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "prices": [],
+        "title": "Prospective paid-road collar outside-gate wall columns: stage 3",
+        "assumptions": [
+          "Before geometry edit: hypothetical refused candidate has four outside-gate columns; proposed NEW-only collar has five. This is not measured live delivery, not a refund, and never overwrites an actual paid wall.",
+          "Exact flat fixture example: common (7,-3); before vertical (4,1),(4,2),(4,3); after horizontal cap (4,3)..(7,3). Gate5x5/transit19/recipe unchanged. Existing wallColumn post phase and single slabs; oak fixture palette, each item separate.",
+          "Stages are separate alternatives, one correction per settlement/week at low/base/high1/5/15. Native preimages, merged axes, terrain, other styles and route quotes remain separate normal admission, so this is not a total city quote.",
+          "No economic policy/rate/refund/AutoSupplies/work-speed change. Direct deltas separately0Vault,0tokens,0EMERALD,0XP. Actual cut cells/protection/retained three-wide road proof remain required."
+        ],
+        "measured_items": {
+          "before": {
+            "item_cobblestone": 4,
+            "item_stone_bricks": 15
+          },
+          "after": {
+            "item_cobblestone": 5,
+            "item_stone_bricks": 18
+          },
+          "totals": [
+            19,
+            23
+          ]
+        }
+      },
+      "calculator_weekly_net_deltas": {
+        "item_cobblestone": [
+          "-0.999999999999999999",
+          "-4.999999999999999995",
+          "-14.999999999999999985"
+        ],
+        "item_stone_bricks": [
+          "-2.999999999999999997",
+          "-14.999999999999999985",
+          "-44.999999999999999955"
+        ],
+        "item_oak_log": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ],
+        "item_oak_stairs": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ],
+        "item_oak_slab": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ],
+        "vault": [
+          "0",
+          "0",
+          "0"
+        ],
+        "tokens": [
+          "0",
+          "0",
+          "0"
+        ],
+        "emerald": [
+          "0",
+          "0",
+          "0"
+        ],
+        "xp": [
+          "0",
+          "0",
+          "0"
+        ],
+        "item_oak_planks": [
+          "0E-18",
+          "0E-18",
+          "0E-18"
+        ]
+      }
+    }
+  },
+  "prospective_new_road_alignment": {
+    "scope": "Before route edit: synthetic compact FORESTER only; unpaid road, unchanged gate/collar/paid roads. Desired frontage alignment, not a live quote.",
+    "before_turns": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        4
+      ],
+      [
+        -18,
+        4
+      ],
+      [
+        -18,
+        3
+      ],
+      [
+        -23,
+        3
+      ],
+      [
+        -23,
+        0
+      ],
+      [
+        -39,
+        0
+      ]
+    ],
+    "desired_turns": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        4
+      ],
+      [
+        -39,
+        4
+      ],
+      [
+        -39,
+        0
+      ]
+    ],
+    "cardinal_steps": {
+      "before": 47,
+      "desired": 47
+    },
+    "direct_deltas_separate": {
+      "vault": 0,
+      "tokens": 0,
+      "emerald": 0,
+      "player_xp": 0
+    },
+    "limits": "Same material/work-speed/AutoSupplies/routing-budget rules. Native lane union, grading and any paving material difference require the existing exact admitted quote; equal centreline length is not a claim of equal total paving or universal native journey time."
+  },
+  "prospective_full_shared_streets": {
+    "recorded_before_plan_activation": true,
+    "before": {
+      "source_candidate_sha256": "1bcb790cc0a39b984e377e9c9340d950394d8a6895d8e908699d6174e9ed7b66",
+      "route_count": 33,
+      "centreline_steps_by_route": {
+        "6001e827-5924-34d4-9ed6-fed93b4336ee": 17,
+        "793343a4-d57a-3f10-8c48-ffbe6fe4805d": 25,
+        "ea535eb6-4d5c-365c-a566-e7f38c2a3a0e": 21,
+        "52c257b3-04c4-3e6e-bf21-da9c2140c0b1": 15,
+        "6d1b2394-d050-3837-a2c1-779c63e9b18c": 47,
+        "8b7e094e-134f-30ba-a2cc-9153205d33a0": 36,
+        "d27de48d-0b1b-3bbf-a70a-5b630995ccd1": 32,
+        "211bb3c4-23e4-37df-a955-1a4462a1f382": 27,
+        "9d2db088-08f1-34a3-a526-064fbfc46c4c": 26,
+        "1e0f8fd7-ac0e-3ec2-b975-7ea76bfef499": 68,
+        "db4c6b24-9261-3ab5-a8ef-4637595db8cf": 29,
+        "02053dbb-8f16-3f35-9414-4f94aca42c46": 29,
+        "e5a7eab0-9f87-32e6-8c2b-b6359bfa0fa0": 38,
+        "d81d7b17-15b0-35f6-a893-836f30ba9941": 56,
+        "03e53443-a332-339f-bfa5-035a9c9303bb": 45,
+        "3fd2a98c-8eea-3520-ae08-62ac6bc7fd8d": 54,
+        "f9ea6ed1-588a-3fec-b6e7-0a280740d95b": 43,
+        "14d40fe5-d953-318b-8a2f-eaf5de4a7eb9": 37,
+        "a21475bc-22ec-35b8-8163-fcb95479f4b5": 66,
+        "90a74124-37dc-3a93-b97b-5b5b1682d33f": 65,
+        "91db32f6-2619-38d9-a113-2a140bd00ff2": 58,
+        "aefebb40-7909-360b-97de-731715d38be3": 91,
+        "7c55f608-c25a-3668-acdb-d516f9fc9041": 47,
+        "e4bb2acc-1238-3cda-908d-97320a82797e": 90,
+        "3c50c80d-d3b9-39e3-a1cf-570c4213378e": 103,
+        "4a2bb633-3e51-3528-ae27-ae3c5968de27": 90,
+        "c0e113f6-e368-3c06-8ede-60bb4706d011": 115,
+        "e9a20d92-df29-37ad-9d95-e5d483c2464e": 127,
+        "37941297-f4f3-3d41-bc7a-2a34f91e1110": 114,
+        "7637a2ed-137a-375f-9d4b-1cd6b281f71a": 63,
+        "7e59cfd5-2e94-3a97-bd33-067d71e38213": 88,
+        "8416c147-8a71-3038-9e24-9d5a7e45b55c": 80,
+        "74a3df70-3325-3b1a-a4e2-35c535a69bed": 95
+      },
+      "summed_centreline_steps_not_unique_paving": 1937,
+      "unique_route_columns": 773,
+      "road_piece_count": 80,
+      "authored_nonair_after_states_NOT_inventory_bill": {
+        "minecraft:dirt_path": 753
+      }
+    },
+    "after": {
+      "source_candidate_sha256": "5acb75625cf8eb0f60a0ff430802014ee4d5a767ef0720b58c64fe64c19c9e0a",
+      "route_count": 33,
+      "centreline_steps_by_route": {
+        "6001e827-5924-34d4-9ed6-fed93b4336ee": 17,
+        "793343a4-d57a-3f10-8c48-ffbe6fe4805d": 25,
+        "ea535eb6-4d5c-365c-a566-e7f38c2a3a0e": 21,
+        "52c257b3-04c4-3e6e-bf21-da9c2140c0b1": 15,
+        "6d1b2394-d050-3837-a2c1-779c63e9b18c": 47,
+        "8b7e094e-134f-30ba-a2cc-9153205d33a0": 36,
+        "d27de48d-0b1b-3bbf-a70a-5b630995ccd1": 32,
+        "211bb3c4-23e4-37df-a955-1a4462a1f382": 27,
+        "9d2db088-08f1-34a3-a526-064fbfc46c4c": 26,
+        "1e0f8fd7-ac0e-3ec2-b975-7ea76bfef499": 68,
+        "db4c6b24-9261-3ab5-a8ef-4637595db8cf": 29,
+        "02053dbb-8f16-3f35-9414-4f94aca42c46": 29,
+        "e5a7eab0-9f87-32e6-8c2b-b6359bfa0fa0": 38,
+        "d81d7b17-15b0-35f6-a893-836f30ba9941": 56,
+        "03e53443-a332-339f-bfa5-035a9c9303bb": 45,
+        "3fd2a98c-8eea-3520-ae08-62ac6bc7fd8d": 54,
+        "f9ea6ed1-588a-3fec-b6e7-0a280740d95b": 43,
+        "14d40fe5-d953-318b-8a2f-eaf5de4a7eb9": 37,
+        "a21475bc-22ec-35b8-8163-fcb95479f4b5": 66,
+        "90a74124-37dc-3a93-b97b-5b5b1682d33f": 65,
+        "91db32f6-2619-38d9-a113-2a140bd00ff2": 58,
+        "aefebb40-7909-360b-97de-731715d38be3": 91,
+        "7c55f608-c25a-3668-acdb-d516f9fc9041": 47,
+        "e4bb2acc-1238-3cda-908d-97320a82797e": 90,
+        "3c50c80d-d3b9-39e3-a1cf-570c4213378e": 103,
+        "4a2bb633-3e51-3528-ae27-ae3c5968de27": 90,
+        "c0e113f6-e368-3c06-8ede-60bb4706d011": 115,
+        "e9a20d92-df29-37ad-9d95-e5d483c2464e": 135,
+        "37941297-f4f3-3d41-bc7a-2a34f91e1110": 116,
+        "7637a2ed-137a-375f-9d4b-1cd6b281f71a": 63,
+        "7e59cfd5-2e94-3a97-bd33-067d71e38213": 104,
+        "8416c147-8a71-3038-9e24-9d5a7e45b55c": 88,
+        "74a3df70-3325-3b1a-a4e2-35c535a69bed": 115
+      },
+      "summed_centreline_steps_not_unique_paving": 1991,
+      "unique_route_columns": 644,
+      "road_piece_count": 70,
+      "authored_nonair_after_states_NOT_inventory_bill": {
+        "minecraft:dirt_path": 634
+      }
+    },
+    "policy": "New unpaid gated roads share a center-axis street with nonnegative planning-cost penalties only. Same route/node/length/grade/protection limits; no second search and no synthetic native/paid standing. Paid/actual roads, gate recipes/stages, payouts, work speed and AutoSupplies unchanged.",
+    "direct_deltas_separate": {
+      "vault": 0,
+      "tokens": 0,
+      "emerald": 0,
+      "player_xp": 0
+    },
+    "assessment_limits": "Road vectors may lengthen/shorten; shared paving may change. No claim of production acceleration or equal item burn. Authored states are not monetary units nor a native inventory bill; fixed ordinary quote prices are unchanged. Measure synthetic after deltas before publication, native costs/progress after activation.",
+    "synthetic_deltas": {
+      "route_count": 0,
+      "summed_centreline_steps_not_unique_paving": 54,
+      "unique_route_columns": -129,
+      "road_piece_count": -10,
+      "authored_nonair_after_states_NOT_inventory_bill": {
+        "minecraft:dirt_path": -119
+      }
+    },
+    "native_quote_status": "NOT_APPLIED: LAB stopped after wipe. These are flat synthetic authored geometry measures, not native debit, mint, inventory burn, or measured production."
+  },
+  "prospective_unpaid_fortified_reconnect": {
+    "scope": "Before activation: allow existing fresh unpaid gate-axis reconnect for fortified frames too; paid/adopted infrastructure and routes remain excluded.",
+    "before": "Provisional routes may meet solid flank of unchanged deep fort gate; normal proof rejects candidate and falls back to no optional forts.",
+    "after": "Same bounded route search reconnects new roads through explicit gate-side center; planning channel follows unchanged gate bounds expanded by four columns.",
+    "direct_deltas_separate": {
+      "vault": 0,
+      "tokens": 0,
+      "emerald": 0,
+      "player_xp": 0
+    },
+    "policy": "Gate/wall recipes, item unit prices, payouts, working speed, AutoSupplies and search budgets unchanged. No refund or manufactured treasury. Roads/ground and optional fortification material quantities may change and remain subject to existing exact native quote.",
+    "native_quote_status": "NOT_APPLIED: LAB stopped after authorized wipe; prospective road/profile admission correction, not a measured item or money flow."
+  },
+  "prospective_fortified_exit_separation": {
+    "scope": "Before activation: reject only new unpaid fortified perimeter proposals whose portal centers are at most16Manhattan blocks apart; existing bounded optional fortification-count fallback chooses another coherent plan. Paid/adopted plans unchanged.",
+    "before_fixture": {
+      "candidate_sha256": "21b9831aeecacac99ca1244c08966eb7c834effad70a1ade6dd892056863ecee",
+      "optional_forts": 4,
+      "gate_centers_z": [
+        -35,
+        0,
+        16,
+        35
+      ],
+      "unused_gate_z": 16
+    },
+    "desired": "A coherent bounded alternative, prospectively2optional forts with gates at-37/0/37; actual postchange counts must be measured, not guaranteed.",
+    "direct_deltas_separate": {
+      "vault": 0,
+      "tokens": 0,
+      "emerald": 0,
+      "player_xp": 0
+    },
+    "limits": "No refund, rate, price, speed, AutoSupplies or material recipe change. Fewer optional structures can lower item sinks; actual gate/wall/road/fort/terrain bill remains normal captured native quote, not converted to a fictitious currency. LABstopped so no native item/money flow measured.",
+    "measured_synthetic_before_after": {
+      "before": {
+        "candidate_sha256": "21b9831aeecacac99ca1244c08966eb7c834effad70a1ade6dd892056863ecee",
+        "optional_forts": 4,
+        "plots": 38,
+        "gates": 4,
+        "piece_counts": {
+          "GATE": 4,
+          "WALL": 25,
+          "ROAD": 71
+        },
+        "routes": 37,
+        "summed_centreline_steps_not_unique": 1968,
+        "unique_route_columns": 798,
+        "perimeter_closed": true,
+        "rejected": {}
+      },
+      "after": {
+        "candidate_sha256": "872a37dd06314ea4ab15da35885d94a17321116b5f7fb892a85e4127ccf80752",
+        "optional_forts": 2,
+        "plots": 36,
+        "gates": 3,
+        "piece_counts": {
+          "GATE": 3,
+          "WALL": 37,
+          "ROAD": 66
+        },
+        "routes": 35,
+        "summed_centreline_steps_not_unique": 2308,
+        "unique_route_columns": 698,
+        "perimeter_closed": true,
+        "rejected": {}
+      }
+    }
+  }
+}

@@ -40,6 +40,8 @@ internal data class CivTerraformOption(val building: CivBuilding, val effort: Lo
     val spatialPriority: Int = 0)
 internal data class CivRouteSearchStats(val expanded: Int, val enqueued: Int, val peakQueue: Int,
     val discovered: Int, val elapsedMillis: Long, val outcome: String, val from: CivPosition, val to: CivPosition)
+/** Detached street preference only: it grants neither a floor grade nor native ownership. */
+internal data class CivRouteStreet(val center: CivPosition, val alongX: Boolean)
 
 internal fun civsGeneratedWaterInfrastructure(building: CivBuilding): Boolean =
     building.type in setOf(BuildingType.WALL, BuildingType.GATE) && building.level == 1 && building.control == null &&
@@ -291,13 +293,30 @@ internal object CivsAutonomousTerraform {
 
     internal fun connection(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
         access: CivAutonomousAccess, additionalObstacles: List<CivBox>,
-        inspectRoute: (CivRouteSearchStats) -> Unit = {}): List<CivPosition> {
+        inspectRoute: (CivRouteSearchStats) -> Unit = {}, frontage: CivPosition? = null,
+        streets: List<CivRouteStreet> = emptyList()): List<CivPosition> {
+        require(streets.size <= 8)
+        val portObstacles = if (building.type.isInfrastructure) emptyList() else access.reservedFortificationPorts.map {
+            CivBox(it.min.copy(x = it.min.x - 1, z = it.min.z - 1), it.max.copy(x = it.max.x + 1, z = it.max.z + 1))
+        }
         val obstacles = city.buildings.filter { it.id != building.id }
-            .flatMap { civsRouteObstacles(city, it) } + additionalObstacles
+            .flatMap { civsRouteObstacles(city, it) } + additionalObstacles + portObstacles
         val standing = access.standing(city, building.id)
-        val prepared = RoutePreparation(surface, standing, emptySet(), building)
+        // Only actual previously calculated routes participate in the existing shared-road
+        // discount. The preferred axes themselves never enter standing or surface authority.
+        val preferred = if (streets.isEmpty()) emptySet() else access.routes.values.flatten()
+            .mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val prepared = RoutePreparation(surface, standing, preferred, building)
+        val arrival = frontage?.let { join ->
+            val entry = building.entrance
+            val length = abs(join.x - entry.x) + abs(join.z - entry.z)
+            require(join.y == entry.y && length in 1..6 && (join.x == entry.x || join.z == entry.z))
+            val dx = (entry.x - join.x).coerceIn(-1, 1); val dz = (entry.z - join.z).coerceIn(-1, 1)
+            (1..length).map { join.copy(x = join.x + dx * it, z = join.z + dz * it) }
+        }.orEmpty()
         return sources(city, building).asSequence().mapNotNull {
-            route(city, building, surface, obstacles, standing, it, inspect = inspectRoute, prepared = prepared)
+            route(city, building, surface, obstacles, standing, it, preferredRoads = preferred, inspect = inspectRoute,
+                destination = frontage ?: building.entrance, arrival = arrival, streets = streets, prepared = prepared)
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
     }
 
@@ -496,21 +515,26 @@ internal object CivsAutonomousTerraform {
         standing: Map<Long, CivPosition>, from: CivPosition, preferredRoads: Set<Long> = emptySet(),
         inspect: (CivRouteSearchStats) -> Unit = {},
         destination: CivPosition = building.entrance,
+        arrival: List<CivPosition> = emptyList(),
+        streets: List<CivRouteStreet> = emptyList(),
         prepared: RoutePreparation = RoutePreparation(surface, standing, preferredRoads, building),
         rejected: (String) -> Unit = {}): List<CivPosition>? {
         val started = System.nanoTime()
         val start = Node(from.x, from.y - 1, from.z)
-        val to = destination
-        val target = Node(to.x, to.y - 1, to.z)
+        var to = destination
+        var target = Node(to.x, to.y - 1, to.z)
+        var finishApproach = arrival
         // Packed x/z keys have heavily colliding Long.hashCode values on a two-dimensional grid.
         // Keep primitive, mixed-hash lookups local to this detached search.
         val columns = prepared.columns
         val retained = prepared.retained
         val preferred = prepared.preferred
         val goalApproach = LongOpenHashSet()
-        if (to == building.entrance) CivsAutonomousGeometry.approach(building).forEach {
+        if (to == building.entrance || arrival.isNotEmpty()) CivsAutonomousGeometry.approach(building).forEach {
             goalApproach.add(civsTerrainKey(it.x, it.z))
-        } else goalApproach.add(civsTerrainKey(to.x, to.z))
+        }
+        goalApproach.add(civsTerrainKey(to.x, to.z))
+        arrival.forEach { goalApproach.add(civsTerrainKey(it.x, it.z)) }
         val discounted = preferredRoads.mapNotNull { key -> retained.get(key) }
         val discountedBounds = discounted.takeIf { it.isNotEmpty() }?.let { points ->
             CivBox(CivPosition(points.minOf { it.x }, 0, points.minOf { it.z }),
@@ -523,13 +547,16 @@ internal object CivsAutonomousTerraform {
             return outside - if (entering) 1 else 0
         }
         fun baseDistance(n: Node): Int {
-            val horizontal = abs(n.x - target.x) + abs(n.z - target.z)
-            val vertical = abs(n.y - target.y)
-            // Every vertical change also consumes a horizontal step; both terms are lower bounds on real cost.
-            val bounds = discountedBounds ?: return maxOf(horizontal, vertical) * 10 + vertical * 8
-            val unshared = outsideSteps(n.x, target.x, bounds.min.x, bounds.max.x) +
-                outsideSteps(n.z, target.z, bounds.min.z, bounds.max.z)
-            return maxOf(horizontal, vertical) * 6 + vertical * 8 + unshared * 4
+            fun goalDistance(goal: CivPosition): Int {
+                val horizontal = abs(n.x - goal.x) + abs(n.z - goal.z)
+                val vertical = abs(n.y - (goal.y - 1))
+                // Every vertical change also consumes a horizontal step; both terms bound real cost.
+                val bounds = discountedBounds ?: return maxOf(horizontal, vertical) * 10 + vertical * 8
+                val unshared = outsideSteps(n.x, goal.x, bounds.min.x, bounds.max.x) +
+                    outsideSteps(n.z, goal.z, bounds.min.z, bounds.max.z)
+                return maxOf(horizontal, vertical) * 6 + vertical * 8 + unshared * 4
+            }
+            return minOf(goalDistance(to), finishApproach.minOfOrNull(::goalDistance) ?: Int.MAX_VALUE)
         }
         fun allowed(x: Int, y: Int, z: Int): Boolean {
             if (y <= surface.minHeight || y + 2 >= surface.maxHeight) return false
@@ -550,6 +577,19 @@ internal object CivsAutonomousTerraform {
             retained.get(key)?.let { return native.loaded && y == it.y - 1 }
             return native.loaded && native.natural && abs(native.groundY - y) <= MAXIMUM_CHANGE
         }
+        // A frontage is a visual preference, not permission to invent an approach. Reject an
+        // unsafe short stub before searching and use the ordinary real entrance in the same search.
+        if (finishApproach.isNotEmpty() && (!allowed(target.x, target.y, target.z) ||
+                finishApproach.any { !allowed(it.x, it.y - 1, it.z) })) {
+            to = building.entrance; target = Node(to.x, to.y - 1, to.z); finishApproach = emptyList()
+            goalApproach.clear()
+            CivsAutonomousGeometry.approach(building).forEach { goalApproach.add(civsTerrainKey(it.x, it.z)) }
+        }
+        val turnStreets = streets.filter { street ->
+            listOf(from, building.entrance).none { abs(it.x - street.center.x) <= 3 && abs(it.z - street.center.z) <= 3 }
+        }
+        fun offStreetCost(x: Int, z: Int): Int =
+            if (streets.isEmpty() || streets.any { if (it.alongX) z == it.center.z else x == it.center.x }) 0 else 4
         // Relax only height/history constraints: static footprints and retained road costs still bound every valid route.
         // The reverse edge charges its forward destination. This leaves the actual grading and safety checks unchanged.
         val horizontalDistances by lazy { prepared.distances.getOrPut(to) {
@@ -567,21 +607,25 @@ internal object CivsAutonomousTerraform {
                 }
                 if (allowed(x, y, z)) floors.put(key, y)
             }
-            val targetKey = civsTerrainKey(target.x, target.z)
             val pending = PriorityQueue<HorizontalOpen> { a, b ->
                 val distance = a.distance.compareTo(b.distance)
                 if (distance != 0) distance else a.key.compareTo(b.key)
             }
-            if (floors.containsKey(targetKey)) {
-                distances.put(targetKey, 0)
-                pending += HorizontalOpen(targetKey, 0)
+            // The forward search can finish on any validated stub cell, including the real
+            // entrance. Seed the same goal set instead of overestimating an earlier arrival.
+            for (goal in listOf(to) + finishApproach) {
+                val key = civsTerrainKey(goal.x, goal.z)
+                if (floors.containsKey(key) && !distances.containsKey(key)) {
+                    distances.put(key, 0)
+                    pending += HorizontalOpen(key, 0)
+                }
             }
             while (pending.isNotEmpty()) {
                 val (key, distance) = pending.remove()
                 if (!distances.containsKey(key) || distances.get(key) != distance) continue
                 val x = (key shr 32).toInt(); val z = key.toInt()
-                val entering = if (preferred.contains(key) && retained.containsKey(key)) 6
-                    else 10 + abs(requireNotNull(columns.get(key)).groundY - floors.get(key)) * 2
+                val entering = (if (preferred.contains(key) && retained.containsKey(key)) 6
+                    else 10 + abs(requireNotNull(columns.get(key)).groundY - floors.get(key)) * 2) + offStreetCost(x, z)
                 for ((dx, dz) in DIRECTIONS) {
                     val previous = civsTerrainKey(x + dx, z + dz)
                     val cost = distance + entering
@@ -615,7 +659,7 @@ internal object CivsAutonomousTerraform {
                 (System.nanoTime() - started) / 1_000_000, outcome, from, to))
             return points
         }
-        if (start == target) return finish(listOf(from), "found")
+        if (start == target && finishApproach.isEmpty()) return finish(listOf(from), "found")
         if (!allowed(target.x, target.y, target.z)) return finish(null, "route-target-blocked")
         if (columns.size <= MAXIMUM_SURFACE_COLUMNS) {
             val distances = horizontalDistances
@@ -632,17 +676,25 @@ internal object CivsAutonomousTerraform {
             // Stale queue entries are bookkeeping, not expanded spatial states.
             expanded++
             val n = current.node
-            if (n.x == target.x && n.y == target.y && n.z == target.z) {
-                val reversed = mutableListOf(n)
-                var cursor = current
-                while (cursor.node != start) {
-                    cursor = cursor.parent ?: return finish(null, "route-history")
-                    reversed += cursor.node
+            val approachAt = if (finishApproach.isEmpty()) -1 else
+                finishApproach.indexOfFirst { it.x == n.x && it.y - 1 == n.y && it.z == n.z }
+            if (n.x == target.x && n.y == target.y && n.z == target.z || approachAt >= 0) {
+                val tail = if (approachAt >= 0) finishApproach.drop(approachAt + 1) else finishApproach
+                // A climb must retain its forward landing before turning onto the flat stub.
+                val landing = !n.climbed || tail.firstOrNull()?.let { next ->
+                    DIRECTIONS.getOrNull(n.direction) == (next.x - n.x to next.z - n.z) } != false
+                if (landing) {
+                    val reversed = mutableListOf(n)
+                    var cursor = current
+                    while (cursor.node != start) {
+                        cursor = cursor.parent ?: return finish(null, "route-history")
+                        reversed += cursor.node
+                    }
+                    val points = reversed.asReversed().map { CivPosition(it.x, it.y + 1, it.z) } + tail
+                    if (points.size <= MAXIMUM_ROUTE_LENGTH && points.map { civsTerrainKey(it.x, it.z) }.distinct().size == points.size)
+                        return finish(points, "found")
+                    if (finishApproach.isEmpty()) return finish(null, "route-length-or-repeat")
                 }
-                if (reversed.size > MAXIMUM_ROUTE_LENGTH || reversed.map { civsTerrainKey(it.x, it.z) }.distinct().size != reversed.size) {
-                    return finish(null, "route-length-or-repeat")
-                }
-                return finish(reversed.asReversed().map { CivPosition(it.x, it.y + 1, it.z) }, "found")
             }
             var ancestorsReady = false
             for ((direction, offset) in DIRECTIONS.withIndex()) for (dy in 0..2) {
@@ -659,8 +711,13 @@ internal object CivsAutonomousTerraform {
                 // A brief hummock or hollow should be cut/filled instead of adding two gratuitous climbs.
                 val column = civsTerrainKey(candidate.x, candidate.z)
                 val shared = preferred.contains(column) && retained.containsKey(column)
+                val offStreet = offStreetCost(candidate.x, candidate.z)
+                val forecourtTurn = if (n.direction < 0 || n.direction == direction) 0 else
+                    (turnStreets.maxOfOrNull { (12 - abs(n.x - it.center.x) - abs(n.z - it.center.z)).coerceAtLeast(0) } ?: 0) * 12
+                // Positive preferences keep the existing distance field a lower bound. Native
+                // obstacles and grades still decide whether a shared axial street can exist.
                 val cost = current.cost + (if (shared) 6 else 10) + abs(candidate.y - n.y) * 8 +
-                    if (shared) 0 else abs(native.groundY - candidate.y) * 2
+                    (if (shared) 0 else abs(native.groundY - candidate.y) * 2) + offStreet + forecourtTurn
                 if (cost >= costs.getOrDefault(candidate, Int.MAX_VALUE)) continue
                 // A column has exactly one finished ground height. A cheap 3-D route can otherwise
                 // climb by zigzagging through the same two columns at successively higher levels.

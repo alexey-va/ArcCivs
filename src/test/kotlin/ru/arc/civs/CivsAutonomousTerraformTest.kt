@@ -16,6 +16,62 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.civs.CivsAutonomousTerraform.Node
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a reconnected ordinary road preserves the reserved fortification port and its shoulder") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { _, _ -> 64 }
+        // The shortest centerline at x=0 clears the raw port, but its right shoulder does not.
+        val port = CivBox(CivPosition(1, 64, 6), CivPosition(3, 72, 8))
+        val reservedApproach = CivBox(port.min.copy(x = 0, z = 5), port.max.copy(x = 4, z = 9))
+        val access = CivAutonomousAccess(reservedFortificationPorts = listOf(port))
+        val route = CivsAutonomousTerraform.connection(city, building, surface, access, emptyList())
+        route.first() shouldBe city.buildings.single().entrance
+        route.last() shouldBe building.entrance
+        route.none { CivsAutonomousGeometry.horizontalContains(reservedApproach, it) } shouldBe true
+        CivsAutonomousTerraform.roadProfile(route).values.none {
+            CivsAutonomousGeometry.horizontalContains(port, it)
+        } shouldBe true
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface,
+            access, reservedRoute = route)
+        draft.route shouldBe route
+        val cells = terraceCapture(draft, surface)
+        checkTerrace(CivsAutonomousTerraform.materialize(draft, cells), draft, cells)
+    }
+
+    test("a frontage connector keeps the real side apron flat before materializing the reserved route") {
+        val original = terraceCity()
+        val hall = original.buildings.single().copy(anchor = CivPosition(-35, 65, 3),
+            entrance = CivPosition(-35, 66, 3), bounds = CivBox(CivPosition(-34, 65, 5), CivPosition(-30, 72, 10)),
+            control = null)
+        val city = original.copy(buildings = listOf(hall))
+        val building = CivBuilding(UUID(0, 220), BuildingType.FORESTER, 1, CivPosition(-39, 64, 0), 0, "fixture",
+            CivBox(CivPosition(-42, 64, -7), CivPosition(-36, 72, -1)), CivPosition(-39, 65, 0), BuildingPhase.CONSTRUCTING)
+        val join = CivPosition(-39, 65, 4)
+        val apron = CivsAutonomousGeometry.approach(building).mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val surface = CivTerrainSurface(-64, 320, buildMap {
+            for (x in building.bounds.min.x..building.bounds.max.x) for (z in building.bounds.min.z..building.bounds.max.z)
+                put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(64, true))
+            apron.forEach { put(it, CivTerrainSurfaceColumn(64, true)) }
+            put(civsTerrainKey(join.x, join.z), CivTerrainSurfaceColumn(64, true))
+            // The only captured incoming corridor reaches a raised side-apron cell. Without
+            // the real apron constraint, the route stays at feet66 here and descends onto the stub.
+            for (x in -38..-35) put(civsTerrainKey(x, 3), CivTerrainSurfaceColumn(65, true))
+        })
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val route = CivsAutonomousTerraform.connection(city, building, surface, CivAutonomousAccess(),
+            emptyList(), searches::add, join)
+        route.last() shouldBe building.entrance
+        route.any { it.x == -38 && it.z == 3 } shouldBe true
+        route.filter { civsTerrainKey(it.x, it.z) in apron }.all { it.y == building.entrance.y } shouldBe true
+        searches.size shouldBe 1
+        searches.single().to shouldBe join
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface, reservedRoute = route)
+        val cells = terraceCapture(draft, surface)
+        val materialized = CivsAutonomousTerraform.materialize(draft, cells)
+        materialized.route shouldBe route
+        checkTerrace(materialized, draft, cells)
+    }
+
     for (rotation in listOf(0, 90, 180, 270))
     test("a composite farm reserves its field padding but reaches its declared apron at rotation $rotation") {
         CivsWorksiteLayouts.installCatalog(mapOf(COMPOSITE_FARM to compositeFarmSite()))
@@ -120,6 +176,23 @@ class CivsAutonomousTerraformTest : FunSpec({
         route.first() shouldBe city.buildings.single().entrance
         route.last() shouldBe building.entrance
         route.drop(1).all { surface.at(it.x, it.z)?.let { c -> c.loaded && c.natural } == true } shouldBe true
+    }
+
+    test("a shared street preference cannot open a protected or unloaded native barrier") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val street = CivRouteStreet(CivPosition(0, 65, 8), alongX = false)
+        for (loaded in listOf(false, true)) {
+            val surface = terraceSurface { _, _ -> 64 }.let { flat -> flat.copy(columns = flat.columns.mapValues { (key, column) ->
+                if (key.toInt() == 8) column.copy(loaded = loaded, natural = !loaded) else column
+            }) }
+            val searches = mutableListOf<CivRouteSearchStats>()
+            shouldThrow<CivsRejection> { CivsAutonomousTerraform.connection(city, building, surface,
+                CivAutonomousAccess(), emptyList(), searches::add, streets = listOf(street))
+            }.reason shouldBe "autonomy-no-path"
+            searches.single().outcome shouldBe "route-disconnected"
+            searches.single().expanded shouldBe 0
+        }
     }
 
     test("an excluded source cannot jump to a component whose only first column has an unreachable grade") {

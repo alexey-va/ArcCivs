@@ -17,7 +17,8 @@ class CivsMultipleResourceLayoutTest : FunSpec({
             pair.first.copy(bounds = bounds) to pair.second.copy(bounds = bounds)
         }
         val searches = mutableListOf<CivRouteSearchStats>()
-        val surface = settlementPlanSurface(city)
+        // Native AutonomousHeightField caps its survey radius at 127, independently of city protection.
+        val surface = settlementPlanSurface(city.copy(radius = 127))
         val plan = try {
             CivsSettlementPlans.prepare(city, templates, surface, CivAutonomousAccess(), inspectRoute = searches::add,
                 inspect = layoutFixtureDiagnostics("multi-resource", city, templates, surface))

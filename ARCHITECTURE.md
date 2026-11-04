@@ -44,8 +44,11 @@ that plot no longer fits, the same finite planner tries eight-block outer
 quarters up to half-width 74. Only a successful ordinary city save adopts the
 new frame; its outer walls and gates are then paid and built by normal jobs.
 Saved towns never shrink. Accepted parcels, captured work and paid inner walls
-keep their geometry and gate passages; only unpaid future plots may be revised
-for a larger quarter. New mines must lie outside the current outer wall, while
+keep their footprints. A bounded, versioned consolidation may close a redundant
+gate on the same wall only after preserving every retained through-route and
+proving both approaches to its surviving entry; the old gate becomes a real
+wall through ordinary captured, paid construction. Only unpaid future plots may
+be revised for a larger quarter. New mines must lie outside the current outer wall, while
 an older mine may remain inside a later quarter. A failed bounded extension
 does not invalidate the older town or prevent a legal existing upgrade.
 
@@ -61,6 +64,39 @@ The composite compiler separately proves a connected level-seven deck with
 full support and two cells of headroom, admitting paired authored spruce doors
 as normally openable passages. This is detached geometry, not native collision
 or NPC traversal acceptance; source door states remain unchanged.
+
+Ordinary fortification profiles progress from simple wood to mixed and stone
+walls. A new ordinary min-cut entry reserves a five-by-five footprint with one
+three-wide opening through the actual wall thickness. Nearby new crossings
+within sixteen blocks by Manhattan distance share one entry, with the other cut cells kept as
+wall. Before forecasting infrastructure, only conflicting new unpaid plot
+routes may use the existing bounded connector to reach the final opening;
+accepted routes and paid footprints remain fixed. Gates at least five blocks
+wide use this opening; existing three-block footprints retain a one-wide wicket.
+Both have solid flanking sections and grounded joins to neighbouring wall columns.
+An already-paid source grants authority only to its exact authored columns;
+its bounding box alone never authorizes cutting lower natural ground. A missing
+one-column seam requires a separate ordinary native capture and material bill.
+Nearby gate consolidation is restricted to the same continuous wall layer,
+with centres at most sixteen blocks apart and at most six intervening columns.
+Every retained route is checked against the solid replacement before admission;
+a candidate needing an unbuilt reroute waits. Different perimeter layers and
+opposite sides remain distinct. The identity exception is confined to the
+proven redundant gate becoming a wall with the same durable id and footprint.
+
+New unpaid exterior roads should continue the street through the gate's axis.
+When a worksite's frontage is close to that axis, the main route targets the
+frontage and a short, fully validated approach reaches the real entrance near
+the worksite. The same search budget and movement/protection rules apply; a
+visual preference grants no unsupported cells or new arrival credit. Existing
+paid routes retain their geometry.
+New gate approaches share street axes and a six-block axial planning channel
+on each side of the portal. A real depot or worksite entrance in the forecourt
+keeps its local approach. These are restrictions and nonnegative cost hints for
+new unpaid roads; they add no standing floor, ownership or movement credit.
+The existing reverse distance field includes the same off-axis step cost and
+all valid approach endpoints, while direction-dependent turn cost has no lower
+estimate. Search, path length and native terrain limits remain unchanged.
 
 Producers return excess native items to their own work building, retaining tools,
 food and accepted recipe inputs. Couriers collect from fixed building containers
@@ -1276,10 +1312,16 @@ bounded road observation first proves a candidate under a read-only prospective
 assignment; that candidate grants no items, arrival or work. Only the ordinary
 durable assignment enables a fresh work capture and its existing payment journal.
 The single pending or selected column holds its worker through this handoff and
-defers new development; stale, unfundable or failed work releases the claim with
+defers new development; stale, unfundable or exhausted work releases the claim with
 bounded retry. Healthy roads leave staffing unchanged. Cargo and active resident
 episodes remain protected, and upkeep does not borrow the last raw producers or
 warehouse courier. Ordinary staffing can return the worker to the tavern afterward.
+An observed route refusal records the standing point only within the current
+selected upkeep work. A normal budgeted native refresh tries the remaining local
+standing candidates for that same column; it grants no arrival or work credit.
+Budget denial never returns the rejected standing. Completion, invalidation,
+changed native work or exhaustion clears the exclusions with the selection;
+exhaustion releases the claim through the existing bounded retry.
 A physical builder retaining an upkeep target still travels for missing inputs.
 Without a construction order it uses the existing selected upkeep requirements
 and ordinary native pickup from its assigned hut, bounded by the existing

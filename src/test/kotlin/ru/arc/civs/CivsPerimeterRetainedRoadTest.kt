@@ -2,9 +2,12 @@ package ru.arc.civs
 
 import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import java.util.ArrayDeque
 import java.util.UUID
+import kotlin.math.abs
 
 class CivsPerimeterRetainedRoadTest : FunSpec({
     test("a retained three-wide dirt road admits its gate while unrelated or obstructed shoulders remain protected") {
@@ -22,14 +25,49 @@ class CivsPerimeterRetainedRoadTest : FunSpec({
         }) }
         val before = Gson().toJson(listOf(city, frame, surface, routes))
 
-        val admitted = CivsSettlementPerimeter.adapt(city, frame, surface, routes, listOf(route))
+        val admitted = try { CivsSettlementPerimeter.adapt(city, frame, surface, routes, listOf(route)) }
+        catch (failure: CivsRejection) { throw AssertionError("${failure.reason}: ${failure.values}", failure) }
         admitted.gates.size shouldBe 1
         admitted.gates.single().passage.let { it.max.z - it.min.z + 1 >= 3 } shouldBe true
         route.none { p -> admitted.wallObstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) } } shouldBe true
         val infrastructure = CivsSettlementLayout.infrastructure(city, admitted, surface, routes.values.toList(),
             retainedRoutes = listOf(route))
-        infrastructure.perimeterClosed shouldBe true
+        withClue("Gates=${admitted.gates}; rejected=${infrastructure.rejected}: ") {
+            infrastructure.perimeterClosed shouldBe true
+        }
         infrastructure.rejected shouldBe emptyMap()
+        val road = route.flatMap { p -> (-1..1).map { p.copy(z = p.z + it) } }
+        road.none { p -> admitted.wallObstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) } } shouldBe true
+        val gate = infrastructure.pieces.single { it.type == BuildingType.GATE }
+        road.filter { CivsAutonomousGeometry.horizontalContains(gate.bounds, it) }.all { it in gate.transit } shouldBe true
+        val structural = infrastructure.pieces.filter { it.type in setOf(BuildingType.WALL, BuildingType.GATE) }
+        val body = road.flatMapTo(hashSetOf()) { listOf(it, it.copy(y = it.y + 1)) }
+        structural.flatMap { it.blocks }.none { it.position in body && it.after != "minecraft:air" } shouldBe true
+
+        // Test physical closure independently of rectangle coverage and the local junction proof.
+        // Seal the intended core only: a bad cap or flank must still reveal an escape here.
+        val blocked = structural.flatMap { it.blocks }.filter { it.position.y in 65..66 && it.after != "minecraft:air" }
+            .mapTo(hashSetOf()) { it.position.x to it.position.z }
+        val alongX = CivsInfrastructureRebuild.axis(CivsInfrastructure.building(gate))
+        val middle = if (alongX) (gate.bounds.min.z + gate.bounds.max.z) / 2 else (gate.bounds.min.x + gate.bounds.max.x) / 2
+        gate.transit.filter { if (alongX) it.z == middle else it.x == middle }.forEach { blocked += it.x to it.z }
+        val start = city.buildings.first().entrance.let { it.x to it.z }
+        val seen = hashSetOf(start)
+        val queue = ArrayDeque<Pair<Int, Int>>().apply { add(start) }
+        var escape: Pair<Int, Int>? = null
+        while (queue.isNotEmpty() && escape == null) {
+            val (x, z) = queue.removeFirst()
+            if (abs(x - city.center.x) >= city.radius || abs(z - city.center.z) >= city.radius) { escape = x to z; break }
+            for ((dx, dz) in listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)) {
+                val next = x + dx to z + dz
+                if (next !in blocked && seen.add(next)) queue += next
+            }
+        }
+        withClue("Escape around a sealed paid-road gate: ") { escape shouldBe null }
+        layoutFixtureDiagnostics("retained-road-collar", city, emptyMap(), surface)?.invoke(
+            CivSettlementPlan(CivsSettlementPlans.VERSION, 0, admitted.halfWidth,
+                city.buildings.map { CivSettlementPlot(it, it.bounds) }, routes.mapKeys { it.key.toString() },
+                admitted.wallObstacles, admitted.gates.map { it.passage }, admitted.gates.map { it.side }), infrastructure)
         Gson().toJson(listOf(city, frame, surface, routes)) shouldBe before
 
         fun refuses(terrain: CivTerrainSurface, retained: Collection<List<CivPosition>>) {

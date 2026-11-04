@@ -87,7 +87,12 @@ class CivsDevelopedUnpaidPlanRecoveryTest : FunSpec({
             s.before.buildings.any { it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE } shouldBe true
             s.before.building(s.oldTarget.id) shouldBe null
             s.start(); s.finish { s.subject.debug(s.city.id)["request"] == null }
-            s.saves.size shouldBe 1
+            withClue("Developed $target: ${s.subject.debug(s.city.id)}; search=${s.searchDebug()}; " +
+                "selected=${s.selected}; forecasts=${s.forecasts}; preferred=${s.preferredDrafts.map { it.building.anchor }}; " +
+                "unreserved=${s.unreservedDrafts.map { it.building.anchor }}; captures=${s.volumeCaptures.map { it.anchor }}; " +
+                "ore_rejections=${s.nativeOreRejections}") {
+                s.saves.size shouldBe 1
+            }
             val selected = requireNotNull(s.selected)
             val plan = requireNotNull(s.city.autonomy?.plan)
             selected.id shouldBe s.oldTarget.id
@@ -103,20 +108,17 @@ class CivsDevelopedUnpaidPlanRecoveryTest : FunSpec({
             s.volumeCaptures.last() shouldBe selected
             s.acceptedAccess.routes.forEach { (id, route) -> plan.routes[id.toString()] shouldBe route }
             if (target == BuildingType.FARM) {
-                s.searchDebug()["preferred_terraces_attempted"] shouldBe 3
-                if (selected.anchor.x == s.oldTarget.anchor.x && selected.anchor.z == s.oldTarget.anchor.z &&
-                    selected.rotation == s.oldTarget.rotation && selected.schematicId == s.oldTarget.schematicId) {
-                    selected.anchor shouldBe s.oldTarget.anchor.copy(y = s.oldTarget.anchor.y + 4)
-                    plan.plots.filter { it.building.id != selected.id } shouldBe s.oldPlan.plots.filter { it.building.id != selected.id }
-                    val unpaid = s.oldPlan.routes.keys - s.acceptedAccess.routes.keys.map(UUID::toString).toSet() - selected.id.toString()
-                    plan.routes.filterKeys { it in unpaid } shouldBe s.oldPlan.routes.filterKeys { it in unpaid }
-                    plan.walls shouldBe s.oldPlan.walls
-                    plan.gates shouldBe s.oldPlan.gates
-                    s.preferredDrafts.single().access shouldBe s.acceptedAccess
-                } else {
-                    s.unreservedDrafts.last().building.anchor shouldBe selected.anchor
-                    s.unreservedDrafts.last().access shouldBe s.acceptedAccess
-                }
+                s.searchDebug()["preferred_terraces_attempted"] shouldBe 1
+                selected.anchor shouldBe s.oldTarget.anchor.copy(y = s.oldTarget.anchor.y + 4)
+                selected.rotation shouldBe s.oldTarget.rotation
+                selected.schematicId shouldBe s.oldTarget.schematicId
+                s.unreservedDrafts shouldBe emptyList()
+                plan.plots.filter { it.building.id != selected.id } shouldBe s.oldPlan.plots.filter { it.building.id != selected.id }
+                val unpaid = s.oldPlan.routes.keys - s.acceptedAccess.routes.keys.map(UUID::toString).toSet() - selected.id.toString()
+                plan.routes.filterKeys { it in unpaid } shouldBe s.oldPlan.routes.filterKeys { it in unpaid }
+                plan.walls shouldBe s.oldPlan.walls
+                plan.gates shouldBe s.oldPlan.gates
+                s.preferredDrafts.single().access shouldBe s.acceptedAccess
             } else {
                 // The reserved draft fails before any native terrain callback, without a native-terrain marker.
                 s.reservedCaptures shouldBe 0
@@ -668,6 +670,28 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
             plan.copy(plots = plan.plots.map { plot -> swapped[plot.building.id]?.let { plot.copy(building = plot.building.copy(id = it)) } ?: plot },
                 routes = plan.routes.mapKeys { (id, _) -> swapped[UUID.fromString(id)]?.toString() ?: id })
         }
+    }.let { plan ->
+        if (!preferOldTerrace || targetType != BuildingType.FARM) plan else {
+            // Raising this unpaid entrance must not move a sibling's already reserved shared street grade.
+            val farmIndices = plan.plots.indices.filter { plan.plots[it].building.type == BuildingType.FARM }
+            val selected = checkNotNull(farmIndices.firstOrNull { index ->
+                val building = plan.plots[index].building
+                val otherColumns = plan.routes.filterKeys { it != building.id.toString() }.values.flatten()
+                    .mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+                CivsAutonomousGeometry.approach(building).none { civsTerrainKey(it.x, it.z) in otherColumns }
+            }) { "The raised FARM fixture requires an entrance apron unshared by every other planned route" }
+            val first = farmIndices.first()
+            plan.copy(plots = plan.plots.mapIndexed { index, plot -> when (index) {
+                first -> plan.plots[selected]
+                selected -> plan.plots[first]
+                else -> plot
+            } }).also { reordered ->
+                reordered.copy(plots = plan.plots) shouldBe plan
+                reordered.plots.associateBy { it.building.id } shouldBe plan.plots.associateBy { it.building.id }
+                reordered.plots.filterNot { it.building.type == BuildingType.FARM } shouldBe
+                    plan.plots.filterNot { it.building.type == BuildingType.FARM }
+            }
+        }
     }
     private val paidRoad = if (!paidInfrastructure) null else CivsInfrastructure.building(CivSettlementPiece(UUID(172, 1),
         BuildingType.ROAD, CivBox(CivPosition(0, 64, 0), CivPosition(0, 66, 0)), CivPosition(0, 65, 0),
@@ -767,6 +791,12 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         developmentAdmission = { developmentWaiting = true; true })
 
     init {
+        if (preferOldTerrace && targetType == BuildingType.FARM) {
+            val apron = CivsAutonomousGeometry.approach(oldTarget)
+            apron.size shouldBe 12
+            val otherRoutes = oldPlan.routes.filterKeys { it != oldTarget.id.toString() }.values.flatten()
+            apron.none { p -> otherRoutes.any { it.x == p.x && it.z == p.z } } shouldBe true
+        }
         nativeWorld.loadChunk(control.x shr 4, control.z shr 4)
         val block = nativeWorld.getBlockAt(control.x, control.y, control.z).also { it.type = Material.BARREL }
         (block.state as Barrel).also { holder ->

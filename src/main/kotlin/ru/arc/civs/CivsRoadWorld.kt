@@ -45,7 +45,7 @@ internal class CivsRoadWorld(
 
     /** Discovery is externally budgeted. This method never loads chunks or writes a block. */
     internal fun captureRoadUpkeep(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep,
-        registerSurface: ((UUID, CivPosition) -> Unit)? = null): CivWorldWork? {
+        registerSurface: ((UUID, CivPosition) -> Unit)? = null, rejectedStandings: Set<CivPosition> = emptySet()): CivWorldWork? {
         check(Bukkit.isPrimaryThread())
         val world = plugin.server.getWorld(city.worldId) ?: return null
         val p = upkeep.floor
@@ -95,6 +95,7 @@ internal class CivsRoadWorld(
         val standingHeights = listOf(1, 0, 2, 3) + if (foundation.isNotEmpty()) listOf(-1, -2, -3) else emptyList()
         for (dy in standingHeights) for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) {
             val standing = CivPosition(p.x + dx, p.y + dy, p.z + dz)
+            if (standing in rejectedStandings) continue
             if (!city.contains(standing.x, standing.z) || !citizenControlClear(city, standing) ||
                 !citizenStandable(world, standing) || !citizenPacketBodyClear(world,
                     CitizenPoint(standing.x + .5, standing.y.toDouble(), standing.z + .5), false)) continue

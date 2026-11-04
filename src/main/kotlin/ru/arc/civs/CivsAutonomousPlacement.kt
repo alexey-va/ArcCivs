@@ -63,14 +63,16 @@ internal class CivsAutonomousPlacement(
         admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
 
     /** Refit geometry is captured by the same admission and queue as a new resident-built site. */
-    fun rebuildInfrastructure(city: Settlement, source: CivPlacementPlan, plans: List<CivPlacementPlan>): CompletableFuture<CivAutonomousDesign> =
+    fun rebuildInfrastructure(city: Settlement, source: CivPlacementPlan, plans: List<CivPlacementPlan>,
+        survivor: CivBuilding? = null): CompletableFuture<CivAutonomousDesign> =
         blueprints.recover(source).thenApplyAsync({
             val access = CivAutonomousAccess.from(city, plans)
             val box = source.building.bounds
-            val witnesses = (access.routes.values.flatten() + city.buildings.flatMap(CivsAutonomousGeometry::approach) +
-                city.buildings.filter { it.type == BuildingType.ROAD }.flatMap { it.transit.orEmpty() })
-                .filter { it.x in box.min.x..box.max.x && it.z in box.min.z..box.max.z }.distinct()
-            val proposal = CivsInfrastructureRebuild.proposal(city, source, witnesses)
+            val routes = if (survivor != null) CivsInfrastructureRebuild.witnesses(city, plans)
+                else (access.routes.values.flatten() + city.buildings.flatMap(CivsAutonomousGeometry::approach) +
+                    city.buildings.filter { it.type == BuildingType.ROAD }.flatMap { it.transit.orEmpty() })
+            val witnesses = routes.filter { it.x in box.min.x..box.max.x && it.z in box.min.z..box.max.z }.distinct()
+            val proposal = CivsInfrastructureRebuild.proposal(city, source, witnesses, survivor)
             val piece = CivSettlementPiece(proposal.building.id, proposal.building.type, box, proposal.building.entrance,
                 proposal.blocks.map { CivSettlementBlock(it.position, it.after) }, proposal.building.transit.orEmpty(),
                 profileStage = CivsInfrastructureRebuild.stage(proposal.building))
@@ -150,7 +152,7 @@ internal class CivsAutonomousPlacement(
                 if (result.isDone || closed) throw CivsRejection("world-closed")
                 val loaded = templates.mapValues { it.value.join() }
                 val kept = sameSlotPlan ?: oldPlan?.takeIf { intent ->
-                    seed != null && compatibleExteriorSlot(city, seed, unpaidSite?.terrain, intent,
+                    seed != null && compatibleExteriorSlot(city, seed, unpaidSite.terrain, intent,
                         CivsAutonomousGeometry.union(CivsAutonomousGeometry.futureBounds(city, seed),
                             CivsSettlementPlans.at(loaded.getValue(seed.type).second, seed.anchor, seed.rotation, seed.id).bounds))
                 }?.let { intent -> intent.copy(plots = intent.plots.filter { it.building.id != seed?.id },

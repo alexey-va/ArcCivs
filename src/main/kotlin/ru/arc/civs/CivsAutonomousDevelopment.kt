@@ -284,7 +284,7 @@ internal class CivsAutonomousDevelopment(
                     autonomyPlanRetryAt[city.id] = now() + if (rejection?.reason in
                         setOf("world-busy", "chunks-unloaded", "stale-development")) 30_000 else 300_000
                     val latest = cities[city.id]
-                    if (compactFounding && adopted == null && city.autonomy?.plan == null &&
+                    if (compactFounding && adopted == null && city.autonomy.plan == null &&
                         rejection?.reason == "autonomy-layout-obstructed" && rejection.values["stage"] == "infrastructure" &&
                         !closed && ready() && latest != null && latest.owner == city.owner && latest.autonomy?.paused == false &&
                         latest.pendingDeletion == null && latest.autonomy.plan == null && civsPlanBoardLayoutKey(latest) == key) {
@@ -546,8 +546,8 @@ internal class CivsAutonomousDevelopment(
     /** Replace one old fortification through the ordinary durable queue; failed pieces never starve growth. */
     private fun pulseInfrastructureRebuild(city: Settlement): Boolean {
         infrastructureRebuildRetryAt.keys.retainAll(cities.values.flatMap { it.buildings }.mapTo(hashSetOf()) { it.id })
-        val building = city.buildings.filter { CivsInfrastructureRebuild.needsRefit(city, it) &&
-            now() >= (infrastructureRebuildRetryAt[it.id] ?: 0L) }
+        val available = city.buildings.filter { now() >= (infrastructureRebuildRetryAt[it.id] ?: 0L) }.mapTo(hashSetOf()) { it.id }
+        var building = city.buildings.filter { CivsInfrastructureRebuild.needsRefit(city, it) && it.id in available }
             .minWithOrNull(compareBy<CivBuilding> { if (it.type == BuildingType.GATE) 0 else 1 }
                 .thenBy { it.bounds.min.x }.thenBy { it.bounds.min.z }) ?: return false
         if (!developmentAdmission(city)) return false
@@ -556,9 +556,16 @@ internal class CivsAutonomousDevelopment(
         autonomyRequests[city.id] = request
         autonomyProgress[city.id] = CivsAutonomyView("planning", building.type, building.level)
         val preparing = runCatching { loadAutonomousPlans(city).thenCompose { plans ->
-            val source = plans.singleOrNull { it.building.id == building.id }
-                ?: throw CivsRejection("gate-refit-source-missing")
-            autonomousPlacement.rebuildInfrastructure(city, source, plans)
+            val work = CivsInfrastructureRebuild.next(city, plans, available)
+                ?: throw CivsRejection("gate-refit-unavailable")
+            building = work.building
+            val seam = work.infill
+            if (seam != null) autonomousPlacement.wallInfill(city, seam.gateId, seam.wallId, emptyList())
+            else {
+                val source = plans.singleOrNull { it.building.id == building.id }
+                    ?: throw CivsRejection("gate-refit-source-missing")
+                autonomousPlacement.rebuildInfrastructure(city, source, plans, work.survivor)
+            }
         } }.getOrElse { CompletableFuture.failedFuture(it) }
         preparing.whenCompleteSync(tasks) prepared@ { design, failure ->
             if (autonomyRequests[city.id] != request) return@prepared
@@ -573,7 +580,8 @@ internal class CivsAutonomousDevelopment(
                     infrastructureRebuildRetryAt.remove(building.id)
                     autonomyProgress[city.id] = CivsAutonomyView("queued", building.type, building.level)
                     CivsDiagnostics.event("autonomous_fortification_rebuild_queued", "city" to city.id,
-                        "building" to building.id, "type" to building.type, "stage" to CivsInfrastructureRebuild.stage(city))
+                        "building" to requireNotNull(design).blueprint.building.id, "type" to requireNotNull(design).blueprint.building.type,
+                        "stage" to CivsInfrastructureRebuild.stage(city))
                     pulseConstruction()
                 }
             }

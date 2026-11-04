@@ -2,20 +2,21 @@ package ru.arc.civs
 
 import java.util.UUID
 
-/** One missing two-column seam between an existing posted gate and its three-wide wall. */
+/** One missing one- or two-column seam between an existing gate and its three-wide wall. */
 internal data class CivWallInfillTarget(val gateId: UUID, val wallId: UUID, val footprint: CivBox)
 
 internal object CivsWallInfill {
     fun target(city: Settlement, gateId: UUID, wallId: UUID): CivWallInfillTarget {
         val gate = city.building(gateId) ?: throw CivsRejection("building-not-found")
         val wall = city.building(wallId) ?: throw CivsRejection("building-not-found")
-        check(city.style == "caledonia" && city.autonomy != null && city.pendingDeletion == null &&
+        val currentProfile = CivsInfrastructureRebuild.version(gate) == 5
+        check((currentProfile || city.style == "caledonia") && city.autonomy != null && city.pendingDeletion == null &&
             gate.phase == BuildingPhase.ACTIVE && wall.phase == BuildingPhase.ACTIVE &&
             CivsGateRefit.validTransit(gate) && wall.type == BuildingType.WALL && wall.level == 1 &&
-            wall.schematicId == "civs/infrastructure/v1/wall/${wall.id}" &&
-            !CivsSettlementLayout.frame(city).fortified, "wall-infill-unsupported")
-        val acrossX = CivsGateRefit.profileAxis(gate.bounds, gate.transit.orEmpty())
-            ?: throw CivsRejection("wall-infill-unsupported")
+            CivsInfrastructureRebuild.owned(wall) && !CivsSettlementLayout.frame(city).fortified, "wall-infill-unsupported")
+        val acrossX = if (currentProfile) CivsInfrastructureRebuild.axis(gate)
+            else CivsGateRefit.profileAxis(gate.bounds, gate.transit.orEmpty())
+                ?: throw CivsRejection("wall-infill-unsupported")
         val g = gate.bounds; val w = wall.bounds
         // The long wall direction follows the gate's width; its thickness occupies the inner three gate rows.
         val crossMin = if (acrossX) w.min.z else w.min.x
@@ -26,15 +27,14 @@ internal object CivsWallInfill {
         val high = if (acrossX) g.max.x else g.max.z
         val wallLow = if (acrossX) w.min.x else w.min.z
         val wallHigh = if (acrossX) w.max.x else w.max.z
-        check(wallHigh.toLong() - wallLow >= 2, "wall-infill-unsupported")
-        val start = when {
-            wallLow.toLong() - high == 3L -> high + 1
-            low.toLong() - wallHigh == 3L -> wallHigh + 1
-            else -> throw CivsRejection("wall-infill-unsupported")
-        }
+        check(wallHigh.toLong() - wallLow >= if (currentProfile) 0 else 2, "wall-infill-unsupported")
+        val gap = if (wallLow > high) wallLow.toLong() - high - 1 else low.toLong() - wallHigh - 1
+        check(gap in (if (currentProfile) 1L else 2L)..2L, "wall-infill-unsupported")
+        val start = if (wallLow > high) high + 1 else wallHigh + 1
+        val end = start + gap.toInt() - 1
         val box = if (acrossX) CivBox(CivPosition(start, city.center.y, crossMin),
-            CivPosition(start + 1, city.center.y, crossMax)) else
-            CivBox(CivPosition(crossMin, city.center.y, start), CivPosition(crossMax, city.center.y, start + 1))
+            CivPosition(end, city.center.y, crossMax)) else
+            CivBox(CivPosition(crossMin, city.center.y, start), CivPosition(crossMax, city.center.y, end))
         check(city.contains(box.min.x, box.min.z) && city.contains(box.max.x, box.max.z), "outside-city")
         return CivWallInfillTarget(gateId, wallId, box)
     }
@@ -50,8 +50,14 @@ internal object CivsWallInfill {
         // Keep the original wall axis even though a 3x2 seam is wider than it is long.
         val strip = CivsAutonomousGeometry.union(wall.bounds, footprint)
         val frame = CivsSettlementLayout.frame(city).copy(wallObstacles = listOf(strip), gates = emptyList())
+        val stage = if (CivsInfrastructureRebuild.version(requireNotNull(city.building(target.gateId))) == 5)
+            maxOf(CivsInfrastructureRebuild.stage(city), CivsInfrastructureRebuild.stage(wall)) else 0
+        // The retained plinths decide the new seam's design grade before slope/approach admission.
+        // This does not alter the observed surface returned to Terraform's ordinary native capture.
+        val floors = if (stage == 0) emptyMap() else joinedFloors(city, target, access, buildable)
         val generated = CivsSettlementLayout.infrastructure(city, frame, buildable, routes,
-            accepted = access.infrastructure, pavingRoutes = emptyList(), retainedRoutes = routes, wallProfileStage = 0)
+            accepted = access.infrastructure, pavingRoutes = emptyList(), retainedRoutes = routes,
+            wallProfileStage = stage, wallFloors = floors)
         val piece = generated.pieces.filter { city.building(it.id) == null }.singleOrNull()
             ?: throw CivsRejection("wall-infill-unavailable", generated.rejected.mapValues { it.value.toString() })
         check(piece.type == BuildingType.WALL && sameColumns(piece.bounds, footprint) &&
@@ -61,11 +67,39 @@ internal object CivsWallInfill {
         return result to buildable
     }
 
+    /** The ordinary Terraform capture pays and journals every new support/fill cell at this proposed grade. */
+    private fun joinedFloors(city: Settlement, target: CivWallInfillTarget, access: CivAutonomousAccess,
+        surface: CivTerrainSurface): Map<Long, Int> {
+        val gate = requireNotNull(city.building(target.gateId))
+        val wall = requireNotNull(city.building(target.wallId))
+        val alongX = CivsInfrastructureRebuild.axis(gate)
+        fun axis(p: CivPosition) = if (alongX) p.x else p.z
+        fun cross(p: CivPosition) = if (alongX) p.z else p.x
+        val wallPlan = access.infrastructure.single { it.id == wall.id }
+        val gateEdge = if (axis(wall.bounds.min) > axis(gate.bounds.max)) axis(gate.bounds.max) else axis(gate.bounds.min)
+        val wallEdge = if (axis(wall.bounds.min) > axis(gate.bounds.max)) axis(wall.bounds.min) else axis(wall.bounds.max)
+        return buildMap {
+            val box = target.footprint
+            for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z) {
+                val p = CivPosition(x, 0, z)
+                val g = gate.transit.orEmpty().filter { cross(it) == cross(p) }
+                    .minByOrNull { kotlin.math.abs(axis(it) - gateEdge) }?.y?.minus(1) ?: gate.bounds.min.y
+                val w = wallPlan.blocks.filter { axis(it.position) == wallEdge && cross(it.position) == cross(p) }
+                    .minOfOrNull { it.position.y } ?: throw CivsRejection("wall-infill-source-missing")
+                val fraction = (axis(p) - gateEdge).toDouble() / (wallEdge - gateEdge)
+                val ground = kotlin.math.floor(g + (w - g) * fraction).toInt()
+                val native = surface.at(x, z) ?: throw CivsRejection("chunks-unloaded")
+                check(kotlin.math.abs(ground - native.groundY) <= 1, "infrastructure-slope")
+                put(civsTerrainKey(x, z), ground)
+            }
+        }
+    }
+
     /** A queued SITE re-proves the same small seam after restart; no additional persistent registry is needed. */
     fun acceptedSurface(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
         access: CivAutonomousAccess): CivTerrainSurface {
         if (building.type != BuildingType.WALL || city.building(building.id)?.phase != BuildingPhase.SITE ||
-            building.schematicId != "civs/infrastructure/v1/wall/${building.id}") return surface
+            !CivsInfrastructureRebuild.owned(building)) return surface
         val targets = city.buildings.filter { it.type == BuildingType.GATE && it.phase == BuildingPhase.ACTIVE }.flatMap { gate ->
             city.buildings.filter { it.type == BuildingType.WALL && it.phase == BuildingPhase.ACTIVE }.mapNotNull { wall ->
                 runCatching { target(city, gate.id, wall.id) }.getOrNull()?.takeIf {

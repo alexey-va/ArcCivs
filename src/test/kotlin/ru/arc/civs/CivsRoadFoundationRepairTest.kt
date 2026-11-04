@@ -253,7 +253,7 @@ private fun validateRoadChanges209(city: Settlement, upkeep: CivRoadUpkeep, chan
     require(expected != null && changes == listOfNotNull(floor) + expected)
 }
 
-private class FoundationFixture(floorY: Int = 68, baseY: Int = 58) : AutoCloseable {
+internal class FoundationFixture(floorY: Int = 68, baseY: Int = 58) : AutoCloseable {
     private val paper = MockBukkitTestRuntime.open()
     val world = CivsWorksiteWorldFixture("road-foundation", ground = Material.AIR, collisionForData = { data ->
         if (CivsRoadMaintenance.surface(data.asString)) roadUpkeepBoxes(data).map { it.at(CivPosition(0, 0, 0)) } else null

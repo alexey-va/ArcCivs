@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import com.google.gson.Gson
+import io.kotest.assertions.withClue
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -14,7 +15,8 @@ class CivsSettlementFortificationsTest : FunSpec({
         pair.first.copy(schematicId = "civs/v2/fixture/$type/level1") to
             pair.second.copy(schematicId = "civs/v2/fixture/$type/level${type.maxLevel}")
     } }
-    val surface by lazy { settlementPlanSurface(base) }
+    // Native AutonomousHeightField caps its survey radius at 127, independently of city protection.
+    val surface by lazy { settlementPlanSurface(base.copy(radius = 127)) }
 
     test("only an active matching captured payload supplies runtime fortification evidence") {
         val plot = fortificationPlot(template, CivPosition(50, 64, -35), 0, UUID(141, 400))
@@ -80,12 +82,35 @@ class CivsSettlementFortificationsTest : FunSpec({
     }
 
     test("a new detached plan reserves at most four native bastions with disjoint paid walls and exact clear port seams") {
+        val attempts = mutableListOf<Map<String, Any>>()
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val diagnostic = layoutFixtureDiagnostics("fortified", base, templates, surface)
         val plan = fortificationPlanDiagnostics { CivsSettlementPlans.prepare(base, templates, surface, CivAutonomousAccess(), fortification = template,
-            inspect = layoutFixtureDiagnostics("fortified", base, templates, surface)) }
+            inspectRoute = searches::add, inspect = { candidate, infrastructure ->
+                attempts += mapOf("forts" to candidate.plots.count { it.fortification != null },
+                    "half_width" to candidate.halfWidth, "plots" to candidate.plots.size, "routes" to candidate.routes.size,
+                    "walls" to candidate.walls.size, "gates" to candidate.gates, "pieces" to infrastructure.pieces.size,
+                    "closed" to infrastructure.perimeterClosed, "rejected" to infrastructure.rejected,
+                    "blockers" to infrastructure.blockers.take(4),
+                    "samples" to infrastructure.rejectionSamples.mapValues { it.value.take(4) })
+                diagnostic?.invoke(candidate, infrastructure)
+            }) }
         val forts = plan.plots.filter { it.fortification != null }
         plan.plots.count { it.building.type != BuildingType.DECORATION } shouldBe 34
-        (forts.size in 1..4) shouldBe true
+        withClue("forts=${forts.size}; surface_columns=${surface.columns.size}; attempts=$attempts; " +
+            "route_outcomes=${searches.groupingBy { it.outcome }.eachCount()}; " +
+            "max_expanded=${searches.maxOfOrNull { it.expanded }}; " +
+            "last_route_refusals=${searches.filter { it.outcome != "found" }.takeLast(6)}") {
+            (forts.size in 1..4) shouldBe true
+        }
         forts.all { CivsSettlementPlans.matchesFortification(it, template) } shouldBe true
+        for ((index, gate) in plan.gates.withIndex()) for (other in plan.gates.drop(index + 1)) {
+            val dx = (gate.min.x + gate.max.x - other.min.x - other.max.x) / 2
+            val dz = (gate.min.z + gate.max.z - other.min.z - other.max.z) / 2
+            withClue("New fortified entries must stay separate: $gate and $other") {
+                (kotlin.math.abs(dx) + kotlin.math.abs(dz) > 16) shouldBe true
+            }
+        }
         val projected = base.copy(autonomy = base.autonomy!!.copy(plan = plan, layoutHalfWidth = plan.halfWidth),
             buildings = plan.plots.map { it.building.copy(bounds = it.envelope) })
         val frame = CivsSettlementLayout.frame(projected)
@@ -155,8 +180,10 @@ class CivsSettlementFortificationsTest : FunSpec({
         old.perimeterClosed shouldBe true
         val compactGates = old.pieces.filter { it.type == BuildingType.GATE }
         compactGates.size shouldBe 3
-        compactGates.all { it.bounds.max.x - it.bounds.min.x == 2 && it.bounds.max.z - it.bounds.min.z == 2 &&
-            it.transit.size == 7 && CivsGateRefit.validTransit(CivsInfrastructure.building(it)) } shouldBe true
+        // This outline was generated above from an unpaid town, then adopted unchanged. Its
+        // new ordinary gates have a three-wide core; paid historical wickets keep their bounds.
+        compactGates.all { it.bounds.max.x - it.bounds.min.x == 4 && it.bounds.max.z - it.bounds.min.z == 4 &&
+            it.transit.size == 19 && CivsGateRefit.validTransit(CivsInfrastructure.building(it)) } shouldBe true
         compactGates.all { gate -> legacy.routes.values.flatten().filter {
             CivsAutonomousGeometry.horizontalContains(gate.bounds, it)
         }.all { it in gate.transit } } shouldBe true

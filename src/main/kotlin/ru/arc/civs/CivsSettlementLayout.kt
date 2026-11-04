@@ -322,8 +322,12 @@ internal object CivsSettlementLayout {
     internal fun gateConnectionObstacles(frame: CivSettlementFrame): List<CivBox> = frame.gates.flatMap { gate ->
         val acrossX = rotate(CivPosition(0, 0, -1), gate.side + frame.rotation / 90).z != 0
         val box = gate.passage
-        if (acrossX) listOf(box.copy(max = box.max.copy(x = box.min.x)), box.copy(min = box.min.copy(x = box.max.x)))
-        else listOf(box.copy(max = box.max.copy(z = box.min.z)), box.copy(min = box.min.copy(z = box.max.z)))
+        val width = if (acrossX) box.max.x - box.min.x + 1 else box.max.z - box.min.z + 1
+        val core = if (width >= 5) 3 else 1
+        val low = (if (acrossX) box.min.x else box.min.z) + (width - core) / 2
+        val high = low + core - 1
+        if (acrossX) listOf(box.copy(max = box.max.copy(x = low - 1)), box.copy(min = box.min.copy(x = high + 1)))
+        else listOf(box.copy(max = box.max.copy(z = low - 1)), box.copy(min = box.min.copy(z = high + 1)))
     }
 
     /** Reuse the existing captured plan journal; this is a detached view, not another registry. */
@@ -350,7 +354,7 @@ internal object CivsSettlementLayout {
         retainedRoutes: Collection<List<CivPosition>> = emptyList(),
         acceptedFortifications: Set<UUID> = emptySet(),
         forecastFortifications: Set<UUID> = emptySet(),
-        wallProfileStage: Int? = null): CivSettlementInfrastructure {
+        wallProfileStage: Int? = null, wallFloors: Map<Long, Int> = emptyMap()): CivSettlementInfrastructure {
         val rejected = sortedMapOf<String, Int>()
         val samples = linkedMapOf<String, MutableList<CivPosition>>()
         fun reject(reason: String, at: CivPosition? = null) {
@@ -416,6 +420,11 @@ internal object CivsSettlementLayout {
         val fortificationStage = if (frame.fortified) 3 else CivsInfrastructureRebuild.stage(city)
         val wallJoins = CivsInfrastructureRebuild.wallJoins(frame.wallObstacles)
         require(wallProfileStage == null || wallProfileStage in 0..3 && !frame.fortified)
+        require(wallFloors.size <= 6 && wallFloors.all { (column, floor) ->
+            val x = (column shr 32).toInt(); val z = column.toInt()
+            frame.wallObstacles.any { contains(it, CivPosition(x, floor, z)) } &&
+                surface.at(x, z)?.let { it.loaded && it.waterTopY == null && abs(it.groundY.toLong() - floor) <= 1 } == true
+        })
         val path = "minecraft:cobblestone"
         fun ground(x: Int, z: Int): Int? {
             val c = surface.at(x, z)
@@ -555,7 +564,7 @@ internal object CivsSettlementLayout {
         }
         // Keep clear 24-column orders stable; split failed dry runs without spanning paid pieces or holes.
         for (wall in frame.wallObstacles) {
-            val alongX = wall.max.x - wall.min.x >= wall.max.z - wall.min.z
+            val alongX = CivsInfrastructureRebuild.wallAxis(city, wall)
             val first = if (alongX) wall.min.x else wall.min.z
             val last = if (alongX) wall.max.x else wall.max.z
             fun addWall(columns: List<List<CivSettlementBlock>>) {
@@ -590,7 +599,8 @@ internal object CivsSettlementLayout {
                             reject("route-crosses-wall"); valid = false; continue
                         }
                         if (key(x, z) in used) { valid = false; continue }
-                        val y = ground(x, z)
+                        val nativeGround = ground(x, z)
+                        val y = nativeGround?.let { wallFloors[key(x, z)] ?: it }
                         if (y == null) { valid = false; continue }
                         val water = surface.at(x, z)?.takeIf { it.waterTopY != null && it.waterBottomY != null }
                         if (water != null) for (fillY in requireNotNull(water.waterBottomY) + 1 until y)

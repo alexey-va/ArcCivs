@@ -349,6 +349,78 @@ internal object CivsSettlementPlans {
                 throw failure
             }
             else CivsPerimeterCrossings.adapt(frame, routes.values, retained.infrastructure)
+        if (adopted == null && retained.infrastructure.isEmpty()) {
+            if (adoptedFrame.fortified) for ((index, gate) in adoptedFrame.gates.withIndex()) {
+                for (other in adoptedFrame.gates.drop(index + 1)) {
+                    if (abs(gate.center.x - other.center.x) + abs(gate.center.z - other.center.z) <= 16)
+                        throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "gate-spacing",
+                            "first" to "${gate.center.x},${gate.center.z}",
+                            "second" to "${other.center.x},${other.center.z}"))
+                }
+            }
+            val obstacles = adoptedFrame.wallObstacles + CivsSettlementLayout.gateConnectionObstacles(adoptedFrame)
+            val streetGates = adoptedFrame.gates.filter { gate -> retained.routes.values.none { route ->
+                route.any { CivsAutonomousGeometry.horizontalContains(gate.passage, it) } } }
+            val streets = streetGates.map { gate -> CivRouteStreet(gate.center,
+                Math.floorMod(gate.side + adoptedFrame.rotation / 90, 2) == 1) }
+            val reconnectObstacles = obstacles + streetGates.map { it.passage }
+            // Full depot-to-plot routes include their shared prefixes, so this also removes every
+            // provisional dependent before selecting shared streets, including legal edge lanes.
+            val reconnect = routes.filter { (id, route) -> city.building(id) == null && id !in retained.routes &&
+                route.any { p -> reconnectObstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) } } }
+            reconnect.keys.forEach(routes::remove)
+            for ((id, previous) in reconnect) {
+                val target = requireNotNull(projected.building(id))
+                // Keep the original source's admission: an early worksite cannot acquire a new
+                // dependency on a forecast warehouse merely because its approach was redirected.
+                val navigable = projected.copy(buildings = projected.buildings.map { building ->
+                    if (building.type == BuildingType.WAREHOUSE && city.building(building.id)?.let(CivsRules::isDepot) != true &&
+                        building.entrance != previous.first()) building.copy(phase = BuildingPhase.SITE) else building
+                })
+                val endpoints = navigable.buildings.filter { CivsRules.isDepot(it) || it.type == BuildingType.TOWN_HALL }
+                    .map { it.entrance } + target.entrance
+                val centreObstacles = streetGates.flatMap { gate ->
+                    // Keep four approach steps straight beyond each portal edge, including
+                    // deeper fortified walls. Only new road proposals use this restriction.
+                    val acrossX = Math.floorMod(gate.side + adoptedFrame.rotation / 90, 2) == 0
+                    val box = if (acrossX) gate.passage.copy(min = gate.passage.min.copy(z = gate.passage.min.z - 4),
+                        max = gate.passage.max.copy(z = gate.passage.max.z + 4))
+                    else gate.passage.copy(min = gate.passage.min.copy(x = gate.passage.min.x - 4),
+                        max = gate.passage.max.copy(x = gate.passage.max.x + 4))
+                    val apron = CivBox(box.min.copy(x = box.min.x - 1, z = box.min.z - 1),
+                        box.max.copy(x = box.max.x + 1, z = box.max.z + 1))
+                    // An actual source or destination beside this short channel may still
+                    // enter from its own forecourt, rather than being trapped behind a mask.
+                    if (endpoints.any { CivsAutonomousGeometry.horizontalContains(apron, it) }) emptyList()
+                    else if (acrossX)
+                        listOf(box.copy(max = box.max.copy(x = gate.center.x - 1)), box.copy(min = box.min.copy(x = gate.center.x + 1)))
+                    else listOf(box.copy(max = box.max.copy(z = gate.center.z - 1)), box.copy(min = box.min.copy(z = gate.center.z + 1)))
+                }
+                // Keep the street on the gate axis; place a short transverse branch beside the
+                // worksite instead of letting an equal-length search turn along the gate flank.
+                val frontage = if (target.type !in CivsSettlementLayout.exteriorTypes) null else
+                    streetGates.mapNotNull { gate ->
+                        val acrossX = Math.floorMod(gate.side + adoptedFrame.rotation / 90, 2) == 0
+                        val entry = target.entrance
+                        val normal = if (acrossX) entry.z - gate.center.z else entry.x - gate.center.x
+                        val sourceNormal = if (acrossX) previous.first().z - gate.center.z else previous.first().x - gate.center.x
+                        val shift = if (acrossX) abs(entry.x - gate.center.x) else abs(entry.z - gate.center.z)
+                        if (shift !in 1..6 || abs(normal) < 6 || normal.toLong() * sourceNormal >= 0)
+                            null else (if (acrossX) entry.copy(x = gate.center.x) else entry.copy(z = gate.center.z)) to abs(normal)
+                    }.minByOrNull { it.second }?.first
+                routes[id] = try { CivsAutonomousTerraform.connection(navigable, target, surface,
+                    planningAccess(), obstacles + centreObstacles, inspectRoute, frontage, streets) }
+                catch (failure: CivsRejection) {
+                    if (inspect != null) runCatching {
+                        inspect(CivSettlementPlan(VERSION, 0, adoptedFrame.halfWidth, plots.toList(),
+                            (routes + reconnect).mapKeys { it.key.toString() }, adoptedFrame.wallObstacles,
+                            adoptedFrame.gates.map { it.passage }, adoptedFrame.gates.map { it.side }),
+                            CivSettlementInfrastructure(emptyList(), mapOf("gate-connection-failed" to 1), false))
+                    }.onFailure(failure::addSuppressed)
+                    throw failure
+                }
+            }
+        }
         // A legacy accepted frame keeps its gate approaches. New gates already lie on real exterior routes.
         for (gate in if (retained.infrastructure.isEmpty()) emptyList() else frame.gates) {
             val id = UUID.nameUUIDFromBytes("arccivs-plan/${city.id}/gate/${gate.side}/${gate.center.x}/${gate.center.z}".toByteArray(Charsets.UTF_8))

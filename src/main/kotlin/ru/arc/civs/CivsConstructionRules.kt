@@ -36,7 +36,8 @@ internal object CivsConstructionRules {
         } else if (existing.phase == BuildingPhase.SITE) {
             CivsRules.check(order.batches != null && existing.copy(phase = BuildingPhase.CONSTRUCTING) == plan, "invalid-building")
         } else {
-            CivsRules.check(existing.phase == BuildingPhase.ACTIVE && existing.type == plan.type &&
+            CivsRules.check(existing.phase == BuildingPhase.ACTIVE &&
+                (existing.type == plan.type || CivsInfrastructureRebuild.refit(city, existing, plan)) &&
                 existing.entrance == plan.entrance && existing.rotation == plan.rotation, "invalid-building")
             CivsRules.check(plan.level == existing.level + 1 && plan.level <= plan.type.maxLevel ||
                 CivsPlanBoardBlueprint.refit(existing, plan) || CivsInfrastructureRebuild.refit(existing, plan), "invalid-level")

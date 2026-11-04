@@ -14,6 +14,7 @@ class CivsGateTerrainReplayTest : FunSpec({
         val output = Path.of(requireNotNull(System.getenv("CIVS_GATE_REPLAY_OUT")))
         val gson = GsonBuilder().setPrettyPrinting().create()
         val document = JsonParser.parseString(Files.readString(Path.of(input))).asJsonObject
+        if (document.has("retained_plans")) { replayGateConsolidation(document, output); return@test }
         val row = document.getAsJsonObject("city")
         val buildings = document.getAsJsonArray("buildings").map { entry ->
             val value = entry.asJsonObject.deepCopy()

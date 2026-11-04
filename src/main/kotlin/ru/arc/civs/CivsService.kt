@@ -139,7 +139,7 @@ class CivsService(
             if (supply.plan(cityId, workerId)?.cargo == cargo) supply.release(cityId, workerId, failed = true)
         },
         workPositionFailed = { city, worker, work ->
-            if (work.upkeep != null) { roadMaintenance.invalidate(worker.id); true }
+            if (work.upkeep != null) roadMaintenance.rejectStanding(city, worker, work)
             else worksites.rejectStanding(city, worker, work)
         },
         residentSupplySource = ::residentSupplySource,

@@ -51,7 +51,8 @@ internal object CivsSnapshotValidation {
                 snapshot(target.phase == BuildingPhase.CONSTRUCTING && city.buildings.none { it.id != target.id && it.bounds.overlaps(target.bounds) })
                 val founding = CivsRules.isFounding(city)
                 snapshot(if (current!!.phase == BuildingPhase.CONSTRUCTING) current == target && target.level == 1 else
-                    current.phase == BuildingPhase.ACTIVE && current.type == target.type &&
+                    current.phase == BuildingPhase.ACTIVE &&
+                        (current.type == target.type || CivsInfrastructureRebuild.refit(city, current, target)) &&
                         (current.level + 1 == target.level || CivsPlanBoardBlueprint.refit(current, target) ||
                             CivsInfrastructureRebuild.refit(current, target)) &&
                         current.entrance == target.entrance && current.rotation == target.rotation)
@@ -252,7 +253,7 @@ internal object CivsSnapshotValidation {
     fun validConstructionPrice(city: Settlement, order: CivConstruction, building: CivBuilding): Boolean {
         if (city.autonomy != null && order.payment == null) {
             val batches = order.batches ?: return false
-            return building.type in CivsAutonomy.allowedTypes && order.payment == null &&
+            return building.type in CivsAutonomy.allowedTypes &&
                 batches.atomicPairs == true &&
                 batches.total in 1..75_000 && batches.size in 1..256 && order.workRequired == batches.total &&
                 order.cost == (if (CivsPlanBoardBlueprint.refit(city.building(building.id), building)) Stock()
