@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
@@ -23,7 +24,11 @@ class CivsCompatibleUnpaidPlanRecoveryTest : FunSpec({
         initialRecoveryScenario(targetType = BuildingType.FORESTER, permuteUnpaidHouses = true) { s ->
             s.city.radius shouldBe 128
             val paidBefore = s.paidPlans.toList()
-            val plan = s.forecastCompatibleExterior().join()
+            val plan = try { s.forecastCompatibleExterior().join() } catch (failure: Throwable) {
+                s.exportForecastFailure("compatible")
+                val rejection = CivsDiagnostics.rejection(failure)
+                throw AssertionError("Compatible exterior forecast: ${rejection?.reason} ${rejection?.values}", failure)
+            }
             val selected = requireNotNull(s.selected)
             val earthworks = requireNotNull(s.forecastTerrain)
             earthworks.blocks.isNotEmpty() shouldBe true
@@ -129,7 +134,10 @@ class CivsDevelopedUnpaidPlanRecoveryTest : FunSpec({
             val paidBefore = s.paidPlans.toList()
             s.acceptedAccess.infrastructure.single().type shouldBe BuildingType.ROAD
             s.start(); s.finish { s.subject.debug(s.city.id)["request"] == null }
-            s.saves.size shouldBe 1
+            if (s.saves.isEmpty()) s.exportForecastFailure("developed")
+            withClue("Development: ${s.subject.debug(s.city.id)}; search: ${s.searchDebug()}") {
+                s.saves.size shouldBe 1
+            }
             val selected = requireNotNull(s.selected)
             val plan = requireNotNull(s.city.autonomy?.plan)
             selected.anchor shouldBe s.oldTarget.anchor.copy(y = s.oldTarget.anchor.y + 4)
@@ -822,6 +830,7 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         val shadow = city.copy(autonomy = city.autonomy!!.copy(plan = null, layoutHalfWidth = oldPlan.halfWidth))
         val remaining = oldPlan.plots.filter { it.building.id != oldTarget.id }.map { it.envelope }
         val obstacles = remaining + oldPlan.walls
+        val gateSides = CivsSettlementLayout.gateConnectionObstacles(CivsSettlementLayout.frame(city))
         val roads = oldPlan.routes.filterKeys { it != oldTarget.id.toString() && city.building(UUID.fromString(it)) == null }
             .values.flatten().groupBy { civsTerrainKey(it.x, it.z) }
         fun conflicts(building: CivBuilding, envelope: CivBox, terrain: CivTerraformPlan? = null): List<String> = buildList {
@@ -839,6 +848,8 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
                 CivsAutonomousGeometry.horizontalContains(it, point)
             } || roads[civsTerrainKey(point.x, point.z)].orEmpty().any { it.y != point.y } }
                 .forEach { add("route:$it") }
+            terrain?.route.orEmpty().filter { point -> gateSides.any { CivsAutonomousGeometry.horizontalContains(it, point) } }
+                .forEach { add("gate-side:$it") }
         }
         val pair = templates.getValue(oldTarget.type)
         fun futureEnvelope(building: CivBuilding): CivBox {
@@ -862,7 +873,7 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
                 return@firstNotNullOfOrNull null
             }
             val draft = try { CivsAutonomousTerraform.draft(shadow, option.copy(building = prepared.building.copy(bounds = envelope)),
-                surface, acceptedAccess, obstacles) }
+                surface, acceptedAccess, obstacles + gateSides) }
             catch (failure: CivsRejection) {
                 if (refused.size < 4) refused += "${prepared.building.anchor}:${failure.reason}:${failure.values}"
                 return@firstNotNullOfOrNull null
@@ -880,6 +891,19 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         }
         check(chosen != null) { "No compatible exterior fixture among ${options.size} ordinary options: $refused" }
         return planner.plan(civsPlanBoardCapture(city), chosen)
+    }
+    /** Re-run only detached forecast with its existing diagnostic sink after a failed assertion. */
+    fun exportForecastFailure(name: String) {
+        if (System.getenv("CIVS_LAYOUT_DIAGNOSTIC_DIR") == null) return
+        val seed = selected ?: return
+        val kept = oldPlan.copy(plots = oldPlan.plots.filter { it.building.id != seed.id },
+            routes = oldPlan.routes - seed.id.toString())
+        val projected = city.copy(buildings = city.buildings + seed,
+            autonomy = city.autonomy!!.copy(plan = kept, layoutHalfWidth = oldPlan.halfWidth))
+        val access = acceptedAccess.copy(routes = acceptedAccess.routes + (seed.id to selectedRoute), reservedFortificationPorts = emptyList())
+        runCatching { CivsSettlementPlans.prepare(projected, templates, nativeSurface(), access,
+            profile = oldPlan.plots.filter { !it.building.type.isInfrastructure && it.building.type != BuildingType.DECORATION }.map { it.building.type },
+            inspect = layoutFixtureDiagnostics("recovery-$name", projected, templates, nativeSurface())) }
     }
     fun finish(done: () -> Boolean) {
         repeat(100) { if (!done()) scheduler.tick() }

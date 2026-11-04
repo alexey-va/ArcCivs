@@ -14,6 +14,31 @@ import java.util.concurrent.Executor
 import java.util.logging.Logger
 
 class CivsOptionalPlanBackoffTest : FunSpec({
+    for (ending in listOf("search failure", "pause", "reset"))
+    test("a hall sized founding plan observes road admission and releases its handoff after $ending") {
+        OptionalPlanHarness(newPlot = true, compactFounding = true).use { h ->
+            h.admitted = false
+            h.start()
+            h.time = 5_001; h.pulse()
+            h.waiting shouldBe true
+            h.development.progress(h.city.id)?.reason shouldBe "city-busy"
+            verify(exactly = 0) { h.placement.plan(any()) }
+            h.admitted = true
+            h.time = 10_002; h.pulse()
+            verify(exactly = 1) { h.placement.plan(any()) }
+            verify(exactly = 0) { h.placement.search(any(), any(), any(), any(), any(), any(), any()) }
+            h.waiting shouldBe true
+            when (ending) {
+                "search failure" -> { h.planned.completeExceptionally(CivsRejection("autonomy-no-site")); h.drain() }
+                "pause" -> h.development.paused(h.city.id)
+                else -> h.development.reset()
+            }
+            h.waiting shouldBe false
+            h.development.debug(h.city.id)["request"] shouldBe null
+            h.committed shouldBe emptyList()
+        }
+    }
+
     test("road admission blocks repeated planning before preparation and releases exactly one search") {
         OptionalPlanHarness(newPlot = true).use { h ->
             h.admitted = false
@@ -219,7 +244,8 @@ class CivsOptionalPlanBackoffTest : FunSpec({
     }
 })
 
-private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean = false) : AutoCloseable {
+private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean = false,
+    compactFounding: Boolean = false) : AutoCloseable {
     private val types = if (noOrdinary) CivsAutonomy.completeProfile else
         CivsAutonomy.profile + List(2) { BuildingType.HOUSE } + if (newPlot) emptyList() else listOf(BuildingType.QUARRY)
     var city = CivsRules.validate(Settlement(UUID(177, 1), UUID(177, 2), "Legacy optional plan", UUID(177, 3),
@@ -230,7 +256,9 @@ private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean 
                 CivBox(CivPosition(x - 3, 62, z - 7), CivPosition(x + 3, 76, z - 1)),
                 CivPosition(x, 65, z), BuildingPhase.ACTIVE, CivPosition(x + 1, 65, z - 1))
         }, emptyList(), inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy(layoutHalfWidth = 56),
-        research = CivResearchState(CivResearchId.entries.toSet())))
+        research = CivResearchState(CivResearchId.entries.toSet()))).let { city ->
+            if (compactFounding) city.copy(autonomy = city.autonomy!!.copy(layoutHalfWidth = CivsSettlementGrowth.initialHalfWidth(city))) else city
+        }
     val quarry get() = city.buildings.firstOrNull { it.type == BuildingType.QUARRY && it.level == 1 }
     var time = 0L
     var upgradeFailure: String? = null
@@ -246,6 +274,7 @@ private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean 
     private val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler)
     val placement = mockk<CivsAutonomousPlacement>()
+    val planned = CompletableFuture<CivSettlementPlan>()
     private val searched = CompletableFuture<CivAutonomousDesign>()
     private val blueprints = mockk<CivsBlueprints>()
     private val plugin = mockk<Plugin>()
@@ -265,7 +294,8 @@ private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean 
                 every { blueprint.building } returns building.copy(level = level, phase = BuildingPhase.CONSTRUCTING)
             })
         }
-        every { placement.plan(any()) } returns CompletableFuture.failedFuture(CivsRejection("unexpected-full-plan"))
+        every { placement.plan(any()) } returns if (compactFounding) planned else
+            CompletableFuture.failedFuture(CivsRejection("unexpected-full-plan"))
         every { placement.search(any(), any(), any(), any(), any(), any(), any()) } returns searched
         every { placement.infrastructure(any()) } answers { CompletableFuture.failedFuture(CivsRejection(infrastructureFailure)) }
         every { placement.debug(any()) } returns emptyMap()

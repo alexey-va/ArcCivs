@@ -30,6 +30,7 @@ internal data class CivSettlementPiece(
     val blocks: List<CivSettlementBlock>,
     val transit: List<CivPosition> = emptyList(),
     val waterFoundations: List<CivWaterFoundation> = emptyList(),
+    val profileStage: Int? = null,
 )
 
 internal data class CivSettlementInfrastructure(
@@ -108,7 +109,7 @@ internal object CivsSettlementLayout {
         ) + if (northernFrontage) listOf(CivSettlementStreet(world(plazaX, backStreet), world(plazaX, -half))) else emptyList()
         val result = CivSettlementFrame(city.center, hall.rotation, half, box(-half, -half, half, half),
             box(plazaX - 8, entry.z + 1, plazaX + 8, plazaZ + 5), gates, walls, streets,
-            adopted?.plots?.any { it.fortification != null } == true)
+            adopted?.takeIf { it.halfWidth == half }?.plots?.any { it.fortification != null } == true)
         adopted?.takeIf { it.halfWidth == half }?.let { plan ->
             val sides = plan.gateSides ?: listOf(1, 2, 3)
             return result.copy(wallObstacles = plan.walls, gates = plan.gates.mapIndexed { i, passage ->
@@ -242,6 +243,7 @@ internal object CivsSettlementLayout {
         }
         // Farm frontage remains exterior; an autonomous farm may also use an ordinary bounded inner yard.
         val exterior = reserveUnbuiltStreets && current.type in exteriorTypes
+        val interior = if (exterior) emptySet() else CivsSettlementGrowth.interior(frame)
         // Small raw worksites use an available flank while the new quarter still needs wide farm parcels.
         // This only ranks the existing finite candidates; terrain, spacing and depot reach still admit them.
         val preserveWideBay = current.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY) && frame.halfWidth > 56 &&
@@ -298,6 +300,7 @@ internal object CivsSettlementLayout {
                 frame.wallObstacles.none { CivsAutonomousGeometry.overlaps(bounds, it, 2) } &&
                 (if (exterior) !CivsAutonomousGeometry.overlaps(bounds, frame.core, 3) else
                     corners(bounds).all { insideCore(frame, it, if (frame.fortified) 5 else 4) } &&
+                        (bounds.min.x..bounds.max.x).all { x -> (bounds.min.z..bounds.max.z).all { z -> key(x, z) in interior } } &&
                         !CivsAutonomousGeometry.overlaps(bounds, frame.court) &&
                         (bounds.min.x..bounds.max.x).none { x -> (bounds.min.z..bounds.max.z).any { z -> key(x, z) in streetCells } }) &&
                 // Frontage is preferred by ranking. Infill may extend a short
@@ -315,17 +318,26 @@ internal object CivsSettlementLayout {
         frame.wallObstacles.none { contains(it, p) }
     }
 
+    /** New connector routes enter an opening along its passage, leaving both side supports available. */
+    internal fun gateConnectionObstacles(frame: CivSettlementFrame): List<CivBox> = frame.gates.flatMap { gate ->
+        val acrossX = rotate(CivPosition(0, 0, -1), gate.side + frame.rotation / 90).z != 0
+        val box = gate.passage
+        if (acrossX) listOf(box.copy(max = box.max.copy(x = box.min.x)), box.copy(min = box.min.copy(x = box.max.x)))
+        else listOf(box.copy(max = box.max.copy(z = box.min.z)), box.copy(min = box.min.copy(z = box.max.z)))
+    }
+
     /** Reuse the existing captured plan journal; this is a detached view, not another registry. */
     fun accepted(city: Settlement, plans: List<CivPlacementPlan>): List<CivSettlementPiece> = plans.mapNotNull { plan ->
         val building = city.building(plan.building.id) ?: return@mapNotNull null
         if (!building.type.isInfrastructure || plan.cityId != city.id || plan.worldId != city.worldId ||
             plan.building.type != building.type || plan.building.anchor != building.anchor ||
             plan.building.bounds != building.bounds || plan.building.rotation != building.rotation) return@mapNotNull null
-        if (CivsGateRefit.versioned(building) && (plan.id != CivsGateRefit.retainedPlanId(building) ||
+        if ((CivsGateRefit.versioned(building) || CivsInfrastructureRebuild.stage(building) > 0) &&
+            (plan.id != CivsGateRefit.retainedPlanId(building) ||
                 plan.building.schematicId != building.schematicId || plan.building.transit != building.transit)) return@mapNotNull null
         CivSettlementPiece(building.id, building.type, building.bounds, building.entrance,
             plan.blocks.map { CivSettlementBlock(it.position, it.after) }, building.transit.orEmpty(),
-            plan.terrain?.waterFoundations.orEmpty())
+            plan.terrain?.waterFoundations.orEmpty(), CivsInfrastructureRebuild.stage(building).takeIf { it > 0 })
     }.distinctBy { it.id }
 
     /**
@@ -337,7 +349,8 @@ internal object CivsSettlementLayout {
         pavingRoutes: List<List<CivPosition>> = routes,
         retainedRoutes: Collection<List<CivPosition>> = emptyList(),
         acceptedFortifications: Set<UUID> = emptySet(),
-        forecastFortifications: Set<UUID> = emptySet()): CivSettlementInfrastructure {
+        forecastFortifications: Set<UUID> = emptySet(),
+        wallProfileStage: Int? = null): CivSettlementInfrastructure {
         val rejected = sortedMapOf<String, Int>()
         val samples = linkedMapOf<String, MutableList<CivPosition>>()
         fun reject(reason: String, at: CivPosition? = null) {
@@ -400,6 +413,9 @@ internal object CivsSettlementLayout {
             fortificationGround.mapValues { it.value.y }
         val wood = wood(city.style)
         val stone = if (city.style == "nordic") "minecraft:cobblestone" else "minecraft:stone_bricks"
+        val fortificationStage = if (frame.fortified) 3 else CivsInfrastructureRebuild.stage(city)
+        val wallJoins = CivsInfrastructureRebuild.wallJoins(frame.wallObstacles)
+        require(wallProfileStage == null || wallProfileStage in 0..3 && !frame.fortified)
         val path = "minecraft:cobblestone"
         fun ground(x: Int, z: Int): Int? {
             val c = surface.at(x, z)
@@ -480,7 +496,9 @@ internal object CivsSettlementLayout {
                 CivWaterFoundation(x, z, floor, top, bottom)
             }
             pieces += CivSettlementPiece(UUID.nameUUIDFromBytes(identity.toByteArray(StandardCharsets.UTF_8)),
-                type, bounds, entrance, cells, transit, waterFoundations)
+                type, bounds, entrance, cells, transit, waterFoundations,
+                (if (type == BuildingType.WALL) wallProfileStage ?: fortificationStage else fortificationStage)
+                    .takeIf { it > 0 && type in setOf(BuildingType.WALL, BuildingType.GATE) })
             cells.forEach { used += key(it.position) }
             return true
         }
@@ -523,24 +541,16 @@ internal object CivsSettlementLayout {
                         cells += CivSettlementBlock(CivPosition(x, level + 9, z), "minecraft:air")
                     }
                 }
-                // Open leaves preserve the complete public transit rectangle and are usable
-                // by both citizens and players. The surrounding wall owns the side supports.
-                val leaves = transit.filter { if (horizontal) it.z == gate.center.z else it.x == gate.center.x }.toSet()
-                val facing = if (horizontal) "north" else "east"
-                val openGate = "minecraft:${wood}_fence_gate[facing=$facing,in_wall=false,open=true,powered=false]"
-                for (i in cells.indices) if (cells[i].position in leaves && cells[i].after == "minecraft:air")
-                    cells[i] = cells[i].copy(after = openGate)
-                if (!frame.fortified && city.style == "caledonia") {
-                    val witnesses = (routes + retainedRoutes).flatten().filter { contains(gate.passage, it) }.distinct()
-                    val shaped = runCatching { CivsGateRefit.generatedShape(CivSettlementPiece(UUID(0, 0), BuildingType.GATE,
-                        box(cells.map { it.position }), gate.center.copy(y = level + 1), cells, transit), horizontal, witnesses) }
-                    if (shaped.isFailure) {
-                        reject(CivsDiagnostics.rejection(shaped.exceptionOrNull()!!)?.reason ?: "gate-refit-unsupported", gate.center)
-                        continue
-                    }
-                    val piece = shaped.getOrThrow()
-                    add(BuildingType.GATE, piece.blocks, piece.entrance, piece.transit)
-                } else add(BuildingType.GATE, cells, gate.center.copy(y = level + 1), transit)
+                val witnesses = (routes + retainedRoutes).flatten().filter { contains(gate.passage, it) }.distinct()
+                val shaped = runCatching { CivsInfrastructureRebuild.gate(CivSettlementPiece(UUID(0, 0), BuildingType.GATE,
+                    box(cells.map { it.position }), gate.center.copy(y = level + 1), cells, transit),
+                    city.style, fortificationStage, horizontal, witnesses) }
+                if (shaped.isFailure) {
+                    reject(CivsDiagnostics.rejection(shaped.exceptionOrNull()!!)?.reason ?: "gate-refit-unsupported", gate.center)
+                    continue
+                }
+                val piece = shaped.getOrThrow()
+                add(BuildingType.GATE, piece.blocks, piece.entrance, piece.transit)
             }
         }
         // Keep clear 24-column orders stable; split failed dry runs without spanning paid pieces or holes.
@@ -586,14 +596,8 @@ internal object CivsSettlementLayout {
                         if (water != null) for (fillY in requireNotNull(water.waterBottomY) + 1 until y)
                             cells += CivSettlementBlock(CivPosition(x, fillY, z), stone)
                         val middle = if (alongX) (wall.min.z + wall.max.z) / 2 else (wall.min.x + wall.max.x) / 2
-                        for (dy in 0..(if (frame.fortified) 7 else 3)) cells += CivSettlementBlock(CivPosition(x, y + dy, z),
-                            if (cross == middle && Math.floorMod(axis, 6) == 0) "minecraft:${wood}_log[axis=y]" else stone)
-                        if (frame.fortified) {
-                            cells += CivSettlementBlock(CivPosition(x, y + 8, z), if (parapet(x, z)) stone else "minecraft:air")
-                            cells += CivSettlementBlock(CivPosition(x, y + 9, z), "minecraft:air")
-                        } else if (cross == middle || Math.floorMod(axis, 3) == 0)
-                            cells += CivSettlementBlock(CivPosition(x, y + 4, z), if (cross == middle)
-                                "minecraft:${wood}_fence[east=false,north=false,south=false,waterlogged=false,west=false]" else stone)
+                        cells += CivsInfrastructureRebuild.wallColumn(city.style, wallProfileStage ?: fortificationStage, x, y, z,
+                            alongX, middle, if (frame.fortified) 9 else 4, parapet(x, z), (x to z) in wallJoins)
                     }
                     if (valid) columns += cells else flush()
                 }

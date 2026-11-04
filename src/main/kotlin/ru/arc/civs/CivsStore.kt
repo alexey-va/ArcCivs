@@ -180,6 +180,7 @@ class CivsStore(
         val snapshot = transaction.copy(after = snapshotCity(transaction.after), changes = transaction.changes.toList(),
             playerDebit = transaction.playerDebit?.let { it.copy(changes = it.changes.toList()) },
             residentTransfer = transaction.residentTransfer?.let { it.copy(before = it.before.toList(), changes = it.changes.toList()) },
+            trade = transaction.trade?.let { it.copy(changes = it.changes.toList()) },
             worldChanges = transaction.worldChanges?.toList(),
             mine = transaction.mine?.detached(),
             upkeep = transaction.upkeep?.detached(),

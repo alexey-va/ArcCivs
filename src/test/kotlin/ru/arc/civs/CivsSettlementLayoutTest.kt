@@ -316,7 +316,7 @@ class CivsSettlementLayoutTest : FunSpec({
         current.building(road.id) shouldBe road
     }
 
-    test("real infrastructure owns nonoverlapping boxes and explicit open gate thresholds") {
+    test("real infrastructure owns nonoverlapping boxes and clear supported gate thresholds") {
         val city = layoutFixtureCity()
         val frame = CivsSettlementLayout.frame(city)
         val surface = layoutSurface(city, "flat")
@@ -341,24 +341,23 @@ class CivsSettlementLayoutTest : FunSpec({
             if (piece.type == BuildingType.WALL) piece.transit shouldBe emptyList()
             else {
                 piece.transit.map { civsTerrainKey(it.x, it.z) }.distinct().size shouldBe piece.transit.size
-                piece.transit.size shouldBe (piece.bounds.max.x - piece.bounds.min.x + 1) * (piece.bounds.max.z - piece.bounds.min.z + 1)
+                piece.transit.size shouldBe (piece.bounds.max.x - piece.bounds.min.x + 1) *
+                    (piece.bounds.max.z - piece.bounds.min.z + 1) - if (piece.type == BuildingType.GATE) 2 else 0
                 (piece.transit.size <= 256) shouldBe true
             }
             if (piece.type == BuildingType.GATE) {
                 val cells = piece.blocks.associate { it.position to it.after }
-                val source = frame.gates.single { it.passage.min.x == piece.bounds.min.x && it.passage.min.z == piece.bounds.min.z }
-                val horizontal = Math.floorMod(source.side + frame.rotation / 90, 2) == 0
-                val facing = if (horizontal) "north" else "east"
-                val openGate = "minecraft:${CivsSettlementLayout.wood(city.style)}_fence_gate[facing=$facing,in_wall=false,open=true,powered=false]"
-                for (feet in piece.transit) for (dy in 0..3) {
-                    val leaf = if (horizontal) feet.z == source.center.z else feet.x == source.center.x
-                    cells[feet.copy(y = feet.y + dy)] shouldBe if (dy == 0 && leaf) openGate else "minecraft:air"
-                }
-                val expectedLeaves = piece.transit.count { if (horizontal) it.z == source.center.z else it.x == source.center.x }
-                val captured = CivPlacementPlan(piece.id, city.id, city.worldId, CivsInfrastructure.building(piece),
+                val building = CivsInfrastructure.building(piece)
+                CivsInfrastructureRebuild.stage(building) shouldBe 1
+                CivsGateRefit.validTransit(building) shouldBe true
+                piece.blocks.none { it.after.contains("_fence_gate[") } shouldBe true
+                for (feet in piece.transit) for (dy in 0..2)
+                    cells[feet.copy(y = feet.y + dy)] shouldBe "minecraft:air"
+                val captured = CivPlacementPlan(piece.id, city.id, city.worldId, building,
                     piece.blocks.filter { it.after != "minecraft:barrier" }.map { CivPlanBlock(it.position, "minecraft:air", it.after) })
                 ru.arc.paper.testing.MockBukkitTestRuntime.open().use {
-                    CivsMaterials.required(captured)["${CivsSettlementLayout.wood(city.style).uppercase()}_FENCE_GATE"] shouldBe expectedLeaves.toLong()
+                    CivsMaterials.required(captured)["${CivsSettlementLayout.wood(city.style).uppercase()}_FENCE_GATE"] shouldBe null
+                    (CivsMaterials.required(captured).getValue("${CivsSettlementLayout.wood(city.style).uppercase()}_LOG") > 0L) shouldBe true
                 }
             }
         }
@@ -418,6 +417,52 @@ class CivsSettlementLayoutTest : FunSpec({
         }
     }
 
+    test("low walls close all reserved corner shoulders when generated or rebuilt at any hall rotation") {
+        fun shifted(p: CivPosition) = p.copy(x = p.x + 101, z = p.z - 57)
+        for (rotation in listOf(0, 90, 180, 270)) for (stage in 1..2) {
+            val base = layoutFixtureCity(rotation)
+            val city = base.copy(center = shifted(base.center), autonomy = CivAutonomy(layoutHalfWidth = 32),
+                buildings = base.buildings.map { it.copy(level = stage, anchor = shifted(it.anchor),
+                    bounds = CivBox(shifted(it.bounds.min), shifted(it.bounds.max)), entrance = shifted(it.entrance)) })
+            val frame = CivsSettlementLayout.frame(city)
+            val fresh = CivsSettlementLayout.infrastructure(city, frame, layoutSurface(city, "flat"), emptyList())
+            fresh.rejected shouldBe emptyMap()
+            val walls = fresh.pieces.filter { it.type == BuildingType.WALL }
+            val cells = walls.flatMap { it.blocks }.associate { it.position to it.after }
+            val legacy = walls.associate { piece -> piece.id to CivsInfrastructure.building(piece.copy(profileStage = null))
+                .copy(phase = BuildingPhase.ACTIVE) }
+            val oldCity = city.copy(buildings = city.buildings + legacy.values)
+            for (x in listOf(-32, 32)) for (z in listOf(-31, 31)) {
+                val local = when (rotation) {
+                    90 -> CivPosition(-z, 65, x); 180 -> CivPosition(-x, 65, -z)
+                    270 -> CivPosition(z, 65, -x); else -> CivPosition(x, 65, z)
+                }
+                val feet = shifted(local)
+                val piece = walls.single { CivsAutonomousGeometry.horizontalContains(it.bounds, feet) }
+                val before = CivPlacementPlan(piece.id, city.id, city.worldId,
+                    legacy.getValue(piece.id).copy(phase = BuildingPhase.CONSTRUCTING), piece.blocks.map {
+                        CivPlanBlock(it.position, "minecraft:air", if (it.position.y <= 67) "minecraft:stone_bricks" else "minecraft:air")
+                    }, capturedSha256 = "a".repeat(64))
+                val rebuilt = CivsInfrastructureRebuild.proposal(oldCity, before, emptyList())
+                rebuilt.building.bounds shouldBe piece.bounds
+                val after = rebuilt.blocks.associate { it.position to it.after }
+                for (dy in 0..1) {
+                    (cells[feet.copy(y = feet.y + dy)]?.substringBefore('[') in
+                        setOf("minecraft:oak_planks", "minecraft:oak_log", "minecraft:stone_bricks")) shouldBe true
+                    after[feet.copy(y = feet.y + dy)] shouldBe cells[feet.copy(y = feet.y + dy)]
+                }
+            }
+            if (rotation == 0) System.getenv("CIVS_LAYOUT_DIAGNOSTIC_DIR")?.let { directory ->
+                val corner = walls.flatMap { it.blocks }.filter { it.position.x >= city.center.x + 26 && it.position.z >= city.center.z + 26 }
+                val box = CivBox(CivPosition(corner.minOf { it.position.x }, 64, corner.minOf { it.position.z }),
+                    CivPosition(corner.maxOf { it.position.x }, 68, corner.maxOf { it.position.z }))
+                val path = Path.of(directory).resolve("wall-corner-stage$stage.json")
+                Files.createDirectories(path.parent)
+                Files.writeString(path, Gson().toJson(mapOf("name" to "wall-corner-stage$stage", "bounds" to box, "after" to corner)))
+            }
+        }
+    }
+
     test("wall subdivision reports only final unsafe slope columns and their samples") {
         val city = layoutFixtureCity()
         val strip = CivBox(CivPosition(0, 64, 30), CivPosition(23, 64, 32))
@@ -448,9 +493,7 @@ class CivsSettlementLayoutTest : FunSpec({
                 val piece = plan.pieces.single { it.type == BuildingType.GATE &&
                     it.bounds.min.x == gate.passage.min.x && it.bounds.min.z == gate.passage.min.z }
                 val horizontal = Math.floorMod(gate.side + frame.rotation / 90, 2) == 0
-                val facing = if (horizontal) "north" else "east"
-                val expected = "minecraft:${CivsSettlementLayout.wood(style)}_fence_gate[facing=$facing,in_wall=false,open=true,powered=false]"
-                val leaves = piece.blocks.filter { it.after.contains("_fence_gate[") }
+                val wood = CivsSettlementLayout.wood(style)
                 val span = if (horizontal) gate.passage.max.x - gate.passage.min.x + 1
                     else gate.passage.max.z - gate.passage.min.z + 1
                 val cells = piece.blocks.associate { it.position to it.after }
@@ -460,42 +503,27 @@ class CivsSettlementLayoutTest : FunSpec({
                     CivPosition(piece.bounds.min.x + depth, y, piece.bounds.min.z + across)
                 val fullTransit = (0 until span).flatMap { across -> (0..4).map { depth -> point(across, floorY + 1, depth) } }.toSet()
                 fullTransit.forEach { cells[it.copy(y = floorY)] shouldBe "minecraft:cobblestone" }
-                if (style == "caledonia") {
-                    CivsGateRefit.profileVersion(CivsInfrastructure.building(piece)) shouldBe 3
-                    leaves shouldBe emptyList()
-                    val posts = listOf(0, span - 1).flatMap { across -> (1..3).map { depth -> point(across, floorY + 1, depth) } }.toSet()
-                    posts.size shouldBe 6
-                    piece.transit.toSet() shouldBe fullTransit - posts
-                    for (feet in piece.transit) for (dy in 0..2)
-                        cells[feet.copy(y = feet.y + dy)] shouldBe "minecraft:air"
-                    posts.forEach { foot ->
-                        cells[foot] shouldBe "minecraft:stone_bricks"
-                        for (y in foot.y + 1 until piece.bounds.max.y - 1)
-                            cells[foot.copy(y = y)] shouldBe "minecraft:dark_oak_log[axis=y]"
-                    }
-                    for (across in 0 until span) for (depth in 1..3) {
-                        cells[point(across, piece.bounds.max.y - 1, depth)] shouldBe
-                            "minecraft:dark_oak_log[axis=${if (horizontal) "x" else "z"}]"
-                        val roofFacing = if (horizontal) { if (depth == 1) "south" else "north" }
-                            else { if (depth == 1) "east" else "west" }
-                        cells[point(across, piece.bounds.max.y, depth)] shouldBe if (depth == 2)
-                            "minecraft:dark_oak_slab[type=top,waterlogged=false]" else
-                            "minecraft:dark_oak_stairs[facing=$roofFacing,half=bottom,shape=straight,waterlogged=false]"
-                    }
-                } else {
-                    CivsGateRefit.profileVersion(CivsInfrastructure.building(piece)) shouldBe 0
-                    leaves.size shouldBe span
-                    piece.transit.toSet() shouldBe fullTransit
-                    leaves.forEach { leaf ->
-                        leaf.after shouldBe expected
-                        piece.transit.any { it == leaf.position } shouldBe true
-                    }
-                    for (feet in piece.transit) for (dy in 0..3) {
-                        val crossing = if (horizontal) feet.z == gate.center.z else feet.x == gate.center.x
-                        cells[feet.copy(y = feet.y + dy)] shouldBe if (dy == 0 && crossing) expected else "minecraft:air"
-                    }
-                    for (across in 0 until span) cells[point(across, piece.bounds.max.y, 2)] shouldBe
-                        if (style == "nordic") "minecraft:cobblestone" else "minecraft:stone_bricks"
+                val building = CivsInfrastructure.building(piece)
+                CivsInfrastructureRebuild.stage(building) shouldBe 1
+                CivsGateRefit.validTransit(building) shouldBe true
+                piece.blocks.none { it.after.contains("_fence_gate[") } shouldBe true
+                val posts = listOf(0, span - 1).map { point(it, floorY + 1, 2) }.toSet()
+                piece.transit.toSet() shouldBe fullTransit - posts
+                for (feet in piece.transit) for (dy in 0..2)
+                    cells[feet.copy(y = feet.y + dy)] shouldBe "minecraft:air"
+                posts.forEach { foot ->
+                    cells[foot] shouldBe if (style == "nordic") "minecraft:cobblestone" else "minecraft:stone_bricks"
+                    for (y in foot.y + 1 until piece.bounds.max.y - 1)
+                        cells[foot.copy(y = y)] shouldBe "minecraft:${wood}_log[axis=y]"
+                }
+                for (across in 0 until span) for (depth in 1..3) {
+                    cells[point(across, piece.bounds.max.y - 1, depth)] shouldBe
+                        "minecraft:${wood}_log[axis=${if (horizontal) "x" else "z"}]"
+                    val roofFacing = if (horizontal) { if (depth == 1) "south" else "north" }
+                        else { if (depth == 1) "east" else "west" }
+                    cells[point(across, piece.bounds.max.y, depth)] shouldBe if (depth == 2)
+                        "minecraft:${wood}_slab[type=top,waterlogged=false]" else
+                        "minecraft:${wood}_stairs[facing=$roofFacing,half=bottom,shape=straight,waterlogged=false]"
                 }
             }
         }
@@ -658,12 +686,11 @@ class CivsSettlementLayoutTest : FunSpec({
                 }) }) })
         }
         val buildings = first.pieces.map { piece ->
-            CivBuilding(piece.id, piece.type, 1, piece.bounds.min, 0, "fixture/infrastructure/${piece.id}",
-                piece.bounds, piece.entrance, BuildingPhase.ACTIVE, transit = piece.transit.takeIf { it.isNotEmpty() })
+            CivsInfrastructure.building(piece).copy(phase = BuildingPhase.ACTIVE)
         }
         val completed = city.copy(buildings = city.buildings + buildings)
         val plans = first.pieces.map { piece ->
-            CivPlacementPlan(layoutId("plan-${piece.id}"), city.id, city.worldId,
+            CivPlacementPlan(piece.id, city.id, city.worldId,
                 requireNotNull(completed.building(piece.id)), piece.blocks.map { CivPlanBlock(it.position, "minecraft:air", it.after) })
         }
         val ownColumns = first.pieces.flatMap { it.blocks }.groupBy { civsTerrainKey(it.position.x, it.position.z) }

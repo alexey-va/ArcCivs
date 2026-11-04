@@ -39,7 +39,7 @@ internal object CivsConstructionRules {
             CivsRules.check(existing.phase == BuildingPhase.ACTIVE && existing.type == plan.type &&
                 existing.entrance == plan.entrance && existing.rotation == plan.rotation, "invalid-building")
             CivsRules.check(plan.level == existing.level + 1 && plan.level <= plan.type.maxLevel ||
-                CivsPlanBoardBlueprint.refit(existing, plan), "invalid-level")
+                CivsPlanBoardBlueprint.refit(existing, plan) || CivsInfrastructureRebuild.refit(existing, plan), "invalid-level")
         }
         CivsRules.check(!CivsSnapshotValidation.intersectsApproach(city, plan), "building-overlap")
         CivsRules.check(CivsSnapshotValidation.validBuilding(city, plan) && city.buildings.none { it.id != plan.id && it.bounds.overlaps(plan.bounds) }, "invalid-building")
@@ -163,6 +163,7 @@ internal object CivsConstructionRules {
         CivsRules.check(city.radius <= Int.MAX_VALUE - growth, "arithmetic-overflow")
         return CivsRules.changed(city, city.copy(radius = city.radius + growth,
             buildings = city.buildings.map { if (it.id == finished.id) finished else it }, construction = null,
+            roadRouteOverrides = CivsInfrastructureRebuild.finishedRoutes(city, previous, finished),
             mineProgress = if (mineUpgrade)
                 city.mineProgress.orEmpty() - finished.id.toString() else city.mineProgress,
             minePlans = if (mineUpgrade) (city.minePlans.orEmpty() - finished.id.toString()).let {

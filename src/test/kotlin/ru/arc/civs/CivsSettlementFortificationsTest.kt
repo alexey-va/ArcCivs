@@ -101,6 +101,9 @@ class CivsSettlementFortificationsTest : FunSpec({
         val forecast = CivsSettlementLayout.infrastructure(projected, frame, surface, routes, forecastFortifications = ids)
         forecast.rejected shouldBe emptyMap()
         forecast.perimeterClosed shouldBe true
+        forecast.pieces.filter { it.type == BuildingType.GATE }.all {
+            CivsGateRefit.validTransit(CivsInfrastructure.building(it))
+        } shouldBe true
         (forecast.pieces.size <= 128) shouldBe true
         forecast.pieces.all { piece -> forts.none { CivsAutonomousGeometry.overlaps(piece.bounds, it.envelope) } } shouldBe true
         forecast.pieces.withIndex().all { (index, a) -> forecast.pieces.drop(index + 1).none {

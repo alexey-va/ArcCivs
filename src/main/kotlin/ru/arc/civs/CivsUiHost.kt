@@ -79,6 +79,9 @@ internal fun civsMovedEntrance(point: CivPosition, direction: CivsPreviewMove, f
 
 /** Main-thread UI port. Every mutation validates authority in its owning service. */
 interface CivsUiHost {
+    fun tradeView(player: Player, cityId: UUID): CivTradeView = throw CivsRejection("trade-market-unavailable")
+    fun trade(player: Player, cityId: UUID, offer: CivTradeOffer): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("trade-market-unavailable"))
     fun research(player: Player, cityId: UUID): CivResearchView = throw CivsRejection("not-authorized")
     fun beginResearch(player: Player, cityId: UUID, research: CivResearchId): CompletableFuture<Unit> =
         CompletableFuture.failedFuture(CivsRejection("not-authorized"))

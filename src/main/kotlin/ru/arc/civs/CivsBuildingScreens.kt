@@ -90,6 +90,8 @@ internal fun CivsUi.showBuildingInspection(player: Player, cityId: UUID, buildin
             add(button(player, "industry", "industry.open", STOCK) { showIndustryBuilding(player, cityId, buildingId) })
         if (building.type == BuildingType.FORESTER && isAdmin(player))
             add(button(player, "production", "forestry.open", LAND) { showForesterSpecies(player, cityId, buildingId) })
+        if (building.type in setOf(BuildingType.TOWN_HALL, BuildingType.WAREHOUSE) && hasTrade(city))
+            add(button(player, "trade", "trade.open", STOCK) { showTrade(player, cityId) })
         add(button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) }
             .copy(tooltip = tr(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help")))
     }, reopen = { showBuildingInspection(player, cityId, buildingId) }, cityId = city.id)

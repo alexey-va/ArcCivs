@@ -51,7 +51,7 @@ internal object CivsWallInfill {
         val strip = CivsAutonomousGeometry.union(wall.bounds, footprint)
         val frame = CivsSettlementLayout.frame(city).copy(wallObstacles = listOf(strip), gates = emptyList())
         val generated = CivsSettlementLayout.infrastructure(city, frame, buildable, routes,
-            accepted = access.infrastructure, pavingRoutes = emptyList(), retainedRoutes = routes)
+            accepted = access.infrastructure, pavingRoutes = emptyList(), retainedRoutes = routes, wallProfileStage = 0)
         val piece = generated.pieces.filter { city.building(it.id) == null }.singleOrNull()
             ?: throw CivsRejection("wall-infill-unavailable", generated.rejected.mapValues { it.value.toString() })
         check(piece.type == BuildingType.WALL && sameColumns(piece.bounds, footprint) &&

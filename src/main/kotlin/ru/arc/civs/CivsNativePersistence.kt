@@ -60,7 +60,7 @@ internal class CivsNativePersistence(
         val transfer = transaction.collected
         val containerChanges = if (transaction.containerRelocation != null) transaction.containerRelocation.containers.flatMap { holder ->
             (0 until STORAGE_SLOTS).map { slot -> CivNativeContainerChange(holder.position, holder.type, slot, holder.before[slot], holder.after[slot]) }
-        } else if (transaction.cargoDropoff != null || transaction.cargoPickup != null) transaction.changes.map { change ->
+        } else if (transaction.cargoDropoff != null || transaction.cargoPickup != null || transaction.trade != null) transaction.changes.map { change ->
             CivNativeContainerChange(change.container, change.containerType, change.slot,
                 change.before?.let { CivResidentItem(it.material, it.amount) },
                 change.after?.let { CivResidentItem(it.material, it.amount) })

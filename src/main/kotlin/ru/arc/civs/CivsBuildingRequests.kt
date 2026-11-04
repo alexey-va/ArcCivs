@@ -255,7 +255,7 @@ internal class CivsBuildingRequests(
         val layout = proposed.autonomy?.plan
         if (layout != null) {
             CivsSettlementPlans.validate(proposed, layout)
-            rejectIf(!CivsVillageSiteScoring.completeProfile(layout), "autonomy-no-site")
+            rejectIf(!CivsSettlementGrowth.covers(proposed, layout), "autonomy-no-site")
         }
         rejectIf(records.cities.values.any { it.name.equals(proposed.name, ignoreCase = true) }, "city-name-conflict")
         checkSettlementSpace(proposed.worldId, proposed.center)
@@ -529,6 +529,9 @@ internal class CivsBuildingRequests(
                                     authority.near(player, city.worldId, building.entrance)
                                 }
                                 controlInstallations.requirePresent(city.worldId, building)
+                                if (CivsInfrastructureRebuild.refit(building, target)) rejectIf(
+                                    requireNotNull(captured).blocks.associate { it.position to it.before } !=
+                                        sitePlan.blocks.associate { it.position to it.before }, "world-changed")
                                 startOrder(actor, records.cities.getValue(city.id), requireNotNull(captured).copy(capturedSha256 = sitePlan.capturedSha256), bytes)
                                     .whenCompleteSync(tasks) { _, orderFailure ->
                                         if (orderFailure == null && building.phase == BuildingPhase.ACTIVE) cleanupCaptured(designId)
@@ -575,8 +578,10 @@ internal class CivsBuildingRequests(
         }, executor).thenCompose { order ->
             store.saveSchematic(plan.id, bytes).thenCompose { store.savePlan(plan) }.thenCompose {
                 // Order captures are deleted on completion; keep the admitted access road with its building.
-                if (city.autonomy != null && plan.terrain != null)
-                    store.saveSchematic(building.id, bytes).thenCompose { store.savePlan(plan.copy(id = building.id)) }
+                if (city.autonomy != null && (plan.terrain != null || CivsInfrastructureRebuild.stage(building) > 0)) {
+                    val retained = CivsGateRefit.retainedPlanId(building)
+                    store.saveSchematic(retained, bytes).thenCompose { store.savePlan(plan.copy(id = retained)) }
+                }
                 else CompletableFuture.completedFuture(plan)
             }.thenApply { order }
         }.whenCompleteSync(tasks) { preparedOrder, failure ->
@@ -632,13 +637,18 @@ internal class CivsBuildingRequests(
         authority.reserveCity(city.id)
         val capture = runCatching {
             if (previous == null) world.captureAutonomousSite(city.id, city.owner, city.worldId, blueprint.building, blueprint.cells, design.terrain)
-            else world.captureSite(city.id, city.owner, city.worldId, blueprint.building, blueprint.cells, previous)
+            else world.captureSite(city.id, city.owner, city.worldId, blueprint.building, blueprint.cells, previous,
+                design.terrain.takeIf { design.infrastructureSource != null })
         }
             .getOrElse { authority.releaseCity(city.id); return CompletableFuture.failedFuture(it) }
         capture.whenCompleteSync(tasks) { captured, captureFailure ->
             if (captureFailure != null) { authority.releaseCity(city.id); result.completeExceptionally(captureFailure); return@whenCompleteSync }
             runCatching {
                 rejectIf(!authority.ready() || records.cities[city.id] != city || city.autonomy?.paused != false, "stale-development")
+                design.infrastructureSource?.let { source ->
+                    rejectIf(!CivsInfrastructureRebuild.refit(previous, blueprint.building) ||
+                        !CivsInfrastructureRebuild.matchesSource(source, requireNotNull(captured)), "world-changed")
+                }
                 expectedCapture?.let { expected ->
                     rejectIf(requireNotNull(captured).copy(id = expected.id, capturedSha256 = expected.capturedSha256) != expected ||
                         expected.capturedSha256 != blueprint.snapshot.fileSha256, "wall-infill-stale-preview")
@@ -652,6 +662,7 @@ internal class CivsBuildingRequests(
                     autonomy = queued.autonomy?.let { it.copy(layoutHalfWidth = it.layoutHalfWidth ?: CivsSettlementLayout.frame(city).halfWidth) },
                     pendingControls = if (control == null) queued.pendingControls else queued.pendingControls.orEmpty() + control))
                 val plan = requireNotNull(captured).copy(id = if (previous == null) blueprint.building.id
+                    else if (CivsInfrastructureRebuild.refit(previous, blueprint.building)) queuedDesignId(previous)
                     else queuedUpgradeId(previous.id, blueprint.building.level), capturedSha256 = blueprint.snapshot.fileSha256)
                 authority.saveCapturedCity(plan, blueprint.sourceBytes, next).whenCompleteSync(tasks) { saved, saveFailure ->
                     if (saveFailure != null) {

@@ -36,9 +36,17 @@ New building types follow the ordinary validation and recipe rules.
 The maximum profile contains 34 ordinary buildings: 16 houses, two foresters,
 two quarries, three farms, two warehouses and the remaining civic/industry types.
 Town hall adult limits are 5/12/24; four nursery places at the highest level
-still require real beds. New founding defaults to radius 128 and an unaccepted
-layout may use a 74-block half-width. Saved territory, adopted parcels, captured
-work and paid infrastructure keep their geometry. A failed bounded extension
+still require real beds. New founding defaults to a protected radius of 96 and
+a 32-block wall half-width, enlarged only when the actual hall footprint needs
+its eight-block approach margin. Runtime planning reserves the actual buildings
+and one next ordinary goal rather than the maximum 34-building forecast. When
+that plot no longer fits, the same finite planner tries eight-block outer
+quarters up to half-width 74. Only a successful ordinary city save adopts the
+new frame; its outer walls and gates are then paid and built by normal jobs.
+Saved towns never shrink. Accepted parcels, captured work and paid inner walls
+keep their geometry and gate passages; only unpaid future plots may be revised
+for a larger quarter. New mines must lie outside the current outer wall, while
+an older mine may remain inside a later quarter. A failed bounded extension
 does not invalidate the older town or prevent a legal existing upgrade.
 
 Caledonia fortifications use one reviewed composite recipe per paid decoration:
@@ -569,8 +577,10 @@ warehouse slots for explicit assignment. Legacy stock-only cities
 retain hall builders; so do migrated full cities without room for a hut.
 Population remains4/8/12 by hall level,12maximum; houses add2/4/6beds. Building
 limit16 and native NPC limit48 remain. Completed hall upgrades expand the actual
-persisted radius by32, including96→128→160 for new default cities. New founding
-reserves future maximum spacing; existing cities keep their actual radius.
+persisted protection radius by32, including96→128→160 for new default cities.
+Visible quarters grow with actual building demand independently of that reserve.
+New founding reserves future maximum spacing; existing cities keep their actual
+radius and accepted geometry.
 
 Materials pages show8 rows and provide one explicit player supply action plus
 an admin/Creative deficit grant. Both subtract existing builder stock and fit physical
@@ -1267,3 +1277,9 @@ Inside its mine plan the worker may clear an interfering LAVA cell through a
 single-cell securing receipt. That receipt grants no items, equipment changes or
 excavation ordinal; owner/Lands, loaded chunks, reach and native receipt checks
 remain required. WATER remains an ordinary hazard boundary.
+
+## Settlement commerce
+
+Players may trade plain native resources near an active warehouse, with the town hall as fallback. The market buys only current settlement shortages and sells only stock beyond construction and production reserves. A physical emerald in its native containers pays for each quoted bundle; the city never issues emeralds or grants an opening purse. The ask supplies half the bid quantity. Vault, tokens and player XP are unchanged.
+
+The existing inventory journal persists the exact quote and changes in up to36 player slots and at most16 local native holders before mutation. Native storage and player slots are locked and conserved together; retries reuse accepted terms, including after restart, and cannot pay again. Public market access is separate from membership/container-edit authority. Distance, fresh supply evidence, actual stock and available slots are checked at admission.

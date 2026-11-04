@@ -14,7 +14,7 @@ class CivsSettingsTest : FunSpec({
         settings.navigation.nativeOperationsPerTick shouldBe 10000
         settings.worksites shouldBe CivsWorksiteSettings()
         settings.maximumNpcs shouldBe 64
-        settings.radius shouldBe 128
+        settings.radius shouldBe 96
     }
 
     test("a configured seven-town population fits while old actor limits and the default remain valid") {

@@ -121,6 +121,7 @@ internal class CivsAutonomousDevelopment(
     private val autonomyWarnAt = mutableMapOf<UUID, Long>()
     private val autonomousAccessChecked = mutableMapOf<UUID, List<CivBuilding>>()
     private val autonomousAccessRetryAt = mutableMapOf<UUID, Long>()
+    private val infrastructureRebuildRetryAt = mutableMapOf<UUID, Long>()
     private var autonomyCursor = 0
     private var nextAutonomyAt = 0L
 
@@ -150,6 +151,7 @@ internal class CivsAutonomousDevelopment(
         unpaidRecoveryCursors.clear()
         autonomousAccessChecked.clear()
         autonomousAccessRetryAt.clear()
+        infrastructureRebuildRetryAt.clear()
     }
 
     fun cancel() {
@@ -223,6 +225,7 @@ internal class CivsAutonomousDevelopment(
             it.constructionQueue.orEmpty().isEmpty() && now() >= (autonomyRetryAt[it.id] ?: 0) && settlementActive(it) }
         if (candidates.isEmpty()) return
         val city = candidates[Math.floorMod(autonomyCursor++, candidates.size)]
+        if (pulseInfrastructureRebuild(city)) return
         val capacity = if (storageCapacityPressure(city)) CivsAutonomy.capacityGoal(city, blueprints::maximumLevel) else null
         val ordinary = capacity ?: CivsAutonomy.nextGoal(city, blueprints::maximumLevel)
         val adopted = CivsSettlementPlans.current(city)
@@ -246,10 +249,16 @@ internal class CivsAutonomousDevelopment(
             developmentFinished(city.id)
             return
         }
-        val extendPlan = adopted != null && existing == null && !infrastructure &&
-            CivsSettlementPlans.next(city, goal.type) == null && CivsSettlementPlans.needsExtension(city)
+        // Legacy planless towns keep their ordinary one-goal search. New founding records its hall-sized quarter.
+        val compactFounding = city.autonomy?.layoutHalfWidth == CivsSettlementGrowth.initialHalfWidth(city)
+        val extendPlan = ordinary != null && existing == null && !infrastructure && (adopted != null || compactFounding) &&
+            (adopted == null || CivsSettlementPlans.next(city, goal.type) == null && CivsSettlementPlans.needsExtension(city))
         if (extendPlan && now() < (autonomyPlanRetryAt[city.id] ?: 0L)) return
         if (extendPlan && now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
+            if (!developmentAdmission(city)) {
+                autonomyFailed(city.id, goal, CivsRejection("city-busy"))
+                return
+            }
             val request = UUID.randomUUID()
             val key = civsPlanBoardLayoutKey(city)
             autonomyRequests[city.id] = request
@@ -273,6 +282,7 @@ internal class CivsAutonomousDevelopment(
                     autonomyRequests.remove(city.id, request)
                     if (saveFailure != null) autonomyFailed(city.id, goal, saveFailure)
                     else {
+                        developmentFinished(city.id)
                         autonomyProgress.remove(city.id)
                         autonomyRetryAt.remove(city.id)
                         autonomyPlanRetryAt.remove(city.id)
@@ -299,7 +309,8 @@ internal class CivsAutonomousDevelopment(
             "type" to goal.type, "level" to goal.targetLevel, "stock" to city.stock, "cost" to goal.cost)
         val reservedPlots = if (!infrastructure && existing == null && adopted != null &&
             unpaidPlot(city, adopted, goal.type) != null) adopted.plots.filter {
-                it.building.type == goal.type && it.building.level == 1 && city.building(it.building.id) == null
+                it.building.type == goal.type && it.building.level == 1 && city.building(it.building.id) == null &&
+                    (goal.type != BuildingType.QUARRY || CivsSettlementGrowth.outside(city, it.envelope))
             } else emptyList()
         val reservedLayoutKey = if (reservedPlots.isEmpty()) null else civsPlanBoardLayoutKey(city)
         var nextReserved = 1
@@ -409,7 +420,7 @@ internal class CivsAutonomousDevelopment(
         if (city.autonomy?.paused != false || !CivsAutoStorageMigration.ready(city) || city.pendingDeletion != null ||
             city.construction != null || city.constructionQueue.orEmpty().isNotEmpty() ||
             city.pendingControls.orEmpty().isNotEmpty() || CivsSettlementPlans.current(city) != plan ||
-            !CivsVillageSiteScoring.completeProfile(plan) || type !in CivsAutonomy.profile || type == BuildingType.TOWN_HALL ||
+            !CivsSettlementGrowth.covers(city, plan) || type !in CivsAutonomy.profile || type == BuildingType.TOWN_HALL ||
             city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL } == null)
             return null
         val next = CivsAutonomy.nextGoal(city, blueprints::maximumLevel) ?: return null
@@ -477,8 +488,9 @@ internal class CivsAutonomousDevelopment(
                     current()
                     rejectIf(unpaidPlot(fresh, oldPlan, goal.type)?.building?.id != oldPlot.building.id || civsPlanBoardLayoutKey(fresh) != key ||
                         accepted.revision != oldPlan.revision + 1 || accepted.halfWidth != oldPlan.halfWidth ||
-                        !CivsVillageSiteScoring.completeProfile(accepted) ||
-                        accepted.plots.count { it.building.type != BuildingType.DECORATION } != CivsAutonomy.completeProfile.size ||
+                        !CivsSettlementGrowth.covers(fresh, accepted) ||
+                        accepted.plots.count { it.building.type != BuildingType.DECORATION } !=
+                            oldPlan.plots.count { it.building.type != BuildingType.DECORATION } ||
                         accepted.plots.singleOrNull { it.building.id == oldPlot.building.id }?.building !=
                             replacement.blueprint.building.copy(phase = BuildingPhase.SITE) ||
                         accepted.routes[oldPlot.building.id.toString()] != replacement.terrain?.route, "stale-development")
@@ -503,6 +515,52 @@ internal class CivsAutonomousDevelopment(
     private val decorationCursor = linkedMapOf<UUID, Int>()
 
     /** Optional small civic scenery follows the complete essential town and its paid infrastructure. */
+    /** Replace one old fortification through the ordinary durable queue; failed pieces never starve growth. */
+    private fun pulseInfrastructureRebuild(city: Settlement): Boolean {
+        infrastructureRebuildRetryAt.keys.retainAll(cities.values.flatMap { it.buildings }.mapTo(hashSetOf()) { it.id })
+        val building = city.buildings.filter { CivsInfrastructureRebuild.needsRefit(city, it) &&
+            now() >= (infrastructureRebuildRetryAt[it.id] ?: 0L) }
+            .minWithOrNull(compareBy<CivBuilding> { if (it.type == BuildingType.GATE) 0 else 1 }
+                .thenBy { it.bounds.min.x }.thenBy { it.bounds.min.z }) ?: return false
+        if (!developmentAdmission(city)) return false
+        val request = UUID.randomUUID()
+        val layout = civsPlanBoardLayoutKey(city)
+        autonomyRequests[city.id] = request
+        autonomyProgress[city.id] = CivsAutonomyView("planning", building.type, building.level)
+        val preparing = runCatching { loadAutonomousPlans(city).thenCompose { plans ->
+            val source = plans.singleOrNull { it.building.id == building.id }
+                ?: throw CivsRejection("gate-refit-source-missing")
+            autonomousPlacement.rebuildInfrastructure(city, source, plans)
+        } }.getOrElse { CompletableFuture.failedFuture(it) }
+        preparing.whenCompleteSync(tasks) prepared@ { design, failure ->
+            if (autonomyRequests[city.id] != request) return@prepared
+            fun finished(error: Throwable?) {
+                autonomyRequests.remove(city.id, request)
+                developmentFinished(city.id)
+                if (closed) return
+                if (error != null) {
+                    infrastructureRebuildRetryAt[building.id] = now() + 300_000L
+                    autonomyFailed(city.id, CivsAutonomy.goal(city, building.type, building.level, building.id), error)
+                } else {
+                    infrastructureRebuildRetryAt.remove(building.id)
+                    autonomyProgress[city.id] = CivsAutonomyView("queued", building.type, building.level)
+                    CivsDiagnostics.event("autonomous_fortification_rebuild_queued", "city" to city.id,
+                        "building" to building.id, "type" to building.type, "stage" to CivsInfrastructureRebuild.stage(city))
+                    pulseConstruction()
+                }
+            }
+            if (failure != null) { finished(failure); return@prepared }
+            runCatching { afterCityAvailable(city.id) {
+                val current = cities[city.id] ?: throw CivsRejection("no-city")
+                rejectIf(!ready() || autonomyRequests[city.id] != request || current.autonomy?.paused != false ||
+                    civsPlanBoardLayoutKey(current) != layout || current.construction != null ||
+                    current.constructionQueue.orEmpty().isNotEmpty() || !settlementActive(current), "stale-development")
+                commitAutonomousDesign(current, requireNotNull(design))
+            } }.onSuccess { it.whenCompleteSync(tasks) { _, error -> finished(error) } }.onFailure(::finished)
+        }
+        return true
+    }
+
     private fun pulseAutonomousDecoration(city: Settlement) {
         decorationCursor.keys.retainAll(cities.keys)
         if (city.autonomy?.paused != false || city.construction != null || city.constructionQueue.orEmpty().isNotEmpty() ||

@@ -53,6 +53,68 @@ import java.util.UUID
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
+class CivsTradeUiTest : FunSpec({
+    test("public village trade keeps player direction exact bundles and one mutation per visit") {
+        for (language in listOf("ru", "en")) withUi(decorationFont = "arc:dialog_ui_preview") { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            val personal = settlement(h.player)
+            val raw = autonomousSettlement(h.player, "Oakford")
+            val village = raw.copy(inventory = CivInventory(CivStorageMode.PHYSICAL), buildings = raw.buildings.map {
+                if (it.type == BuildingType.TOWN_HALL) it.copy(control = it.anchor) else it
+            })
+            h.city = personal
+            every { h.host.settlements() } returns listOf(personal, village)
+            val sell = CivTradeOffer("OAK_LOG", CivTradeDirection.SELL, 32)
+            val buy = CivTradeOffer("BREAD", CivTradeDirection.BUY, 8)
+            every { h.host.tradeView(h.player, village.id) } returns CivTradeView(village.id, village.name,
+                village.buildings.first().id, 12, listOf(buy, sell))
+            val pending = CompletableFuture<Unit>()
+            every { h.host.trade(h.player, village.id, sell) } returns pending
+            h.ui.openVillages(h.player)
+            h.click("trade_0")
+            h.screen.id shouldBe "civs.trade"
+            h.body() shouldContain "12"
+            h.screen.buttons.map { it.id.value }.containsAll(listOf("buy", "sell")) shouldBe true
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "trade-overview-$language", h.screen, listOf(588, 380)) }
+            h.click("sell")
+            h.body() shouldContain if (language == "ru") "Продать поселению" else "Sell to the settlement"
+            plainText(h.screen.buttons.single { it.id.value == "offer_0" }.label) shouldContain "×32"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "trade-sell-$language", h.screen, listOf(588, 380)) }
+            val offerScreen = h.screen
+            h.click("offer_0"); h.click("offer_0", screen = offerScreen)
+            verify(exactly = 1) { h.host.trade(h.player, village.id, sell) }
+            pending.complete(Unit); h.paper.performTicks(2)
+            h.body() shouldContain if (language == "ru") "Получен 1 изумруд" else "Received 1 emerald"
+            h.city shouldBe personal
+            verify(exactly = 0) { h.host.inspectBuilding(any(), any(), any()) }
+        }
+    }
+
+    test("unavailable and refreshing markets show the next useful action without purchase controls") {
+        withUi(decorationFont = "arc:dialog_ui_preview") { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru"))
+            val raw = settlement(h.player)
+            val city = raw.copy(inventory = CivInventory(CivStorageMode.PHYSICAL), buildings = raw.buildings.map {
+                if (it.type == BuildingType.TOWN_HALL) it.copy(control = it.anchor) else it
+            })
+            h.city = city
+            every { h.host.tradeView(h.player, city.id) } throws CivsRejection("trade-too-far")
+            h.open(); h.click("trade")
+            h.body() shouldContain "16 блоков"
+            h.body() shouldContain "Подойдите к месту торговли"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            every { h.host.tradeView(h.player, city.id) } returns CivTradeView(city.id, city.name,
+                city.buildings.first().id, 0, emptyList(), refreshing = true)
+            h.click("refresh")
+            h.body() shouldContain "Проверяем запасы"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            verify(exactly = 0) { h.host.trade(any(), any(), any()) }
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "trade-refreshing-ru", h.screen, listOf(588, 380)) }
+        }
+    }
+})
+
 class CivsVillageVisitUiTest : FunSpec({
     test("public village visits keep the personal city and target the selected village once") {
         for (language in listOf("ru", "en")) withUi(realHistory = true) { h ->
@@ -491,7 +553,7 @@ class CivsUiTest : FunSpec({
                 h.player.setLocale(Locale.forLanguageTag(locale))
                 h.city = settlement(h.player)
                 h.open()
-                h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "upgrade", "hall_inventory", "guide", "visit_villages")
+                h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "trade", "upgrade", "hall_inventory", "guide", "visit_villages")
                 h.body().codePoints().anyMatch { it in 0xF9000..0xF9FFF } shouldBe font.isNotEmpty()
                 h.screen.body.count { plainText(it.text).codePoints().anyMatch { point -> point in 0xFA300..0xFAF1B } } shouldBe
                     if (font.isEmpty()) 0 else 1
@@ -3189,7 +3251,7 @@ class CivsUiTest : FunSpec({
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             h.city = settlement(h.player)
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "upgrade", "hall_inventory", "guide", "visit_villages")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "trade", "upgrade", "hall_inventory", "guide", "visit_villages")
             plainText(h.screen.buttons.first().label) shouldBe "Управление поселением ›"
             h.click("management")
             h.screen.id shouldBe "civs.management"
@@ -4288,6 +4350,7 @@ private fun exportUiActionBar(directory: String, id: String, component: Componen
 }
 
 private fun uiSourceHashes(): Map<String, String> = listOf(
+    "src/main/kotlin/ru/arc/civs/CivsTradeScreens.kt", "src/main/kotlin/ru/arc/civs/CivsTrade.kt",
     "src/main/kotlin/ru/arc/civs/CivsUi.kt", "src/main/kotlin/ru/arc/civs/CivsText.kt", "src/main/resources/locales.yml",
     "src/main/kotlin/ru/arc/civs/CivsDialogPresentation.kt", "src/main/kotlin/ru/arc/civs/CivsResearchScreens.kt",
     "src/main/kotlin/ru/arc/civs/CivsResearch.kt", "src/main/resources/config.yml",

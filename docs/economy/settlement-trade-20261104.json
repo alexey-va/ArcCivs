@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "title": "ArcCivs finite physical emerald treasury trades, lab",
+  "participants": [
+    1,
+    5,
+    15
+  ],
+  "assumptions": [
+    "Activity assumptions, not measured: low/base/high 2/8/24 trades per active hour, 0.5/1/2 hours per player-day.",
+    "Every trade transfers exactly one existing emerald between player and one native settlement treasury; no issued currency, initial funding, top-up or virtual purse.",
+    "All 26 sell-to-city bundles are priced one emerald; city-to-player quantity is exactly half. Rate map below. Existing outstanding demands and native reserves cap offers.",
+    "No currency conversion to Vault/tokens, no XP reward. Same-material round trip loses half of the goods. Logs/planks ratio4, wheat/bread ratio3, ore/furnace ratio1 retained in bundle ratios.",
+    "City gross per-day emerald outflow is bounded by physical treasury, which only purchases by players or actual manual physical deposits replenish; multi-account does not bypass this.",
+    "Initial settlement treasury emeralds remain whatever native contents already exist; zero grants. Auto testing issuance stays identified and does not mint emeralds."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "emerald": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "physical_treasury_exchange",
+          "kind": "transfer",
+          "source": "ArcCivs/CivsTrade",
+          "basis": "Gross one-way turnover assumption; bid/ask transfers and finite physical stock, never mint/burn.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              8,
+              48
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              8,
+              48
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "rates_items_per_emerald_player_sells": {
+    "OAK_LOG": 32,
+    "SPRUCE_LOG": 32,
+    "BIRCH_LOG": 32,
+    "DARK_OAK_LOG": 32,
+    "ACACIA_LOG": 32,
+    "JUNGLE_LOG": 32,
+    "MANGROVE_LOG": 32,
+    "CHERRY_LOG": 32,
+    "OAK_PLANKS": 128,
+    "SPRUCE_PLANKS": 128,
+    "BIRCH_PLANKS": 128,
+    "DARK_OAK_PLANKS": 128,
+    "ACACIA_PLANKS": 128,
+    "JUNGLE_PLANKS": 128,
+    "MANGROVE_PLANKS": 128,
+    "CHERRY_PLANKS": 128,
+    "COBBLESTONE": 64,
+    "COBBLED_DEEPSLATE": 64,
+    "STONE": 64,
+    "COAL": 16,
+    "CHARCOAL": 16,
+    "RAW_IRON": 16,
+    "IRON_INGOT": 8,
+    "BREAD": 16,
+    "WHEAT": 48,
+    "GLASS": 32
+  }
+}

@@ -266,6 +266,13 @@ class CivsStorage(private val plugin: Plugin,
         lock(city, transactionId, containers.indexedPositions(city), player?.uniqueId, closeViewers = false)
     }
 
+    /** Public commerce has its own admission; it never grants the visitor ordinary container access. */
+    fun reserveTrade(city: Settlement, transactionId: UUID, player: Player) {
+        checkMain(); requireOpen()
+        CivsTrade.checkAccess(city, player)
+        lock(city, transactionId, containers.indexedPositions(city), player.uniqueId, closeViewers = false)
+    }
+
     fun seal(transaction: CivInventoryTransaction, keepViewersOpen: Boolean = false) {
         checkMain(); requireOpen(); transaction.validated()
         val claim = claims[transaction.id] ?: throw CivsRejection("storage-busy")
@@ -291,6 +298,7 @@ class CivsStorage(private val plugin: Plugin,
                 administrator = claim.city.autonomy != null))
         }
         transaction.gateRefit?.let { require(it.before(transaction.after) == claim.city) }
+        transaction.trade?.let { require(transaction.after.copy(revision = transaction.beforeRevision) == claim.city) }
         transaction.warehouseRefit?.let { require(it.before(transaction.after) == claim.city) }
         transaction.collected?.let { collected ->
             val worker = claim.city.workers.single { it.id == collected.workerId }
@@ -695,6 +703,9 @@ class CivsStorage(private val plugin: Plugin,
         planner.prepareCredit(city, material, count, buildingId)
     fun prepareConstructionSupply(city: Settlement, buildingId: UUID, required: Map<String, Long>, player: Player? = null): CivStorageSupplyPlan =
         planner.prepareConstructionSupply(city, buildingId, required, player)
+    internal fun tradeStock(city: Settlement, marketId: UUID): Map<String, Long> = planner.tradeStock(city, marketId)
+    internal fun prepareTrade(city: Settlement, player: Player, offer: CivTradeOffer): CivStoragePlan =
+        planner.prepareTrade(city, player, offer)
     internal fun prepareAutoSupply(city: Settlement, demand: CivAutoSupplyDemand, canModify: (CivPosition) -> Boolean): CivStoragePlan? =
         planner.prepareAutoSupply(city, demand, canModify)
     fun prepareMaterialization(city: Settlement, targetMode: CivStorageMode = CivStorageMode.PHYSICAL): CivStoragePlan =
@@ -752,7 +763,7 @@ class CivsStorage(private val plugin: Plugin,
         require(claim.city.id == transaction.cityId && claim.city.owner == transaction.after.owner &&
             claim.city.worldId == transaction.after.worldId && claim.city.revision in transaction.beforeRevision..transaction.after.revision)
         val playerId = transaction.playerId()
-        val playerChanges = transaction.residentTransfer?.changes ?: transaction.resurrection?.let { listOf(it.change) } ?: transaction.playerDebit?.changes.orEmpty().map {
+        val playerChanges = transaction.trade?.changes ?: transaction.residentTransfer?.changes ?: transaction.resurrection?.let { listOf(it.change) } ?: transaction.playerDebit?.changes.orEmpty().map {
             CivNativePlayerSlot(it.slot, CivResidentItem(it.before.material, it.before.amount), it.after?.let { item -> CivResidentItem(item.material, item.amount) })
         }
         playerChanges.forEach { change ->
@@ -918,20 +929,59 @@ class CivsStorage(private val plugin: Plugin,
     /** Collected transfers fence both states; typed cargo persists its native credit before city debit. */
     internal fun persistCollected(transaction: CivInventoryTransaction, beforeJournal: Boolean = false): CompletableFuture<Unit> {
         checkMain(); requireOpen()
-        if (transaction.collected == null && transaction.containerRelocation == null && transaction.cargoDropoff == null && transaction.cargoPickup == null)
+        if (transaction.collected == null && transaction.containerRelocation == null && transaction.cargoDropoff == null && transaction.cargoPickup == null && transaction.trade == null)
             return CompletableFuture.completedFuture(Unit)
         fun checkState() {
-            val state = if (transaction.containerRelocation != null) classifyRelocation(transaction, beforeJournal)
+            val state = if (transaction.trade != null) tradeNativeState(transaction, beforeJournal)
+                else if (transaction.containerRelocation != null) classifyRelocation(transaction, beforeJournal)
                 else if (transaction.cargoDropoff != null || transaction.cargoPickup != null) classifyCargoTransfer(transaction, beforeJournal)
                 else classifyCollected(transaction, beforeJournal)
             when (state) {
                 CivInventoryApplyResult.Applied -> Unit
-                is CivInventoryApplyResult.Retry -> throw CivsRejection("inventory-recovery", state.values)
+                is CivInventoryApplyResult.Retry -> {
+                    val failure = CivsRejection("inventory-recovery", state.values)
+                    if (transaction.trade != null && !beforeJournal)
+                        throw CivsNativePersistenceRetry("Trade native endpoint is temporarily unavailable", failure)
+                    throw failure
+                }
                 is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", state.values)
                 null -> throw CivsRejection("inventory-recovery")
             }
         }
-        return nativeBarrier({ persistCollectedNative(transaction, beforeJournal) }, ::checkState)
+        return nativeBarrier({
+            if (beforeJournal && transaction.trade != null)
+                playerDataPersistence.persist(requireNotNull(plugin.server.getPlayer(transaction.trade.playerId)))
+            persistCollectedNative(transaction, beforeJournal)
+        }, ::checkState)
+    }
+
+    /** Accepted commerce fences both native endpoints; recovery never reads a new offer or visitor authority. */
+    internal fun tradeNativeState(transaction: CivInventoryTransaction, expectedBefore: Boolean = false): CivInventoryApplyResult {
+        checkMain(); requireOpen()
+        val trade = requireNotNull(transaction.trade)
+        if (lockedPlayers[trade.playerId] != transaction.id)
+            return CivInventoryApplyResult.Conflict(mapOf("reason" to "unlocked-player"))
+        val player = plugin.server.getPlayer(trade.playerId)?.takeIf { it.isOnline }
+            ?: return CivInventoryApplyResult.Retry(mapOf("reason" to "player-offline"))
+        for (change in trade.changes) {
+            val expected = if (expectedBefore) change.before else change.after
+            if (!matchesNative(player.inventory.getItem(change.slot), expected))
+                return CivInventoryApplyResult.Conflict(mapOf("reason" to "trade-player-slot-drift", "slot" to change.slot.toString()))
+        }
+        val resolved = linkedMapOf<CivPosition, Source>()
+        for (change in transaction.changes) {
+            if (locked[Key(transaction.after.worldId, change.container)] != transaction.id)
+                return CivInventoryApplyResult.Conflict(details(transaction.after, change, "unlocked-container"))
+            val source = try {
+                resolved.getOrPut(change.container) { containers.resolve(transaction.after, change.container, change.containerType) }
+            } catch (failure: CivsRejection) {
+                return if (failure.reason == "storage-unavailable") CivInventoryApplyResult.Retry(failure.values)
+                    else CivInventoryApplyResult.Conflict(failure.values)
+            }
+            if (!matches(source.inventory.getItem(change.slot), if (expectedBefore) change.before else change.after))
+                return CivInventoryApplyResult.Conflict(details(transaction.after, change, "trade-container-slot-drift"))
+        }
+        return CivInventoryApplyResult.Applied
     }
 
     internal fun persistControlRetirement(city: Settlement, receipt: CivControlPlacement): CompletableFuture<Unit> = nativeBarrier({

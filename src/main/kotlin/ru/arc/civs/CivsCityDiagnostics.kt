@@ -140,6 +140,7 @@ internal class CivsCityDiagnostics(
                 "pending_building_orders" to buildingRequests.orderCount, "geometry_generation" to records.geometryGeneration,
                 "cities" to selected.map { city -> mapOf("city" to city.id, "name" to city.name, "owner" to city.owner,
                     "world" to city.worldId, "revision" to city.revision, "workers" to city.workers.size,
+                    "radius" to city.radius, "layout_half_width" to city.autonomy?.let { CivsSettlementLayout.frame(city).halfWidth },
                     "buildings" to city.buildings.size, "busy" to (city.id in records.busy), "unhealthy" to (city.id in records.unhealthy),
                     "building_catalog_truncated" to (city.buildings.size > 32),
                     "building_catalog" to city.buildings.take(32).map { building -> mapOf(

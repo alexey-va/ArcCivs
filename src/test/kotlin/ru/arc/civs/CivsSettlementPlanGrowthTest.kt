@@ -40,23 +40,24 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         before.workers shouldBe emptyList()
     }
 
-    test("a compact retained subset extends to the full profile without moving the old town or invalidating its accepted work") {
-        // These parcels came from a feasible full plan; finding its extension must preserve all previously reserved intent.
+    test("a compact retained subset adds the next house without moving paid town geometry or invalidating accepted work") {
+        // The current irregular enclosure is authoritative; add one needed plot rather than forcing all future houses inside it.
         val before = legacyGrowthCity(roomy = false)
         val old = requireNotNull(CivsSettlementPlans.current(before))
         val serialized = Gson().toJson(before)
-        val next = CivsSettlementPlans.prepare(before, settlementPlanTemplates(), settlementPlanSurface(before), CivAutonomousAccess())
-        next.plots.size shouldBe 34
-        next.plots.groupingBy { it.building.type }.eachCount() shouldBe CivsAutonomy.completeProfile.groupingBy { it }.eachCount()
-        next.plots.take(old.plots.size) shouldBe old.plots
-        old.routes.forEach { (id, route) -> next.routes[id] shouldBe route }
-        next.walls shouldBe old.walls
-        next.gates shouldBe old.gates
-        next.gateSides shouldBe old.gateSides
-        next.halfWidth shouldBe old.halfWidth
+        val requested = old.plots.map { it.building.type } + BuildingType.HOUSE
+        val next = CivsSettlementPlans.prepareGrowth(before, settlementPlanTemplates(), settlementPlanSurface(before),
+            CivAutonomousAccess(), requested)
+        next.plots.size shouldBe requested.size
+        next.plots.groupingBy { it.building.type }.eachCount() shouldBe requested.groupingBy { it }.eachCount()
+        before.buildings.forEach { paid ->
+            civsSameBuildingGeometry(next.plots.single { it.building.id == paid.id }.building,
+                paid.copy(phase = BuildingPhase.SITE)) shouldBe true
+        }
+        (next.halfWidth >= old.halfWidth) shouldBe true
         CivsSettlementPlans.validate(before, next)
         val adopted = before.copy(autonomy = before.autonomy!!.copy(plan = next))
-        CivsSettlementPlans.needsExtension(adopted) shouldBe false
+        CivsSettlementGrowth.covers(adopted, next) shouldBe true
         CivsRules.validate(adopted) shouldBe adopted
         Gson().toJson(before) shouldBe serialized
         CivsSettlementPlans.current(before) shouldBe old

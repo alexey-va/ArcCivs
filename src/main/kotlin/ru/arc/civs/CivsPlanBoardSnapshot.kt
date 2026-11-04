@@ -65,6 +65,7 @@ internal fun queuedUpgradeId(buildingId: UUID, targetLevel: Int): UUID =
     UUID.nameUUIDFromBytes("arccivs-upgrade/$buildingId/$targetLevel".toByteArray(Charsets.UTF_8))
 
 internal fun queuedDesignId(building: CivBuilding): UUID = if (building.phase == BuildingPhase.SITE) building.id
+    else if (CivsInfrastructureRebuild.needsRefit(building)) CivsInfrastructureRebuild.queuedId(building)
     else queuedUpgradeId(building.id, if (CivsPlanBoardBlueprint.needsRefit(building)) building.level else building.level + 1)
 
 /** The existing queue's captured-design identity, shared by activation and the detached board view. */
@@ -74,7 +75,7 @@ internal fun requireQueuedDesign(plan: CivPlacementPlan, city: Settlement, build
         plan.building.copy(phase = BuildingPhase.SITE, production = building.production) == building
     else building.phase == BuildingPhase.ACTIVE && plan.building.id == building.id && plan.building.type == building.type &&
         plan.building.phase == BuildingPhase.CONSTRUCTING && (plan.building.level == building.level + 1 ||
-            CivsPlanBoardBlueprint.refit(building, plan.building)) &&
+            CivsPlanBoardBlueprint.refit(building, plan.building) || CivsInfrastructureRebuild.refit(building, plan.building)) &&
         plan.building.entrance == building.entrance && plan.building.rotation == building.rotation &&
         civsContainsBox(plan.building.bounds, building.bounds)) { "Queued design no longer matches building ${building.id}" }
 }

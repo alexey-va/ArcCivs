@@ -29,7 +29,8 @@ internal object CivsSettlementPlans {
     }
 
     fun next(city: Settlement, type: BuildingType): CivSettlementPlot? {
-        val missing = current(city)?.plots.orEmpty().filter { it.building.type == type && city.building(it.building.id) == null }
+        val missing = current(city)?.plots.orEmpty().filter { it.building.type == type && city.building(it.building.id) == null &&
+            (type != BuildingType.QUARRY || CivsSettlementGrowth.outside(city, it.envelope)) }
         return if (type == BuildingType.DECORATION) missing.firstOrNull { it.fortification != null } ?: missing.firstOrNull()
             else missing.firstOrNull()
     }
@@ -101,7 +102,9 @@ internal object CivsSettlementPlans {
         if (city.construction != null || city.constructionQueue.orEmpty().isNotEmpty()) return false
         val plan = current(city) ?: return false
         val types = (plan.plots.map { it.building } + city.buildings).distinctBy { it.id }.groupingBy { it.type }.eachCount()
-        return CivsAutonomy.completeProfile.groupingBy { it }.eachCount().any { (type, count) -> (types[type] ?: 0) < count }
+        val goal = CivsAutonomy.nextGoal(city)
+        return goal?.takeIf { it.buildingId == null }?.let { next(city, it.type) == null } == true ||
+            CivsAutonomy.completeProfile.groupingBy { it }.eachCount().any { (type, count) -> (types[type] ?: 0) < count }
     }
 
     fun validate(city: Settlement, plan: CivSettlementPlan) {
@@ -138,27 +141,47 @@ internal object CivsSettlementPlans {
     fun prepare(city: Settlement, templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>,
         surface: CivTerrainSurface, retained: CivAutonomousAccess,
         fortification: CivFortificationTemplate? = null,
+        profile: List<BuildingType> = CivsAutonomy.completeProfile,
+        halfWidth: Int? = null,
         inspectRoute: (CivRouteSearchStats) -> Unit = {},
         inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? = null): CivSettlementPlan {
         val newFortifications = fortification != null && city.style == CivsFortifications.STYLE && city.autonomy?.plan == null &&
             city.autonomy != null && city.construction == null && city.constructionQueue.orEmpty().isEmpty() &&
             city.buildings.none { it.type.isInfrastructure } && retained.infrastructure.isEmpty() &&
-            CivsSettlementLayout.frame(city).halfWidth > 56
+            CivsSettlementLayout.frame(city).halfWidth > 56 && profile == CivsAutonomy.completeProfile
         val maximum = if (newFortifications) minOf(CivsRules.MAX_AUTONOMOUS_FORTIFICATIONS,
             CivsRules.decorationLimit(city) - city.buildings.count { it.type == BuildingType.DECORATION }) else 0
         for (count in maximum downTo 0) {
-            try { return prepareOnce(city, templates, surface, retained, fortification, count, inspectRoute, inspect) }
+            try { return prepareOnce(city, templates, surface, retained, fortification, count, profile, halfWidth, inspectRoute, inspect) }
             catch (failure: CivsRejection) { if (count == 0) throw failure }
         }
         throw CivsRejection("autonomy-no-site")
     }
 
+    /** Add a quarter only after the next ordinary plot no longer fits the current one. Paid work stays pinned. */
+    fun prepareGrowth(city: Settlement, templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>,
+        surface: CivTerrainSurface, retained: CivAutonomousAccess, profile: List<BuildingType>,
+        fortification: CivFortificationTemplate? = null): CivSettlementPlan {
+        var last: CivsRejection? = null
+        for (width in CivsSettlementGrowth.halfWidths(city)) {
+            try { return prepare(city, templates, surface, retained, fortification, profile, width) }
+            catch (failure: CivsRejection) {
+                if (failure.reason !in setOf("autonomy-no-site", "autonomy-layout-obstructed", "autonomy-no-path")) throw failure
+                last = failure
+            }
+        }
+        throw requireNotNull(last)
+    }
+
     private fun prepareOnce(city: Settlement, templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>,
         surface: CivTerrainSurface, retained: CivAutonomousAccess, fortification: CivFortificationTemplate?, count: Int,
+        profile: List<BuildingType>, halfWidth: Int?,
         inspectRoute: (CivRouteSearchStats) -> Unit,
         inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)?): CivSettlementPlan {
-        val frame = CivsSettlementLayout.frame(city).let { if (count > 0) it.copy(fortified = true) else it }
+        val frame = CivsSettlementLayout.frame(city, halfWidth ?: city.autonomy?.layoutHalfWidth)
+            .let { if (count > 0) it.copy(fortified = true) else it }
         val adopted = current(city)
+        val expanding = frame.halfWidth > CivsSettlementLayout.frame(city).halfWidth
         val accepted = city.construction?.plannedBuilding
         val actual = city.buildings.map { if (accepted != null && it.id == accepted.id) accepted else it }
         val actualPlots = actual.filterNot { it.type.isInfrastructure }.map { building ->
@@ -167,7 +190,9 @@ internal object CivsSettlementPlans {
                 else union(CivsAutonomousGeometry.futureBounds(city, building), future?.bounds ?: building.bounds)
             CivSettlementPlot(building.copy(phase = BuildingPhase.SITE), bounds)
         }
-        val plots = adopted?.plots.orEmpty().map { old -> actualPlots.firstOrNull { it.building.id == old.building.id }
+        val plots = adopted?.plots.orEmpty().filter { old -> city.building(old.building.id) != null || !expanding &&
+            (old.building.type != BuildingType.QUARRY || !CivsAutonomousGeometry.overlaps(old.envelope, frame.core, 3)) }
+            .map { old -> actualPlots.firstOrNull { it.building.id == old.building.id }
             ?.let { it.copy(envelope = union(old.envelope, it.envelope), fortification = old.fortification) } ?: old }.toMutableList()
         plots += actualPlots.filter { actualPlot -> plots.none { it.building.id == actualPlot.building.id } }
         var projected = city.copy(construction = null, constructionQueue = emptyList(),
@@ -176,7 +201,9 @@ internal object CivsSettlementPlans {
                 bounds = plots.firstOrNull { it.building.id == b.id }?.envelope ?: b.bounds) } +
                 plots.filter { plot -> actual.none { it.id == plot.building.id } }.map { it.building.copy(bounds = it.envelope,
                     phase = if (it.building.type == BuildingType.WAREHOUSE) BuildingPhase.ACTIVE else it.building.phase) })
-        val routes = adopted?.routes.orEmpty().mapKeys { UUID.fromString(it.key) }.toMutableMap()
+        val keptPlots = plots.mapTo(hashSetOf()) { it.building.id.toString() }
+        val routes = adopted?.routes.orEmpty().filter { (id, _) -> id in keptPlots || !expanding &&
+            adopted?.plots.orEmpty().none { it.building.id.toString() == id } }.mapKeys { UUID.fromString(it.key) }.toMutableMap()
         routes += retained.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
         val preferredRoads = routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
         fun planningAccess() = CivAutonomousAccess(routes, retained.infrastructure, retained.acceptedFortifications,
@@ -214,7 +241,7 @@ internal object CivsSettlementPlans {
             }
             if (reserved < count) throw CivsRejection("autonomy-no-site", mapOf("stage" to "fortification-reservation"))
         }
-        val remaining = CivsAutonomy.completeProfile.toMutableList()
+        val remaining = profile.toMutableList()
         plots.forEach { remaining.remove(it.building.type) }
         if (plots.count { it.building.type != BuildingType.DECORATION } + remaining.size > CivsRules.MAX_BUILDINGS)
             throw CivsRejection("building-limit")
@@ -309,7 +336,8 @@ internal object CivsSettlementPlans {
                 phase = if (type == BuildingType.WAREHOUSE) BuildingPhase.ACTIVE else BuildingPhase.SITE))
         }
         val fortificationProofs = plots.mapNotNull { plot -> plot.fortification?.let { plot.building.id to it.proof } }.toMap()
-        val adoptedFrame = if (adopted != null) frame else if (retained.infrastructure.isEmpty())
+        val exteriorRoutes = routes.keys.any { projected.building(it)?.type in CivsSettlementLayout.exteriorTypes }
+        val adoptedFrame = if (adopted != null && !expanding) frame else if (retained.infrastructure.isEmpty() && exteriorRoutes)
             try { CivsSettlementPerimeter.adapt(projected, frame, surface, routes, retained.routes.values, fortificationProofs) }
             catch (failure: CivsRejection) {
                 if (inspect != null) runCatching {
@@ -331,7 +359,7 @@ internal object CivsSettlementPlans {
             val target = CivBuilding(id, BuildingType.GATE, 1, point, 0, "civs/generated/gate",
                 CivBox(point, point), point, BuildingPhase.CONSTRUCTING, transit = listOf(point))
             routes[id] = CivsAutonomousTerraform.connection(projected, target, surface,
-                planningAccess(), frame.wallObstacles)
+                planningAccess(), frame.wallObstacles + CivsSettlementLayout.gateConnectionObstacles(frame))
         }
         val roads = routes.values.toList()
         val plan = CivSettlementPlan(VERSION, (city.autonomy?.plan?.revision ?: -1) + 1, frame.halfWidth,

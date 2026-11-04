@@ -87,6 +87,14 @@ internal class CivsInventoryJournal(
         return submitNative(city, tx, freshAdmission)
     }
 
+    fun submitTrade(city: Settlement, tx: CivInventoryTransaction,
+        freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
+        require(tx.trade != null && tx.cityId == city.id)
+        rejectIf(city.id in busy || city.id in unhealthy || cities[city.id] != city, "city-busy")
+        busy += city.id
+        return submitNative(city, tx, freshAdmission)
+    }
+
     fun submitRelocation(city: Settlement, tx: CivInventoryTransaction,
         freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
         require(tx.containerRelocation != null)
@@ -126,6 +134,10 @@ internal class CivsInventoryJournal(
 
     /** No changed city or resident may inherit a prepared native transfer after an asynchronous wait. */
     private fun requireCollectedCity(tx: CivInventoryTransaction) {
+        if (tx.trade != null) {
+            val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
+            rejectIf(current != tx.after.copy(revision = tx.beforeRevision), "stale-delivery")
+        }
         if (tx.containerRelocation != null) {
             val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
             rejectIf(current != tx.containerRelocation.before(tx.after), "stale-delivery")
@@ -156,10 +168,14 @@ internal class CivsInventoryJournal(
     }
 
     private fun requireFreshNative(tx: CivInventoryTransaction) {
-        require(tx.collected != null || tx.containerRelocation != null || tx.cargoPickup != null)
+        require(tx.collected != null || tx.containerRelocation != null || tx.cargoPickup != null || tx.trade != null)
         requireCollectedCity(tx)
         if (tx.collected != null) validateNativeCollected(tx)
-        else when (val state = if (tx.cargoPickup != null) storage.cargoPickupBeforeState(tx) else storage.relocationBeforeState(tx)) {
+        else when (val state = when {
+            tx.trade != null -> storage.tradeNativeState(tx, expectedBefore = true)
+            tx.cargoPickup != null -> storage.cargoPickupBeforeState(tx)
+            else -> storage.relocationBeforeState(tx)
+        }) {
             CivInventoryApplyResult.Applied -> Unit
             is CivInventoryApplyResult.Retry -> throw CivsRejection("storage-unavailable", state.values)
             is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", state.values)
@@ -223,7 +239,7 @@ internal class CivsInventoryJournal(
             return
         }
         runCatching {
-            if (tx.collected != null || tx.containerRelocation != null || tx.cargoPickup != null) {
+            if (tx.collected != null || tx.containerRelocation != null || tx.cargoPickup != null || tx.trade != null) {
                 if (result != null) {
                     if (tx.collected?.food != null) {
                         val state = storage.collectedBeforeState(tx)
@@ -251,7 +267,7 @@ internal class CivsInventoryJournal(
             }
             when (val applied = storage.reconcile(tx)) {
                 is CivInventoryApplyResult.Retry -> {
-                    if ((tx.cargoDropoff != null || tx.cargoPickup != null)) collectedNextAt[tx.after.worldId] = now() + 5_000
+                    if (tx.cargoDropoff != null || tx.cargoPickup != null || tx.trade != null) collectedNextAt[tx.after.worldId] = now() + 5_000
                     return fail(CivsRejection("inventory-recovery", applied.values), retry = true)
                 }
                 is CivInventoryApplyResult.Conflict -> return fail(CivsRejection("inventory-conflict", applied.values))
@@ -288,7 +304,7 @@ internal class CivsInventoryJournal(
                     }
                 }
             }
-            if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null) commit()
+            if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null && tx.trade == null) commit()
             else persistCollectedReceipt(tx).whenCompleteSync(tasks) { _, persistenceFailure ->
                 if (persistenceFailure != null) fail(CivsRejection("inventory-recovery").also { it.initCause(persistenceFailure) },
                     retry = retryCollectedPersistence(tx, persistenceFailure))
@@ -300,7 +316,7 @@ internal class CivsInventoryJournal(
     /** Native after-state first, then a permanent UUID fence, then the caller may publish its one city credit. */
     private fun persistCollectedReceipt(tx: CivInventoryTransaction): CompletableFuture<Unit> {
         val result = tracked<Unit>()
-        storage.persistCollected(tx).whenCompleteSync(tasks) { _, failure ->
+        runCatching { storage.persistCollected(tx) }.getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { _, failure ->
             if (failure != null) result.completeExceptionally(failure)
             else if (closed) result.completeExceptionally(CivsRejection("not-ready"))
             else if (tx.collected?.ground.isNullOrEmpty()) result.complete(Unit)
@@ -318,7 +334,7 @@ internal class CivsInventoryJournal(
 
     /** Retry the same locked receipt at most once per five seconds; exact mismatches remain blocked. */
     private fun retryCollectedPersistence(tx: CivInventoryTransaction, failure: Throwable): Boolean {
-        if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null ||
+        if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null && tx.trade == null ||
             generateSequence(failure) { it.cause }.take(8).none { it is CivsNativePersistenceRetry }) return false
         collectedNextAt[tx.after.worldId] = now() + 5_000
         return true
@@ -384,7 +400,7 @@ internal class CivsInventoryJournal(
 
     fun recover() {
         val tx = inventoryRecovery.values.firstOrNull { it.cityId !in busy && it.cityId !in blockedRecovery &&
-            (it.collected == null && it.containerRelocation == null && it.cargoDropoff == null && it.cargoPickup == null ||
+            (it.collected == null && it.containerRelocation == null && it.cargoDropoff == null && it.cargoPickup == null && it.trade == null ||
                 now() >= (collectedNextAt[it.after.worldId] ?: 0L)) &&
             !storage.waitingForPlayer(it) } ?: return
         val city = cities[tx.cityId] ?: run { blockedRecovery += tx.cityId; return }
@@ -398,16 +414,16 @@ internal class CivsInventoryJournal(
                     applyInventory(tx, null)
                     return@runCatching
                 }
-                if (city.revision == tx.after.revision || tx.residentTransfer != null || tx.resurrection != null || tx.collected != null ||
+                if (city.revision == tx.after.revision || tx.trade != null || tx.residentTransfer != null || tx.resurrection != null || tx.collected != null ||
                     tx.containerRelocation != null || tx.cargoDropoff != null || tx.cargoPickup != null) when (val applied = storage.reconcile(tx)) {
                     is CivInventoryApplyResult.Retry -> {
-                        if ((tx.cargoDropoff != null || tx.cargoPickup != null)) collectedNextAt[tx.after.worldId] = now() + 5_000
+                        if (tx.cargoDropoff != null || tx.cargoPickup != null || tx.trade != null) collectedNextAt[tx.after.worldId] = now() + 5_000
                         busy -= city.id; unhealthy += city.id; return@runCatching
                     }
                     is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", applied.values)
                     CivInventoryApplyResult.Applied -> Unit
                 }
-                if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null) {
+                if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null && tx.trade == null) {
                     requestResurrectionAdmission(tx)
                     finishInventory(tx, null)
                 } else persistCollectedReceipt(tx).whenCompleteSync(tasks) { _, failure ->

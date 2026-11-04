@@ -14,11 +14,13 @@ internal object CivsGateRefit {
         building.schematicId.startsWith(POSTED_PREFIX) -> 2
         else -> 0
     }
-    fun versioned(building: CivBuilding): Boolean = profileVersion(building) != 0
-    fun retainedPlanId(building: CivBuilding): UUID = if (versioned(building))
+    fun versioned(building: CivBuilding): Boolean = profileVersion(building) != 0 ||
+        building.type == BuildingType.GATE && CivsInfrastructureRebuild.stage(building) > 0
+    fun retainedPlanId(building: CivBuilding): UUID = if (versioned(building) || CivsInfrastructureRebuild.stage(building) > 0)
         UUID.fromString(building.schematicId.substringAfterLast('/')) else building.id
 
     fun validTransit(building: CivBuilding): Boolean {
+        if (CivsInfrastructureRebuild.stage(building) > 0) return CivsInfrastructureRebuild.validTransit(building)
         if (!versioned(building) || runCatching { retainedPlanId(building) }.isFailure) return false
         return profileAxis(building.bounds, building.transit.orEmpty()) != null ||
             profileVersion(building) == 3 && compactAxis(building.bounds, building.transit.orEmpty()) != null

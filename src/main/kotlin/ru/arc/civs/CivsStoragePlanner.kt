@@ -91,6 +91,50 @@ internal class CivsStoragePlanner(
         return totals.toSortedMap()
     }
 
+    /** Explicit commerce reads at most sixteen native holders, never the whole settlement. */
+    fun tradeStock(city: Settlement, marketId: UUID): Map<String, Long> {
+        checkReady()
+        val totals = linkedMapOf<String, Long>()
+        containers.localSources(city, marketId).take(16).forEach { source ->
+            source.inventory.storageContents.forEach { stack -> plain(stack)?.let {
+                totals.merge(it.material, it.amount.toLong(), Math::addExact)
+            } }
+        }
+        return totals
+    }
+
+    fun prepareTrade(city: Settlement, player: Player, offer: CivTradeOffer): CivStoragePlan {
+        checkClaim(city)
+        require(claimedPlayer(city.id) == player.uniqueId)
+        val market = CivsTrade.checkAccess(city, player)
+        require(CivsTrade.bundle(offer.material, offer.direction) == offer.amount)
+        val native = containers.localSources(city, market.id).take(16).map(::snapshot).toList()
+        val before = player.inventory.storageContents.map { it?.clone() }
+        require(before.size == PLAYER_STORAGE_SLOTS)
+        val personal = Snapshot(Source(market.entrance, "PLAYER", player.inventory), before,
+            before.map { it?.clone() }.toMutableList())
+        val goods = mapOf(offer.material to offer.amount.toLong())
+        val emerald = mapOf("EMERALD" to 1L)
+        val playerPays = if (offer.direction == CivTradeDirection.BUY) emerald else goods
+        val cityPays = if (offer.direction == CivTradeDirection.BUY) goods else emerald
+        val missingPlayer = playerPays.toMutableMap()
+        debit(sequenceOf(personal), missingPlayer)
+        reject(missingPlayer.isNotEmpty(), if (offer.direction == CivTradeDirection.BUY)
+            "trade-player-emerald-missing" else "trade-player-goods-missing")
+        val missingCity = cityPays.toMutableMap()
+        debit(native.asSequence(), missingCity)
+        reject(missingCity.isNotEmpty(), "trade-stock-changed")
+        playerPays.forEach { (material, amount) -> reject(insert(native, material, amount) != 0L, "storage-full") }
+        cityPays.forEach { (material, amount) -> reject(insert(listOf(personal), material, amount) != 0L, "trade-player-full") }
+        val changes = before.indices.mapNotNull { slot ->
+            val a = plain(before[slot]); val b = plain(personal.after[slot])
+            if (a == b) null else CivNativePlayerSlot(slot,
+                a?.let { CivResidentItem(it.material, it.amount) }, b?.let { CivResidentItem(it.material, it.amount) })
+        }
+        return plan(requireNotNull(city.inventory), native).copy(
+            trade = CivTradeReceipt(player.uniqueId, market.id, offer, changes))
+    }
+
     fun constructionAvailable(city: Settlement, buildingId: UUID): Map<String, Long> {
         checkReady()
         if (city.inventory == null) throw CivsRejection("materials-required")

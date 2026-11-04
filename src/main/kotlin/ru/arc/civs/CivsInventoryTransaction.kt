@@ -59,7 +59,8 @@ data class CivStoragePlan(val inventoryAfter: CivInventory, val changes: List<Ci
     val playerDebit: CivPlayerDebit? = null, val residentTransfer: CivResidentTransfer? = null,
     val worldChanges: List<CivPlanBlock>? = null, val mine: CivMineReceipt? = null,
     val autoSupplyBuildingId: UUID? = null, val cargoDropoff: CivCargoDropoffReceipt? = null,
-    val cargoPickup: CivCargoPickupReceipt? = null)
+    val cargoPickup: CivCargoPickupReceipt? = null,
+    val trade: CivTradeReceipt? = null)
 data class CivStorageSupplyPlan(val plan: CivStoragePlan, val result: CivsSupplyResult)
 data class CivResidentTransferPlan(val plan: CivStoragePlan, val worker: CivWorker)
 data class CivCorpseTransferPlan(val worker: CivWorker, val transfer: CivResidentTransfer?)
@@ -89,6 +90,7 @@ data class CivInventoryTransaction(
     val gateRefit: CivGateRefitReceipt? = null,
     /** Reviewed annex enclosure; never changes native inventory slots. */
     val warehouseRefit: CivWarehouseRefitReceipt? = null,
+    val trade: CivTradeReceipt? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
@@ -97,7 +99,11 @@ data class CivInventoryTransaction(
         require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null ||
             autonomousVisual != null || containerRelocation != null || gateRefit != null || warehouseRefit != null || after.autonomy != null && residentTransfer != null)
         require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine,
-            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup, gateRefit, warehouseRefit).size <= 1)
+            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup, gateRefit, warehouseRefit, trade).size <= 1)
+        trade?.let {
+            require(worldChanges.isNullOrEmpty())
+            it.validated(after, changes)
+        }
         containerRelocation?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -207,7 +213,7 @@ internal fun CivMineReceipt.detached(): CivMineReceipt = copy(
         miningAccessSections = work.miningAccessSections?.toMap(), miningDeferredSeals = work.miningDeferredSeals?.toSet()),
 )
 
-internal fun CivInventoryTransaction.playerId(): UUID? = playerDebit?.playerId ?: residentTransfer?.playerId ?: resurrection?.playerId
+internal fun CivInventoryTransaction.playerId(): UUID? = playerDebit?.playerId ?: residentTransfer?.playerId ?: resurrection?.playerId ?: trade?.playerId
 
 sealed interface CivInventoryApplyResult {
     data object Applied : CivInventoryApplyResult

@@ -183,8 +183,8 @@ internal class CitizenNavigationSearch(
             }
         })
         val found = goal ?: return when {
-            unknownTerrain -> result(failure = "chunk-unloaded")
-            clipped && isolatedGoalDistance == null -> result(failure = "search-budget")
+            unknownTerrain -> partial("chunk-unloaded", MINIMUM_PARTIAL_GAIN)
+            clipped && isolatedGoalDistance == null -> finishAtBudget("search-budget")
             else -> partial("no-path", MINIMUM_PARTIAL_GAIN)
         }
         val path = pathTo(found.node) ?: return result(failure = if (cancelled.get()) "cancelled" else "broken-path")
@@ -209,13 +209,15 @@ internal class CitizenNavigationSearch(
         fun failed(cause: String) = CitizenSearchResult(emptyList(), visited, failure = cause,
             blockedPositions = if (cause == "no-path") blockedPositions.toList() else emptyList())
         if (cancelled.get()) return failed("cancelled")
-        if (unknownTerrain) return failed("chunk-unloaded")
         // A failed person detour must keep its caller's previous ready route available for waiting.
-        if (reason == "no-path" && avoiding.isNotEmpty()) return failed(reason)
-        val closest = progressEndpoint(minimumGain) ?: return failed(reason)
+        val cause = if (unknownTerrain) "chunk-unloaded" else reason
+        if (avoiding.isNotEmpty() && (reason == "no-path" || unknownTerrain)) return failed(cause)
+        // An unavailable neighbour does not invalidate connected edges already checked
+        // against loaded cells. Walk only that prefix, then replan at its real frontier.
+        val closest = progressEndpoint(minimumGain) ?: return failed(cause)
         val path = pathTo(closest) ?: return failed(if (cancelled.get()) "cancelled" else "broken-path")
         return CitizenSearchResult(emptyList(), visited, path = path, continuation = true,
-            blockedPositions = if (reason == "no-path") blockedPositions.toList() else emptyList(), continuationReason = reason)
+            blockedPositions = if (cause == "no-path") blockedPositions.toList() else emptyList(), continuationReason = cause)
     }
 
     private fun progressEndpoint(minimumGain: Double): CitizenSearchNode? {

@@ -396,7 +396,7 @@ class CivsUi internal constructor(
     internal fun screenColor(id: String): TextColor = when (id) {
         "civs.workers", "civs.worker", "civs.members", "civs.member", "civs.member-add", "civs.building-workers" -> PEOPLE
         "civs.stock", "civs.warehouse", "civs.materials", "civs.building-materials", "civs.builder-materials", "civs.logistics",
-        "civs.containers", "civs.container", "civs.industry", "civs.industry-building" -> STOCK
+        "civs.containers", "civs.container", "civs.industry", "civs.industry-building", "civs.trade" -> STOCK
         "civs.management", "civs.upgrades", "civs.upgrade", "civs.worker-skills", "civs.production", "civs.carpentry-recipes", "civs.storage-mode", "civs.testing-settings", "civs.research", "civs.research-detail" -> PERSONAL
         "civs.guide", "civs.remote", "civs.villages" -> NAVIGATION
         "civs.delete-city", "civs.delete-building" -> DANGER

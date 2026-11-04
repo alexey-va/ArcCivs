@@ -9,7 +9,8 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-internal data class CivAutonomousDesign(val blueprint: CivBlueprint, val terrain: CivTerraformPlan? = null)
+internal data class CivAutonomousDesign(val blueprint: CivBlueprint, val terrain: CivTerraformPlan? = null,
+    val infrastructureSource: CivPlacementPlan? = null)
 
 /** The planner and its diagnostic export capture the same water-foundation domain. */
 internal fun civsAutonomousWaterColumns(frame: CivSettlementFrame, retainedGates: List<CivBox>): Set<Long> =
@@ -41,7 +42,7 @@ internal class CivsAutonomousPlacement(
         skipPrepared: Int = 0): CompletableFuture<CivAutonomousDesign> {
         if (skipPrepared !in 0..MAXIMUM_OPTIONS || skipPrepared > 0 && initialPlan == null ||
             initialPlan != null && (!captureVolume || type !in CivsAutonomy.profile || type == BuildingType.TOWN_HALL || level != 1 ||
-            CivsSettlementPlans.current(city) != initialPlan || !CivsVillageSiteScoring.completeProfile(initialPlan) ||
+            CivsSettlementPlans.current(city) != initialPlan || !CivsSettlementGrowth.covers(city, initialPlan) ||
             city.building(buildingId) != null || CivsSettlementPlans.next(city, type)?.building?.id != buildingId ||
             CivsAutonomy.nextGoal(city, blueprints::maximumLevel)?.let {
                 it.type == type && it.targetLevel == 1 && it.buildingId == null
@@ -60,6 +61,25 @@ internal class CivsAutonomousPlacement(
 
     fun infrastructure(city: Settlement): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
+
+    /** Refit geometry is captured by the same admission and queue as a new resident-built site. */
+    fun rebuildInfrastructure(city: Settlement, source: CivPlacementPlan, plans: List<CivPlacementPlan>): CompletableFuture<CivAutonomousDesign> =
+        blueprints.recover(source).thenApplyAsync({
+            val access = CivAutonomousAccess.from(city, plans)
+            val box = source.building.bounds
+            val witnesses = (access.routes.values.flatten() + city.buildings.flatMap(CivsAutonomousGeometry::approach) +
+                city.buildings.filter { it.type == BuildingType.ROAD }.flatMap { it.transit.orEmpty() })
+                .filter { it.x in box.min.x..box.max.x && it.z in box.min.z..box.max.z }.distinct()
+            val proposal = CivsInfrastructureRebuild.proposal(city, source, witnesses)
+            val piece = CivSettlementPiece(proposal.building.id, proposal.building.type, box, proposal.building.entrance,
+                proposal.blocks.map { CivSettlementBlock(it.position, it.after) }, proposal.building.transit.orEmpty(),
+                profileStage = CivsInfrastructureRebuild.stage(proposal.building))
+            Triple(proposal, piece, CivsInfrastructure.schematic(piece, dataVersion))
+        }, executor).thenCompose { (proposal, piece, bytes) ->
+            writeCapture(proposal.id, bytes).thenCompose {
+                blueprints.prepareInfrastructure(piece, city.worldId, bytes, proposal.id)
+            }.thenApply { CivAutonomousDesign(it.copy(building = proposal.building), proposal.terrain, source) }
+        }
 
     fun wallInfill(city: Settlement, gateId: UUID, wallId: UUID,
         acceptedWork: List<CivPlacementPlan>): CompletableFuture<CivAutonomousDesign> {
@@ -138,11 +158,18 @@ internal class CivsAutonomousPlacement(
                 val projected = if (seed == null) city else surveyCity.copy(autonomy = requireNotNull(surveyCity.autonomy).copy(plan = kept))
                 val access = if (seed == null) input.first else input.first.copy(
                     routes = input.first.routes + (seed.id to requireNotNull(seedRoute)), reservedFortificationPorts = emptyList())
-                val plan = CivsSettlementPlans.prepare(projected, loaded, input.second, access,
-                    fortification = input.third)
+                // Replacing one declined reservation preserves its existing forecast and sibling plots.
+                val profile = if (seed == null) CivsSettlementGrowth.profile(city) else requireNotNull(oldPlan).plots
+                    .filter { !it.building.type.isInfrastructure && it.building.type != BuildingType.DECORATION }
+                    .map { it.building.type }
+                val plan = if (seed == null) CivsSettlementPlans.prepareGrowth(projected, loaded, input.second, access,
+                    profile, fortification = input.third)
+                else CivsSettlementPlans.prepare(projected, loaded, input.second, access,
+                    fortification = input.third, profile = profile)
                 if (seed == null) plan else {
-                    if (!CivsVillageSiteScoring.completeProfile(plan) ||
-                        plan.plots.count { it.building.type != BuildingType.DECORATION } != CivsAutonomy.completeProfile.size ||
+                    if (!CivsSettlementGrowth.covers(city, plan) ||
+                        plan.plots.count { it.building.type != BuildingType.DECORATION } !=
+                            requireNotNull(oldPlan).plots.count { it.building.type != BuildingType.DECORATION } ||
                         plan.plots.singleOrNull { it.building.id == seed.id }?.building != seed ||
                         plan.routes[seed.id.toString()] != seedRoute || city.buildings.filterNot { it.type.isInfrastructure }.any { actual ->
                             !civsSameBuildingGeometry(plan.plots.singleOrNull { it.building.id == actual.id }?.building,

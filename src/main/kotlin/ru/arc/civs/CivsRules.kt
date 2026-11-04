@@ -278,10 +278,12 @@ object CivsRules {
         if (buildingId !in city.constructionQueue.orEmpty())
             check(city.pendingControls.orEmpty().none { it.buildingId == buildingId && it.retire != null }, "city-busy")
         check(building.phase == BuildingPhase.SITE || building.phase == BuildingPhase.ACTIVE &&
-            (building.level < building.type.maxLevel || CivsPlanBoardBlueprint.needsRefit(building)), "invalid-building")
+            (building.level < building.type.maxLevel || CivsPlanBoardBlueprint.needsRefit(building) ||
+                CivsInfrastructureRebuild.needsRefit(city, building)), "invalid-building")
         check(city.construction?.buildingId != buildingId, "construction-busy")
         check(building.phase == BuildingPhase.SITE || building.type == BuildingType.TOWN_HALL ||
-            building.level < city.level() || CivsPlanBoardBlueprint.needsRefit(building), "town-hall-level-required")
+            building.level < city.level() || CivsPlanBoardBlueprint.needsRefit(building) ||
+            CivsInfrastructureRebuild.needsRefit(city, building), "town-hall-level-required")
         if (buildingId in city.constructionQueue.orEmpty()) return city
         return changed(city, city.copy(constructionQueue = city.constructionQueue.orEmpty() + buildingId))
     }

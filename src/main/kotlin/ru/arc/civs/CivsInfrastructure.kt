@@ -12,10 +12,13 @@ internal object CivsInfrastructure {
     fun building(piece: CivSettlementPiece): CivBuilding {
         val gateV2 = piece.type == BuildingType.GATE && CivsGateRefit.generatedProfile(piece.bounds, piece.transit)
         return CivBuilding(piece.id, piece.type, 1, piece.bounds.min, 0,
-            if (gateV2) CivsGateRefit.PREFIX + piece.id else "civs/infrastructure/v1/${piece.type.name.lowercase()}/${piece.id}",
+            if (piece.profileStage != null) CivsInfrastructureRebuild.schematicId(piece.type, piece.profileStage, piece.id)
+            else if (gateV2) CivsGateRefit.PREFIX + piece.id else "civs/infrastructure/v1/${piece.type.name.lowercase()}/${piece.id}",
             piece.bounds, piece.entrance, BuildingPhase.CONSTRUCTING,
             transit = piece.transit.takeIf { it.isNotEmpty() }?.toList()).also {
-                require(!gateV2 || CivsGateRefit.validTransit(it)) { "Invalid versioned gate passage" }
+                require(it.type != BuildingType.GATE || !CivsGateRefit.versioned(it) || CivsGateRefit.validTransit(it)) {
+                    "Invalid versioned gate passage"
+                }
             }
     }
 

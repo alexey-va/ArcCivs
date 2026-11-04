@@ -101,6 +101,7 @@ internal fun CivsUi.showOverview(player: Player, feedback: Component? = null) {
         add(button(player, "workers", "workers.open", PEOPLE) { showWorkers(player) })
         add(button(player, "research", "research.open", PERSONAL) { showResearch(player, city.id) })
         add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, city.id) })
+        if (hasTrade(city)) add(button(player, "trade", "trade.open", STOCK) { showTrade(player, city.id) })
         if (hall != null && canUpgrade(city, hall)) add(button(player, "upgrade", "upgrades.hall-start", COMMIT, appearance = Action.UPGRADE) {
             perform(player, "civs.overview", "city.title", { host.upgradeBuilding(player, hall.id) },
                 success = { showOverview(player) }, failure = { showOverview(player, it) }, workingKey = "upgrades.starting")
@@ -317,6 +318,8 @@ internal fun CivsUi.showVillages(player: Player, page: Int = 0, feedback: Compon
                         runtime.close(player)
                     }, failure = { showVillages(player, current, it) }, workingKey = "villages.travelling")
             })
+            if (hasTrade(city)) add(valueButton(player, "trade_$index", "trade.destination", text.literal(city.name), STOCK,
+                tr(player, "trade.help")) { showTrade(player, city.id) })
         }
         pages(player, current, villages.size) { showVillages(player, it) }
     }, reopen = { showVillages(player, current) })
@@ -381,6 +384,7 @@ internal fun CivsUi.showAutonomousCity(player: Player, cityId: UUID, feedback: C
         add(button(player, "research", "research.open", PERSONAL) { showResearch(player, city.id) })
         add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, city.id) }
             .copy(tooltip = tr(player, "autonomy.resources-help")))
+        if (hasTrade(city)) add(button(player, "trade", "trade.open", STOCK) { showTrade(player, city.id) })
         if (!paused && city.construction?.phase == ConstructionPhase.PAUSED)
             add(button(player, "retry", "admin.retry", COMMIT, appearance = Action.START) {
                 if (!isAdmin(player)) autonomyDenied(player)

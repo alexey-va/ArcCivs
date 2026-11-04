@@ -54,18 +54,35 @@ class CivsPartialNavigationTest : FunSpec({
         (result.nodes <= 64) shouldBe true
     }
 
-    test("unknown native terrain and cancellation cannot return a discovered prefix") {
+    test("unknown native terrain retains only the validated prefix and stops at its actual frontier") {
         val target = CitizenPoint(8.5, 64.0, .5)
         val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), target, 0, 256, emptyList())
         val unknown = partialFinish(search, target, wall = 4, unknownX = 3)
-        unknown.failure shouldBe "chunk-unloaded"
-        unknown.path shouldBe null
-        unknown.continuation shouldBe false
-        search.finishAtBudget("capture-budget").failure shouldBe "chunk-unloaded"
+        unknown.failure shouldBe null
+        requireNotNull(unknown.path).last().point shouldBe CitizenPoint(2.5, 64.0, .5)
+        unknown.continuation shouldBe true
+        unknown.continuationReason shouldBe "chunk-unloaded"
+        search.finishAtBudget("capture-budget").continuationReason shouldBe "chunk-unloaded"
+        val stopped = partialFinish(CitizenNavigationSearch(CitizenPoint(2.5, 64.0, .5), target,
+            0, 256, emptyList()), target, wall = 4, unknownX = 3)
+        stopped.failure shouldBe "chunk-unloaded"
+        stopped.path shouldBe null
         search.cancel()
         val cancelled = search.finishAtBudget("capture-budget")
         cancelled.failure shouldBe "cancelled"
         cancelled.path shouldBe null
+    }
+
+    for (unknown in listOf(false, true))
+    test("a ninety-nine block trip keeps its loaded prefix with an unavailable side neighbour=$unknown") {
+        val target = CitizenPoint(99.5, 64.0, .5)
+        val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), target, 0, 256, emptyList())
+        val result = partialFinish(search, target, wall = null, unknownX = 3.takeIf { unknown }, unknownZ = 1)
+        result.failure shouldBe null
+        result.continuation shouldBe true
+        result.continuationReason shouldBe if (unknown) "chunk-unloaded" else "search-budget"
+        requireNotNull(result.path).last().point shouldBe CitizenPoint(96.5, 64.0, .5)
+        result.path.all { it.point.z == .5 && it.point.y == 64.0 } shouldBe true
     }
 
     test("a close capture budget keeps real progress without raising the node or capture limits") {
@@ -142,22 +159,22 @@ private fun partialSearch(origin: CitizenPoint, target: CitizenPoint, wall: Int?
     CitizenNavigationSearch(origin, target, 0, 256, emptyList()), target, wall, allowed = allowed)
 
 private fun partialFinish(search: CitizenNavigationSearch, target: CitizenPoint, wall: Int?, unknownX: Int? = null,
-    allowed: (CivPosition) -> Boolean = { true }): CitizenSearchResult {
+    allowed: (CivPosition) -> Boolean = { true }, unknownZ: Int = 0): CitizenSearchResult {
     var result = search.advance(emptyList())
     repeat(200) {
         if (result.probes.isEmpty()) return result
-        result = search.advance(result.probes.map { partialCapture(it, target, wall, unknownX, allowed) })
+        result = search.advance(result.probes.map { partialCapture(it, target, wall, unknownX, allowed, unknownZ) })
     }
     error("Partial search did not finish")
 }
 
 private fun partialCapture(probe: CitizenSearchProbe, target: CitizenPoint, wall: Int?, unknownX: Int? = null,
-    allowed: (CivPosition) -> Boolean = { true }): CitizenSearchCapture {
+    allowed: (CivPosition) -> Boolean = { true }, unknownZ: Int = 0): CitizenSearchCapture {
     val blocks = buildMap {
         for (x in probe.node.x - 1..probe.node.x + 1) for (z in -1..1) for (y in 61..67) {
             val p = CivPosition(x, y, z)
             val solid = y <= 63 || x == wall && y <= 65
-            put(p, if (x == unknownX && y == 64 && z == 0) CitizenTerrainBlock.UNAVAILABLE else
+            put(p, if (x == unknownX && y == 64 && z == unknownZ) CitizenTerrainBlock.UNAVAILABLE else
                 CitizenTerrainBlock(true, false, false, false, false,
                     x in 0..target.x.toInt() && y == 64 && z == 0 && allowed(p), 1.0,
                     if (solid) listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)) else emptyList()))

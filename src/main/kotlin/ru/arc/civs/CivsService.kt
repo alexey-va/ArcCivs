@@ -764,6 +764,7 @@ class CivsService(
         sourcePlayer: Player? = null,
         keepViewersOpen: Boolean = false,
         freshAdmission: ((Settlement) -> Unit)? = null,
+        trading: Boolean = false,
         transition: (Settlement, CivInventory) -> Settlement,
     ): CompletableFuture<Settlement> {
         checkMain()
@@ -772,27 +773,30 @@ class CivsService(
         val city = cities[cityId] ?: throw CivsRejection("no-city")
         rejectIf(city.pendingDeletion != null, "deletion-pending")
         val id = UUID.randomUUID()
-        storage.reserve(city, id, sourcePlayer)
+        if (trading) storage.reserveTrade(city, id, requireNotNull(sourcePlayer)) else storage.reserve(city, id, sourcePlayer)
         val tx = try {
             val prepared = prepare(city) ?: run {
                 storage.unlock(id)
                 return CompletableFuture.completedFuture(city)
             }
             val after = CivsRules.validate(transition(city, prepared.inventoryAfter))
+            require((prepared.trade != null) == trading)
             if (after == city && prepared.changes.isEmpty() && prepared.residentTransfer == null && prepared.worldChanges.orEmpty().isEmpty()) {
                 storage.unlock(id)
                 return CompletableFuture.completedFuture(city)
             }
             require(after.revision == city.revision + 1)
-            if (prepared.cargoPickup != null) requireNotNull(freshAdmission)
+            if (prepared.cargoPickup != null || prepared.trade != null) requireNotNull(freshAdmission)
             CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes, prepared.playerDebit,
                 prepared.residentTransfer, prepared.worldChanges, mine = prepared.mine,
                 autoSupplyBuildingId = prepared.autoSupplyBuildingId, cargoDropoff = prepared.cargoDropoff,
-                cargoPickup = prepared.cargoPickup)
+                cargoPickup = prepared.cargoPickup, trade = prepared.trade)
                 .also { storage.seal(it, keepViewersOpen) }
         } catch (failure: Exception) { storage.unlock(id); throw failure }
         return if (tx.cargoPickup != null)
             inventoryJournal.submitCargoPickup(city, tx) { requireNotNull(freshAdmission)(city) }
+        else if (tx.trade != null)
+            inventoryJournal.submitTrade(city, tx) { requireNotNull(freshAdmission)(city) }
         else inventoryJournal.submit(tx)
     }
 
@@ -935,6 +939,11 @@ class CivsService(
                     "player" to transfer.playerId, "material" to material, "before" to previous,
                     "after" to current, "delta" to current - previous)
             }
+        }
+        tx.trade?.let { trade ->
+            CivsDiagnostics.event("settlement_trade_committed", "city" to tx.cityId, "transaction" to tx.id,
+                "player" to trade.playerId, "market" to trade.marketId, "material" to trade.offer.material,
+                "quantity" to trade.offer.amount, "direction" to trade.offer.direction, "emeralds" to 1, "mint" to 0)
         }
         val current = cities.getValue(tx.cityId)
         tx.resurrection?.let { debit ->
@@ -1198,6 +1207,47 @@ class CivsService(
 
     internal fun saveCapturedCity(plan: CivPlacementPlan, bytes: ByteArray, city: Settlement): CompletableFuture<Settlement> =
         store.saveSchematic(plan.id, bytes).thenCompose { store.savePlan(plan) }.thenCompose { store.save(city) }
+    override fun tradeView(player: Player, cityId: UUID): CivTradeView {
+        requireReady(player)
+        val city = cities[cityId] ?: throw CivsRejection("city-not-found")
+        rejectIf(cityId in unhealthy || cityId in busy, "city-busy")
+        return tradeView(player, city)
+    }
+
+    private fun tradeView(player: Player, city: Settlement): CivTradeView {
+        val cityId = city.id
+        val market = CivsTrade.checkAccess(city, player)
+        val snapshot = supply.observation(cityId)
+        val observation = snapshot?.inputKey as? CivSupplyObservation
+        val fresh = snapshot != null && observation != null && CivsAutoSupplies.observed(city, snapshot) &&
+            storage.supplyCaptureCurrent(city, observation.capture, requireComplete = true)
+        val stock = storage.tradeStock(city, market.id)
+        if (!fresh) supply.request(cityId)
+        return CivTradeView(cityId, city.name, market.id, stock["EMERALD"] ?: 0L,
+            if (fresh) CivsTrade.offers(city, requireNotNull(snapshot), stock) else emptyList(), refreshing = !fresh)
+    }
+
+    override fun trade(player: Player, cityId: UUID, offer: CivTradeOffer): CompletableFuture<Unit> =
+        action("settlement_trade", player, "city" to cityId, "material" to offer.material, "direction" to offer.direction) {
+            val view = tradeView(player, cityId)
+            rejectIf(view.refreshing, "trade-refreshing")
+            rejectIf(offer !in view.offers, "trade-offer-changed")
+            inventoryMutation(cityId, { city ->
+                val current = tradeView(player, cityId)
+                rejectIf(current.refreshing || offer !in current.offers, "trade-offer-changed")
+                storage.prepareTrade(city, player, offer)
+            }, sourcePlayer = player, trading = true, freshAdmission = { city ->
+                requireReady(player)
+                val current = tradeView(player, city)
+                rejectIf(current.refreshing || offer !in current.offers, "trade-offer-changed")
+            }) { city, inventory ->
+                city.copy(inventory = inventory, revision = Math.addExact(city.revision, 1))
+            }.thenApply {
+                supply.request(cityId)
+                Unit
+            }
+        }
+
     internal fun managed(player: Player, allowDeletion: Boolean = false): Settlement {
         requireReady(player)
         val city = city(player) ?: throw membership.remoteCity(player)?.let {

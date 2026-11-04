@@ -1,0 +1,378 @@
+{
+  "version": 1,
+  "title": "ArcCivs two captured medievaloak gate projects: initial legacy vs ordinary stage1 rebuild",
+  "assumptions": [
+    "Measured bills of two exact private lab captures: one5-wide and one7-wide gate. Costs are native item sinks; no refunds or currency prices.",
+    "Low/base/high1/5/15 settlements each complete one pair of gate projects in a week, represented as1/7 event per player-day solely to show arithmetic. This is a scenario, not measured production or repeatable reward.",
+    "Initial legacy bill and later rebuild are sequential distinct actions. Before/after compares their respective bills, not a free replacement or rebate. Old floor paid again0; removed gate items refunded0.",
+    "Source hashes/material evidence and wall stage quantities are documented in fortification-growth-20261104.md. Width/terrain/style determine actual bill through unchanged CivsMaterials.required.",
+    "Vault/tokens/emerald/playerXP mint0; no recipe/payout/rate/multiplier change. Wider-town total cannot be inferred from this pair."
+  ],
+  "participants": [
+    1,
+    5,
+    15
+  ],
+  "currencies": {
+    "item_cobblestone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "native_project_item_sink",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Measured exact pair bill; nonmonetary native item units, one pair/week.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "51",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_fence_gate": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "native_project_item_sink",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Measured exact pair bill; nonmonetary native item units, one pair/week.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_log": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "native_project_item_sink",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Measured exact pair bill; nonmonetary native item units, one pair/week.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "46",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_slab": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "native_project_item_sink",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Measured exact pair bill; nonmonetary native item units, one pair/week.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_stairs": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "native_project_item_sink",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Measured exact pair bill; nonmonetary native item units, one pair/week.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "24",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "item_stone_bricks": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "native_project_item_sink",
+          "kind": "burn",
+          "source": "CivsInfrastructureRebuild/CivsMaterials.required",
+          "basis": "Measured exact pair bill; nonmonetary native item units, one pair/week.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "emerald": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    }
+  },
+  "prices": [],
+  "measured_items": {
+    "legacy_initial_pair": {
+      "COBBLESTONE": 51,
+      "OAK_FENCE_GATE": 12,
+      "STONE_BRICKS": 12
+    },
+    "stage1_rebuild_pair": {
+      "OAK_LOG": 46,
+      "OAK_SLAB": 12,
+      "OAK_STAIRS": 24,
+      "STONE_BRICKS": 4
+    }
+  }
+}

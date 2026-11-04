@@ -65,7 +65,7 @@ object CivsAutonomy {
         id: UUID, owner: UUID, name: String, worldId: UUID, center: CivPosition,
         radius: Int, style: String, townHall: CivBuilding, now: Long,
     ): Settlement = CivsRules.validate(CivsRules.found(id, owner, name, worldId, center, radius, style, townHall, now)
-        .copy(autonomy = CivAutonomy()))
+        .let { city -> city.copy(autonomy = CivAutonomy(layoutHalfWidth = CivsSettlementGrowth.initialHalfWidth(city))) })
 
     /** Finish accepted sites before adding another; the hall waits for a real hut and sustainable producers. */
     fun nextGoal(city: Settlement, maximumLevel: (CivBuilding) -> Int = { it.type.maxLevel }): CivAutonomyGoal? {

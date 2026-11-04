@@ -37,7 +37,8 @@ internal object CivsSnapshotValidation {
                 snapshot(queue.size <= CivsRules.MAX_SITES && queue.distinct().size == queue.size &&
                     queue.all { id -> CivsRules.present(id) && city.building(id)?.let {
                         it.phase == BuildingPhase.SITE || it.phase == BuildingPhase.ACTIVE &&
-                            (it.level < it.type.maxLevel || CivsPlanBoardBlueprint.needsRefit(it))
+                            (it.level < it.type.maxLevel || CivsPlanBoardBlueprint.needsRefit(it) ||
+                                CivsInfrastructureRebuild.needsRefit(city, it))
                     } == true && id != order?.buildingId })
             }
             city.pendingDeletion?.buildingId?.let { id -> snapshot(city.building(id)?.type?.let { it != BuildingType.TOWN_HALL } == true) }
@@ -51,7 +52,8 @@ internal object CivsSnapshotValidation {
                 val founding = CivsRules.isFounding(city)
                 snapshot(if (current!!.phase == BuildingPhase.CONSTRUCTING) current == target && target.level == 1 else
                     current.phase == BuildingPhase.ACTIVE && current.type == target.type &&
-                        (current.level + 1 == target.level || CivsPlanBoardBlueprint.refit(current, target)) &&
+                        (current.level + 1 == target.level || CivsPlanBoardBlueprint.refit(current, target) ||
+                            CivsInfrastructureRebuild.refit(current, target)) &&
                         current.entrance == target.entrance && current.rotation == target.rotation)
                 snapshot(target.type == BuildingType.TOWN_HALL || target.level <= city.level())
                 snapshot(founding || target.type != BuildingType.TOWN_HALL || target.level > 1 || order.batches != null)
