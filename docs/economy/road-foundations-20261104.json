@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "title": "ArcCivs bounded paid foundations for missing retained road floors",
+  "assumptions": [
+    "LAB native captures2026-11-04: five center columns atx10960,z9488..9492 need10/5/4/2/1 blocks from current solid base through retained floor. This22-block center-line bill is not the total for a wider road.",
+    "Low/base/high1/5/15 owners each have one town and one such damaged approach repaired once in an illustrative week, modeled as1/7event per owner-day solely for arithmetic. This is not a forecast of recurring incidents or measured production.",
+    "Before unsupported missing floors are refused. After the existing physical upkeep pays1COBBLESTONE per floor plus1per new AIR-to-COBBLESTONE foundation cell. Existing healthy columns consume0; normal no-foundation upkeep stays1. No refund/drop duplication.",
+    "Direct monetary and XP flows are separately0. Materials use their own physical units and are not valued at EconomyShopGUI SELL prices. Planned SELL-to-contract transition remains separate.",
+    "AutoSupplies, logistics, recipes, work duration and trade rates remain unchanged. Repair can restore resident movement/output; no measured income multiplier is claimed. Existing Auto material grants remain a distinct policy, not an emerald topup."
+  ],
+  "participants": [
+    1,
+    5,
+    15
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "emerald": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "item_cobblestone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "missing_retained_approach_repair",
+          "kind": "burn",
+          "source": "CivsRoadMaintenance/CivsRoadWorld validated world-work changes",
+          "basis": "Five measured central columns require10+5+4+2+1 placed blocks including five floor cells. Other shoulders are outside this representative bill.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "22",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.142857142857142857",
+              "0.142857142857142857",
+              "0.142857142857142857"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "measured_center_columns": [
+    {
+      "x": 10960,
+      "z": 9488,
+      "floor_y": 68,
+      "solid_base_y": 58,
+      "new_blocks_including_floor": 10
+    },
+    {
+      "x": 10960,
+      "z": 9489,
+      "floor_y": 67,
+      "solid_base_y": 62,
+      "new_blocks_including_floor": 5
+    },
+    {
+      "x": 10960,
+      "z": 9490,
+      "floor_y": 66,
+      "solid_base_y": 62,
+      "new_blocks_including_floor": 4
+    },
+    {
+      "x": 10960,
+      "z": 9491,
+      "floor_y": 65,
+      "solid_base_y": 63,
+      "new_blocks_including_floor": 2
+    },
+    {
+      "x": 10960,
+      "z": 9492,
+      "floor_y": 65,
+      "solid_base_y": 64,
+      "new_blocks_including_floor": 1
+    }
+  ]
+}

@@ -1248,8 +1248,9 @@ corner shape may change during construction; revalidation ignores only that prop
 while preserving material, orientation, half, waterlogged and protection checks.
 
 An idle Auto builder can maintain an accepted approach through existing native
-column receipts: one abstract STONE and three seconds per changed column, no
-items or profession training. Besides a bounded rising-turn correction, upkeep
+column receipts and three seconds per changed column, with no drops or profession
+training. Legacy closed-stock upkeep consumes one STONE; physical upkeep consumes
+one COBBLESTONE for an ordinary column. Besides a bounded rising-turn correction, upkeep
 can lower a straight hump of at most nine raised columns and three blocks in
 height between equal-level approaches. Every disjoint correction is validated
 against the immutable original journal. Compatible owners sharing the complete
@@ -1260,6 +1261,15 @@ preflight checks the final cut, support, headroom and permissions; each later
 column still requires its own exact before/after receipt. Only natural ground
 and a verified old pavement state at its original road height may be cleared.
 This preflight never supplies navigation arrival, work credit or free world writes.
+A missing retained floor in a physical city may also restore an AIR-only vertical
+foundation down to its current solid base, within the existing 24-block terraform
+limit including the floor. Every added foundation cell costs one additional
+COBBLESTONE. The existing change vector carries the full bottom-up proof and
+receipt; native validation checks every cell, permissions, source route and base.
+Other blocks or liquids inside the gap refuse the repair. Foundation work may use
+a reachable standing point up to three blocks below the floor under the ordinary
+body, support and approach checks. It never grants remote arrival. Healthy columns
+consume nothing again; old receipts retain their existing shape and payment.
 A physical builder retaining an upkeep target still travels for missing inputs.
 Without a construction order it uses the existing selected upkeep requirements
 and ordinary native pickup from its assigned hut, bounded by the existing

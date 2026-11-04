@@ -58,12 +58,29 @@ internal class CivsRoadWorld(
             if (!roadUpkeepReplaceable(block) && block.blockData.asString !in pavement[p].orEmpty()) return null
             CivPlanBlock(p, block.blockData.asString, after.asString)
         }
+        val foundation = mutableListOf<CivPlanBlock>()
+        if (change != null && block.type.isAir && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+            upkeep.route != null && upkeep.routeOverride == null) {
+            for (depth in 1..CivsAutonomousTerraform.MAXIMUM_CHANGE) {
+                val y = p.y - depth
+                if (y < world.minHeight) return null
+                val support = world.getBlockAt(p.x, y, p.z)
+                if (!support.type.isAir) {
+                    val supported = if (foundation.isEmpty()) roadUpkeepSupport(support) else roadUpkeepGround(support)
+                    if (!supported) return null
+                    break
+                }
+                if (depth == CivsAutonomousTerraform.MAXIMUM_CHANGE) return null
+                foundation += CivPlanBlock(p.copy(y = y), support.blockData.asString, "minecraft:cobblestone")
+            }
+            foundation.reverse()
+        }
         val clearance = (1..CivsRoadMaintenance.MAX_CLEARANCE).map { dy ->
             world.getBlockAt(p.x, p.y + dy, p.z).blockData.asString
         }
         val cover = CivsRoadMaintenance.covers(p, clearance)
             ?: CivsRoadMaintenance.covers(p, clearance, pavement) ?: return null
-        val changes = listOfNotNull(change) + cover
+        val changes = foundation + listOfNotNull(change) + cover
         if (changes.isEmpty()) {
             val stairs = block.blockData as? Stairs
             if (registerSurface != null && stairs != null && stairs.material != Material.COBBLESTONE_STAIRS &&
@@ -75,7 +92,8 @@ internal class CivsRoadWorld(
             return null
         }
         val assignment = worker.assignment ?: return null
-        for (dy in listOf(1, 0, 2, 3)) for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) {
+        val standingHeights = listOf(1, 0, 2, 3) + if (foundation.isNotEmpty()) listOf(-1, -2, -3) else emptyList()
+        for (dy in standingHeights) for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) {
             val standing = CivPosition(p.x + dx, p.y + dy, p.z + dz)
             if (!city.contains(standing.x, standing.z) || !citizenControlClear(city, standing) ||
                 !citizenStandable(world, standing) || !citizenPacketBodyClear(world,
@@ -103,6 +121,7 @@ internal class CivsRoadWorld(
         try { CivsRoadMaintenance.validateChanges(city, upkeep, work.changes) }
         catch (_: IllegalArgumentException) { throw CivsRejection("stale-worksite") }
         val cell = work.changes.firstOrNull { it.position == upkeep.floor }
+        val foundation = work.changes.filter { it.position.y < upkeep.floor.y }.associateBy { it.position }
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unloaded")
         fun read(p: CivPosition): Block {
             requireCivs(p.y in world.minHeight until world.maxHeight, "outside-world")
@@ -110,12 +129,13 @@ internal class CivsRoadWorld(
             return world.getBlockAt(p.x, p.y, p.z)
         }
         val p = upkeep.floor
+        val supportPosition = p.copy(y = (foundation.keys.minOfOrNull { it.y } ?: p.y) - 1)
         requireCivs(world.worldBorder.isInside(Location(world, p.x + .5, p.y.toDouble(), p.z + .5)), "outside-border")
         val all = cities().filter { it.id != city.id } + city
         for (other in all) {
             if (other.worldId != city.worldId) continue
             requireCivs(other.id == city.id || !other.contains(p.x, p.z), "city-overlap")
-            val positions = work.changes.map { it.position } + p
+            val positions = work.changes.map { it.position } + p + if (foundation.isNotEmpty()) listOf(supportPosition) else emptyList()
             requireCivs(positions.none { other.inventory?.containers?.contains(it) == true }, "registered-container")
             requireCivs(other.pendingControls.orEmpty().none { it.position in positions || it.approach.orEmpty().any { c -> c.position in positions } },
                 "building-overlap")
@@ -140,14 +160,20 @@ internal class CivsRoadWorld(
             val beside = read(p.copy(x = p.x + dx, z = p.z + dz))
             requireCivs(roadUpkeepSideSafe(beside), "protected-terrain")
         }
-        val support = read(p.copy(y = p.y - 1))
-        val retainedStepSupport = CivsRoadMaintenance.surface(support.blockData.asString) &&
-            civsRetainedRouteStep(support.blockData) && support.collisionShape.boundingBoxes.any {
-                it.maxY == 1.0 && it.maxX > it.minX && it.maxZ > it.minZ
+        val support = read(supportPosition)
+        requireCivs(if (foundation.isEmpty()) roadUpkeepSupport(support) else roadUpkeepGround(support), "autonomy-no-path")
+        if (foundation.isNotEmpty()) {
+            requireCivs(canModify(city.owner, support, null), "lands-denied")
+            for ((position, change) in foundation) {
+                val native = read(position)
+                requireCivs(native.blockData.asString == change.before || native.blockData.asString == change.after, "world-changed")
+                requireCivs(native.state !is TileState && !native.isLiquid &&
+                    (native.blockData as? Waterlogged)?.isWaterlogged != true, "protected-terrain")
+                requireCivs(canModify(city.owner, native, Material.COBBLESTONE), "lands-denied")
             }
-        requireCivs(roadUpkeepGround(support) && fullTerraformSupport(support) || retainedStepSupport, "autonomy-no-path")
+        }
         requireCivs(canModify(city.owner, block, after.material), "lands-denied")
-        val cover = work.changes.filter { it.position != p }.associateBy { it.position }
+        val cover = work.changes.filter { it.position.y > p.y }.associateBy { it.position }
         for (dy in 1..maxOf(2, cover.keys.maxOfOrNull { it.y - p.y } ?: 0)) {
             val head = read(p.copy(y = p.y + dy))
             val clear = cover[CivPosition(head.x, head.y, head.z)]
@@ -174,13 +200,15 @@ internal class CivsRoadWorld(
 
         // Stairs have two levels, not a fictional full cube. Actual neighbours retain their native shapes.
         val localAfter = roadUpkeepBoxes(if (already) block.blockData else after).map { it.at(CivPosition(0, 0, 0)) }
+        val supportAfter = if (foundation.isEmpty()) emptyList() else
+            roadUpkeepBoxes(Bukkit.createBlockData(Material.COBBLESTONE)).map { it.at(CivPosition(0, 0, 0)) }
         val collisions = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
         fun collision(x: Int, y: Int, z: Int): CitizenCollisionSnapshot = collisions.getOrPut(CivPosition(x, y, z)) {
             val at = CivPosition(x, y, z)
             val native = read(at)
-            val local = if (at == p) localAfter else if (at in cover) emptyList()
+            val local = if (at == p) localAfter else if (at in foundation) supportAfter else if (at in cover) emptyList()
                 else native.collisionShape.boundingBoxes.map { it.clone() }
-            CitizenCollisionSnapshot(if (at == p || at in cover) false else native.isLiquid,
+            CitizenCollisionSnapshot(if (at == p || at in cover || at in foundation) false else native.isLiquid,
                 at != p && citizenRouteOpenable(native.blockData) != null, local,
                 local.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) })
         }
@@ -372,6 +400,10 @@ internal class CivsRoadWorld(
 
     private fun roadUpkeepGround(block: Block): Boolean =
         naturalTerraform(block) && fullTerraformSupport(block)
+
+    private fun roadUpkeepSupport(block: Block): Boolean = roadUpkeepGround(block) ||
+        CivsRoadMaintenance.surface(block.blockData.asString) && civsRetainedRouteStep(block.blockData) &&
+        block.collisionShape.boundingBoxes.any { it.maxY == 1.0 && it.maxX > it.minX && it.maxZ > it.minZ }
 
     /** These ordinary plants attach below, never to the side of the changed column. */
     private fun roadUpkeepSideSafe(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||

@@ -372,11 +372,11 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         val network = networks[city.id]?.takeIf { it.worldId == city.worldId && it.buildings == city.buildings &&
             it.routeOverrides == city.roadRouteOverrides } ?: return null
         selected[worker.id]?.let { work ->
-            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city) &&
+            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city, work) &&
                 !budget(worker.id)) return work
-            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city)) {
+            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city, work)) {
                 val refreshed = world.captureRoadUpkeep(city, worker, requireNotNull(work.upkeep), registerSurface)
-                    ?.copy(inputs = inputs(city))
+                    ?.let { it.copy(inputs = inputs(city, it)) }
                 if (refreshed != null) {
                     val retained = if (refreshed.changes == work.changes) work else refreshed
                     selected[worker.id] = retained
@@ -392,7 +392,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             val grade = gradeChecks[city.id]?.removeFirstOrNull()
             if (grade == null && (city.id in developmentWaiting || city.constructionQueue.orEmpty().isNotEmpty())) return null
             val target = grade ?: nextTarget(city.id, network)
-            val work = world.captureRoadUpkeep(city, worker, target, registerSurface)?.copy(inputs = inputs(city))
+            val work = world.captureRoadUpkeep(city, worker, target, registerSurface)?.let { it.copy(inputs = inputs(city, it)) }
             if (grade != null && work != null) gradeChecks.getValue(city.id).addLast(grade)
             if (work == null) return@repeat
             selected[worker.id] = work
@@ -477,15 +477,17 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     fun requirements(city: Settlement): Map<UUID, Map<String, Long>> = if (!eligible(city) ||
         city.inventory?.mode != CivStorageMode.PHYSICAL) emptyMap() else city.workers.mapNotNull { worker ->
         selected[worker.id]?.takeIf { work -> work.cycle == worker.completedCycles && work.buildingId == worker.assignment &&
-            work.inputs == NATIVE_INPUTS && worker.cargo == null && !CivsResidents.isChild(worker) &&
+            work.inputs == inputs(city, work) && worker.cargo == null && !CivsResidents.isChild(worker) &&
             city.building(work.buildingId)?.let { it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE } == true
         }?.let { worker.id to it.inputs }
     }.toMap()
 
     companion object {
         private const val SCAN_COLUMNS = 8
-        private val NATIVE_INPUTS = mapOf("COBBLESTONE" to 1L)
-        private fun inputs(city: Settlement): Map<String, Long> = if (CivsAutonomy.legacyStock(city)) emptyMap() else NATIVE_INPUTS
+        /** The old column charge plus each newly placed support; clearance keeps its existing charge. */
+        internal fun inputs(city: Settlement, work: CivWorldWork): Map<String, Long> =
+            if (CivsAutonomy.legacyStock(city)) emptyMap() else mapOf("COBBLESTONE" to
+                1L + work.changes.count { it.position.y < requireNotNull(work.upkeep).floor.y })
         /** A complete zero observation lets development create its missing production source. */
         internal fun paymentPossible(city: Settlement, snapshot: CivSupplySnapshot?): Boolean? {
             if (CivsAutonomy.legacyStock(city) || city.workers.any {
@@ -634,7 +636,6 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         /** A bounded open cut; paired plants require both exact halves in this same receipt. */
         internal fun covers(floor: CivPosition, cells: List<String>, pavement: Map<CivPosition, Set<String>> = emptyMap()): List<CivPlanBlock>? {
             require(cells.size in 2..MAX_CLEARANCE)
-            fun air(data: String) = data in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
             fun clear(y: Int, before: String) = CivPlanBlock(floor.copy(y = floor.y + y), before, "minecraft:air")
             val changes = mutableListOf<CivPlanBlock>()
             var index = 0
@@ -658,16 +659,30 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         }
 
         internal fun validateChanges(city: Settlement, upkeep: CivRoadUpkeep, changes: List<CivPlanBlock>) {
-            require(changes.size in 1..MAX_CLEARANCE + 1 && changes.map { it.position }.distinct().size == changes.size)
+            require(changes.size in 1..CivsAutonomousTerraform.MAXIMUM_CHANGE + MAX_CLEARANCE &&
+                changes.map { it.position }.distinct().size == changes.size)
             require(changes.all { it.before != it.after })
-            val floor = changes.firstOrNull()?.takeIf { it.position == upkeep.floor }
+            val foundation = changes.takeWhile { it.position.y < upkeep.floor.y }
+            if (foundation.isNotEmpty()) {
+                require(city.inventory?.mode == CivStorageMode.PHYSICAL && upkeep.route != null && upkeep.routeOverride == null)
+                require(foundation.size < CivsAutonomousTerraform.MAXIMUM_CHANGE)
+                foundation.forEachIndexed { index, change ->
+                    require(change.position == upkeep.floor.copy(y = upkeep.floor.y - foundation.size + index) &&
+                        air(change.before) && change.after == "minecraft:cobblestone")
+                }
+            }
+            val column = changes.drop(foundation.size)
+            val floor = column.firstOrNull()?.takeIf { it.position == upkeep.floor }
+            require(foundation.isEmpty() || floor != null && air(floor.before))
             require(floor == null || floor.after == upkeep.after)
-            val cover = changes.filter { it.position != upkeep.floor }
+            val cover = column.filter { it.position != upkeep.floor }
             val expected = covers(upkeep.floor, (1..MAX_CLEARANCE).map { dy ->
                 cover.firstOrNull { it.position == upkeep.floor.copy(y = upkeep.floor.y + dy) }?.before ?: "minecraft:air"
             }, ownedPavement(city, upkeep))
-            require(expected != null && changes == listOfNotNull(floor) + expected)
+            require(expected != null && column == listOfNotNull(floor) + expected)
         }
+
+        private fun air(data: String): Boolean = data in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
 
         fun eligible(city: Settlement): Boolean = city.autonomy?.paused == false &&
             (city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) &&
@@ -676,7 +691,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         private fun funded(city: Settlement): Boolean =
             city.stock.stone > (CivsAutonomy.nextGoal(city)?.cost?.stone ?: 0L)
 
-        /** One native cobblestone per worked column; accepted legacy receipts retain their closed debit. */
+        /** Paid support and floor work share the existing receipt; legacy receipts retain their closed debit. */
         fun complete(city: Settlement, work: CivWorldWork, at: Long, nativePaid: Boolean = false): Settlement {
             val legacy = CivsAutonomy.legacyStock(city)
             require(eligible(city) && (!legacy || funded(city)) && at in 0..Long.MAX_VALUE - 1_000)
@@ -690,7 +705,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             validateChanges(city, upkeep, work.changes)
             require((work.focus == upkeep.floor || work.changes.any { it.position == work.focus }) &&
                 work.status == "repairing-road" && work.durationMillis == 3_000L)
-            require(work.inputs == inputs(city) && work.outputs.isEmpty() && work.equipmentAfter == null && work.forestry == null &&
+            require(work.inputs == inputs(city, work) && work.outputs.isEmpty() && work.equipmentAfter == null && work.forestry == null &&
                 work.miningStep == null && work.miningPlanVersion == null && !work.miningGenerator && work.miningAccessStep == null)
             require(city.contains(work.standing.x, work.standing.z) && work.standing.y in -4_094..4_094 &&
                 (work.standing.x != upkeep.floor.x || work.standing.z != upkeep.floor.z))
