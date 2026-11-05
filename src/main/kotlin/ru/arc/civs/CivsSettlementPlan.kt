@@ -414,8 +414,25 @@ internal object CivsSettlementPlans {
                         if (shift !in 1..6 || abs(normal) < 6 || normal.toLong() * sourceNormal >= 0)
                             null else (if (acrossX) entry.copy(x = gate.center.x) else entry.copy(z = gate.center.z)) to abs(normal)
                     }.minByOrNull { it.second }?.first
-                routes[id] = try { CivsAutonomousTerraform.connection(navigable, target, surface,
-                    planningAccess(), obstacles + centreObstacles, inspectRoute, frontage, streets) }
+                routes[id] = try {
+                    val access = planningAccess()
+                    val connected = CivsAutonomousTerraform.connection(navigable, target, surface,
+                        access, obstacles + centreObstacles, inspectRoute, frontage, streets)
+                    val paid = retained.copy(reservedFortificationPorts = access.reservedFortificationPorts)
+                    val otherPlots = plots.filter { it.building.id != id }.map { it.envelope }
+                    val reuse = CivsAutonomousTerraform.paidApproach(city, target, connected, adoptedFrame,
+                        surface, paid, otherPlots, routes.values)
+                    if (reuse == null) connected else try {
+                        // A real SITE hall owns its entrance, not the projected ACTIVE hall's flat apron.
+                        // Validate the paid grades against the actual town and physical obstacles.
+                        CivsAutonomousTerraform.draft(city, CivTerraformOption(target, 0), surface, paid,
+                            obstacles + otherPlots, reservedRoute = reuse.route).route
+                    } catch (failure: CivsRejection) {
+                        if (failure.reason !in setOf("autonomy-no-path", "autonomy-terrain", "autonomy-slope",
+                                "building-overlap", "outside-world", "autonomy-search-budget")) throw failure
+                        connected
+                    }
+                }
                 catch (failure: CivsRejection) {
                     if (inspect != null) runCatching {
                         inspect(CivSettlementPlan(VERSION, 0, adoptedFrame.halfWidth, plots.toList(),

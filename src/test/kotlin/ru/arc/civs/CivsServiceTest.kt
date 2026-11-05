@@ -5895,9 +5895,9 @@ class CivsServiceTest : FunSpec({
                 else CompletableFuture.completedFuture(capture).thenApply { captures[it.id] = it; it }
             }
             h.start()
-            val startOrder = CivsBuildingRequests::class.java.getDeclaredMethod("startOrder", UUID::class.java,
-                Settlement::class.java, CivPlacementPlan::class.java, ByteArray::class.java).also { it.isAccessible = true }
-            val starting = startOrder.invokeService(h.service, city.owner, city, plan, bytes) as CompletableFuture<*>
+            val startOrder = CivsBuildingRequests::class.java.declaredMethods.single { it.name == "startOrder" && it.parameterCount == 5 }
+                .also { it.isAccessible = true }
+            val starting = startOrder.invokeService(h.service, city.owner, city, plan, bytes, null) as CompletableFuture<*>
             if (autonomous && earthworks) {
                 h.saves shouldBe emptyList()
                 starting.isDone shouldBe false
@@ -5946,9 +5946,9 @@ class CivsServiceTest : FunSpec({
                 else CompletableFuture.completedFuture(firstArg())
             }
             h.start()
-            val startOrder = CivsBuildingRequests::class.java.getDeclaredMethod("startOrder", UUID::class.java,
-                Settlement::class.java, CivPlacementPlan::class.java, ByteArray::class.java).also { it.isAccessible = true }
-            val starting = startOrder.invokeService(h.service, city.owner, city, plan, byteArrayOf(2)) as CompletableFuture<*>
+            val startOrder = CivsBuildingRequests::class.java.declaredMethods.single { it.name == "startOrder" && it.parameterCount == 5 }
+                .also { it.isAccessible = true }
+            val starting = startOrder.invokeService(h.service, city.owner, city, plan, byteArrayOf(2), null) as CompletableFuture<*>
             h.tick()
 
             CivsDiagnostics.cause(shouldThrow<CompletionException> { starting.join() }) shouldBe failure

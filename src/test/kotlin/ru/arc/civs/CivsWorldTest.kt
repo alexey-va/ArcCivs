@@ -28,6 +28,172 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 
+class CivsOwnControlTreeSupportTest : FunSpec({
+    test("a registered site marker preserves its filled barrel through route capture and paid tree clearing") {
+        worldScenario(collisionWorld = true) { s ->
+            val proposal = ownControlTree(s)
+            val city = s.cities.single()
+            val site = city.buildings.single()
+            val marker = requireNotNull(site.control)
+            val beforeItems = controlTreeItems(s, marker)
+            val beforeData = s.world.getBlockAt(marker.x, marker.y, marker.z).blockData.asString
+            val terrain = requireNotNull(proposal.terrain)
+            val route = s.subject.autonomousRoute(city, proposal.building, terrain.route.first(),
+                java.util.concurrent.Executor(Runnable::run), terrain, site)
+            repeat(100) { if (!route.isDone) s.scheduler.tick() }
+            completed(route) shouldBe Unit
+
+            val capture = s.subject.capture(city.id, city.owner, city.worldId, proposal.building,
+                controlTreeCells(proposal.building), site, terrain)
+            s.scheduler.tick()
+            val captured = completed(capture)
+            val capturedTerrain = requireNotNull(captured.terrain)
+            captured.blocks.none { it.position == marker } shouldBe true
+            capturedTerrain.blocks shouldBe terrain.blocks
+            capturedTerrain.blocks.none { it.position == marker } shouldBe true
+            s.cities[0] = city.copy(buildings = listOf(captured.building), construction = CivConstruction(
+                captured.id, captured.building.id, 1, 1, 0, ConstructionPhase.PLACING, Stock(),
+                plannedBuilding = captured.building))
+            val placed = mutableListOf<CivPlanBlock>()
+            val clearing = s.subject.applyTerraform(captured, city.owner, terrain.blocks, 0, { true }, placed::add)
+            repeat(10) { if (!clearing.isDone) s.scheduler.tick() }
+            completed(clearing) shouldBe Unit
+            placed shouldBe terrain.blocks
+            val revalidation = s.subject.revalidate(captured, city.owner)
+            s.scheduler.tick()
+            completed(revalidation) shouldBe Unit
+            terrain.blocks.all { p -> s.world.getBlockAt(p.position.x, p.position.y, p.position.z).type.isAir } shouldBe true
+            s.world.getBlockAt(marker.x, marker.y, marker.z).blockData.asString shouldBe beforeData
+            controlTreeItems(s, marker) shouldBe beforeItems
+            s.world.entities.filterIsInstance<org.bukkit.entity.Item>() shouldBe emptyList()
+        }
+    }
+
+    test("unregistered forged and sibling markers cannot become tree support") {
+        for (registration in listOf("unregistered", "forged", "sibling")) worldScenario(collisionWorld = true) { s ->
+            val proposal = ownControlTree(s)
+            val originalCity = s.cities.single()
+            val originalSite = originalCity.buildings.single()
+            val marker = requireNotNull(originalSite.control)
+            var terrain = requireNotNull(proposal.terrain)
+            val probed = if (registration == "sibling") marker.copy(x = 2) else marker
+            val city = when (registration) {
+                "unregistered" -> originalCity.copy(buildings = emptyList())
+                "forged" -> originalCity.copy(buildings = listOf(originalSite.copy(control = marker.copy(x = 1))))
+                else -> {
+                    for (y in 66..70) {
+                        val source = s.world.getBlockAt(0, y, 0)
+                        s.world.getBlockAt(2, y, 0).also { it.type = source.type; it.blockData = source.blockData }
+                    }
+                    (s.world.getBlockAt(2, 67, 0).state as Barrel).inventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+                    terrain = terrain.copy(bounds = terrain.bounds.copy(max = terrain.bounds.max.copy(x = 2)),
+                        blocks = terrain.blocks.map { it.copy(position = it.position.copy(x = 2)) })
+                    val sibling = worldBuilding(worldBox(8, 9)).copy(phase = BuildingPhase.ACTIVE,
+                        control = probed, entrance = CivPosition(8, 65, 0))
+                    originalCity.copy(buildings = originalCity.buildings + sibling)
+                }
+            }
+            s.cities[0] = city
+            val beforeItems = controlTreeItems(s, probed)
+            val previous = city.building(proposal.building.id)
+            val route = s.subject.autonomousRoute(city, proposal.building, terrain.route.first(),
+                java.util.concurrent.Executor(Runnable::run), terrain, previous)
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, proposal.building,
+                controlTreeCells(proposal.building), terrain, previous)
+            s.scheduler.tick()
+            for (rejected in listOf(route, capture)) {
+                val failure = rejection(rejected)
+                failure.reason shouldBe "autonomy-terrain"
+                failure.values["block"] shouldBe "BARREL"
+                failure.values["x"] shouldBe probed.x.toString()
+                failure.values["y"] shouldBe probed.y.toString()
+            }
+            controlTreeItems(s, probed) shouldBe beforeItems
+        }
+    }
+
+    test("an owned marker still requires its native Lands permission during the support probe") {
+        worldScenario(collisionWorld = true) { s ->
+            val proposal = ownControlTree(s)
+            val city = s.cities.single()
+            val site = city.buildings.single()
+            val marker = requireNotNull(site.control)
+            val beforeItems = controlTreeItems(s, marker)
+            val lands = s.paper.createSimplePlugin("Lands")
+            lands.server.pluginManager.disablePlugin(lands)
+            val terrain = requireNotNull(proposal.terrain)
+            val route = s.subject.autonomousRoute(city, proposal.building, terrain.route.first(),
+                java.util.concurrent.Executor(Runnable::run), terrain, site)
+            val capture = s.subject.capture(city.id, city.owner, city.worldId, proposal.building,
+                controlTreeCells(proposal.building), site, terrain)
+            s.scheduler.tick()
+            for (rejected in listOf(route, capture)) {
+                val failure = rejection(rejected)
+                failure.reason shouldBe "lands-denied"
+                failure.values["block"] shouldBe "BARREL"
+                failure.values["y"] shouldBe marker.y.toString()
+            }
+            controlTreeItems(s, marker) shouldBe beforeItems
+        }
+    }
+
+    test("skipping an owned marker yields before the next unit proves the actual ground beneath it") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                var nanos = 0L
+                WorldScenario(paper, collisionWorld = true) { nanos.also { nanos += CivsWorld.NANOS_PER_TICK } }.use { s ->
+                    val proposal = ownControlTree(s)
+                    val city = s.cities.single()
+                    val site = city.buildings.single()
+                    val marker = requireNotNull(site.control)
+                    val beforeItems = controlTreeItems(s, marker)
+                    val terrain = requireNotNull(proposal.terrain)
+                    val route = s.subject.autonomousRoute(city, proposal.building, terrain.route.first(),
+                        java.util.concurrent.Executor(Runnable::run), terrain, site)
+                    s.scheduler.tick()
+                    route.isDone shouldBe false
+                    val ground = s.world.getBlockAt(marker.x, marker.y - 1, marker.z).also { it.type = Material.CHEST }
+                    (ground.state as Chest).blockInventory.setItem(0, ItemStack(Material.DIAMOND, 2))
+                    s.scheduler.tick()
+                    val failure = rejection(route)
+                    failure.reason shouldBe "autonomy-terrain"
+                    failure.values["block"] shouldBe "CHEST"
+                    failure.values["y"] shouldBe (marker.y - 1).toString()
+                    (ground.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 2)
+                    controlTreeItems(s, marker) shouldBe beforeItems
+                }
+            }
+        }
+    }
+
+    test("the owned marker consumes one of the bounded twenty four support probes") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                var nanos = 0L
+                WorldScenario(paper, collisionWorld = true) { nanos.also { nanos += CivsWorld.NANOS_PER_TICK } }.use { s ->
+                    val proposal = ownControlTree(s)
+                    val city = s.cities.single()
+                    val site = city.buildings.single()
+                    val marker = requireNotNull(site.control)
+                    val beforeItems = controlTreeItems(s, marker)
+                    for (y in marker.y - CivsTerrainPolicy.MAXIMUM_TREE_READS + 1 until marker.y)
+                        s.world.getBlockAt(marker.x, y, marker.z).type = Material.AIR
+                    val terrain = requireNotNull(proposal.terrain)
+                    val route = s.subject.autonomousRoute(city, proposal.building, terrain.route.first(),
+                        java.util.concurrent.Executor(Runnable::run), terrain, site)
+                    repeat(CivsTerrainPolicy.MAXIMUM_TREE_READS) {
+                        s.scheduler.tick()
+                        route.isDone shouldBe false
+                    }
+                    s.scheduler.tick()
+                    failureReason(route) shouldBe "autonomy-terrain"
+                    controlTreeItems(s, marker) shouldBe beforeItems
+                }
+            }
+        }
+    }
+})
+
 class CivsWorldTest : FunSpec({
     for (source in listOf(CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID, CivsPlanBoardBlueprint.SMALL_SCHEMATIC_ID))
         for (rotation in listOf(0, 90, 180, 270))
@@ -2616,6 +2782,38 @@ private class WorldScenario(val paper: MockBukkitTestRuntime, collisionWorld: Bo
 private fun worldScenario(collisionWorld: Boolean = false, action: (WorldScenario) -> Unit) = failOnUnsupportedMockBukkitOperation {
     MockBukkitTestRuntime.open().use { paper -> WorldScenario(paper, collisionWorld).use(action) }
 }
+
+/** Same root/barrel/soil heights as the captured native FORESTER column; all cuts have original natural canopy proof. */
+private fun ownControlTree(s: WorldScenario): CivPlacementPlan {
+    val marker = CivPosition(0, 67, 0)
+    val building = worldBuilding(CivBox(CivPosition(0, 66, 0), CivPosition(1, 70, 0))).copy(
+        type = BuildingType.FORESTER, anchor = CivPosition(0, 66, 0), entrance = CivPosition(-1, 67, 0),
+        control = marker, phase = BuildingPhase.CONSTRUCTING)
+    val log = Bukkit.createBlockData("minecraft:birch_log[axis=y]").asString
+    val leaves = Bukkit.createBlockData("minecraft:birch_leaves[distance=1,persistent=false,waterlogged=false]").asString
+    val cuts = (68..69).map { CivPlanBlock(CivPosition(0, it, 0), log, "minecraft:air") } +
+        CivPlanBlock(CivPosition(0, 70, 0), leaves, "minecraft:air")
+    val proposal = worldTerraformPlan(s, cuts, building)
+    s.cities += worldCity(s.world.uid, building.copy(phase = BuildingPhase.SITE)).copy(
+        id = proposal.cityId, autonomy = CivAutonomy())
+    for (x in -1..0) s.world.getBlockAt(x, 66, 0).type = Material.DIRT
+    val barrel = s.world.getBlockAt(marker.x, marker.y, marker.z).also { it.type = Material.BARREL }
+    (barrel.state as Barrel).inventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+    (barrel.state as Barrel).inventory.setItem(1, ItemStack(Material.OAK_LOG, 8))
+    cuts.forEach { cell -> s.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).also {
+        it.type = Material.matchMaterial(cell.before.substringBefore('['))!!
+        it.blockData = Bukkit.createBlockData(cell.before)
+    } }
+    return proposal
+}
+
+private fun controlTreeCells(building: CivBuilding): List<ArcSchematicBlock> = worldSchematicCells(building).map { cell ->
+    if (CivPosition(cell.position.x, cell.position.y, cell.position.z) == building.control)
+        ArcSchematicBlock(cell.position, "minecraft:structure_void", false, false) else cell
+}
+
+private fun controlTreeItems(s: WorldScenario, point: CivPosition): List<ItemStack?> =
+    (s.world.getBlockAt(point.x, point.y, point.z).state as Barrel).inventory.contents.map { it?.clone() }
 
 private fun worldBox(minX: Int, maxX: Int) = CivBox(CivPosition(minX, 64, 0), CivPosition(maxX, 64, 0))
 private fun worldBuilding(box: CivBox) = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 1,

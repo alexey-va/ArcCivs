@@ -510,19 +510,22 @@ internal class CivsBuildingRequests(
                         return@cellsReady
                     }
                     // Waiting designs reserve against fresh before-images, never the terrain at confirmation.
-                    val terrain = if (building.phase == BuildingPhase.SITE &&
+                    val terrain: CompletableFuture<Pair<CivTerraformPlan?, CivPaidApproachReuse?>> = if (building.phase == BuildingPhase.SITE &&
                         (sitePlan.adminPlacement || city.autonomy == null || sitePlan.terrain?.route?.isEmpty() == true))
                         world.captureManualFoundation(city.id, city.owner, city.worldId, target,
-                            requireNotNull(cells), executor, building, adminPlacement = sitePlan.adminPlacement)
+                            requireNotNull(cells), executor, building, adminPlacement = sitePlan.adminPlacement).thenApply { it to null }
                     else if (city.autonomy != null && building.phase == BuildingPhase.SITE)
                         autonomousPlacement.prepareExisting(city, CivBlueprint(target, city.worldId, snapshot,
-                            requireNotNull(cells), emptyList(), bytes), sitePlan.terrain?.waterFoundations.orEmpty()).thenApply { it.terrain }
-                    else CompletableFuture.completedFuture(sitePlan.terrain)
-                    terrain.thenCompose { preparation -> world.capture(city.id, city.owner, city.worldId,
-                        target, requireNotNull(cells), building, preparation, adminPlacement = sitePlan.adminPlacement) }
-                        .whenCompleteSync(tasks) capturedReady@ { captured, captureFailure ->
+                            requireNotNull(cells), emptyList(), bytes), sitePlan.terrain?.waterFoundations.orEmpty())
+                            .thenApply { it.terrain to it.paidApproach }
+                    else CompletableFuture.completedFuture(sitePlan.terrain to null)
+                    terrain.thenCompose { (preparation, reuse) -> world.capture(city.id, city.owner, city.worldId,
+                        target, requireNotNull(cells), building, preparation, adminPlacement = sitePlan.adminPlacement)
+                        .thenApply { it to reuse } }
+                        .whenCompleteSync(tasks) capturedReady@ { prepared, captureFailure ->
                             if (captureFailure != null) return@capturedReady completeActivation(captureFailure)
                             runCatching {
+                                val (captured, reuse) = requireNotNull(prepared)
                                 rejectIf(!authority.ready() || records.cities[city.id]?.pendingDeletion != null, "not-ready")
                                 if (player != null) {
                                     rejectIf(!player.isOnline, "not-authorized")
@@ -530,9 +533,15 @@ internal class CivsBuildingRequests(
                                 }
                                 controlInstallations.requirePresent(city.worldId, building)
                                 if (CivsInfrastructureRebuild.refit(building, target)) rejectIf(
-                                    requireNotNull(captured).blocks.associate { it.position to it.before } !=
+                                    captured.blocks.associate { it.position to it.before } !=
                                         sitePlan.blocks.associate { it.position to it.before }, "world-changed")
-                                startOrder(actor, records.cities.getValue(city.id), requireNotNull(captured).copy(capturedSha256 = sitePlan.capturedSha256), bytes)
+                                val replacement = reuse?.let {
+                                    // A crash can leave the freshly prepared building journal ahead of the city save.
+                                    rejectIf(sitePlan.terrain?.route != it.original && sitePlan.terrain?.route != it.route ||
+                                        captured.terrain?.route != it.route, "stale-development")
+                                    QueuedApproach(city, building, it)
+                                }
+                                startOrder(actor, records.cities.getValue(city.id), captured.copy(capturedSha256 = sitePlan.capturedSha256), bytes, replacement)
                                     .whenCompleteSync(tasks) { _, orderFailure ->
                                         if (orderFailure == null && building.phase == BuildingPhase.ACTIVE) cleanupCaptured(designId)
                                         completeActivation(orderFailure)
@@ -545,9 +554,32 @@ internal class CivsBuildingRequests(
         return result
     }
 
+    /** The route and the order become visible together in the existing city save. */
+    private class QueuedApproach(val source: Settlement, val site: CivBuilding, val reuse: CivPaidApproachReuse) {
+        private val key = civsPlanBoardLayoutKey(source)
+
+        fun apply(city: Settlement): Settlement {
+            val state = city.autonomy
+            val plan = state?.plan
+            val slot = plan?.plots?.singleOrNull { it.building.id == site.id }
+            if (city.id != source.id || city.owner != source.owner || city.worldId != source.worldId ||
+                city.pendingDeletion != null || city.construction != null || city.constructionQueue.orEmpty().firstOrNull() != site.id ||
+                state?.paused != false || plan == null || plan != source.autonomy?.plan ||
+                civsPlanBoardLayoutKey(city) != key || site.phase != BuildingPhase.SITE ||
+                !civsSameBuildingGeometry(city.building(site.id), site) || !civsSameBuildingGeometry(slot?.building, site) ||
+                plan.routes[site.id.toString()] != reuse.original) throw CivsRejection("stale-development")
+            val updated = plan.copy(revision = Math.addExact(plan.revision, 1L),
+                routes = plan.routes + (site.id.toString() to reuse.route))
+            CivsSettlementPlans.validate(city, updated)
+            return city.copy(autonomy = state.copy(plan = updated))
+        }
+    }
+
     /** Starting an order reserves the immutable design; each worked row pays independently later. */
-    private fun startOrder(actor: UUID, city: Settlement, plan: CivPlacementPlan, bytes: ByteArray): CompletableFuture<Settlement> {
+    private fun startOrder(actor: UUID, city: Settlement, plan: CivPlacementPlan, bytes: ByteArray,
+        replacement: QueuedApproach? = null): CompletableFuture<Settlement> {
         rejectIf(city.construction != null, "construction-busy")
+        replacement?.apply(city) // Fence the captured site and forecast before writing either prepared journal.
         rejectIf(!CivsAutoStorageMigration.ready(city), "materials-migration-pending")
         rejectIf(city.inventory == null && city.autonomy == null, "materials-migration-pending")
         rejectIf(!city.canManage(actor), "not-authorized")
@@ -593,7 +625,7 @@ internal class CivsBuildingRequests(
                 val batches = requireNotNull(order.batches)
                 authority.releaseCity(city.id)
                 authority.mutate(city.id) { before ->
-                    val reserved = CivsRules.reserveBuild(before, actor, building, order)
+                    val reserved = CivsRules.reserveBuild(replacement?.apply(before) ?: before, actor, building, order)
                     if (approach == null) reserved else CivsRules.validate(reserved.copy(
                         pendingControls = reserved.pendingControls.orEmpty() + approach))
                 }

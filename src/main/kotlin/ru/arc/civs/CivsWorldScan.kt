@@ -180,6 +180,12 @@ internal abstract class CivsWorldScan<T>(
         if (treeProbe != position) { treeProbe = position; treeProbeDepth = 0 }
         requireCivs(treeProbeDepth < MAXIMUM_TREE_READS, "autonomy-terrain")
         val below = read(position.copy(y = position.y - ++treeProbeDepth))
+        if (below.type == Material.BARREL && building.control == CivPosition(below.x, below.y, below.z) &&
+            access.scanCities().any { city -> city.id == cityId && city.owner == owner && city.worldId == worldId &&
+                city.building(building.id)?.let { it.phase == BuildingPhase.SITE && it.control == building.control } == true }) {
+            checkControl(below)
+            return false
+        }
         if (naturalTerraform(below) && !below.type.hasGravity() && fullTerraformSupport(below)) {
             treeSupports[key] = CivPosition(below.x, below.y, below.z)
             return true

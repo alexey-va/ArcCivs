@@ -10,7 +10,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 internal data class CivAutonomousDesign(val blueprint: CivBlueprint, val terrain: CivTerraformPlan? = null,
-    val infrastructureSource: CivPlacementPlan? = null)
+    val infrastructureSource: CivPlacementPlan? = null, val paidApproach: CivPaidApproachReuse? = null)
 
 /** The planner and its diagnostic export capture the same water-foundation domain. */
 internal fun civsAutonomousWaterColumns(frame: CivSettlementFrame, retainedGates: List<CivBox>): Set<Long> =
@@ -318,6 +318,7 @@ internal class CivsAutonomousPlacement(
         private var infillOptions = IntRange.EMPTY
         @Volatile private var gradingSamples = emptyList<Map<String, Any>>()
         @Volatile private var routeRefreshed = false
+        private var keepOriginalApproach = false
         @Volatile private var nativeTerrainRejected = false
         private var preferredPending = initialPlan != null
         private var remainingPrepared = skipPrepared
@@ -606,24 +607,41 @@ internal class CivsAutonomousPlacement(
                 piece?.transit.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.y - 1) }
                 piece?.waterFoundations.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.floorY) }
             }
+            val reservedRoute = when {
+                routeRefreshed -> null
+                reservation == null -> pinnedRoute
+                else -> adopted?.routes?.get(buildingId.toString()) ?: throw CivsRejection("invalid-plan")
+            }
+            val paidApproach = if (!keepOriginalApproach && !infrastructure && pinned != null && previous?.phase == BuildingPhase.SITE &&
+                city.construction == null && city.constructionQueue.orEmpty().firstOrNull() == buildingId &&
+                adopted != null && reservedRoute != null && reservedRoute == pinnedRoute &&
+                civsSameBuildingGeometry(reservation?.building, previous))
+                CivsAutonomousTerraform.paidApproach(city, option.building, reservedRoute, CivsSettlementLayout.frame(city),
+                    surface, access, futureObstacles, adopted.routes.filterKeys { it != buildingId.toString() }.values)
+            else null
+            fun retryApproach(failure: Throwable) {
+                val cause = unwrap(failure)
+                if (paidApproach != null && cause is CivsRejection && cause.reason in setOf("autonomy-no-path", "autonomy-terrain")) {
+                    // The fixed SITE already had a valid alternative. Try its original pin once under the same budget.
+                    keepOriginalApproach = true
+                    next--
+                    attempt()
+                } else retry(failure)
+            }
             val draft = try { if (preferredTerrace) preferredDraft(option) else CivsAutonomousTerraform.draft(city, option, surface, access,
                 (if (pinned != null && !infrastructure && pinnedRoute == null) emptyList()
                     else frame().wallObstacles) + futureObstacles,
                 infrastructureFloors, waterFoundations = piece?.waterFoundations.orEmpty(),
-                reservedRoute = when {
-                    routeRefreshed -> null
-                    reservation == null -> pinnedRoute
-                    else -> adopted?.routes?.get(buildingId.toString()) ?: throw CivsRejection("invalid-plan")
-                },
+                reservedRoute = paidApproach?.route ?: reservedRoute,
                 preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }) }
-            catch (failure: RuntimeException) { retry(failure); return }
+            catch (failure: RuntimeException) { retryApproach(failure); return }
             phase = "earthworks"
             await(world.captureTerraform(nativeCity, draft, executor, previous), { failure ->
                 if ((unwrap(failure) as? CivsRejection)?.reason == "autonomy-terrain") nativeTerrainRejected = true
-                retry(failure)
+                retryApproach(failure)
             }) { terrain ->
                 phase = "route"
-                await(world.autonomousRoute(nativeCity, draft.building, terrain.route.first(), executor, terrain, previous), ::retry) {
+                await(world.autonomousRoute(nativeCity, draft.building, terrain.route.first(), executor, terrain, previous), ::retryApproach) {
                     phase = "blueprint"
                     val prepared = when {
                         pinned != null -> CompletableFuture.completedFuture(pinned)
@@ -658,7 +676,10 @@ internal class CivsAutonomousPlacement(
                                     attempt()
                                 } else result.complete(CivAutonomousDesign(blueprint, terrain))
                             }
-                        } else result.complete(CivAutonomousDesign(blueprint, terrain))
+                        } else {
+                            if (paidApproach != null && paidApproach.route != terrain.route) throw CivsRejection("invalid-plan")
+                            result.complete(CivAutonomousDesign(blueprint, terrain, paidApproach = paidApproach))
+                        }
                     }
                 }
             }

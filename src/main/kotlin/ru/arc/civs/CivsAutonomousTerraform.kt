@@ -42,6 +42,8 @@ internal data class CivRouteSearchStats(val expanded: Int, val enqueued: Int, va
     val discovered: Int, val elapsedMillis: Long, val outcome: String, val from: CivPosition, val to: CivPosition)
 /** Detached street preference only: it grants neither a floor grade nor native ownership. */
 internal data class CivRouteStreet(val center: CivPosition, val alongX: Boolean)
+/** A shorter unpaid approach, witnessed by one completed building's exact retained street. */
+internal data class CivPaidApproachReuse(val original: List<CivPosition>, val route: List<CivPosition>)
 
 internal fun civsGeneratedWaterInfrastructure(building: CivBuilding): Boolean =
     building.type in setOf(BuildingType.WALL, BuildingType.GATE) && building.level == 1 && building.control == null &&
@@ -88,6 +90,60 @@ internal object CivsAutonomousTerraform {
     const val MAXIMUM_CHANGED_CELLS = 32_768
     const val MAXIMUM_ROUTE_NODES = 131_072
     const val MAXIMUM_ROUTE_LENGTH = 256
+
+    /** Remove a loop only before a straight portal crossing. The original solver owns the entire
+     * suffix; a paid, currently supported prefix introduces no new street or corridor permission. */
+    fun paidApproach(city: Settlement, target: CivBuilding, route: List<CivPosition>, frame: CivSettlementFrame,
+        surface: CivTerrainSurface, retained: CivAutonomousAccess, otherPlots: List<CivBox>,
+        siblingRoutes: Collection<List<CivPosition>>): CivPaidApproachReuse? {
+        if (retained.routes.isEmpty() || route.size !in 3..MAXIMUM_ROUTE_LENGTH || route.last() != target.entrance ||
+            city.buildings.none { CivsRules.isDepot(it) && it.entrance == route.first() }) return null
+        val edge = route.indexOfFirst { p -> frame.gates.any { CivsAutonomousGeometry.horizontalContains(it.passage, p) } }
+        if (edge < 2) return null
+        val gate = frame.gates.first { CivsAutonomousGeometry.horizontalContains(it.passage, route[edge]) }
+        val alongX = Math.floorMod(gate.side + frame.rotation / 90, 2) == 1
+        val depth = if (alongX) gate.passage.max.x - gate.passage.min.x + 1 else gate.passage.max.z - gate.passage.min.z + 1
+        if (depth !in 3..9 || edge + depth > route.size) return null
+        val passage = route.subList(edge, edge + depth)
+        fun axial(p: CivPosition) = if (alongX) p.z == gate.center.z else p.x == gate.center.x
+        if (!passage.all { axial(it) && CivsAutonomousGeometry.horizontalContains(gate.passage, it) } ||
+            abs(passage.last().x - passage.first().x) + abs(passage.last().z - passage.first().z) != depth - 1) return null
+        // One to four steps outside the real opening: exactly the virtual approach that can create a loop.
+        val joins = (maxOf(1, edge - 4) until edge).filter { i -> (i until edge).all { axial(route[it]) } &&
+            route[i].y == route[i + 1].y }.associateBy { route[it] }
+        if (joins.isEmpty()) return null
+        val obstacles = frame.wallObstacles + frame.gates.map { it.passage } + otherPlots +
+            city.buildings.flatMap { civsRouteObstacles(city, it) } + retained.reservedFortificationPorts.map {
+                CivBox(it.min.copy(x = it.min.x - 1, z = it.min.z - 1), it.max.copy(x = it.max.x + 1, z = it.max.z + 1))
+            }
+        val standing = retained.standing(city, target.id)
+        val siblingGrades = siblingRoutes.flatten().groupBy { civsTerrainKey(it.x, it.z) }
+        var best: List<CivPosition>? = null
+        for ((id, paid) in retained.routes) {
+            val owner = city.building(id) ?: continue
+            if (owner.phase != BuildingPhase.ACTIVE || paid.size !in 2..MAXIMUM_ROUTE_LENGTH ||
+                paid.first() != route.first() || paid.last() != owner.entrance) continue
+            for (i in 1 until paid.size) {
+                val p = paid[i]
+                val j = joins[p] ?: continue
+                if (j <= i || paid[i - 1].y != p.y || route.size - (j - i) >= (best?.size ?: route.size)) continue
+                val prefix = paid.take(i + 1)
+                if (prefix.any { q ->
+                    val key = civsTerrainKey(q.x, q.z)
+                    val c = surface.at(q.x, q.z)
+                    standing[key] != q || c == null || !c.loaded || !c.natural && !c.dirtPath || c.waterTopY != null ||
+                        c.groundY != q.y - 1 || c.topY != c.groundY ||
+                        obstacles.any { CivsAutonomousGeometry.horizontalContains(it, q) } ||
+                        siblingGrades[key].orEmpty().any { it.y != q.y }
+                }) continue
+                val combined = prefix + route.drop(j + 1)
+                if (combined.map { civsTerrainKey(it.x, it.z) }.distinct().size == combined.size &&
+                    combined.zipWithNext().all { (a,b) -> abs(a.x-b.x) + abs(a.z-b.z) == 1 && abs(a.y-b.y) <= 1 })
+                    best = combined
+            }
+        }
+        return best?.let { CivPaidApproachReuse(route.toList(), it) }
+    }
 
     /** A median terrace minimises excavation; nearby levels allow a less costly graded connection. */
     fun options(city: Settlement, candidates: List<CivsAutonomousCandidate>, surface: CivTerrainSurface,
