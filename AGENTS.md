@@ -13,3 +13,9 @@ after a preview/build finishes. See ARCHITECTURE.md for the player contract.
 Run ./gradlew test shadowJar and the central consumer verifier. New tests must
 use arc-core-paper-testing for Paper fixtures. Production activation and native
 client acceptance remain separate from source/package verification.
+
+For settlement audits and autonomous gameplay checks, use
+[ArcCivs behavior evidence](../ruscrafting-ops/.agents/skills/ruscrafting-server-ops/references/arccivs-diagnostics.md)
+and the [player observation route](../ruscrafting-ops/.agents/skills/ruscrafting-server-ops/references/player-bot-qa.md#choose-the-player-evidence-first)
+before extending a replay. These routes own the representative player outcomes,
+state interpretation, active-profile entry and observer limitations.
