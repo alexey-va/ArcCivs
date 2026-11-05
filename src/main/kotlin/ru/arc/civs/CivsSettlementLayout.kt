@@ -147,6 +147,14 @@ internal object CivsSettlementLayout {
                 listOf(5, 8, 14, 20) else listOf(8, 14, 20)
             val preferred = when (current.type) { BuildingType.FORESTER -> 3; BuildingType.QUARRY -> 1; else -> 2 }
             for (gate in frame.gates.sortedBy { if (it.side == preferred) 0 else 1 }) {
+                val facing = Math.floorMod(gate.side + frame.rotation / 90, 4)
+                // An inset accepted gate still serves frontage outside the unchanged rectangular core.
+                val origin = when (facing) {
+                    0 -> gate.center.copy(z = minOf(gate.center.z, frame.core.min.z))
+                    1 -> gate.center.copy(x = maxOf(gate.center.x, frame.core.max.x))
+                    2 -> gate.center.copy(z = maxOf(gate.center.z, frame.core.max.z))
+                    else -> gate.center.copy(x = minOf(gate.center.x, frame.core.min.x))
+                }
                 val outward = rotate(CivPosition(0, 0, -1), gate.side)
                 val sideways = CivPosition(-outward.z, 0, outward.x)
                 val worldSideways = rotate(sideways, frame.rotation / 90)
@@ -157,8 +165,7 @@ internal object CivsSettlementLayout {
                     val local = CivPosition(outward.x * distance + sideways.x * (offset + alignment), 0,
                         outward.z * distance + sideways.z * (offset + alignment))
                     val delta = rotate(local, frame.rotation / 90)
-                    choices += gate.center.copy(x = gate.center.x + delta.x, z = gate.center.z + delta.z) to
-                        Math.floorMod(gate.side + frame.rotation / 90, 4)
+                    choices += origin.copy(x = origin.x + delta.x, z = origin.z + delta.z) to facing
                 }
             }
         } else {
