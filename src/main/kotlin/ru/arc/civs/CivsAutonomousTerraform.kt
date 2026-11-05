@@ -251,6 +251,10 @@ internal object CivsAutonomousTerraform {
             mapOf("stage" to "route-search") + routeFailures.mapValues { it.value.toString() })
         if (route.any { civsTerrainKey(it.x, it.z) in waterColumns }) throw CivsRejection("autonomy-no-path")
         val columns = linkedMapOf<Long, CivTerraformColumn>()
+        val wallRoadProfiles by lazy {
+            city.buildings.asSequence().filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }
+                .mapNotNull { access.routes[it.id] }.map { roadProfile(it).mapValues { (_, floor) -> floor.y } }.toList()
+        }
         val centerline = route.associateBy { civsTerrainKey(it.x, it.z) }
         val profile = roadProfile(route)
         fun add(x: Int, z: Int, ground: Int, floor: Int, preserve: Boolean = false) {
@@ -270,7 +274,13 @@ internal object CivsAutonomousTerraform {
             val targetGround = if (protected == null && pathFloor != null) pathFloor else ground
             val targetFloor = if (pathFloor != null) targetGround else floor
             val control = building.control?.let { it.x == x && it.z == z } == true && city.building(building.id) != null
-            if (!retained && !native.natural && !control) throw CivsRejection("autonomy-terrain")
+            // A wall can consume its paid road's exact shoulder, through ordinary mutable native capture.
+            val ownWallShoulder = building.type == BuildingType.WALL && !retained && native.dirtPath &&
+                native.topY == ground && native.groundY == ground && floor == ground &&
+                CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, ground, z)) &&
+                wallRoadProfiles.any { it[key] == ground &&
+                    CivsSettlementLayout.pathPavement(CivPosition(x, ground, z), it, city.style) == "minecraft:dirt_path" }
+            if (!retained && !native.natural && !control && !ownWallShoulder) throw CivsRejection("autonomy-terrain")
             if (!retained && abs(native.groundY - ground) > MAXIMUM_CHANGE) throw CivsRejection("autonomy-slope")
             if (targetFloor <= surface.minHeight || targetGround + 2 >= surface.maxHeight) throw CivsRejection("outside-world")
             val existing = columns[key]
