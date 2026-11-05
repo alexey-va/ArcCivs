@@ -242,7 +242,10 @@ internal class CivsAutonomousDevelopment(
         val adopted = CivsSettlementPlans.current(city)
         val checked = autonomyLayoutChecked[city.id]
         val layoutCheckDue = checked == null || !civsSameBuildingLayout(checked.first, city.buildings) || now() >= checked.second
-        var infrastructure = capacity == null && CivsAutonomy.infrastructureDue(city, ordinary) && layoutCheckDue
+        // A refused extension may yield to unfinished work in the unchanged accepted layout.
+        var infrastructure = capacity == null && layoutCheckDue && (CivsAutonomy.infrastructureDue(city, ordinary) ||
+            adopted != null && ordinary != null && now() < (autonomyPlanRetryAt[city.id] ?: 0L) &&
+                CivsAutonomy.infrastructureDue(city, null) && searchFailures.blocked(city, ordinary, now()))
         if (!infrastructure && ordinary == null && adopted != null) { developmentFinished(city.id); return }
         var goal = if (infrastructure || ordinary == null) CivsAutonomy.goal(city, BuildingType.ROAD, 1, null) else requireNotNull(ordinary)
         val existing = if (infrastructure) null else goal.buildingId?.let(city::building)
@@ -284,6 +287,10 @@ internal class CivsAutonomousDevelopment(
                     autonomyPlanRetryAt[city.id] = now() + if (rejection?.reason in
                         setOf("world-busy", "chunks-unloaded", "stale-development")) 30_000 else 300_000
                     val latest = cities[city.id]
+                    if (adopted != null && rejection != null && !closed && ready() && latest != null &&
+                        latest.owner == city.owner && latest.worldId == city.worldId && latest.pendingDeletion == null &&
+                        latest.autonomy?.paused == false && civsPlanBoardLayoutKey(latest) == key)
+                        searchFailures.remember(city, goal, rejection.reason, now())
                     if (compactFounding && adopted == null && city.autonomy.plan == null &&
                         rejection?.reason == "autonomy-layout-obstructed" && rejection.values["stage"] == "infrastructure" &&
                         !closed && ready() && latest != null && latest.owner == city.owner && latest.autonomy?.paused == false &&
@@ -415,7 +422,8 @@ internal class CivsAutonomousDevelopment(
                 val latest = if (infrastructure) CivsAutonomy.goal(current, goal.type, 1, null)
                     else (if (storageCapacityPressure(current)) CivsAutonomy.capacityGoal(current, blueprints::maximumLevel) else null)
                         ?: CivsAutonomy.nextGoal(current, blueprints::maximumLevel)
-                rejectIf(infrastructure && !civsSameBuildingLayout(current.buildings, city.buildings), "stale-development")
+                rejectIf(infrastructure && (current.owner != city.owner ||
+                    civsPlanBoardLayoutKey(current) != civsPlanBoardLayoutKey(city)), "stale-development")
                 rejectIf(infrastructure && latest?.ready != true, "not-enough-resources")
                 rejectIf(autonomyRequests[city.id] != request || current.autonomy?.paused != false ||
                     current.construction != null || current.constructionQueue.orEmpty().isNotEmpty() ||
