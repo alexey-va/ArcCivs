@@ -3,6 +3,7 @@ package ru.arc.civs
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonParser
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -13,7 +14,7 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 
 class CivsMineReceiptSelfConsistencyTest : FunSpec({
-    test("a selected V7 Nordic second landing passes receipt validation on unchanged native blocks") {
+    fun receiptSelfConsistency(diagnosticRefusal: Boolean = false) {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
                 val world = CivsWorksiteWorldFixture("mine-receipt-self-consistency").also(paper.server::addWorld)
@@ -57,6 +58,12 @@ class CivsMineReceiptSelfConsistencyTest : FunSpec({
                         val p = key.split(',').map(String::toInt)
                         put(CivPosition(p[0], p[1], p[2]), data)
                     }
+                    val exposed = CivPosition(9, -11, -8)
+                    val shell = exposed.copy(x = 10)
+                    val cave = if (diagnosticRefusal) (-12..-8).map { z -> exposed.copy(z = z) } + shell else emptyList()
+                    // Constructed one-high cave, not a native replay. The real selector currently
+                    // defers this AIR shell; the unchanged conservative receipt guard must refuse it.
+                    cave.forEach { put(it, "minecraft:air") }
                     LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
                         CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                             val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
@@ -70,9 +77,33 @@ class CivsMineReceiptSelfConsistencyTest : FunSpec({
                             cell.before shouldBe "minecraft:stone"
                             cell.after shouldBe "minecraft:air"
                             val beforeItems = worker.items?.toList()
-                            // Selection and admission must agree without any intervening world/state change.
-                            runtime.validate(city, work)
+                            if (diagnosticRefusal) {
+                                work.miningExcavation shouldBe state.excavation
+                                val failure = shouldThrow<CivsRejection> { runtime.validate(city, work) }
+                                failure.reason shouldBe "stale-worksite"
+                                failure.values shouldBe mapOf("frontier" to "landing",
+                                    "exposed" to "9,-11,-8", "block" to "10,-11,-8", "want" to "COBBLESTONE",
+                                    "dep" to "false", "air" to "true", "liq" to "false", "occ" to "false", "grav" to "false",
+                                    "ord" to requireNotNull(work.miningOrdinal).toString(), "clear" to "-")
+                                (failure.values.toString().length <= 240) shouldBe true
+                                val source = requireNotNull(CivsDiagnostics.rejectionSource(failure))
+                                source.startsWith("CivsMineWorksite.kt:") shouldBe true
+                                source.endsWith(":validateLandingClearanceFrontier") shouldBe true
+                            } else {
+                                // The original sound native fixture still admits its selected receipt.
+                                runtime.validate(city, work)
+                            }
                             world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+                            cave.forEach { local ->
+                                val p = CivsWorksiteLayouts.point(mine, local)
+                                world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe "minecraft:air"
+                            }
+                            state.seals.orEmpty().forEach { (key, data) ->
+                                val xyz = key.split(',').map(String::toInt)
+                                val p = CivsWorksiteLayouts.point(mine, CivPosition(xyz[0], xyz[1], xyz[2]))
+                                world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe data
+                            }
+                            // Items retain their exact equipment data, including tool wear.
                             city.workers.single().items shouldBe beforeItems
                             city.workers.single().completedCycles shouldBe 73L
                             city.minePlans?.get(mine.id.toString()) shouldBe state
@@ -81,6 +112,14 @@ class CivsMineReceiptSelfConsistencyTest : FunSpec({
                 } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
             }
         }
+    }
+
+    test("a selected V7 Nordic second landing passes receipt validation on unchanged native blocks") {
+        receiptSelfConsistency()
+    }
+
+    test("a refused old landing frontier reports only bounded context without receipt side effects") {
+        receiptSelfConsistency(diagnosticRefusal = true)
     }
 })
 

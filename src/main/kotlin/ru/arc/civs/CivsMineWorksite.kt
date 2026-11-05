@@ -529,11 +529,20 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             if (!mineExposed(task, emptySet(), opening)) continue
             val block = observeMineHazard(world, CivsWorksiteLayouts.point(building, task.block))
                 ?: throw CivsRejection("chunks-unloaded")
-            val dependent = task.material == Material.COBBLESTONE &&
-                pendingLandingClearance(plan, task.exposed, access, sections) == plan.section(ordinal)
+            val clearance = if (task.material == Material.COBBLESTONE)
+                pendingLandingClearance(plan, task.exposed, access, sections) else null
+            val dependent = task.material == Material.COBBLESTONE && clearance == plan.section(ordinal)
             if (dependent) requireCivs(!block.isLiquid && (block.type.isAir || block.type == Material.COBBLESTONE ||
                 CivsMineSafety.natural(block.type) || mineOwnedBlock(city, building, task.block, block.blockData.asString)), "stale-worksite")
-            requireCivs(!mineProtectionNeeded(block, task.material) || dependent && block.type.isAir, "stale-worksite")
+            val safe = !mineProtectionNeeded(block, task.material) || dependent && block.type.isAir
+            if (!safe) throw CivsRejection("stale-worksite", mapOf(
+                "frontier" to "landing",
+                "exposed" to "${task.exposed.x},${task.exposed.y},${task.exposed.z}",
+                "block" to "${task.block.x},${task.block.y},${task.block.z}",
+                "want" to (task.material?.name ?: "-"), "dep" to dependent.toString(),
+                "air" to block.type.isAir.toString(), "liq" to block.isLiquid.toString(),
+                "occ" to block.type.isOccluding.toString(), "grav" to block.type.hasGravity().toString(),
+                "ord" to ordinal.toString(), "clear" to (clearance ?: "-")))
         }
         return tasks
     }
