@@ -28,9 +28,9 @@ internal class CivsAutonomousSearchFailures(private val lifetimeMillis: Long = 3
     private val refused = linkedMapOf<Key, Refusal>()
     private val suppressed = mutableMapOf<UUID, Long>()
 
-    fun remember(city: Settlement, goal: CivAutonomyGoal, reason: String, now: Long, candidate: Int? = null) {
+    fun remember(city: Settlement, goal: CivAutonomyGoal, reason: String, now: Long, candidate: Int? = null): Boolean {
         if (reason !in setOf("autonomy-no-site", "autonomy-no-path", "autonomy-search-budget",
-                "autonomy-layout-obstructed", "autonomy-layout-complete")) return
+                "autonomy-layout-obstructed", "autonomy-layout-complete")) return false
         val layout = civsPlanBoardLayoutKey(city)
         prune(city, layout, now)
         val key = Key(city.id, goal.type, goal.targetLevel, goal.buildingId, candidate)
@@ -43,6 +43,7 @@ internal class CivsAutonomousSearchFailures(private val lifetimeMillis: Long = 3
         // A city has a finite goal/profile and at most 64 recovery choices; expired/old evidence is disposable.
         val keys = refused.keys.filter { it.city == city.id }
         keys.take((keys.size - 128).coerceAtLeast(0)).forEach(refused::remove)
+        return true
     }
 
     fun blocked(city: Settlement, goal: CivAutonomyGoal, now: Long, candidate: Int? = null): Boolean {
@@ -112,6 +113,16 @@ internal class CivsAutonomousDevelopment(
     private data class DeferredInitialPlan(val owner: UUID, val layoutKey: String)
     private val deferredInitialPlans = mutableMapOf<UUID, DeferredInitialPlan>()
     private val searchFailures = CivsAutonomousSearchFailures()
+    // One fresh infrastructure attempt may follow failed growth even after terrain invalidates its geometric refusal.
+    private data class FailedGrowthYield(val owner: UUID, val world: UUID, val layout: String,
+        val goal: CivAutonomyGoal, val until: Long) {
+        fun matches(city: Settlement, now: Long): Boolean = now < until && city.owner == owner && city.worldId == world &&
+            civsPlanBoardLayoutKey(city) == layout
+        fun matches(ordinary: CivAutonomyGoal?): Boolean = ordinary?.let {
+            it.type == goal.type && it.targetLevel == goal.targetLevel && it.buildingId == goal.buildingId
+        } == true
+    }
+    private val failedGrowthYields = mutableMapOf<UUID, FailedGrowthYield>()
     private data class UnpaidRecoveryCursor(val owner: UUID, val worldId: UUID, val layoutKey: String,
         val type: BuildingType, val buildingId: UUID,
         val skipPrepared: Int = 0) {
@@ -135,6 +146,7 @@ internal class CivsAutonomousDevelopment(
 
     fun paused(cityId: UUID) {
         searchFailures.remove(cityId)
+        failedGrowthYields.remove(cityId)
         developmentFinished(cityId)
         autonomyRequests.remove(cityId)
         autonomyRetryAt.remove(cityId)
@@ -145,6 +157,7 @@ internal class CivsAutonomousDevelopment(
 
     fun reset() {
         searchFailures.clear()
+        failedGrowthYields.clear()
         (autonomyRequests.keys + autonomyProgress.keys + autonomyRetryAt.keys).toSet().forEach(developmentFinished)
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
@@ -160,6 +173,7 @@ internal class CivsAutonomousDevelopment(
 
     fun cancel() {
         searchFailures.clear()
+        failedGrowthYields.clear()
         (autonomyRequests.keys + autonomyProgress.keys + autonomyRetryAt.keys).toSet().forEach(developmentFinished)
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
@@ -218,6 +232,12 @@ internal class CivsAutonomousDevelopment(
         if (now() < nextAutonomyAt) return
         nextAutonomyAt = now() + 5_000
         searchFailures.retain(cities.keys)
+        failedGrowthYields.entries.removeIf { (cityId, evidence) ->
+            val latest = cities[cityId]
+            latest == null || latest.pendingDeletion != null || latest.autonomy?.paused != false ||
+                latest.construction != null || latest.constructionQueue.orEmpty().isNotEmpty() ||
+                latest.pendingControls.orEmpty().isNotEmpty() || !evidence.matches(latest, now())
+        }
         deferredInitialPlans.entries.removeIf { (cityId, evidence) ->
             val latest = cities[cityId]
             latest == null || latest.pendingDeletion != null || latest.autonomy?.paused != false ||
@@ -239,13 +259,14 @@ internal class CivsAutonomousDevelopment(
         if (pulseInfrastructureRebuild(city)) return
         val capacity = if (storageCapacityPressure(city)) CivsAutonomy.capacityGoal(city, blueprints::maximumLevel) else null
         val ordinary = capacity ?: CivsAutonomy.nextGoal(city, blueprints::maximumLevel)
+        val growthYield = failedGrowthYields[city.id]?.takeIf { capacity == null && it.matches(ordinary) }
+        if (growthYield == null) failedGrowthYields.remove(city.id)
         val adopted = CivsSettlementPlans.current(city)
         val checked = autonomyLayoutChecked[city.id]
         val layoutCheckDue = checked == null || !civsSameBuildingLayout(checked.first, city.buildings) || now() >= checked.second
         // A refused extension may yield to unfinished work in the unchanged accepted layout.
         var infrastructure = capacity == null && layoutCheckDue && (CivsAutonomy.infrastructureDue(city, ordinary) ||
-            adopted != null && ordinary != null && now() < (autonomyPlanRetryAt[city.id] ?: 0L) &&
-                CivsAutonomy.infrastructureDue(city, null) && searchFailures.blocked(city, ordinary, now()))
+            adopted != null && growthYield != null && CivsAutonomy.infrastructureDue(city, null))
         if (!infrastructure && ordinary == null && adopted != null) { developmentFinished(city.id); return }
         var goal = if (infrastructure || ordinary == null) CivsAutonomy.goal(city, BuildingType.ROAD, 1, null) else requireNotNull(ordinary)
         val existing = if (infrastructure) null else goal.buildingId?.let(city::building)
@@ -289,8 +310,10 @@ internal class CivsAutonomousDevelopment(
                     val latest = cities[city.id]
                     if (adopted != null && rejection != null && !closed && ready() && latest != null &&
                         latest.owner == city.owner && latest.worldId == city.worldId && latest.pendingDeletion == null &&
-                        latest.autonomy?.paused == false && civsPlanBoardLayoutKey(latest) == key)
-                        searchFailures.remember(city, goal, rejection.reason, now())
+                        latest.autonomy?.paused == false && civsPlanBoardLayoutKey(latest) == key &&
+                        searchFailures.remember(city, goal, rejection.reason, now()))
+                        failedGrowthYields[city.id] = FailedGrowthYield(city.owner, city.worldId, key, goal,
+                            requireNotNull(autonomyPlanRetryAt[city.id]))
                     if (compactFounding && adopted == null && city.autonomy.plan == null &&
                         rejection?.reason == "autonomy-layout-obstructed" && rejection.values["stage"] == "infrastructure" &&
                         !closed && ready() && latest != null && latest.owner == city.owner && latest.autonomy?.paused == false &&
@@ -318,6 +341,7 @@ internal class CivsAutonomousDevelopment(
                         autonomyProgress.remove(city.id)
                         autonomyRetryAt.remove(city.id)
                         autonomyPlanRetryAt.remove(city.id)
+                        failedGrowthYields.remove(city.id)
                         CivsDiagnostics.event("autonomous_plan_adopted", "city" to city.id,
                             "plots" to requireNotNull(plan).plots.size, "roads" to plan.routes.size, "revision" to plan.revision)
                     }
@@ -334,6 +358,7 @@ internal class CivsAutonomousDevelopment(
             autonomyFailed(city.id, goal, CivsRejection("city-busy"))
             return
         }
+        if (infrastructure && growthYield != null) failedGrowthYields.remove(city.id, growthYield)
         val request = UUID.randomUUID()
         autonomyRequests[city.id] = request
         autonomyProgress[city.id] = CivsAutonomyView("searching", goal.type, goal.targetLevel)

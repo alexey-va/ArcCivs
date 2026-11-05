@@ -45,6 +45,116 @@ class CivsAutonomousInfrastructureStarvationTest : FunSpec({
         }
     }
 
+    test("terrain invalidation clears stale geometry but preserves one fresh infrastructure attempt after the retry floor") {
+        InfrastructureStarvationHarness().use { h ->
+            val before = h.city
+            h.start()
+            h.failGrowth("autonomy-no-path")
+            (h.development.debug(h.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe true
+            h.advance(5_001)
+            val farm = h.city.buildings.single { it.type == BuildingType.FARM }
+            val bounds = CivsAutonomousGeometry.futureBounds(h.city, farm)
+            val changed = bounds.max.copy(y = farm.entrance.y, z = (bounds.min.z + bounds.max.z) / 2)
+            h.development.terrainChanged(h.city.worldId, changed)
+            (h.development.debug(h.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe false
+            h.development.debug(h.city.id)["retry_at"] shouldBe 30_000L
+
+            h.advance(10_002)
+            h.growth.size shouldBe 1
+            h.infrastructure.size shouldBe 0
+            h.advance(30_001)
+            h.infrastructure.size shouldBe 1
+            h.growth.size shouldBe 1
+            h.city shouldBe before
+            h.city.stock shouldBe before.stock
+            h.city.constructionQueue shouldBe before.constructionQueue
+            h.committed shouldBe emptyList()
+            h.infrastructure.single().isDone shouldBe false
+        }
+    }
+
+    for (guard in listOf("owner", "world", "plan", "goal", "accepted order", "paused", "expired", "reset", "cancel"))
+    test("failed growth cannot select infrastructure after $guard supersedes its scheduling turn") {
+        InfrastructureStarvationHarness().use { h ->
+            h.start()
+            h.failGrowth("autonomy-no-path")
+            val before = h.city
+            when (guard) {
+                "owner" -> h.city = h.city.copy(owner = UUID(215, 77))
+                "world" -> h.city = h.city.copy(worldId = UUID(215, 78))
+                "plan" -> h.city = h.city.copy(autonomy = h.city.autonomy!!.let {
+                    it.copy(plan = it.plan!!.copy(revision = it.plan!!.revision + 1))
+                })
+                "goal" -> {
+                    h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.dropLast(1) +
+                        h.house.copy(phase = BuildingPhase.ACTIVE) + h.city.buildings.last()))
+                    CivsAutonomy.nextGoal(h.city)?.type shouldBe BuildingType.PLAN_BOARD
+                }
+                "accepted order" -> h.city = CivsRules.enqueue(CivsRules.placeSite(h.city, h.city.owner, h.house),
+                    h.city.owner, h.house.id)
+                "paused" -> h.city = h.city.copy(autonomy = h.city.autonomy!!.copy(paused = true))
+                "reset" -> h.development.reset()
+                "cancel" -> h.development.cancel()
+            }
+            val current = h.city
+            h.development.pulseAccessRepair(); h.drain()
+            h.advance(if (guard == "expired") 300_001 else 30_001)
+            h.infrastructure.size shouldBe 0
+            h.committed shouldBe emptyList()
+            h.city shouldBe current
+            if (guard in listOf("expired", "reset")) h.growth.size shouldBe 2
+            if (guard in listOf("accepted order", "paused")) {
+                // Resuming or cancelling the intervening order must not revive the old scheduling turn.
+                h.city = before
+                h.development.pulseAccessRepair(); h.drain()
+                h.advance(35_002)
+                h.infrastructure.size shouldBe 0
+                h.committed shouldBe emptyList()
+            }
+        }
+    }
+
+    test("current capacity growth keeps priority over the failed ordinary goal without a layout change") {
+        InfrastructureStarvationHarness(hallLevel = 2).use { h ->
+            val before = h.city
+            h.start()
+            h.failGrowth("autonomy-no-path")
+            h.capacityPressure = true
+            val capacity = requireNotNull(CivsAutonomy.capacityGoal(h.city) { it.type.maxLevel })
+            capacity.type shouldBe BuildingType.WAREHOUSE
+            capacity.targetLevel shouldBe 2
+            h.advance(30_001)
+            h.upgrades shouldBe listOf(requireNotNull(capacity.buildingId) to 2)
+            h.infrastructure.size shouldBe 0
+            h.growth.size shouldBe 1
+            h.committed shouldBe emptyList()
+            h.city shouldBe before
+        }
+    }
+
+    test("a city-busy admission preserves the turn but an admitted infrastructure attempt consumes it") {
+        InfrastructureStarvationHarness().use { h ->
+            val before = h.city
+            h.start()
+            h.failGrowth("autonomy-no-path")
+            h.admitted = false
+            h.advance(30_001)
+            h.infrastructure.size shouldBe 0
+            h.growth.size shouldBe 1
+            h.admitted = true
+            h.advance(35_002)
+            h.infrastructure.size shouldBe 1
+            h.infrastructure.single().completeExceptionally(CivsRejection("world-busy"))
+            h.drain()
+            h.development.terrainChanged(h.city.worldId, h.city.center.copy(x = h.city.center.x + h.city.radius))
+            h.advance(40_003)
+            h.infrastructure.size shouldBe 1
+            h.growth.size shouldBe 2
+            h.committed shouldBe emptyList()
+            h.city shouldBe before
+        }
+    }
+
     for (changed in listOf("plan", "owner", "world"))
     test("a current infrastructure design cannot cross a changed $changed at final admission") {
         InfrastructureStarvationHarness().use { h ->
@@ -125,10 +235,10 @@ class CivsAutonomousInfrastructureStarvationTest : FunSpec({
 })
 
 /** Reduced Auto-2 scheduling structure from the 2026-11-05 capture; coordinates and terrain proof are synthetic. */
-private class InfrastructureStarvationHarness : AutoCloseable {
+private class InfrastructureStarvationHarness(hallLevel: Int = 1) : AutoCloseable {
     private val templates = settlementPlanTemplates()
-    private val base = settlementPlanCity().copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
-        autonomy = CivAutonomy(layoutHalfWidth = 56))
+    private val base = settlementPlanCity().let { it.copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
+        buildings = it.buildings.map { hall -> hall.copy(level = hallLevel) }, autonomy = CivAutonomy(layoutHalfWidth = 56)) }
     private val ordinary = base.buildings + listOf(
         BuildingType.BUILDER_HUT to CivPosition(18, 64, 0),
         BuildingType.FORESTER to CivPosition(-28, 64, 24),
@@ -142,7 +252,7 @@ private class InfrastructureStarvationHarness : AutoCloseable {
     private val gateId = UUID(215, 20)
     private val gateBounds = CivBox(CivPosition(-2, 64, 54), CivPosition(2, 69, 58))
     private val gate = CivBuilding(gateId, BuildingType.GATE, 1, gateBounds.min, 0,
-        "${CivsInfrastructureRebuild.PREFIX}gate/1/$gateId", gateBounds, CivPosition(0, 65, 53), BuildingPhase.ACTIVE,
+        "${CivsInfrastructureRebuild.PREFIX}gate/$hallLevel/$gateId", gateBounds, CivPosition(0, 65, 53), BuildingPhase.ACTIVE,
         transit = CivsInfrastructureRebuild.openColumns(gateBounds, true).map { (x, z) -> CivPosition(x, 65, z) })
     private val walls = buildList {
         for (range in listOf(-57..-35, -34..-12, -11..11, 12..34, 35..57))
@@ -171,6 +281,9 @@ private class InfrastructureStarvationHarness : AutoCloseable {
     val infrastructure = mutableListOf<CompletableFuture<CivAutonomousDesign>>()
     val reserved = mutableListOf<UUID>()
     val committed = mutableListOf<UUID>()
+    val upgrades = mutableListOf<Pair<UUID, Int>>()
+    var capacityPressure = false
+    var admitted = true
     private var time = 0L
     private val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler)
@@ -183,6 +296,10 @@ private class InfrastructureStarvationHarness : AutoCloseable {
     init {
         every { plugin.logger } returns Logger.getLogger("CivsAutonomousInfrastructureStarvationTest")
         every { blueprints.maximumLevel(any()) } answers { firstArg<CivBuilding>().type.maxLevel }
+        every { blueprints.prepareUpgrade(any(), any(), any()) } answers {
+            upgrades += firstArg<CivBuilding>().id to secondArg<Int>()
+            CompletableFuture<CivBlueprint>()
+        }
         every { placement.plan(any()) } answers { CompletableFuture<CivSettlementPlan>().also(growth::add) }
         every { placement.infrastructure(any()) } answers { CompletableFuture<CivAutonomousDesign>().also(infrastructure::add) }
         every { placement.reserved(any(), any()) } answers {
@@ -200,7 +317,7 @@ private class InfrastructureStarvationHarness : AutoCloseable {
             city = CivsRules.enqueue(CivsRules.placeSite(current, current.owner, building), current.owner, building.id)
             committed += building.id
             CompletableFuture.completedFuture(Unit)
-        }, {}, { time })
+        }, {}, { time }, storageCapacityPressure = { capacityPressure }, developmentAdmission = { admitted })
 
     fun start() {
         CivsSettlementPlans.current(city) shouldBe adopted
