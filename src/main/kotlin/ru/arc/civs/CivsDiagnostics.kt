@@ -7,7 +7,7 @@ import java.util.UUID
 import java.util.logging.Level
 import java.util.logging.Logger
 
-/** Source-owned events and committed material counts; no item metadata, credentials, packets or frame traces. */
+/** Source-owned events and committed material counts; no item metadata, credentials, packets or full traces. */
 internal object CivsDiagnostics {
     private val format = StructuredDebugLine("ARC_CIVS")
     private class Sink(val history: CivsCityHistory, val logger: Logger)
@@ -61,6 +61,25 @@ internal object CivsDiagnostics {
 
     fun rejection(failure: Throwable?): CivsRejection? =
         failure?.let { generateSequence(it) { cause -> cause.cause }.take(16).filterIsInstance<CivsRejection>().firstOrNull() }
+
+    fun rejectionSource(failure: Throwable?): String? {
+        val rejection = rejection(failure)?.takeIf { it.reason == "stale-worksite" } ?: return null
+        val frame = rejection.stackTrace.asSequence().take(16).firstOrNull { frame ->
+            val file = frame.fileName
+            val method = frame.methodName.removePrefix("access$").substringBefore('$')
+            frame.className.startsWith("ru.arc.civs.") && file != null && file.endsWith(".kt") &&
+                '/' !in file && '\\' !in file && frame.lineNumber > 0 && frame.methodName.isNotBlank() &&
+                !when (frame.className) {
+                    "ru.arc.civs.CivsWorksiteContextKt" -> method == "requireWorksite"
+                    "ru.arc.civs.CivsRules" -> method == "check" || method == "reject"
+                    "ru.arc.civs.CivsWorkerCommits" -> method == "rejectIf"
+                    "ru.arc.civs.CivsAutonomousWorksites" -> method == "requireWork"
+                    "ru.arc.civs.CivsWorldKt", "ru.arc.civs.CivsRoadWorldKt" -> method == "requireCivs"
+                    else -> false
+                }
+        } ?: return null
+        return "${frame.fileName!!.take(96)}:${frame.lineNumber}:${frame.methodName.take(96)}"
+    }
 
     fun cause(failure: Throwable?): Throwable? = failure?.let { generateSequence(it) { cause -> cause.cause }.take(16).last() }
 }

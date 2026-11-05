@@ -1292,12 +1292,14 @@ class CivsService(
         val result = try { block() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         return result.whenComplete { _, failure ->
             val rejection = CivsDiagnostics.rejection(failure)
+            val rejectionSource = if (name == "deliver") CivsDiagnostics.rejectionSource(failure) else null
             if (failure != null && rejection == null) CivsDiagnostics.record(Level.WARNING,
                 fields.firstOrNull { it.first == "city" }?.second as? UUID,
                 "ArcCivs operation $name failed (request=$id)", plugin.logger, failure)
             CivsDiagnostics.event("operation_end", "operation" to name, "request" to id, *actor, *fields,
                 "outcome" to if (failure == null) "success" else if (rejection != null) "rejected" else "failed",
                 "reason" to rejection?.reason, "detail" to rejection?.values,
+                *rejectionSource?.let { arrayOf("rejection_source" to it) }.orEmpty(),
                 "cause" to CivsDiagnostics.cause(failure)?.javaClass?.simpleName,
                 "duration_ms" to (System.nanoTime() - started) / 1_000_000)
         }
