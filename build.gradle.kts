@@ -3,7 +3,7 @@ plugins {
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.217"
+version = "0.1.218"
 description = "Persistent player settlements and working citizens for RusCrafting"
 val arcCorePluginVersion = "0.1.27"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
@@ -67,6 +67,7 @@ tasks.test {
         "CivsRoadPassagePreviewTest" to "CIVS_ROAD_NATIVE_INPUT",
         "CivsRoadJunctionNativeReplayTest" to "CIVS_JUNCTION_NATIVE_INPUT",
         "CivsNativeGrowthPlanReplayTest" to "CIVS_NATIVE_GROWTH_INPUT",
+        "CivsNativeAuto1GrowthReplayTest" to "CIVS_AUTO1_GROWTH_INPUT",
         "CivsNativePaidForesterApproachTest" to "CIVS_PAID_APPROACH_INPUT",
     )
     for ((testClass, inputVariable) in optionalReplayInputs) {

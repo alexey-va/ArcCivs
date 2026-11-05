@@ -355,7 +355,7 @@ internal object CivsSettlementPlans {
                 throw failure
             }
             else CivsPerimeterCrossings.adapt(frame, routes.values, retained.infrastructure)
-        if (adopted == null && retained.infrastructure.isEmpty()) {
+        if (retained.infrastructure.isEmpty()) {
             if (adoptedFrame.fortified) for ((index, gate) in adoptedFrame.gates.withIndex()) {
                 for (other in adoptedFrame.gates.drop(index + 1)) {
                     if (abs(gate.center.x - other.center.x) + abs(gate.center.z - other.center.z) <= 16)
@@ -373,6 +373,7 @@ internal object CivsSettlementPlans {
             // Full depot-to-plot routes include their shared prefixes, so this also removes every
             // provisional dependent before selecting shared streets, including legal edge lanes.
             val reconnect = routes.filter { (id, route) -> city.building(id) == null && id !in retained.routes &&
+                (adopted == null || id.toString() !in adopted.routes) &&
                 route.any { p -> reconnectObstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) } } }
             reconnect.keys.forEach(routes::remove)
             for ((id, previous) in reconnect) {
