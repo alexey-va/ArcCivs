@@ -216,7 +216,7 @@ class CivsInitialPlanDeferralTest : FunSpec({
 private fun growthWithWidths(city: Settlement, result: (Int) -> CivSettlementPlan): CivSettlementPlan {
     mockkObject(CivsSettlementPlans)
     try {
-        every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers { result(arg(6)) }
+        every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } answers { result(arg(6)) }
         return CivsSettlementPlans.prepareGrowth(city, emptyMap(), CivTerrainSurface(-64, 320, emptyMap()),
             CivAutonomousAccess(), CivsSettlementGrowth.profile(city))
     } finally { unmockkObject(CivsSettlementPlans) }

@@ -2124,7 +2124,7 @@ class CivsUiTest : FunSpec({
             val worker = h.city!!.workers.last()
             h.city = CivsRules.assign(h.city!!, h.player.uniqueId, worker.id, h.city!!.buildings.last().id, 0)
             for ((status, label) in listOf(
-                "no-construction" to "Walking around · no construction",
+                "no-construction" to "No construction",
                 "sleeping" to "Sleeping",
                 "route-unreachable" to "No accessible route",
                 "waiting-materials" to "Waiting for construction materials",

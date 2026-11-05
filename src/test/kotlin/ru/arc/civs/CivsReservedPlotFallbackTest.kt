@@ -119,11 +119,14 @@ private class ReservedFallbackHarness(base: Settlement, plan: CivSettlementPlan,
         }
     }.building.copy(phase = BuildingPhase.ACTIVE)
     var city = base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
-        buildings = base.buildings.map { it.copy(phase = BuildingPhase.SITE) } +
+        buildings = base.buildings.map { it.copy(phase = if (type == BuildingType.FARM && it.type == BuildingType.TOWN_HALL) BuildingPhase.ACTIVE else BuildingPhase.SITE) } +
             CivsAutonomy.baseProfile.takeWhile { it != type }.filterNot { it == BuildingType.TOWN_HALL }.map { previous ->
                 plan.plots.first { it.building.type == previous }.building.copy(phase = BuildingPhase.ACTIVE)
             } + listOfNotNull(establishedDepot), autonomy = base.autonomy!!.copy(plan = plan, layoutHalfWidth = plan.halfWidth))
     val paidPlans = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map { building ->
+        // A completed founding hall has no road from an earlier depot.
+        if (building.type == BuildingType.TOWN_HALL)
+            return@map CivPlacementPlan(building.id, city.id, city.worldId, building, emptyList())
         CivPlacementPlan(building.id, city.id, city.worldId, building, emptyList(), terrain = CivTerraformPlan(
             building.bounds, emptyList(), plan.routes.getValue(building.id.toString()), building.anchor.y, 0, 0))
     }
@@ -142,6 +145,15 @@ private class ReservedFallbackHarness(base: Settlement, plan: CivSettlementPlan,
         runCatching { transform(city) }.fold({ city = it; CompletableFuture.completedFuture(it) }, { CompletableFuture.failedFuture(it) })
     }
     init {
+        if (type == BuildingType.FARM) {
+            val hall = city.buildings.single { it.type == BuildingType.TOWN_HALL }
+            hall.phase shouldBe BuildingPhase.ACTIVE
+            val next = requireNotNull(CivsAutonomy.nextGoal(city))
+            next.type shouldBe BuildingType.FARM
+            next.buildingId shouldBe null
+            paidPlans.single { it.building.id == hall.id }.terrain shouldBe null
+            (hall.id in CivAutonomousAccess.from(city, paidPlans).routes) shouldBe false
+        }
         establishedDepot?.let { depot ->
             val adopted = plan.plots.single { it.building.id == depot.id }.building
             city.building(depot.id) shouldBe adopted.copy(phase = BuildingPhase.ACTIVE)

@@ -748,7 +748,10 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         listOf(CivSettlementBlock(CivPosition(0, 64, 0), "minecraft:dirt_path"),
             CivSettlementBlock(CivPosition(0, 65, 0), "minecraft:air"), CivSettlementBlock(CivPosition(0, 66, 0), "minecraft:air")),
         listOf(CivPosition(0, 65, 0)))).copy(phase = BuildingPhase.ACTIVE)
-    private val actualBuildings = base.buildings + listOfNotNull(paidRoad) + CivsAutonomy.baseProfile.takeWhile { it != targetType }
+    // FARM recovery starts after the physical town has completed its founding hall.
+    private val actualBuildings = base.buildings.map {
+        if (targetType == BuildingType.FARM && it.type == BuildingType.TOWN_HALL) it.copy(phase = BuildingPhase.ACTIVE) else it
+    } + listOfNotNull(paidRoad) + CivsAutonomy.baseProfile.takeWhile { it != targetType }
         .filterNot { it == BuildingType.TOWN_HALL }.map { type ->
             initialPlan.plots.first { it.building.type == type }.building.copy(phase = BuildingPhase.ACTIVE)
         }
@@ -762,6 +765,9 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     val oldHut = oldPlan.plots.single { it.building.type == BuildingType.BUILDER_HUT }.building
     val oldTarget = oldPlan.plots.first { it.building.type == targetType }.building
     val paidPlans = before.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map { building ->
+        // Founding records the hall itself; it does not invent a road from another depot.
+        if (building.type == BuildingType.TOWN_HALL)
+            return@map CivPlacementPlan(building.id, before.id, before.worldId, building, emptyList())
         val route = if (building.id == paidRoad?.id) listOf(building.entrance) else initialPlan.routes.getValue(building.id.toString())
         val blocks = if (building.id != paidRoad?.id) emptyList() else listOf(
             CivPlanBlock(CivPosition(0, 64, 0), "minecraft:dirt", "minecraft:dirt_path"),
@@ -847,6 +853,15 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         developmentAdmission = { developmentWaiting = true; true })
 
     init {
+        if (targetType == BuildingType.FARM) {
+            val hall = before.buildings.single { it.type == BuildingType.TOWN_HALL }
+            hall.phase shouldBe BuildingPhase.ACTIVE
+            val next = requireNotNull(CivsAutonomy.nextGoal(before))
+            next.type shouldBe BuildingType.FARM
+            next.buildingId shouldBe null
+            paidPlans.single { it.building.id == hall.id }.terrain shouldBe null
+            (hall.id in acceptedAccess.routes) shouldBe false
+        }
         if (preferOldTerrace && targetType == BuildingType.FARM) {
             val apron = CivsAutonomousGeometry.approach(oldTarget)
             apron.size shouldBe 12

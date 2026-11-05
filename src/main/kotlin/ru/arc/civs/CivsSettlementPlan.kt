@@ -167,13 +167,36 @@ internal object CivsSettlementPlans {
             it.plan == null && it.layoutHalfWidth == CivsSettlementGrowth.initialHalfWidth(city)
         } == true
         var deferredInfrastructure: CivsRejection? = null
+        var alternatives = 0
         for (width in CivsSettlementGrowth.halfWidths(city)) {
-            try { return prepare(city, templates, surface, retained, fortification, profile, width) }
+            var routeBudget = false
+            val inspectRoute: (CivRouteSearchStats) -> Unit = { if (it.outcome == "route-budget") routeBudget = true }
+            try { return prepare(city, templates, surface, retained, fortification, profile, width, inspectRoute) }
             catch (failure: CivsRejection) {
                 if (failure.reason !in setOf("autonomy-no-site", "autonomy-layout-obstructed", "autonomy-no-path")) throw failure
                 if (compactFounding && deferredInfrastructure == null && failure.reason == "autonomy-layout-obstructed" &&
                     failure.values["stage"] == "infrastructure") deferredInfrastructure = failure
                 last = failure
+                if (alternatives < 3 && !routeBudget && CivsRetainedGrowthPerimeter.geometric(failure)) {
+                    val adopted = current(city)
+                    val envelopes = city.buildings.filterNot { it.type.isInfrastructure }.associate { building ->
+                        val actual = actualPlot(city, building, templates)
+                        val old = adopted?.plots?.firstOrNull { it.building.id == building.id }
+                        building.id to if (old == null) actual.envelope else union(actual.envelope, old.envelope)
+                    }
+                    val nominal = CivsSettlementLayout.frame(city, width)
+                    for (candidate in CivsRetainedGrowthPerimeter.candidates(city, nominal, surface, retained, envelopes)) {
+                        if (alternatives == 3) break
+                        alternatives++
+                        routeBudget = false
+                        try { return prepareOnce(city, templates, surface, retained, fortification, 0, profile,
+                            width, inspectRoute, null, candidate) }
+                        catch (alternative: CivsRejection) {
+                            if (routeBudget || !CivsRetainedGrowthPerimeter.geometric(alternative)) throw alternative
+                            last = alternative
+                        }
+                    }
+                }
             }
         }
         throw requireNotNull(deferredInfrastructure ?: last)
@@ -183,19 +206,15 @@ internal object CivsSettlementPlans {
         surface: CivTerrainSurface, retained: CivAutonomousAccess, fortification: CivFortificationTemplate?, count: Int,
         profile: List<BuildingType>, halfWidth: Int?,
         inspectRoute: (CivRouteSearchStats) -> Unit,
-        inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)?): CivSettlementPlan {
-        val frame = CivsSettlementLayout.frame(city, halfWidth ?: city.autonomy?.layoutHalfWidth)
+        inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)?,
+        candidateFrame: CivSettlementFrame? = null): CivSettlementPlan {
+        val frame = (candidateFrame ?: CivsSettlementLayout.frame(city, halfWidth ?: city.autonomy?.layoutHalfWidth))
             .let { if (count > 0) it.copy(fortified = true) else it }
         val adopted = current(city)
         val expanding = frame.halfWidth > CivsSettlementLayout.frame(city).halfWidth
         val accepted = city.construction?.plannedBuilding
         val actual = city.buildings.map { if (accepted != null && it.id == accepted.id) accepted else it }
-        val actualPlots = actual.filterNot { it.type.isInfrastructure }.map { building ->
-            val future = templates[building.type]?.second?.let { at(it, building.anchor, building.rotation, building.id) }
-            val bounds = if (building.type == BuildingType.PLAN_BOARD) CivsPlanBoardBlueprint.futureBounds(building)
-                else union(CivsAutonomousGeometry.futureBounds(city, building), future?.bounds ?: building.bounds)
-            CivSettlementPlot(building.copy(phase = BuildingPhase.SITE), bounds)
-        }
+        val actualPlots = actual.filterNot { it.type.isInfrastructure }.map { actualPlot(city, it, templates) }
         val plots = adopted?.plots.orEmpty().filter { old -> city.building(old.building.id) != null || !expanding &&
             (old.building.type != BuildingType.QUARRY || !CivsAutonomousGeometry.overlaps(old.envelope, frame.core, 3)) }
             .map { old -> actualPlots.firstOrNull { it.building.id == old.building.id }
@@ -212,7 +231,8 @@ internal object CivsSettlementPlans {
             adopted?.plots.orEmpty().none { it.building.id.toString() == id } }.mapKeys { UUID.fromString(it.key) }.toMutableMap()
         routes += retained.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
         val preferredRoads = routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
-        fun planningAccess() = CivAutonomousAccess(routes, retained.infrastructure, retained.acceptedFortifications,
+        fun planningAccess() = CivAutonomousAccess(if (candidateFrame == null) routes else routes + retained.routes,
+            retained.infrastructure, retained.acceptedFortifications,
             plots.flatMap { it.fortification?.let { metadata -> portReservations(metadata.proof) }.orEmpty() })
         if (count > 0) {
             val template = requireNotNull(fortification)
@@ -354,7 +374,9 @@ internal object CivsSettlementPlans {
                 }.onFailure(failure::addSuppressed)
                 throw failure
             }
-            else CivsPerimeterCrossings.adapt(frame, routes.values, retained.infrastructure)
+            else CivsPerimeterCrossings.adapt(frame, planningAccess().routes.values, retained.infrastructure)
+        if (candidateFrame != null) CivsRetainedGrowthPerimeter.validate(city, adoptedFrame, surface, retained,
+            plots.map { it.envelope })
         if (retained.infrastructure.isEmpty()) {
             if (adoptedFrame.fortified) for ((index, gate) in adoptedFrame.gates.withIndex()) {
                 for (other in adoptedFrame.gates.drop(index + 1)) {
@@ -446,23 +468,29 @@ internal object CivsSettlementPlans {
             }
         }
         // A legacy accepted frame keeps its gate approaches. New gates already lie on real exterior routes.
-        for (gate in if (retained.infrastructure.isEmpty()) emptyList() else frame.gates) {
+        val connectionFrame = if (candidateFrame == null) frame else adoptedFrame
+        for (gate in if (retained.infrastructure.isEmpty()) emptyList() else connectionFrame.gates) {
             val id = UUID.nameUUIDFromBytes("arccivs-plan/${city.id}/gate/${gate.side}/${gate.center.x}/${gate.center.z}".toByteArray(Charsets.UTF_8))
             val existing = retained.infrastructure.filter { it.type == BuildingType.GATE }.flatMap { it.transit }
                 .firstOrNull { it.x == gate.center.x && it.z == gate.center.z }
-            val point = existing ?: surface.at(gate.center.x, gate.center.z)?.takeIf { it.loaded && it.natural }
+            val paid = if (candidateFrame == null) null else retained.routes.values.asSequence().flatten()
+                .firstOrNull { it.x == gate.center.x && it.z == gate.center.z && surface.at(it.x, it.z)?.let { native ->
+                    native.loaded && native.topY == native.groundY && native.groundY == it.y - 1
+                } == true }
+            val point = existing ?: paid ?: surface.at(gate.center.x, gate.center.z)?.takeIf { it.loaded && it.natural }
                 ?.let { gate.center.copy(y = it.groundY + 1) } ?: throw CivsRejection("autonomy-terrain")
             val target = CivBuilding(id, BuildingType.GATE, 1, point, 0, "civs/generated/gate",
                 CivBox(point, point), point, BuildingPhase.CONSTRUCTING, transit = listOf(point))
             routes[id] = CivsAutonomousTerraform.connection(projected, target, surface,
-                planningAccess(), frame.wallObstacles + CivsSettlementLayout.gateConnectionObstacles(frame))
+                planningAccess(), connectionFrame.wallObstacles + CivsSettlementLayout.gateConnectionObstacles(connectionFrame), inspectRoute)
         }
         val roads = routes.values.toList()
         val plan = CivSettlementPlan(VERSION, (city.autonomy?.plan?.revision ?: -1) + 1, frame.halfWidth,
             plots.toList(), routes.mapKeys { it.key.toString() }.mapValues { it.value.toList() },
             adoptedFrame.wallObstacles.toList(), adoptedFrame.gates.map { it.passage }, adoptedFrame.gates.map { it.side })
         val forecast = projected.copy(autonomy = projected.autonomy?.copy(plan = plan, layoutHalfWidth = plan.halfWidth))
-        val infrastructure = CivsSettlementLayout.infrastructure(forecast, adoptedFrame, surface, roads,
+        val protectedRoads = if (candidateFrame == null) roads else roads + retained.routes.values
+        val infrastructure = CivsSettlementLayout.infrastructure(forecast, adoptedFrame, surface, protectedRoads,
             retained.infrastructure, roads, retained.routes.values, acceptedFortifications = retained.acceptedFortifications,
             forecastFortifications = fortificationProofs.keys)
         inspect?.invoke(plan, infrastructure)
@@ -471,7 +499,16 @@ internal object CivsSettlementPlans {
                 mapOf("stage" to "infrastructure", "closed" to "${infrastructure.perimeterClosed}",
                     "pieces" to "${infrastructure.pieces.size}", "wall_strips" to "${adoptedFrame.wallObstacles.size}") +
                 infrastructure.pieces.groupingBy { it.type.name }.eachCount().mapValues { it.value.toString() })
+        if (candidateFrame != null) CivsRetainedGrowthPerimeter.validateResult(adoptedFrame, retained, infrastructure, protectedRoads)
         return plan.also { validate(city, it) }
+    }
+
+    private fun actualPlot(city: Settlement, building: CivBuilding,
+        templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>): CivSettlementPlot {
+        val future = templates[building.type]?.second?.let { at(it, building.anchor, building.rotation, building.id) }
+        val bounds = if (building.type == BuildingType.PLAN_BOARD) CivsPlanBoardBlueprint.futureBounds(building)
+            else union(CivsAutonomousGeometry.futureBounds(city, building), future?.bounds ?: building.bounds)
+        return CivSettlementPlot(building.copy(phase = BuildingPhase.SITE), bounds)
     }
 
     internal fun at(template: CivBuilding, anchor: CivPosition, rotation: Int, id: UUID = template.id): CivBuilding {

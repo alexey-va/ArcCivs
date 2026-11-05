@@ -76,7 +76,10 @@ object CivsAutonomy {
         val hut = city.buildings.firstOrNull { it.type == BuildingType.BUILDER_HUT }
         if (hut == null) return goal(city, BuildingType.BUILDER_HUT, 1, null)
         if (hut.phase == BuildingPhase.SITE) return goal(hut)
-        val hallReady = baseProfile.takeWhile { it != BuildingType.TOWN_HALL }.all { type ->
+        val physical = city.inventory?.mode == CivStorageMode.PHYSICAL
+        val hallPrerequisites = if (physical) listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY)
+            else baseProfile.takeWhile { it != BuildingType.TOWN_HALL }
+        val hallReady = hallPrerequisites.all { type ->
             city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE }
         }
         city.constructionQueue.orEmpty().mapNotNull(city::building).filter { it.type != BuildingType.DECORATION }.firstOrNull {
@@ -87,6 +90,10 @@ object CivsAutonomy {
         city.buildings.firstOrNull(CivsPlanBoardBlueprint::needsRefit)?.let {
             return goal(city, BuildingType.PLAN_BOARD, it.level, it.id)
         }
+        // Physical construction keeps its ordinary per-row supplies instead of waiting for another plot.
+        if (physical && hallReady) city.buildings.firstOrNull {
+            it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.SITE
+        }?.let { return goal(it) }
         for (type in baseProfile) {
             val existing = city.buildings.firstOrNull { it.type == type }
             if (existing == null) {
