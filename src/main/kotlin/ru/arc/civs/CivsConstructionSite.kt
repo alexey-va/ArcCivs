@@ -39,15 +39,21 @@ internal fun citizenConstructionColumns(building: CivBuilding, changed: Set<Long
 }
 
 /** Sixteen precomputed exterior columns; never load chunks or stand on future cut/fill. */
-internal fun citizenConstructionTarget(city: Settlement, world: World, site: CivConstructionSite): CivPosition? {
+internal fun citizenConstructionTarget(city: Settlement, world: World, site: CivConstructionSite): CivPosition? =
+    site.exteriorColumns.firstNotNullOfOrNull { citizenConstructionColumnTarget(city, world, site, it) }
+
+/** Prefer the authored ground beneath a canopy before considering the column's highest surface. */
+internal fun citizenConstructionColumnTarget(city: Settlement, world: World, site: CivConstructionSite,
+    column: CivPosition): CivPosition? {
+    if (civsTerrainKey(column.x, column.z) in site.changedColumns ||
+        !citizenRouteCellAllowed(city, emptySet(), column.x, column.z) ||
+        !citizenChunkReady(world, column.x shr 4, column.z shr 4)) return null
     val entrance = site.building.entrance
-    for (column in site.exteriorColumns) {
-        if (civsTerrainKey(column.x, column.z) in site.changedColumns ||
-            !citizenRouteCellAllowed(city, emptySet(), column.x, column.z) ||
-            !citizenChunkReady(world, column.x shr 4, column.z shr 4)) continue
-        val feet = column.copy(y = world.getHighestBlockYAt(column.x, column.z, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1)
-        if (abs(feet.y.toLong() - entrance.y) <= CivsAutonomousTerraform.MAXIMUM_CHANGE &&
-            citizenConstructionStanding(city, world, site, feet)) return feet
+    val authored = column.copy(y = entrance.y)
+    if (citizenConstructionStanding(city, world, site, authored)) return authored
+    val surface = column.copy(y = world.getHighestBlockYAt(column.x, column.z, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1)
+    return surface.takeIf {
+        abs(it.y.toLong() - entrance.y) <= CivsAutonomousTerraform.MAXIMUM_CHANGE &&
+            citizenConstructionStanding(city, world, site, it)
     }
-    return null
 }

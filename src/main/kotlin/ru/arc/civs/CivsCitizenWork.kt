@@ -547,7 +547,7 @@ internal class CivsCitizenWork(
         val site = constructionSite(city.id, orderId)?.takeIf { it.orderId == orderId } ?: return null
         val world = Bukkit.getWorld(city.worldId) ?: return null
         constructionWorkplaces[orderId]?.let { point ->
-            if (citizenConstructionStanding(city, world, site, point)) return point
+            if (citizenConstructionColumnTarget(city, world, site, point) == point) return point
             constructionWorkplaces.remove(orderId)
         }
         if (runtime.constructionBudget == 0) return null
