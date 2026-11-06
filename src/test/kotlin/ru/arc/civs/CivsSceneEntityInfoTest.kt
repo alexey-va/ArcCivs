@@ -41,7 +41,7 @@ class CivsSceneEntityInfoTest : FunSpec({
             info.fields.associate { it.key to (it.label to it.value) } shouldBe linkedMapOf(
                 "settlement" to ("Город" to "Берёзки"),
                 "profession" to ("Профессия" to "Фермер"),
-                "status" to ("Состояние" to "Ожидает работу"),
+                "status" to ("Состояние" to "Нет работы"),
                 "home" to ("Дом" to "Дом · Уровень 2"),
                 "workplace" to ("Место работы" to "Ферма · Уровень 2"),
                 "health" to ("Здоровье" to "18.5 / 22"),
@@ -51,6 +51,10 @@ class CivsSceneEntityInfoTest : FunSpec({
             civsSceneEntityInfo(text, bounds, setOf(id), snapshot().copy(name = "<red>Анна</red>"), changed)!!.title shouldBe "<red>Анна</red>"
             info.title shouldBe "Анна"
             info.fields.first().value shouldBe "Берёзки"
+            val searching = snapshot().copy(status = "workers.status.route-searching")
+            civsSceneEntityInfo(text, bounds, setOf(id), searching, city())!!.fields.first { it.key == "status" }.value shouldBe "Работает"
+            val unassigned = city().copy(workers = city().workers.map { it.copy(assignment = null, cargo = null) })
+            civsSceneEntityInfo(text, bounds, setOf(id), searching, unassigned)!!.fields.first { it.key == "status" }.value shouldBe "Отдыхает"
             civsSceneEntityInfo(text, bounds, setOf(id), snapshot().copy(status = "workers.status.waiting-inputs",
                 statusInputs = listOf("GRAVEL")), city())!!.fields.first { it.key == "status" }.value shouldBe "Ждёт: Гравий"
         }

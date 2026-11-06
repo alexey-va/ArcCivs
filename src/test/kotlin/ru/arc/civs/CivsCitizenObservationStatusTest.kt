@@ -66,7 +66,7 @@ class CivsCitizenObservationStatusTest : FunSpec({
         verify { route wasNot Called }
     }
 
-    test("status and hologram share the held-search caption without starting work or another plan") {
+    test("raw held search remains diagnostic while public nameplates show assigned work without replanning") {
         residentRuntime { h ->
             h.assignFarm()
             val hall = h.city.buildings.first().copy(control = h.city.buildings.first().entrance)
@@ -93,12 +93,20 @@ class CivsCitizenObservationStatusTest : FunSpec({
             val text = CivsText.fromYaml(civsLocaleSource())
             for ((key, label) in mapOf("route-preparing" to "Готовится идти", "route-searching" to "Ищет путь",
                 "route-blocked" to "Ждёт свободный проход", "route-stopped" to "Остановился")) {
-                plainText(text.status(null, key)) shouldBe label
+                plainText(text.status(null, key, hasWork = true)) shouldBe "Работает"
+                plainText(text.status(null, key)) shouldBe "Отдыхает"
+                plainText(text.render("workers.status.$key")) shouldBe label
                 for (locale in listOf("ru", "en")) {
                     text.keys(locale).contains("workers.status.$key") shouldBe true
                     text.keys(locale).contains("building-status.$key") shouldBe true
                 }
             }
+            plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[2] shouldBe "Работает"
+            h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
+            h.routeIdentity() shouldBe route
+            h.city shouldBe city
+            h.workPlans shouldBe workPlans
+            h.observedWork() shouldBe 0L
         }
     }
 })

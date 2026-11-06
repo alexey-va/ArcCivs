@@ -34,7 +34,8 @@ internal data class CivMineProtection(val exposed: CivPosition, val block: CivPo
 
 
 /** Retained mine execution, cover probes, paid safety frontier and receipt authority. */
-internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWorksiteApproaches) :
+internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWorksiteApproaches,
+    private val initialMineBlock: (Settlement, CivBuilding, CivPosition, String) -> Boolean = { _, _, _, _ -> false }) :
     CivsProfessionWorksite(context, approaches) {
     override val type = BuildingType.QUARRY
     override val toolSuffix = "_PICKAXE"
@@ -338,8 +339,11 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val paidLiquidSeal = sealing && cell.after == "minecraft:cobblestone" && before in setOf(Material.WATER, Material.LAVA)
         val lavaClearance = clearingLava && before == Material.LAVA && cell.after == "minecraft:air" && local in plan.positions
         val ownedBefore = !before.isAir && mineOwnedBlock(city, building, local, cell.before)
+        val initialCut = !block.isLiquid && plan.version == 7 && plan.section(ordinal) == "0/shaft/opening" &&
+            plan.steps[ordinal].point == local && plan.steps[ordinal].after == null && cell.after == "minecraft:air" &&
+            initialMineBlock(city, building, point, cell.before)
         if (!before.isAir && before !in WEEDS && !CivsMineSafety.natural(before) && !generatorFace && !paidLiquidSeal && !lavaClearance &&
-            !ownedBefore) return denied("mine-foreign-block")
+            !ownedBefore && !initialCut) return denied("mine-foreign-block")
         val saved = city.minePlans?.get(building.id.toString())
         val after = Bukkit.createBlockData(cell.after).material
         val restoredSolid = after.isSolid && saved?.let {
@@ -347,7 +351,12 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         } == cell.after
         // Removing an exact paid block reuses its existing mine opening instead of requiring untouched ground above it.
         if (generatorFace || restoredSolid || ownedBefore && after.isAir) return true
-        val required = CivsMineSafety.requiredCover(plan, ordinal, local)
+        // A safety repair carries the active frontier ordinal; cover belongs to its exact authored action.
+        val coverOrdinal = if (sealing && plan.version == 7) sequenceOf("0/shaft/entrance", "0/shaft/opening")
+            .flatMap { plan.sections[it].orEmpty().asSequence() }.firstOrNull {
+                plan.steps[it].point == local && plan.expectedAfter(it, building.rotation) == cell.after
+            } ?: ordinal else ordinal
+        val required = CivsMineSafety.requiredCover(plan, coverOrdinal, local)
         if (required == 0) return true
         val cap = civsProtectedBuildings(city).filter { it.id != building.id && CivsAutonomousGeometry.horizontalContains(it.bounds, point) }
             .minOfOrNull { it.bounds.min.y - 1 } ?: world.maxHeight - 1

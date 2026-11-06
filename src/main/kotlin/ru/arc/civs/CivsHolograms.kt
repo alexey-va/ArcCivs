@@ -171,12 +171,13 @@ internal const val CIVS_NPC_TEXT_GAP = .20
 internal const val CIVS_NPC_TEXT_OFFSET = 1.8 + CIVS_NPC_TEXT_GAP
 
 internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): Component {
+    val hasWork = !npc.child && npc.profession !in setOf("", "unassigned", "child")
     val action = if (npc.status.removePrefix("workers.status.") == "waiting-tool") {
         when (npc.profession) {
             "farmer", "forester", "miner" -> text.render("hologram.tool-${npc.profession}")
-            else -> text.status(null, npc.status)
+            else -> text.status(null, npc.status, hasWork = hasWork)
         }
-    } else text.status(null, npc.status, npc.statusInputs)
+    } else text.status(null, npc.status, npc.statusInputs, hasWork = hasWork)
     val profession = when (val key = if (npc.child) "child" else npc.profession) {
         "" , "unassigned" -> text.render("hologram.resident")
         "courier" -> text.render("hologram.courier")

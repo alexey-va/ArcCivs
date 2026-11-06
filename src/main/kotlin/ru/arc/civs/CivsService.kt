@@ -116,7 +116,8 @@ class CivsService(
     internal var corpseLocation: (UUID, UUID, Long) -> org.bukkit.Location? = { _, _, _ -> null }
     private val footTraffic = CivsFootTraffic(plugin) { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() }
     private val worksites = CivsWorksites(plugin, world, { city, id -> storage.buildingAvailable(city, id) },
-        storage::isWorldLocked, { it in busy || it in unhealthy }, { cityPlans.forestryRoute(it.id) }, settings = settings.worksites)
+        storage::isWorldLocked, { it in busy || it in unhealthy }, { cityPlans.forestryRoute(it.id) }, settings = settings.worksites,
+        initialMineBlock = { city, building, point, before -> cityPlans.initialMineBlock(city, building, point, before) })
     private val chunkLoading = CivsChunkLoading(plugin, settings.maximumLoadedChunks,
         permissions = CivsChunkPermissions(plugin, clock), clock = clock).also { storage.collectedChunkLease = it::retainLoaded }
     private val testingPermissions = CivsChunkPermissions(plugin, clock, CIVS_TESTING_PERMISSION)
@@ -1023,6 +1024,10 @@ class CivsService(
                 }
             }.onFailure(materialized::completeExceptionally)
         }
+        val initialMines = materialized.thenCompose { records ->
+            val plans = records.map { city -> cityPlans.prepareInitialMines(city).thenApply { city.id to it } }
+            CompletableFuture.allOf(*plans.toTypedArray()).thenApply { plans.associate { it.join() } }
+        }
         materialized.thenApplyAsync({ records ->
             val members = records.filter { it.autonomy == null }.flatMap { it.members + it.owner }
             require(members.distinct().size == members.size) { "A player belongs to more than one settlement" }
@@ -1035,7 +1040,7 @@ class CivsService(
             }
             Triple(records.associateByTo(linkedMapOf(), Settlement::id), CivsProtection.prepare(records),
                 recovered?.names?.mapNotNull { (id, name) -> name?.let { id to it } }?.toMap().orEmpty())
-        }, executor).whenCompleteSync(tasks) { loaded, failure ->
+        }, executor).thenCombine(initialMines) { loaded, proofs -> loaded to proofs }.whenCompleteSync(tasks) { loaded, failure ->
             if (closed) { result.completeExceptionally(CivsRejection("not-ready")); return@whenCompleteSync }
             loading = false
             if (failure != null) {
@@ -1044,7 +1049,9 @@ class CivsService(
                 log("load settlements", failure)
                 result.completeExceptionally(failure)
             } else runCatching {
-                val (records, prepared, recovered) = requireNotNull(loaded)
+                val (state, proofs) = requireNotNull(loaded)
+                val (records, prepared, recovered) = state
+                proofs.forEach { (city, mines) -> cityPlans.publishInitialMines(city, mines) }
                 storage.replaceCities(records.values)
                 cities = records
                 construction.loadLegacyRetries(records.values)
@@ -1071,10 +1078,11 @@ class CivsService(
     internal fun publish(city: Settlement): CompletableFuture<Unit> = publish(city.id, city)
 
     internal fun publish(cityId: UUID, city: Settlement?): CompletableFuture<Unit> {
-        if (closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
+        if (closed || loading) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
         val previous = cities[cityId]
         if (city != null && previous?.buildings == city.buildings && previous?.construction?.plannedBuilding == city.construction?.plannedBuilding && previous.members == city.members &&
-            previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls && previous.pendingDeletion == city.pendingDeletion) {
+            previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls && previous.pendingDeletion == city.pendingDeletion &&
+            previous.owner == city.owner && previous.worldId == city.worldId && cityPlans.initialMinesUnchanged(previous, city)) {
             cities[city.id] = city
             if (!CivsAutonomy.legacyStock(city) && civSupplyInputs(previous) != civSupplyInputs(city)) supply.request(city.id)
             return CompletableFuture.completedFuture(Unit)
@@ -1082,17 +1090,23 @@ class CivsService(
         val expected = geometryGeneration
         val snapshot = cities.values.filter { it.id != cityId } + listOfNotNull(city)
         val result = tracked<Unit>()
-        CompletableFuture.supplyAsync({ CivsProtection.prepare(snapshot) }, executor).whenCompleteSync(tasks) { prepared, failure ->
-            if (closed) result.completeExceptionally(CivsRejection("not-ready"))
+        val refreshInitialMines = city != null && !cityPlans.initialMinesUnchanged(previous, city)
+        val initialMines = if (refreshInitialMines) cityPlans.prepareInitialMines(requireNotNull(city))
+            else CompletableFuture.completedFuture<List<CivsCityPlans.InitialMineProof>>(emptyList())
+        CompletableFuture.supplyAsync({ CivsProtection.prepare(snapshot) }, executor)
+            .thenCombine(initialMines) { prepared, proofs -> prepared to proofs }.whenCompleteSync(tasks) { candidate, failure ->
+            if (closed || loading) result.completeExceptionally(CivsRejection("not-ready"))
             else if (failure != null) result.completeExceptionally(failure)
             else if (geometryGeneration != expected) publish(cityId, city).whenComplete { _, retryFailure ->
                 if (retryFailure == null) result.complete(Unit) else result.completeExceptionally(retryFailure)
             } else runCatching {
+                val (prepared, proofs) = requireNotNull(candidate)
                 if (city == null) storage.removeCity(cityId) else storage.updateCity(city)
                 if (city == null) cities.remove(cityId) else cities[cityId] = city
+                if (refreshInitialMines) cityPlans.publishInitialMines(cityId, proofs)
                 if (city == null) { supply.remove(cityId); cargoRequests.forgetObservation(cityId); cityPlans.remove(cityId) }
                 else if (!CivsAutonomy.legacyStock(city)) supply.request(cityId)
-                protection.publish(requireNotNull(prepared))
+                protection.publish(prepared)
                 geometryGeneration++
             }.onSuccess { result.complete(Unit) }.onFailure(result::completeExceptionally)
         }
@@ -1347,6 +1361,7 @@ class CivsService(
         controlRelocations.close()
         vegetation.close()
         roadMaintenance.clear()
+        cityPlans.clear()
         supply.close()
         HandlerList.unregisterAll(this)
         lastInjury.clear()

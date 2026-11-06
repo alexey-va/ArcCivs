@@ -108,7 +108,7 @@ class CivsText private constructor(
             else -> "ready"
         }
         val currentStatus = status?.takeIf { it in messages.getValue("ru") }?.let {
-            render(player, it, "position" to (city.constructionQueue.orEmpty().indexOf(building.id) + 1))
+            buildingStatus(player, city, building, it)
         }
         val label = render(player, "hologram.label",
             "name" to this.building(player, building.type).color(TextColor.color(0x9BD48D)),
@@ -126,8 +126,47 @@ class CivsText private constructor(
     fun style(player: Player, style: String): Component =
         if ("style.$style" in messages.getValue("ru")) render(player, "style.$style") else literal(style)
 
-    fun status(player: Player?, status: String, inputs: List<String> = emptyList(), locale: String? = null): Component {
-        val key = if (status.startsWith("workers.status.")) status else "workers.status.$status"
+    /** Public activity stays stable while the administrator observes individual navigation phases. */
+    internal fun publicStatusKey(status: String, hasWork: Boolean = false): String = when (
+        val state = status.removePrefix("workers.status.").removePrefix("building-status.")
+    ) {
+        "route-preparing", "route-searching", "route-blocked", "route-stopped", "searching-work",
+        "workstation-unavailable", "mine-waiting" -> if (hasWork) "working" else "resting"
+        "to-work", "moving-to-work", "moving-to-storage", "returning-output", "to-store",
+        "moving-to-pickup", "loading-cargo", "carrying-cargo", "collecting-supplies", "delivering",
+        "mine-descending", "mine-returning", "working-field", "repairing-road", "watering", "fertilizing",
+        "felling-tree", "planting-tree", "digging-mine", "securing-mine", "building", "placing",
+        "guarding", "patrolling", "serving-guests" -> "working"
+        "idle", "waiting", "unassigned", "no-assignment", "no-construction", "no-research",
+        "waiting-orders", "waiting-guests", "queued-construction", "waiting-reassignment" -> "no-work"
+        "walking", "wandering", "meeting", "talking", "to-campfire", "campfire", "old-age-retirement",
+        "no-viewers", "capacity", "closed" -> "resting"
+        "research-unfunded" -> "waiting-materials"
+        else -> state
+    }
+
+    internal fun buildingStatusKey(city: Settlement, building: CivBuilding, status: String): String {
+        val constructing = city.construction?.buildingId == building.id
+        val hasWork = city.workers.any { worker -> !CivsResidents.isChild(worker) &&
+            worker.assignment?.let(city::building)?.let { assigned ->
+                if (constructing) CivsRules.isBuilder(city, assigned) && CivsRules.builderCanWork(city, assigned)
+                else assigned.id == building.id
+            } == true }
+        return publicStatusKey(status, hasWork)
+    }
+
+    internal fun buildingStatus(player: Player, city: Settlement, building: CivBuilding, status: String,
+                                inputs: List<String> = emptyList()): Component {
+        val state = buildingStatusKey(city, building, status)
+        if (state == "waiting-inputs" && inputs.isNotEmpty()) return this.status(player, state, inputs)
+        val key = listOf("building-status.$state", "workers.status.$state")
+            .firstOrNull { it in messages.getValue("ru") } ?: "workers.status.unavailable"
+        return render(player, key, "position" to (city.constructionQueue.orEmpty().indexOf(building.id) + 1))
+    }
+
+    fun status(player: Player?, status: String, inputs: List<String> = emptyList(), locale: String? = null,
+               hasWork: Boolean = false): Component {
+        val key = "workers.status.${publicStatusKey(status, hasWork)}"
         val selectedLocale = locale ?: language(player)
         if (key == "workers.status.waiting-inputs" && inputs.isNotEmpty()) return render(
             "workers.status.waiting-input-materials", selectedLocale,

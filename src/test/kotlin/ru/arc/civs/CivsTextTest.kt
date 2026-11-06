@@ -76,9 +76,38 @@ class CivsTextTest : FunSpec({
         plainText(text.status(ru, "waiting-inputs", listOf("SAND", "CHARCOAL", "SAND"))) shouldBe "Ждёт: Песок, Древесный уголь"
         plainText(text.status(en, "waiting-inputs", listOf("RAW_IRON", "CHARCOAL"))) shouldBe "Waiting for: Raw Iron, Charcoal"
         plainText(text.status(null, "waiting-inputs", listOf("GRAVEL"))) shouldBe "Ждёт: Гравий"
-        plainText(text.status(ru, "waiting-inputs")) shouldBe "Ждёт сырьё"
+        plainText(text.status(ru, "waiting-inputs")) shouldBe "Ждёт материалы"
         plainText(text.status(ru, "moving-to-tavern", listOf("BREAD"))) shouldBe "Идёт в трактир"
         plainText(text.status(ru, "moving-to-town-hall")) shouldBe "Идёт в ратушу"
+    }
+
+    test("public activity captions hide routine phases and retain actual needs and failures") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        for ((locale, working, resting, noWork, waiting) in listOf(
+            listOf("ru", "Работает", "Отдыхает", "Нет работы", "Ждёт материалы"),
+            listOf("en", "Working", "Resting", "No work", "Waiting for materials"),
+        )) {
+            for (status in listOf("moving-to-work", "moving-to-storage", "working-field", "watering", "fertilizing",
+                "felling-tree", "planting-tree", "digging-mine", "mine-descending", "mine-returning", "placing",
+                "building", "carrying-cargo", "collecting-supplies", "patrolling")) {
+                plainText(text.status(null, status, locale = locale)) shouldBe working
+            }
+            for (status in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped",
+                "searching-work", "workstation-unavailable", "mine-waiting")) {
+                plainText(text.status(null, status, locale = locale, hasWork = true)) shouldBe working
+                plainText(text.status(null, status, locale = locale)) shouldBe resting
+            }
+            for (status in listOf("waiting", "idle", "unassigned", "no-assignment", "no-construction", "waiting-orders"))
+                plainText(text.status(null, status, locale = locale, hasWork = true)) shouldBe noWork
+            for (status in listOf("walking", "wandering", "meeting", "to-campfire", "campfire", "talking"))
+                plainText(text.status(null, status, locale = locale)) shouldBe resting
+            for (status in listOf("waiting-materials", "waiting-inputs", "research-unfunded"))
+                plainText(text.status(null, status, locale = locale)) shouldBe waiting
+            for (status in listOf("eating", "sleeping", "to-meal", "moving-to-tavern", "moving-to-town-hall",
+                "route-unreachable", "worksite-no-access", "storage-full")) {
+                text.status(null, status, locale = locale, hasWork = true) shouldBe text.render("workers.status.$status", locale)
+            }
+        }
     }
 
     test("missing translation rejects a catalog instead of publishing untranslated controls") {
@@ -230,6 +259,10 @@ class CivsTextTest : FunSpec({
         plainText(text.buildingHologram(player, city, building)) shouldBe "Ферма\nУр. 2\nНет работников"
         val assigned = city.copy(workers = listOf(CivWorker(UUID(0, 5), "Worker", building.id)))
         plainText(text.buildingHologram(player, assigned, building)) shouldBe "Ферма\nУр. 2\nРаботников: 1"
+        for (status in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped", "searching-work")) {
+            plainText(text.buildingHologram(player, assigned, building, "building-status.$status")) shouldBe "Ферма\nУр. 2\nРаботает"
+            plainText(text.buildingHologram(player, city, building, "building-status.$status")) shouldBe "Ферма\nУр. 2\nОтдыхает"
+        }
         plainText(text.buildingHologram(player, city, building.copy(phase = BuildingPhase.SITE))) shouldBe "Ферма\nУр. 2\nНе начато"
         val order = CivConstruction(UUID(0, 6), building.id, 3, 100, 40, ConstructionPhase.CONSTRUCTING, Stock())
         plainText(text.buildingHologram(player, city.copy(construction = order), building)) shouldBe "Ферма\nУр. 2\nСтройка"
@@ -237,6 +270,8 @@ class CivsTextTest : FunSpec({
             "Ферма\nУр. 2\nОстановлено"
         every { player.locale() } returns Locale.ENGLISH
         plainText(text.buildingHologram(player, assigned, building)) shouldBe "Farm\nLevel 2\nWorkers: 1"
+        plainText(text.buildingHologram(player, assigned, building, "building-status.route-searching")) shouldBe "Farm\nLevel 2\nWorking"
+        plainText(text.buildingHologram(player, city, building, "building-status.route-searching")) shouldBe "Farm\nLevel 2\nResting"
         plainText(text.buildingHologram(player, city.copy(construction = order.copy(phase = ConstructionPhase.WAITING_MATERIALS)), building)) shouldBe
             "Farm\nLevel 2\nWaiting for materials"
     }

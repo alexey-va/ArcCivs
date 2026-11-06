@@ -18,10 +18,11 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private val isPaused: (UUID) -> Boolean = { false },
     private val forestryPaths: (Settlement) -> Set<Pair<Int, Int>> = { emptySet() },
     private val nanoTime: () -> Long = System::nanoTime,
-    private val settings: CivsWorksiteSettings = CivsWorksiteSettings()) {
+    private val settings: CivsWorksiteSettings = CivsWorksiteSettings(),
+    initialMineBlock: (Settlement, CivBuilding, CivPosition, String) -> Boolean = { _, _, _, _ -> false }) {
     private val context: CivsWorksiteContext = CivsWorksiteContext(plugin, worldAccess, stock, locked, forestryPaths, { nanoTime() })
     private val approaches: CivsWorksiteApproaches = CivsWorksiteApproaches(context, { forestry }, { invalidate(it) })
-    private val mine: CivsMineWorksite = CivsMineWorksite(context, approaches)
+    private val mine: CivsMineWorksite = CivsMineWorksite(context, approaches, initialMineBlock)
     private val forestry: CivsForestryWorksite = CivsForestryWorksite(context, approaches)
     private val farm = CivsFarmWorksites(context, approaches)
     private val professions: Map<BuildingType, CivsProfessionWorksite> = listOf(farm, forestry, mine).associateBy { it.type }

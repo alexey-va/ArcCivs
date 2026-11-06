@@ -54,9 +54,12 @@ internal object CivsMineSafety {
 
     fun natural(material: Material): Boolean = material in GROUND || material.name.endsWith("_ORE")
 
-    /** Existing ladder/backing access stays narrow; broad landings and arms need real terrain cover. */
+    /** V7's exact authored surface mouth needs no overburden; lower landings and arms keep their cover. */
     fun requiredCover(plan: CivsMinePlan, ordinal: Int, local: CivPosition): Int {
-        if (plan.section(ordinal) == "spine" &&
+        val section = plan.section(ordinal)
+        if (plan.version == 7 && (section == "0/shaft/entrance" || section == "0/shaft/opening") &&
+            local == plan.steps[ordinal].point) return 0
+        if (section == "spine" &&
             kotlin.math.abs(local.x - plan.bottom.x) <= 1 && kotlin.math.abs(local.z - plan.bottom.z) <= 1) return 0
         return if (maxOf(kotlin.math.abs(local.x - plan.center.x), kotlin.math.abs(local.z - plan.center.z)) <= COMPACT_RADIUS)
             COMPACT_COVER else FULL_COVER

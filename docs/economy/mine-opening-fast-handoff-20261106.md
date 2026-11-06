@@ -1,0 +1,34 @@
+# V7 surface mine opening and bounded fast handoff: before-source assessment
+
+Recorded 2026-11-06T07:48:55.589109+00:00; LAB only. No affected production source edited yet.
+
+BEFORE affected mine/scheduling source changes, LAB ONLY; current .22343c1158/PID3044848/ready2026-11-05T23:59:55.020062032Z. UI-only uncommitted status presentation is independent. Source hashes below freeze the six affected mine/dispatcher owners before implementation.
+
+Observed Auto1 native cap consists of9COBBLESTONE cells matching the validated original schematic. Terraform STONE is applied first, schematic COBBLE last. Original-plan finite27opening-cut ownership is separate from cover; foreign blocks, exact identity/native-before, Lands, TileState, liquids, frontier, reach, arrival and normal item journal remain authoritative.
+
+Explicit proposed cover policy: zero natural-overburden requirement only for exact V7 authored0/shaft/entrance and0/shaft/opening action points, including planned supports/torches. These are the initial surface vestibule and3x3mouth. All other V7 sections and oldV2..V6 retain6/16cover. Native first entrance cut DIRTat12325,71,9623 has top76, less than required77; this is a separate confirmed barrier. No free completion, AIR bulk write, paid-progress rewrite, new recipe or reward rate.
+
+Existing native work stays observed and journalled. For autonomous mine native cuts, current outputs are empty and economic_credit is false; economic resource delivery is separate and unchanged. Manual physical workers retain ordinary native block drops, tool wear and real bag capacity. Clearing the observed9cap is finite: world loses9blocks; manual scenario may receive at most9ordinaryCOBBLESTONE items, while Auto world-only cut itself does not grant these. Initial support/torch debits follow exact prepared work; material mix is not invented here.
+
+Fast handoff adds QUARRY/FORESTER eligibility to the existing5-tick round-robin8-actor dispatcher, retaining the normal20-tick pulse. No new scheduler, increased8-actor budget, shortened work duration or future work credit. At20TPS with <=8eligibleactors an opportunity may arrive in <=0.25s rather than the ordinary<=1s; at16actors <=0.5s; normal pulse remains fallback. These are cadence bounds, not measured worker latency or guarantees.
+
+Illustrative no-walk/no-food/no-supply/no-commit-delay2s mining action: a worst-phase2+1s loop corresponds to1200actions/h;2+0.25s corresponds to1600, and2+0.5s to1440. The2s action duration itself is unchanged. Real production may improve; it is NOT assumed to increase33percent or to equal these opportunities. Sleep, path work, budget fairness, native durability, unavailable work and storage reduce actual output. Forest/default3s and generator6s paths remain unchanged.
+
+Existing AutoSupply gross envelope unchanged: <=8material kinds x64units/receipt, shared<=1acceptedreceipt/s across backend. Sensitivity0.25/1/4activehours/day permits900/3600/14400receipts; native_item_units is a service count of unlike material units, not a monetary valuation. More successful work can change realized supply draws, stock, tool/food consumption and goods available for trade; do not write blanket item mint=0.
+
+Direct new Vault, premium tokens, physical EMERALD mint and playerXP are separately0. Existing emerald treasury/player trades transfer actual items/currency with unchanged prices/reserves; no treasury seed/grant/refund. Current SELL/AutoSell and future SELL-to-contract remain distinct, no item-to-money conversion assumed. Source checks, artifact, deployment and native outcome remain separate; native mouth/descent/fairness and latency require post-change observations.
+
+Affected source SHA-256 before implementation:
+
+```json
+{
+  "src/main/kotlin/ru/arc/civs/CivsCityPlans.kt": "91986ae0286e9745b1646703057df22d623fe1152c98e4acfcbece9557af9a0b",
+  "src/main/kotlin/ru/arc/civs/CivsService.kt": "e2dac9473f5b5ffaf23b86529334ff8820fc2cd350d1e71dbd4bd2abc8b08b78",
+  "src/main/kotlin/ru/arc/civs/CivsWorksites.kt": "6ef7834195d3da611916e3ff58a3d45e7de4d7f07c115c994f3071d08931da00",
+  "src/main/kotlin/ru/arc/civs/CivsMineWorksite.kt": "55070012b91414c0759db64b2fda6fb936c3bea4d72492b9d1d21828500902ad",
+  "src/main/kotlin/ru/arc/civs/CivsMineSafety.kt": "ffb7fccca2178175cc762da3d61ae26691a631c986a587eee195cb6c675acf6e",
+  "src/main/kotlin/ru/arc/civs/CivsCitizens.kt": "f8dc84829217c6cd70d26e7795c65cff0f08c3c870afd404bf59270cb70bd616"
+}
+```
+
+The finite cap scenarios cover this one observed retained quarry only: calculator network_weekly_cap9 is its one-off initial stock bound, NOT a new runtime economic limit or9daily repeated rewards. Additional newly funded quarries require separate construction/world-stock accounting.

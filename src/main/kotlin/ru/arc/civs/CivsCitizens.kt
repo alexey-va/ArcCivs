@@ -565,10 +565,13 @@ class CivsCitizens(
         val cities = cityProvider().associateBy { it.id }
         val viewers = audience.viewers()
         // At most eight existing actors, rotated after admission; no spawn, scan or threat pulse.
-        val candidates = actors.values.filter { (it.plan.type in setOf(BuildingType.FARM, BuildingType.BUILDER_HUT) ||
-            it.plan.type == BuildingType.WAREHOUSE && it.plan.courier != null) && it.workerId !in pendingHarm &&
+        // Extra worksite kinds use slots only for admitted work or a brief committed handoff.
+        val candidates = actors.values.filter { it.workerId !in pendingHarm &&
             it.npc.isValid && !it.sleeping && !it.sheltering && it.attacker == null && it.foodSource == null &&
-            it.supplyPickup == null && it.social.visit == null }.take(8)
+            it.supplyPickup == null && it.social.visit == null &&
+            (it.plan.type in setOf(BuildingType.FARM, BuildingType.BUILDER_HUT) ||
+                it.plan.type in CivsWorksites.TYPES && (it.plan.worldWork != null || workRuntime.workActivityStatus(it, it.plan) != null) ||
+                it.plan.type == BuildingType.WAREHOUSE && it.plan.courier != null) }.take(8)
         for (actor in candidates) {
             citizenRotateAfterAdmission(actors, actor.workerId)
             val city = cities[actor.cityId]?.takeIf { it.pendingDeletion == null } ?: continue

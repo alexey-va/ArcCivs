@@ -164,8 +164,12 @@ class CivsVillageVisitUiTest : FunSpec({
 })
 
 class CivsBuildingStatusUiTest : FunSpec({
-    test("building inspection uses the existing worker label for active mine and travel states") {
-        for (language in listOf("ru", "en")) for (status in listOf("securing-mine", "returning-output", "defending", "retreating", "no-research", "research-paused", "research-unfunded", "mine-descending", "mine-returning")) {
+    test("building inspection uses public work labels and preserves concrete mine needs") {
+        for (language in listOf("ru", "en")) for ((status, publicStatus) in listOf(
+            "securing-mine" to "working", "returning-output" to "working", "defending" to "defending",
+            "retreating" to "retreating", "no-research" to "no-work", "research-paused" to "research-paused",
+            "research-unfunded" to "waiting-materials", "mine-descending" to "working", "mine-returning" to "working",
+        )) {
             withUi { h ->
                 h.player.setLocale(Locale.forLanguageTag(language))
                 val village = autonomousSettlement(h.player, "Mine status")
@@ -175,7 +179,7 @@ class CivsBuildingStatusUiTest : FunSpec({
                 every { h.host.workerStatus(any()) } returns "workers.status.$status"
                 h.ui.openBuildingInspection(h.player, village.id, quarry.id)
                 h.screen.id shouldBe "civs.building-inspection"
-                h.body() shouldContain plainText(h.ui.tr(h.player, "workers.status.$status"))
+                h.body() shouldContain plainText(h.ui.tr(h.player, "workers.status.$publicStatus"))
                 h.body().contains(plainText(h.ui.tr(h.player, "workers.status.unavailable"))) shouldBe false
             }
         }
@@ -540,9 +544,9 @@ class CivsUiTest : FunSpec({
                 export("auto2-hall")
             }
             val statuses = if (russian) mapOf("to-meal" to "Идёт поесть", "eating" to "Ест", "learning" to "Учится у взрослого",
-                "patrolling" to "Обходит деревню", "alarm-shelter" to "Укрывается от опасности")
+                "patrolling" to "Работает", "alarm-shelter" to "Укрывается от опасности")
             else mapOf("to-meal" to "Going for a meal", "eating" to "Eating", "learning" to "Learning from an adult",
-                "patrolling" to "Patrolling the village", "alarm-shelter" to "Taking shelter from danger")
+                "patrolling" to "Working", "alarm-shelter" to "Taking shelter from danger")
             statuses.forEach { (status, expected) -> plainText(labels.status(h.player, status)) shouldBe expected }
         }
     }
@@ -1399,14 +1403,14 @@ class CivsUiTest : FunSpec({
             h.paper.performTicks(2)
             h.screen.id shouldBe "civs.worker"
             h.body() shouldContain "Forester"
-            h.body() shouldContain "Walking to work"
-            h.body().contains("No assignment") shouldBe false
+            h.body() shouldContain "Working"
+            h.body().contains("No work") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, forester.id) }
 
             assignedStatus = "working"
             h.click("unassign")
             h.paper.performTicks(2)
-            h.body() shouldContain "No assignment"
+            h.body() shouldContain "No work"
             h.body().contains("Working") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, null) }
             verify(exactly = 0) { h.runtime.close(h.player) }
@@ -2124,13 +2128,18 @@ class CivsUiTest : FunSpec({
             val worker = h.city!!.workers.last()
             h.city = CivsRules.assign(h.city!!, h.player.uniqueId, worker.id, h.city!!.buildings.last().id, 0)
             for ((status, label) in listOf(
-                "no-construction" to "No construction",
+                "no-construction" to "No work",
                 "sleeping" to "Sleeping",
                 "route-unreachable" to "No accessible route",
-                "waiting-materials" to "Waiting for construction materials",
-                "collecting-supplies" to "Collecting supplies",
-                "placing" to "Placing the next section",
+                "waiting-materials" to "Waiting for materials",
+                "collecting-supplies" to "Working",
+                "placing" to "Working",
                 "working" to "Working",
+                "route-preparing" to "Working",
+                "route-searching" to "Working",
+                "route-blocked" to "Working",
+                "route-stopped" to "Working",
+                "waiting" to "No work",
                 "injury-pending" to "Injured · saving condition",
             )) {
                 every { h.host.workerStatus(worker.id) } returns "workers.status.$status"
@@ -2893,13 +2902,19 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Sleeping"
             every { h.host.workerStatus(idle.id) } returns "workers.status.unassigned"
             h.ui.openWorker(h.player, base.id, idle.id)
-            h.body() shouldContain "No assignment"
+            h.body() shouldContain "No work"
             for (language in listOf("ru", "en")) {
                 h.player.setLocale(Locale.forLanguageTag(language))
+                for (status in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped")) {
+                    every { h.host.workerStatus(idle.id) } returns "workers.status.$status"
+                    h.ui.openWorker(h.player, base.id, idle.id)
+                    h.body() shouldContain if (language == "ru") "Отдыхает" else "Resting"
+                    h.body().contains(if (language == "ru") "Работает" else "Working") shouldBe false
+                }
                 for (status in listOf("unassigned", "no-assignment")) {
                     every { h.host.workerStatus(idle.id) } returns "workers.status.$status"
                     h.ui.openWorker(h.player, base.id, idle.id)
-                    h.body() shouldContain if (language == "ru") "Нет работы" else "No assignment"
+                    h.body() shouldContain if (language == "ru") "Нет работы" else "No work"
                     h.body().contains(if (language == "ru") "Гуляет без работы" else "Walking around · unassigned") shouldBe false
                 }
             }
@@ -3645,9 +3660,11 @@ class CivsUiTest : FunSpec({
         withUi { h ->
             val base = settlement(h.player)
             val building = base.buildings.last().copy(control = CivPosition(16, 66, 1))
-            h.city = base.copy(buildings = base.buildings.map { if (it.id == building.id) building else it })
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == building.id) building else it },
+                workers = base.workers.map { if (it.id == base.workers.last().id) it.copy(assignment = building.id) else it })
             for ((status, label) in listOf("no-workers" to "No workers assigned", "route-unreachable" to "Worker cannot reach the destination",
-                "waiting-materials" to "Waiting for materials", "working" to "Working", "no-construction" to "No active construction",
+                "waiting-materials" to "Waiting for materials", "working" to "Working", "no-construction" to "No work",
+                "route-preparing" to "Working", "route-searching" to "Working", "route-blocked" to "Working", "route-stopped" to "Working",
                 "work-route-too-long" to "Storage is too far away", "control-missing" to "Control barrel is missing",
                 "lands-denied" to "No permission for this plot", "world-changed" to "The plot has changed",
                 "protected-terrain" to "A protected block cannot be replaced", "building-overlap" to "Overlaps another building",

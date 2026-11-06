@@ -31,7 +31,8 @@ internal fun civsSceneEntityInfo(text: CivsText, bounds: ArcSceneBounds, entityI
     "profession.$profession".takeIf { it in text.keys("ru") }?.let { field("profession", "label.profession", localized(it)) }
     val status = npc.status.takeIf { it.startsWith("workers.status.") } ?: "workers.status.${npc.status}"
     status.takeIf { it in text.keys("ru") }?.let {
-        field("status", "label.state", plain.serialize(text.status(null, it, npc.statusInputs, locale = "ru")))
+        field("status", "label.state", plain.serialize(text.status(null, it, npc.statusInputs, locale = "ru",
+            hasWork = !CivsResidents.isChild(resident) && (resident.assignment != null || resident.cargo != null))))
     }
     field("home", "label.home", building(resident.homeId))
     field("workplace", "label.workplace", building(resident.assignment))

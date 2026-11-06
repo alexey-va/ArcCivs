@@ -74,7 +74,7 @@ class CivsCitizenCourierHandoffTest : FunSpec({
         }
     }
 
-    test("real couriers share the same eight fast handoff slots while idle warehouses remain excluded") {
+    test("real couriers share the same eight fast handoff slots while idle producers and warehouses remain excluded") {
         residentRuntime { h ->
             val (source, idleWarehouseWorker) = h.courierSource(material = "OAK_LOG", amount = 1)
             val warehouse = h.city.buildings.single { it.type == BuildingType.WAREHOUSE }
@@ -140,10 +140,19 @@ class CivsCitizenCourierHandoffTest : FunSpec({
                 couriers.take(index).none { other -> citizenStandingBounds(other.location, other.scale)
                     .overlaps(citizenStandingBounds(npc.location, npc.scale)) } shouldBe true
             }
+            val producer = h.actor(h.workerId)
+            producer.plan.type shouldBe BuildingType.FORESTER
+            producer.plan.worldWork shouldBe null
+            producer.plan.idleReason shouldBe "searching-work"
+            producer.workHandoff shouldBe null
+            val workPlans = h.workPlans
             h.owner.pulseFieldWork(8_250)
+            h.workPlans shouldBe workPlans
             requested.size shouldBe 8
             requested.distinct().size shouldBe 8
             h.owner.pulseFieldWork(8_500)
+            h.workPlans shouldBe workPlans
+            producer.plan.worldWork shouldBe null
             requested.toSet() shouldBe ids.toSet()
             requested.size shouldBe 9
             repeat(4) { h.owner.pulseFieldWork(8_750L + it * 250) }

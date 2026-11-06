@@ -255,6 +255,8 @@ internal fun CivsUi.showAssignments(player: Player, workerId: UUID, page: Int = 
 
 internal fun CivsUi.workerStatus(player: Player, worker: CivWorker): Component {
     val status = host.workerStatus(worker.id)
+    val hasWork = !CivsResidents.isChild(worker) && (worker.assignment != null || worker.cargo != null)
     return tint(text.status(player, status, if (status == "workers.status.waiting-inputs")
-        host.workerStatusInputs(worker.id) else emptyList()), statusColor(status))
+        host.workerStatusInputs(worker.id) else emptyList(), hasWork = hasWork),
+        statusColor(text.publicStatusKey(status, hasWork)))
 }
