@@ -16,10 +16,14 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         fun matches(city: Settlement): Boolean = world == city.worldId && center == city.center && radius == city.radius &&
             buildings == city.buildings && planned == city.construction?.plannedBuilding
 
-        fun outside(point: CivPosition): Boolean =
-            abs(point.x.toLong() - center.x) <= radius && abs(point.z.toLong() - center.z) <= radius &&
-                protectedBuildings.none { point.x in it.bounds.min.x..it.bounds.max.x &&
-                    point.z in it.bounds.min.z..it.bounds.max.z || CivsWorksiteLayouts.isField(it, point.x, point.z) }
+        fun outside(point: CivPosition): Boolean = contains(point) && !onPlot(point)
+
+        fun contains(point: CivPosition): Boolean =
+            abs(point.x.toLong() - center.x) <= radius && abs(point.z.toLong() - center.z) <= radius
+
+        fun onPlot(point: CivPosition): Boolean =
+            protectedBuildings.any { point.x in it.bounds.min.x..it.bounds.max.x &&
+                point.z in it.bounds.min.z..it.bounds.max.z || CivsWorksiteLayouts.isField(it, point.x, point.z) }
     }
 
     internal class Network(val geometry: Geometry, val cells: LinkedHashSet<CivPosition> = linkedSetOf())
@@ -48,7 +52,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     }
 
     class Trip internal constructor(internal val cityId: UUID, internal val network: Network,
-        internal val retainedRoads: RetainedRoads) {
+        internal val preferCourierRoads: Boolean, internal val retainedRoads: RetainedRoads) {
         // Costs cannot change halfway through one A* search as other residents finish their trips.
         private val preferred = network.cells.toHashSet()
         internal val reuseSignature: Set<CivPosition> get() = preferred
@@ -70,7 +74,13 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
 
         fun cost(ground: Block, recognizedSurface: (Block) -> Double): Double {
             val point = CivPosition(ground.x, ground.y, ground.z)
-            if (!network.geometry.outside(point)) return 1.0
+            if (!network.geometry.contains(point)) return 1.0
+            if (network.geometry.onPlot(point)) {
+                if (!preferCourierRoads) return 1.0
+                val material = ground.type
+                return if (material in CivsTerrainPolicy.AUTONOMOUS_SOIL &&
+                    (material != Material.COARSE_DIRT || point !in retainedRoads)) ORDINARY_COST else 1.0
+            }
             // A remembered line never licenses climbing an outdoor tree.
             val material = ground.type
             if (Tag.LOGS.isTagged(material) || Tag.LEAVES.isTagged(material)) return Double.POSITIVE_INFINITY
@@ -97,7 +107,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         val network = networks[city.id]?.takeIf { it.geometry == geometry }
             ?: Network(geometry).also { networks[city.id] = it }
         while (networks.size > MAX_CITIES) networks.remove(networks.keys.first())
-        return Trip(city.id, network, if (preferCourierRoads) courierRoads(city) else RetainedRoads.EMPTY)
+        return Trip(city.id, network, preferCourierRoads, if (preferCourierRoads) courierRoads(city) else RetainedRoads.EMPTY)
     }
 
     fun complete(city: Settlement, trip: Trip) {

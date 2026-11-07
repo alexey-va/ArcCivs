@@ -1890,6 +1890,80 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("a freight route takes the paved warehouse approach instead of cutting across its yard") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val base = pathsCity().copy(worldId = terrain.world.uid)
+            val warehouse = base.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
+                anchor = CivPosition(7, 69, 14), entrance = CivPosition(7, 70, 14), control = CivPosition(3, 70, 1),
+                bounds = CivBox(CivPosition(-1, 68, -12), CivPosition(16, 84, 13)))
+            val city = base.copy(buildings = base.buildings + warehouse)
+            val street = (18 downTo 7).map { CivPosition(it, if (it > 8) 69 else 70, 14) }
+            val journal = CivPlacementPlan(warehouse.id, city.id, city.worldId, warehouse, emptyList(),
+                terrain = CivTerraformPlan(CivBox(CivPosition(7, 68, 14), CivPosition(18, 72, 14)),
+                    emptyList(), street, 69, 0, 0))
+            val roads = CivsPaths.RetainedRoads.from(city, CivAutonomousAccess.from(city, listOf(journal)))
+            val paths = CivsPaths { roads }
+            // Auto4's translated street, yard and storage aisle, with the wooden passage open.
+            for (x in 2..18) for (z in 0..14) terrain.blocks[CivPosition(x, 69, z)] = Material.GRASS_BLOCK
+            for (point in street) {
+                if (point.y == 69) terrain.blocks.remove(point)
+                terrain.blocks[point.copy(y = point.y - 1)] = Material.COARSE_DIRT
+            }
+            for (z in 3..13) terrain.blocks[CivPosition(7, 69, z)] = Material.DIRT_PATH
+            for (z in 3..8) terrain.blocks[CivPosition(8, 69, z)] = Material.DIRT_PATH
+            for (x in 2..10) for (z in 0..2) terrain.blocks[CivPosition(x, 69, z)] = Material.OAK_PLANKS
+            for (x in 2..18) if (x !in 7..8) for (y in 70..71)
+                terrain.blocks[CivPosition(x, y, 2)] = Material.OAK_PLANKS
+            terrain.blocks[warehouse.control!!] = Material.BARREL
+            terrain.blocks[CivPosition(4, 70, 1)] = Material.CHEST
+
+            fun walk(trip: CivsPaths.Trip): Set<CivPosition> {
+                var at = Location(terrain.world, 18.5, 69.0, 14.5)
+                val target = Location(terrain.world, 3.5, 70.0, .5)
+                val route = CitizenPacketRoute(terrain.world, at, target,
+                    { p -> p.x in 2..18 && p.y in 69..70 && p.z in 0..14 }, { _, _ -> true },
+                    { ground -> trip.cost(ground) { 1.0 } })
+                route.prepare()
+                route.failure shouldBe null
+                val walked = linkedSetOf<CivPosition>()
+                for (tick in 0 until 240) {
+                    if (route.finished) break
+                    route.move(at, 1.0) { true }?.let { next ->
+                        walked += CivPosition(next.blockX, citizenSupportY(next.y), next.blockZ)
+                        at = next
+                    }
+                }
+                route.finished shouldBe true
+                at.distanceSquared(target) shouldBe 0.0
+                return walked
+            }
+
+            val courier = paths.begin(city, preferCourierRoads = true)
+            val ordinary = paths.begin(city)
+            val yardRows = (4..12).toSet()
+            walk(ordinary).any { it.x >= 10 && it.z in yardRows } shouldBe true
+            walk(courier).filter { it.x in 7..8 && it.z in yardRows }.map { it.z }.toSet() shouldBe yardRows
+
+            for (x in 7..8) for (y in 70..71) terrain.blocks[CivPosition(x, y, 8)] = Material.OAK_PLANKS
+            val detour = walk(courier)
+            detour.none { it.x in 7..8 && it.z == 8 } shouldBe true
+            detour.any { it.z == 8 && terrain.blocks[it] == Material.GRASS_BLOCK } shouldBe true
+
+            val unrecorded = CivsPaths()
+            val freightWithoutRoads = unrecorded.begin(city, preferCourierRoads = true)
+            val ordinaryWithoutRoads = unrecorded.begin(city)
+            val yardSoil = terrain.world.getBlockAt(10, 69, 7)
+            freightWithoutRoads.cost(yardSoil) { 1.0 } shouldBe CivsPaths.ORDINARY_COST
+            ordinaryWithoutRoads.cost(yardSoil) { 1.0 } shouldBe 1.0
+            freightWithoutRoads.cost(terrain.world.getBlockAt(7, 69, 6)) { 1.0 } shouldBe 1.0
+            freightWithoutRoads.cost(terrain.world.getBlockAt(3, 69, 0)) { 1.0 } shouldBe 1.0
+            val freightKey = CitizenRouteReuseKey.of(freightWithoutRoads, emptySet())
+            val ordinaryKey = CitizenRouteReuseKey.of(ordinaryWithoutRoads, emptySet())
+            (freightKey != ordinaryKey) shouldBe true
+        }
+    }
+
     test("a path at fifteen sixteenths height reaches its endpoint and emits every actual cell crossing") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
