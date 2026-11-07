@@ -211,7 +211,8 @@ internal class CivsVillageSites(
         var failure: Throwable? = null
     }
     private class Search(val reference: Settlement?, val count: Int, val prefix: String, val forcedStyle: String?, val batch: Int,
-        val token: LifecycleTaskScope.Token, val bootstrap: CivVillageBootstrap? = null) {
+        val token: LifecycleTaskScope.Token, val bootstrap: CivVillageBootstrap? = null,
+        val allowEarlyNativeProof: Boolean = false) {
         val referenceId = bootstrap?.id ?: requireNotNull(reference).id
         val owner = bootstrap?.owner ?: requireNotNull(reference).owner
         val worldId = bootstrap?.worldId ?: requireNotNull(reference).worldId
@@ -273,13 +274,14 @@ internal class CivsVillageSites(
             .thenBy { it })
     }
 
-    fun search(reference: Settlement, count: Int, prefix: String, style: String? = null, batch: Int = 0): CompletableFuture<CivVillageSitesResult> {
+    fun search(reference: Settlement, count: Int, prefix: String, style: String? = null, batch: Int = 0,
+        allowEarlyNativeProof: Boolean = false): CompletableFuture<CivVillageSitesResult> {
         check(Bukkit.isPrimaryThread())
         if (batch !in 0..MAXIMUM_BATCH) return CompletableFuture.failedFuture(CivsRejection("invalid-village-search-arguments"))
         val cleanPrefix = prefix.trim()
         active?.let {
             if (!it.finishing && it.bootstrap == null && it.referenceId == reference.id && it.count == count && it.prefix == cleanPrefix &&
-                it.forcedStyle == style && it.batch == batch) return it.result
+                it.forcedStyle == style && it.batch == batch && it.allowEarlyNativeProof == allowEarlyNativeProof) return it.result
             return CompletableFuture.failedFuture(CivsRejection("world-busy"))
         }
         if (closed || timer == null || !ready()) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
@@ -290,7 +292,7 @@ internal class CivsVillageSites(
             return CompletableFuture.failedFuture(CivsRejection("city-not-found"))
         if (plugin.server.getWorld(reference.worldId)?.name !in settings.worlds)
             return CompletableFuture.failedFuture(CivsRejection("world-not-allowed"))
-        val search = Search(reference, count, cleanPrefix, style, batch, tasks.token())
+        val search = Search(reference, count, cleanPrefix, style, batch, tasks.token(), allowEarlyNativeProof = allowEarlyNativeProof)
         active = search
         runCatching {
             for (ordinal in 1..count) {
@@ -431,6 +433,12 @@ internal class CivsVillageSites(
     private fun coarse(search: Search) {
         if (!context(search)) return finish(search, "not-ready")
         val ordinal = search.missing() ?: return finish(search, null)
+        // Cold generation can consume the whole deadline before the first tranche ranks.
+        // At this candidate boundary no coarse lease or load needs to be abandoned.
+        if (search.allowEarlyNativeProof && search.ticks >= EARLY_PROOF_TICKS && search.shortlist.isNotEmpty()) {
+            val missing = search.count - search.created.size
+            if (search.shortlist.size >= maxOf(2, missing) || search.ticks >= SINGLE_SITE_PROOF_TICKS) return full(search)
+        }
         while (search.nextCandidate < minOf(search.batchEnd, search.candidates.size)) {
             val anchor = search.candidates[search.nextCandidate]
             val city = draft(search, ordinal, anchor)
@@ -498,7 +506,8 @@ internal class CivsVillageSites(
         else if (search.nextCandidate < search.candidates.size) {
             search.shortlist.clear()
             search.nextShortlist = 0
-            search.batchEnd = minOf(search.candidates.size, search.batchEnd + CivsVillageSiteScoring.CANDIDATE_BATCH)
+            if (search.nextCandidate == search.batchEnd)
+                search.batchEnd = minOf(search.candidates.size, search.batchEnd + CivsVillageSiteScoring.CANDIDATE_BATCH)
             coarse(search)
         } else finish(search, "autonomy-no-site")
     }
@@ -789,6 +798,8 @@ internal class CivsVillageSites(
         const val MAXIMUM_BATCH = 31
         const val MAXIMUM_CHUNK_REQUESTS = 8_192
         const val MAXIMUM_TICKS = 36_000
+        private const val EARLY_PROOF_TICKS = MAXIMUM_TICKS / 3
+        private const val SINGLE_SITE_PROOF_TICKS = MAXIMUM_TICKS / 2
         internal fun rejectionDetails(values: Map<String, String>): Map<String, String> {
             fun identifier(value: String) = value.length in 1..64 && value.all {
                 it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' || it == '-'

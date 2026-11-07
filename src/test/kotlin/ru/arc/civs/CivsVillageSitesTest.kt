@@ -693,6 +693,74 @@ class CivsVillageSitesTest : FunSpec({
         }
     }
 
+    for (refuseEarly in listOf(false, true)) {
+        val outcome = if (refuseEarly) "resumes the same tranche after native refusal" else "founds the best ranked site"
+        test("a cold coarse survey $outcome before exhausting the search deadline") {
+            villageScenario { s ->
+                s.requireLeasedSurvey = true
+                val flat = s.coarseSurface
+                s.coarseSurface = { city, points ->
+                    val surveyed = s.coarseCities.size
+                    if (surveyed == 2) s.holdLoads = true
+                    val surface = flat(city, points)
+                    val edge = surface.columns.keys.first()
+                    surface.copy(columns = surface.columns.mapValues { (key, column) ->
+                        if (surveyed in 4 until CivsVillageSiteScoring.CANDIDATE_BATCH || surveyed <= 2 && key == edge)
+                            column.copy(natural = false) else column
+                    })
+                }
+                s.siteProof = { proof ->
+                    if (refuseEarly && s.coarseCities.size == 3) CompletableFuture.failedFuture(CivsRejection("lands-denied"))
+                    else CompletableFuture.completedFuture(proof.plan())
+                }
+                val candidates = CivsVillageSiteScoring.candidates(s.reference, "Auto-")
+                val result = s.subject.search(s.reference, 1, "Auto-", allowEarlyNativeProof = true)
+                s.until { s.coarseCities.size == 2 && s.subject.status()["pending_loads"] == 2 }
+                s.tick(CivsVillageSites.MAXIMUM_TICKS / 3)
+                s.holdLoads = false
+                s.completeLoads(evictUnticketed = true)
+
+                s.until { s.fullCities.isNotEmpty() }
+                s.coarseCities.size shouldBe 3
+                s.fullCities.first().buildings.single().anchor.let {
+                    (it.x to it.z) shouldBe (candidates[2].x to candidates[2].z)
+                }
+                s.until { result.isDone }
+                val receipt = result.join()
+                receipt.complete shouldBe true
+                receipt.rejected["lands-denied"] shouldBe if (refuseEarly) 3 else null
+                val surveyed = if (refuseEarly) CivsVillageSiteScoring.CANDIDATE_BATCH else 3
+                s.coarseCities.map { it.buildings.single().anchor } shouldBe candidates.take(surveyed)
+                val admission = s.admissions.single().city
+                admission.id shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
+                admission.owner shouldBe s.reference.owner
+                (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
+                s.peakPending shouldBe 2
+                s.registry.activeLeaseCount shouldBe 0
+                s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+            }
+        }
+    }
+
+    test("an ordinary cold coarse survey still ranks all forty-eight candidates before full proof") {
+        villageScenario { s ->
+            val flat = s.coarseSurface
+            s.coarseSurface = { city, points ->
+                if (s.coarseCities.size == 2) s.holdLoads = true
+                flat(city, points)
+            }
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { s.coarseCities.size == 2 && s.subject.status()["pending_loads"] == 2 }
+            s.tick(CivsVillageSites.MAXIMUM_TICKS / 2)
+            s.holdLoads = false
+            s.completeLoads(evictUnticketed = true)
+            s.until { s.fullCities.isNotEmpty() }
+            s.coarseCities.size shouldBe CivsVillageSiteScoring.CANDIDATE_BATCH
+            s.until { result.isDone }
+            result.join().complete shouldBe true
+        }
+    }
+
     test("foundation rejectAt shape retains validated block and coordinates without world identifiers or accepting a town") {
         villageScenario { s ->
             val values = mutableMapOf("block" to "OAK_LOG", "x" to "262", "y" to "69", "z" to "-3593",

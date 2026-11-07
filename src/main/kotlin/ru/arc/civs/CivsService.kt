@@ -441,7 +441,9 @@ class CivsService(
         val reference = cities[referenceId] ?: throw CivsRejection("city-not-found")
         rejectIf(reference.autonomy == null || reference.pendingDeletion != null, "invalid-reference-city")
         rejectIf(!testingAllowed(reference), "not-authorized")
-        return villageSites.search(reference, count, prefix, batch = batch).thenApply { it }
+        val allowEarlyNativeProof = labBackend && plugin.server.getWorld(reference.worldId)?.name == "arccivs_lab"
+        return villageSites.search(reference, count, prefix, batch = batch, allowEarlyNativeProof = allowEarlyNativeProof)
+            .thenApply { it }
     }
 
     internal fun foundVillageAt(owner: UUID, worldName: String, style: String, name: String,
