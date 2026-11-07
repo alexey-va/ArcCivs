@@ -3,6 +3,7 @@ package ru.arc.civs
 import net.kyori.adventure.text.Component
 import org.bukkit.entity.Player
 import ru.arc.civs.CivsDialogPresentation.Action
+import ru.arc.paper.menu.DialogTables
 import ru.arc.paper.menu.PaperDialogTextInput
 import ru.arc.civs.CivsUi.Companion.PAGE_SIZE
 import ru.arc.civs.CivsUi.Companion.NAME
@@ -28,7 +29,8 @@ internal fun CivsUi.showEntry(player: Player) {
 
 
 internal fun CivsUi.showWelcome(player: Player): Unit { present(player, "civs.welcome", "common.title",
-    listOfNotNull(body(player, if (host.foundingAllowed()) "founding.intro" else "network.view-only"), body(player, "city.sleep-rule"),
+    listOfNotNull(presentation.panel(tr(player, if (host.foundingAllowed()) "founding.intro" else "network.view-only"),
+        DialogTables.PanelSkin.EVERGREEN), body(player, "city.sleep-rule"),
         if (host.styles().isEmpty()) body(player, "founding.unavailable") else null), buildList {
         if (host.foundingAllowed() && host.styles().isNotEmpty()) add(button(player, "found", "founding.begin", PERSONAL, appearance = Action.FOUND) { showStyles(player) })
         add(button(player, "visit_villages", "villages.open", NAVIGATION) { showVillages(player) })

@@ -96,6 +96,11 @@ def style_key(style):
     return re.sub(r"[^a-z0-9_-]+", "-", style.lower()).strip("-")
 
 
+def forecourt_surface(front_x, x, z, content_front, decoration=False):
+    # Dirt uses the ordinary dirt bill and can green over naturally after work.
+    return "minecraft:dirt_path" if not decoration and x == front_x and z > content_front else "minecraft:dirt"
+
+
 def front_pad(scene, content_bounds, control):
     """A modest shared forecourt is outside retained source cells, never a room cut."""
     ground = scene.origin[1]
@@ -117,7 +122,10 @@ def front_pad(scene, content_bounds, control):
                     if name(scene.at((x, y, z))) in SKIP:
                         scene.set((x, y, z), "minecraft:cobblestone", "paid-forecourt-foundation")
                 if name(scene.at((x, ground, z))) in SKIP:
-                    scene.set((x, ground, z), "minecraft:gravel", "shared-ground-forecourt")
+                    # Continue the public path down the front center only. Side and
+                    # rear padding are terrain, and all authored surfaces stay intact.
+                    scene.set((x, ground, z), forecourt_surface(scene.origin[0], x, z, content_bounds[1][2],
+                        scene.decoration), "shared-ground-forecourt")
     scene.set(control, "minecraft:structure_void", "shared-ground-control")
     seen, parent = scene.reachable()
     doors = [scene.position(i) for i, pid in enumerate(scene.cells)

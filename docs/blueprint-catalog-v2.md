@@ -161,6 +161,20 @@ Repeat `--batch` for multiple partitions. On a later release, add
 retains accepted old revisions and refuses changed rows under an accepted ID.
 All outputs must be fresh; accepted trees are never overwritten.
 
+A published legacy v2 catalog can also adopt the soil forecourt without
+regenerating unrelated rooms or decorations. `scripts/revise-forecourts.py`
+reads the exact active index, its verified base release and, if needed, only
+the additional payloads named by that index. It changes final cells whose
+curation receipt identifies generated gravel outside the retained source frame.
+The entrance center uses dirt path; side and rear padding use dirt, which can
+green naturally. Both use the ordinary dirt material bill in place of gravel.
+Old hashes and upgrade families are retained; new templates are assigned a
+distinct revision. Receipt-mismatched specializations are carried unchanged.
+The installer stages only the revised `civs/v2` directory, preserving external
+furniture and legacy assets alongside it.
+This output is a runtime tree; retain the verified base release and its receipts
+for further curation and preview.
+
 The final assembler verifies exact source coverage, no duplicate source/output
 IDs, complete upgrade families, payload hashes and receipt equality. Only
 manifest-authorized READY and explicitly retained payloads are copied. Files

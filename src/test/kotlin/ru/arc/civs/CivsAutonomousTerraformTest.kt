@@ -846,6 +846,9 @@ class CivsAutonomousTerraformTest : FunSpec({
         (plan.fillCount > 0) shouldBe true
         plan.blocks.map { it.position }.distinct().size shouldBe plan.blocks.size
         plan.blocks.none { it.position.x == plan.route.first().x && it.position.z == plan.route.first().z } shouldBe true
+        val control = requireNotNull(draft.building.control)
+        cells.getValue(control).solid shouldBe true
+        plan.blocks.none { it.position == control } shouldBe true
         checkTerrace(plan, draft, cells)
         // Replaying the journal consumes each exact original once, including terrain below the schematic.
         val replay = cells.mapValues { it.value.data }.toMutableMap()
@@ -1257,7 +1260,9 @@ private fun checkTerrace(plan: CivTerraformPlan, draft: CivTerraformDraft, cells
     for (x in b.min.x..b.max.x) for (z in b.min.z..b.max.z) {
         solid(CivPosition(x, b.min.y - 1, z)) shouldBe true
         solid(CivPosition(x, draft.groundY, z)) shouldBe true
-        passable(CivPosition(x, draft.groundY + 1, z)) shouldBe true
-        passable(CivPosition(x, draft.groundY + 2, z)) shouldBe true
+        for (dy in 1..2) {
+            val point = CivPosition(x, draft.groundY + dy, z)
+            if (point != draft.building.control || draft.prepareControl) passable(point) shouldBe true
+        }
     }
 }

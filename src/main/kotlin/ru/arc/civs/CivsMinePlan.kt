@@ -218,6 +218,7 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
         if (step.stage == "shaft" && step.branch == null) "spine"
         else "${step.floor ?: 0}/${step.stage}/${step.branch ?: "access"}"
     }
+    val upperSpine = sections["spine"].orEmpty().takeWhile { steps[it].point.y >= transferFeetY }
     private val sectionAt = Array(steps.size) { "" }.also { keys ->
         sections.forEach { (key, indices) -> indices.forEach { keys[it] = key } }
     }
@@ -265,10 +266,12 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
     }
 
     /** Dependency checks are pure; the actual approach still needs native support and a route. */
-    fun sectionReady(key: String, prefix: Long, saved: Map<String, Long>): Boolean {
+    fun sectionReady(key: String, prefix: Long, saved: Map<String, Long>, earlySurface: Boolean = false): Boolean {
         fun done(name: String) = sections[name]?.let { sectionCount(name, prefix, saved) == it.size.toLong() } != false
         if (key == "spine") return true
-        if (!done("spine")) return false
+        if (!done("spine") && !(earlySurface && version == 7 && upperSpine.isNotEmpty() &&
+                (key == "0/shaft/entrance" || key == "0/shaft/opening") &&
+                sectionCount("spine", prefix, saved) >= upperSpine.size)) return false
         val first = steps[sections.getValue(key).first()]
         val floor = first.floor ?: return false
         val landing = if (floor == 0) "entrance" else "landing"

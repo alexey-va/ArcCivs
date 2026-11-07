@@ -430,6 +430,53 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         return wall.type.isOccluding && !wall.type.hasGravity() && wall.type !in UNBREAKABLE
     }
 
+    private fun earlySurfaceScope(city: Settlement, building: CivBuilding, plan: CivsMinePlan, saved: CivMinePlanState?) =
+        city.inventory?.mode == CivStorageMode.PHYSICAL && building.level == 1 && plan.version == 7 && saved?.version == 7
+
+    private fun earlySurfaceObstruction(building: CivBuilding, world: World, plan: CivsMinePlan, opening: Boolean): Pair<String, CivPosition>? {
+        for (ordinal in plan.upperSpine) {
+            val step = plan.steps[ordinal]
+            val point = CivsWorksiteLayouts.point(building, step.point)
+            val block = observeMineHazard(world, point) ?: return "chunks-unloaded" to point
+            val safe = if (step.shaftSupport) block.type.isOccluding && !block.type.hasGravity() &&
+                block.type !in UNBREAKABLE && !block.isLiquid
+            else block.blockData.asString == plan.expectedAfter(ordinal, building.rotation)
+            if (!safe) return "mine-upper-access" to point
+        }
+        if (opening) for ((x, z) in plan.openingColumns) {
+            val point = CivsWorksiteLayouts.point(building, CivPosition(x, plan.transferFeetY - 1, z))
+            val block = observeMineHazard(world, point) ?: return "chunks-unloaded" to point
+            if (!CivsTerrainPolicy.fullTerraformSupport(block) || block.type.hasGravity() || block.type in CITIZEN_LEISURE_HAZARDS)
+                return "mine-early-floor" to point
+        }
+        return null
+    }
+
+    private fun requireEarlySurfaceReceipt(city: Settlement, building: CivBuilding, world: World,
+        plan: CivsMinePlan, saved: CivMinePlanState, section: String, ordinal: Int,
+        access: Long, sections: Map<String, Long>) {
+        requireCivs(plan.upperSpine.all { plan.completed(it, saved.nextStep, saved.sectionSteps.orEmpty()) } &&
+            plan.sectionReady(section, access, sections, earlySurface = true) &&
+            plan.sections.getValue(section).getOrNull(plan.sectionCount(section, access, sections).toInt()) == ordinal,
+            "stale-worksite")
+        earlySurfaceObstruction(building, world, plan, section == "0/shaft/opening")?.let { (reason, point) ->
+            throw CivsRejection(reason, mapOf("point" to point.toString()))
+        }
+        // The planner checked this old frontier before switching sections; a pending receipt must prove it again.
+        val previous = saved.excavation?.takeIf { it.y < plan.transferFeetY } ?: return
+        val tasks = mineFrontier(city, building, world, plan, previous, emptySet(), accessStep = saved.nextStep,
+            sectionSteps = saved.sectionSteps.orEmpty()) ?: throw CivsRejection("chunks-unloaded")
+        for (task in tasks) {
+            if (task.transferFooting) continue
+            val opening = observeMineHazard(world, CivsWorksiteLayouts.point(building, task.exposed))
+                ?: throw CivsRejection("chunks-unloaded")
+            if (!mineExposed(task, emptySet(), opening)) continue
+            val point = CivsWorksiteLayouts.point(building, task.block)
+            val block = observeMineHazard(world, point) ?: throw CivsRejection("chunks-unloaded")
+            if (mineProtectionNeeded(block, task.material)) throw CivsRejection("mine-lower-frontier", mapOf("point" to point.toString()))
+        }
+    }
+
     /** No transient cache or actor is authority for a durable mine write. */
     internal fun validateMineReceiptNative(city: Settlement, work: CivWorldWork) {
         try { validateMineReceiptBlocks(city, work) }
@@ -438,6 +485,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             // its exact action/approach proof but re-read this frontier next pulse.
             mineSafety.remove(work.workerId)
             mineCovers.remove(work.workerId)
+            if (failure.reason == "mine-lower-frontier") mineFrontierDirty += work.workerId
             throw failure
         }
     }
@@ -486,16 +534,22 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val ordinal = work.miningOrdinal ?: work.focus?.let { focus ->
             plan.steps.indexOfFirst { it.point == CivsMinePlan.localPoint(building, focus) }.takeIf { it >= 0 }
         } ?: 0
+        requireCivs(ordinal in plan.steps.indices, "stale-worksite")
+        val saved = city.minePlans?.get(building.id.toString())
+        val section = plan.section(ordinal)
+        val access = work.miningAccessStep ?: work.miningStep ?: 0
+        val sections = work.miningAccessSections.orEmpty()
+        val earlySurface = earlySurfaceScope(city, building, plan, saved) && section in EARLY_SURFACE_SECTIONS &&
+            plan.sectionCount("spine", access, sections) < plan.sections.getValue("spine").size
+        if (earlySurface) requireEarlySurfaceReceipt(city, building, world, plan, requireNotNull(saved), section, ordinal, access, sections)
         val clearingLava = CivsMineSafety.clearingLava(work)
         CivsMineSafety.adjacentLavaFrontier(work)?.let { focus ->
             val local = requireNotNull(work.miningFrontier)
-            val step = plan.steps.getOrNull(ordinal) ?: throw CivsRejection("stale-worksite")
-            val access = requireNotNull(work.miningAccessStep)
-            val sections = work.miningAccessSections.orEmpty()
-            val section = plan.section(ordinal)
+            val step = plan.steps[ordinal]
+            requireNotNull(work.miningAccessStep)
             requireCivs(step.point == local && step.after == null &&
                 focus == CivsWorksiteLayouts.point(building, local) &&
-                plan.sectionReady(section, access, sections) &&
+                plan.sectionReady(section, access, sections, earlySurface) &&
                 plan.sections.getValue(section).getOrNull(plan.sectionCount(section, access, sections).toInt()) == ordinal,
                 "stale-worksite")
             val frontier = context.read(city, building, world, focus) ?: throw CivsRejection("protected-area")
@@ -746,9 +800,22 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val sectionKeys = geometry.sections.keys.toList()
         fun nextOrdinal(section: String): Int? = geometry.sections.getValue(section)
             .getOrNull(geometry.sectionCount(section, execution.prefix, execution.sections).toInt())
-        if (nextOrdinal("spine") != null) execution.selected = "spine"
-        if (execution.selected?.let { nextOrdinal(it) == null || it in execution.blockedSections ||
-                execution.retryAt.getOrDefault(it, 0) > Bukkit.getCurrentTick() } == true) execution.selected = null
+        val tick = Bukkit.getCurrentTick()
+        fun available(key: String) = nextOrdinal(key) != null && key !in execution.blockedSections &&
+            execution.retryAt.getOrDefault(key, 0) <= tick
+        val spineNext = nextOrdinal("spine")
+        val early = if (spineNext != null && state != null && earlySurfaceScope(city, building, geometry, state) &&
+            geometry.upperSpine.all { geometry.completed(it, state.nextStep, state.sectionSteps.orEmpty()) })
+            EARLY_SURFACE_SECTIONS.firstOrNull { available(it) && geometry.sectionReady(it, execution.prefix, execution.sections, earlySurface = true) }
+        else null
+        val checkPrevious = !execution.checkedExcavation || worker.id in mineFrontierDirty
+        val previousBelow = state?.excavation?.let { it.y < geometry.transferFeetY } == true
+        val witnessChecks = geometry.upperSpine.size + if (early == "0/shaft/opening") geometry.openingColumns.size else 0
+        val useEarly = early != null && (!previousBelow || !checkPrevious && execution.unsealedExcavation == null) &&
+            context.mineChecksRemaining > witnessChecks && context.nanoTime() < context.discoveryBudget.deadline
+        if (useEarly) execution.selected = early
+        else if (spineNext != null) execution.selected = "spine"
+        if (execution.selected?.let { !available(it) } == true) execution.selected = null
         if (execution.selected == null) {
             for (offset in sectionKeys.indices) {
                 val index = Math.floorMod(execution.cursor + offset, sectionKeys.size)
@@ -763,14 +830,22 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         }
         val selected = execution.selected
         val scanStart = selected?.let(::nextOrdinal) ?: steps.size
-        execution.ordinal = minOf(scanStart, steps.lastIndex)
+        execution.ordinal = if (early != null && previousBelow && checkPrevious) requireNotNull(spineNext)
+            else minOf(scanStart, steps.lastIndex)
         mineCursors[building.id] = Triple(building.level, progress, scanStart)
         // Take a useful batch before descending, then use it until a supply runs out.
         if (!autonomous && scanStart < steps.size && CivsLogistics.QUARRY_SUPPLIES.keys.any { CivsEquipment.plainCount(worker, it) == 0 })
             return prepareQuarry(city, worker, building, world)
+        if (useEarly) {
+            context.mineChecksRemaining -= witnessChecks
+            earlySurfaceObstruction(building, world, geometry, early == "0/shaft/opening")?.let { (reason, point) ->
+                return context.blocked(worker, if (reason == "chunks-unloaded") "worksite-unloaded" else "worksite-protected",
+                    point = point, reason = reason)
+            }
+        }
         // A committed cut can expose a cave that was unreachable before it. Derive
         // this repair from the durable cursor, including after restart or the last step.
-        if (!execution.checkedExcavation || worker.id in mineFrontierDirty) {
+        if (checkPrevious) {
             val previous = state?.excavation?.let { point -> CivsMinePlan.Step(point, null, "shaft") }
                 ?: steps.getOrNull(progress.toInt() - 1)
             previous?.let {
@@ -794,6 +869,10 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             // excavation invalidate clears it even when progress did not move.
             execution.checkedExcavation = true
             mineFrontierDirty.remove(worker.id)
+            if (early != null && previousBelow && execution.unsealedExcavation == null) {
+                context.spotSearchPending = true
+                return context.blocked(worker, "searching-work")
+            }
         }
         if (scanStart == steps.size) return if (execution.prefix == steps.size.toLong())
             generateStone(city, worker, building, world, geometry, execution.prefix) else {
@@ -1265,6 +1344,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
     private fun position(block: Block) = CivPosition(block.x, block.y, block.z)
 
     companion object {
+        private val EARLY_SURFACE_SECTIONS = listOf("0/shaft/entrance", "0/shaft/opening")
         private val WEEDS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN, Material.LARGE_FERN, Material.GLOW_LICHEN)
         private val UNBREAKABLE = setOf(Material.BEDROCK, Material.BARRIER, Material.END_PORTAL_FRAME, Material.END_PORTAL, Material.NETHER_PORTAL)
     }

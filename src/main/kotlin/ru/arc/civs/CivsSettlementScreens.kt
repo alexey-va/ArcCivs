@@ -301,13 +301,20 @@ internal fun CivsUi.showVillages(player: Player, page: Int = 0, feedback: Compon
         it.autonomy != null && it.pendingDeletion == null
     }.sortedBy { it.name } else emptyList()
     val current = page.coerceIn(0, lastPage(villages.size))
+    val visible = villages.drop(current * PAGE_SIZE).take(PAGE_SIZE)
     present(player, "civs.villages", "villages.title", listOfNotNull(
         presentation.paragraph(tr(player, "villages.help")),
-        if (!host.ready()) body(player, "common.starting") else if (villages.isEmpty()) body(player, "villages.empty") else
-            body(tr(player, "autonomy.count", "count" to villages.size)),
+        when {
+            !host.ready() -> body(player, "common.starting")
+            visible.isEmpty() -> body(player, "villages.empty")
+            else -> presentation.table(visible.map { city -> listOf(
+                text.literal(city.name), text.literal(city.workers.size), text.literal(CivsRules.buildingCount(city)),
+            ) }, listOf(tr(player, "autonomy.village-label"), tr(player, "label.population"), tr(player, "label.buildings")),
+                listOf(4, 2, 2), DialogTables.PanelSkin.EVERGREEN)
+        },
         feedback?.let(::body),
     ), buildList {
-        villages.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, city ->
+        visible.forEachIndexed { index, city ->
             add(valueButton(player, "visit_$index", "villages.destination", text.literal(city.name), NAVIGATION,
                 tr(player, "autonomy.population", "buildings" to CivsRules.buildingCount(city),
                     "workers" to city.workers.size, "assigned" to city.workers.count { it.assignment != null })) {

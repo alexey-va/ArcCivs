@@ -116,6 +116,21 @@ class CivsTradeUiTest : FunSpec({
 })
 
 class CivsVillageVisitUiTest : FunSpec({
+    test("public village overview uses a filled table with the configured dialogue font") {
+        withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            val first = autonomousSettlement(h.player, "Village-1")
+            val second = first.copy(id = UUID.randomUUID(), name = "Village-2")
+            every { h.host.settlements() } returns listOf(second, first)
+            h.ui.openVillages(h.player)
+            fun fonts(component: Component): List<String> =
+                listOfNotNull(component.font()?.asString()) + component.children().flatMap(::fonts)
+            h.screen.body.flatMap { fonts(it.text) }.any { it == "arc:dialog_panel_evergreen" } shouldBe true
+            h.body() shouldContain "Village-1"
+            h.body() shouldContain "Village-2"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("visit_0", "visit_1")
+        }
+    }
+
     test("public village visits keep the personal city and target the selected village once") {
         for (language in listOf("ru", "en")) withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag(language))

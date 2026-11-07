@@ -76,6 +76,18 @@ class CurationGeometryTest(unittest.TestCase):
         self.assertEqual("minecraft:air", scene.at((4, 1, 4)))
         self.assertEqual("minecraft:oak_planks", scene.at((5, 1, 4)))
 
+    def test_forecourt_connects_the_center_path_without_wrapping_the_building_in_gravel(self):
+        scene = room()
+        scene.set((0, 1, 4), "minecraft:air", "empty-side-padding")
+        scene.set((4, 1, 8), "minecraft:air", "empty-front-padding")
+        scene.set((3, 1, 8), "minecraft:air", "empty-front-shoulder")
+        scene.set((2, 1, 7), "minecraft:gravel", "authored-floor")
+        curate.front_pad(scene, ([1, 1, 1], [7, 7, 7]), (5, 2, 8))
+        self.assertEqual("minecraft:dirt", scene.at((0, 1, 4)))
+        self.assertEqual("minecraft:dirt_path", scene.at((4, 1, 8)))
+        self.assertEqual("minecraft:dirt", scene.at((3, 1, 8)))
+        self.assertEqual("minecraft:gravel", scene.at((2, 1, 7)))
+
     def mine_cap(self, ground=5):
         registry = {"blocks": {"minecraft:air": {"boundingBox": "empty"}}}
         scene = curate.Scene([9, 11, 9], ["minecraft:air"], [0] * 891, [4, ground, 9], registry)

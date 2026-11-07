@@ -6,7 +6,7 @@ import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.TileState
 
-/** Read-only admission for one fixed flat field. The resident journal remains the only writer. */
+/** Read-only admission for two fixed flat beds. The resident journal remains the only writer. */
 internal object CivsFarmExpansion {
     private val soils = setOf(Material.DIRT, Material.GRASS_BLOCK, Material.COARSE_DIRT, Material.ROOTED_DIRT, Material.FARMLAND)
     private val naturalSoils = soils - Material.FARMLAND
@@ -71,8 +71,43 @@ internal object CivsFarmExpansion {
             read(originalWater.copy(y = originalWater.y + 1))?.type?.isAir == true &&
             clear(originalWater.copy(y = originalWater.y + 2)), "original-water")
         require(water.all { waterSafe(building, it, ::read, requireClearTop = false) }, "water-banks")
-        require(perimeter.all { point -> read(point)?.let(CivsTerrainPolicy::fullTerraformSupport) == true &&
-            clear(point.copy(y = point.y + 1)) && clear(point.copy(y = point.y + 2)) }, "perimeter-access")
+        require(walkableRim(perimeter, ::read, ::clear), "perimeter-access")
+    }
+
+    private fun walkableRim(perimeter: List<CivPosition>, read: (CivPosition) -> Block?,
+        clear: (CivPosition) -> Boolean): Boolean {
+        val floors = perimeter.associate { base ->
+            if (read(base)?.let(CivsTerrainPolicy::fullTerraformSupport) != true) return false
+            val floor = (0..2).firstNotNullOfOrNull { rise ->
+                val point = base.copy(y = base.y + rise)
+                val supported = (1..rise).all { step ->
+                    read(base.copy(y = base.y + step))?.let { it.type in naturalSoils &&
+                        CivsTerrainPolicy.fullTerraformSupport(it) } == true
+                }
+                point.takeIf { supported && clear(it.copy(y = it.y + 1)) && clear(it.copy(y = it.y + 2)) }
+            } ?: return false
+            (floor.x to floor.z) to floor
+        }
+        // Every rim column needs a real approach from field grade. A steep
+        // corner is fine if the other side reaches it in one-block steps.
+        val fieldY = perimeter.first().y
+        val start = floors.values.firstOrNull { it.y == fieldY } ?: return false
+        val visited = hashSetOf(start)
+        val open = ArrayDeque<CivPosition>().apply { addLast(start) }
+        while (open.isNotEmpty()) {
+            val point = open.removeFirst()
+            for ((dx, dz) in sides) {
+                val other = floors[(point.x + dx) to (point.z + dz)] ?: continue
+                if (other in visited || kotlin.math.abs(point.y - other.y) > 1) continue
+                if (point.y != other.y) {
+                    val lower = if (point.y < other.y) point else other
+                    if (!clear(lower.copy(y = lower.y + 3))) continue
+                }
+                visited += other
+                open.addLast(other)
+            }
+        }
+        return visited.size == floors.size
     }
 
     /** Rechecked by ordinary work validation; no water may flow through a missing bed or outside bank. */

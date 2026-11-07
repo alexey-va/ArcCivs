@@ -37,7 +37,7 @@ internal data class CivTerraformCell(val position: CivPosition, val data: String
 internal fun civsTerrainKey(x: Int, z: Int): Long = (x.toLong() shl 32) xor (z.toLong() and 0xffff_ffffL)
 
 internal data class CivTerraformOption(val building: CivBuilding, val effort: Long, val streetFrontage: Boolean = false,
-    val spatialPriority: Int = 0)
+    val spatialPriority: Int = 0, val gradeCost: Long = 0)
 internal data class CivRouteSearchStats(val expanded: Int, val enqueued: Int, val peakQueue: Int,
     val discovered: Int, val elapsedMillis: Long, val outcome: String, val from: CivPosition, val to: CivPosition)
 /** Detached street preference only: it grants neither a floor grade nor native ownership. */
@@ -90,6 +90,10 @@ internal object CivsAutonomousTerraform {
     const val MAXIMUM_CHANGED_CELLS = 32_768
     const val MAXIMUM_ROUTE_NODES = 131_072
     const val MAXIMUM_ROUTE_LENGTH = 256
+    private const val COMPACT_TERRACE_COLUMNS = 100L
+    private const val COMPACT_FILL_DEPTH = 4
+    private const val LARGE_FILL_DEPTH = 3
+    private const val PARALLEL_ROAD_COST = 8
 
     /** Remove a loop only before a straight portal crossing. The original solver owns the entire
      * suffix; a paid, currently supported prefix introduces no new street or corridor permission. */
@@ -145,11 +149,23 @@ internal object CivsAutonomousTerraform {
         return best?.let { CivPaidApproachReuse(route.toList(), it) }
     }
 
-    /** A median terrace minimises excavation; nearby levels allow a less costly graded connection. */
+    /** Compact recovery may keep its four-block raise across at most a hundred columns. */
+    fun compactTerrace(building: CivBuilding): Boolean = building.bounds.let { box ->
+        (box.max.x.toLong() - box.min.x + 1) * (box.max.z.toLong() - box.min.z + 1) <= COMPACT_TERRACE_COLUMNS
+    }
+
+    private fun unpaidTerrace(city: Settlement, building: CivBuilding): Boolean =
+        city.autonomy != null && building.type in CivsAutonomy.profile && building.type != BuildingType.TOWN_HALL &&
+            city.building(building.id) == null
+
+    /** A median terrace minimises earthworks; nearby levels can avoid filling or ease the connection. */
     fun options(city: Settlement, candidates: List<CivsAutonomousCandidate>, surface: CivTerrainSurface,
-        fixed: Boolean = false, standing: Map<Long, CivPosition> = emptyMap(),
+        fixed: Boolean = false, standing: Map<Long, CivPosition> = emptyMap(), tryNearbyCut: Boolean = false,
         rejected: (String, CivPosition) -> Unit = { _, _ -> }): List<CivTerraformOption> = candidates.flatMap { candidate ->
         val b = candidate.building
+        val limitFill = unpaidTerrace(city, b)
+        val preferLowerFill = limitFill && !compactTerrace(b)
+        val fillDepth = if (preferLowerFill) LARGE_FILL_DEPTH else COMPACT_FILL_DEPTH
         val ownSite = city.building(b.id)?.takeIf { civsAutonomousHallSite(city, it) }
         val heights = ArrayList<Int>()
         for (x in b.bounds.min.x..b.bounds.max.x) for (z in b.bounds.min.z..b.bounds.max.z) {
@@ -169,10 +185,18 @@ internal object CivsAutonomousTerraform {
         if (heights.isEmpty()) return@flatMap emptyList()
         heights.sort()
         val median = heights[heights.size / 2]
+        val lowest = heights.first()
+        fun fillAt(y: Int): Long = heights.sumOf { (y.toLong() - it).coerceAtLeast(0) }
+        val fillLimitedGrade = if (limitFill && !fixed) {
+            val capped = minOf(median, lowest + fillDepth)
+            // At or below the median, a maximum two-block rise fits one layer across the plot.
+            (if (preferLowerFill && fillAt(capped) > heights.size) capped - 1 else capped).takeIf { it != median }
+        } else null
+        val nearbyCut = (median - 1).takeIf { preferLowerFill && tryNearbyCut }
         val retainedFeet = if (fixed || standing.isEmpty()) null else CivsAutonomousGeometry.approach(b)
             .mapNotNull { standing[civsTerrainKey(it.x, it.z)]?.y }.distinct().singleOrNull()
         val levels = if (fixed) listOf(b.anchor.y) else (listOf(median, median - 4, median + 4) +
-            listOfNotNull(retainedFeet?.let { it - (b.entrance.y - b.anchor.y) })).distinct()
+            listOfNotNull(fillLimitedGrade, nearbyCut, retainedFeet?.let { it - (b.entrance.y - b.anchor.y) })).distinct()
         levels.mapNotNull { y ->
             val building = CivsAutonomousGeometry.atHeight(b, y)
             if (heights.any { abs(it - y) > MAXIMUM_CHANGE }) {
@@ -187,14 +211,21 @@ internal object CivsAutonomousTerraform {
                 rejected("work-route-too-long", building.entrance)
                 return@mapNotNull null
             }
+            val fill = if (preferLowerFill) fillAt(y) else 0L
+            if (limitFill && (y.toLong() - lowest > fillDepth || fill > heights.size)) {
+                rejected("autonomy-slope", building.anchor)
+                return@mapNotNull null
+            }
             val nearest = sources(city, building).minOfOrNull { source ->
                 abs(source.x - building.entrance.x) + abs(source.z - building.entrance.z) +
                     abs(source.y - building.entrance.y) * 3
             } ?: return@mapNotNull null
-            CivTerraformOption(building, heights.sumOf { abs(it - y).toLong() } + nearest * 4L,
-                candidate.streetFrontage, candidate.spatialPriority)
+            val earthwork = heights.sumOf { abs(it - y).toLong() } + fill
+            CivTerraformOption(building, earthwork + nearest * 4L, candidate.streetFrontage, candidate.spatialPriority,
+                gradeCost = if (preferLowerFill) earthwork else 0)
         }
-    }.sortedWith(compareBy<CivTerraformOption> { it.spatialPriority }.thenByDescending { it.streetFrontage }
+    }.sortedWith(compareBy<CivTerraformOption> { it.spatialPriority }
+        .thenBy { it.gradeCost }.thenByDescending { it.streetFrontage }
         .thenBy { it.effort }.thenBy { it.building.entrance.x }
         .thenBy { it.building.entrance.z }.thenBy { it.building.anchor.y })
 
@@ -246,7 +277,8 @@ internal object CivsAutonomousTerraform {
                 throw CivsRejection("autonomy-no-path")
         } ?: (if (option.streetFrontage) frontageRoute(city, building, surface, access, routeObstacles, standing, preferredRoads, inspectRoute, preparedRoute)
         else null) ?: sources(city, building).asSequence().mapNotNull {
-            route(city, building, surface, routeObstacles, standing, it, preferredRoads, inspectRoute, prepared = preparedRoute) { reason ->
+            route(city, building, surface, routeObstacles, standing, it, preferredRoads, inspectRoute,
+                prepared = preparedRoute, preferSharedTrunk = unpaidTerrace(city, building)) { reason ->
                 routeFailures.merge(reason, 1, Int::plus)
             }
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path",
@@ -259,7 +291,7 @@ internal object CivsAutonomousTerraform {
         }
         val centerline = route.associateBy { civsTerrainKey(it.x, it.z) }
         val profile = roadProfile(route)
-        fun add(x: Int, z: Int, ground: Int, floor: Int, preserve: Boolean = false) {
+        fun add(x: Int, z: Int, ground: Int, floor: Int, preserve: Boolean = false, visibleFillLimit: Int? = null) {
             if (!city.contains(x, z) || obstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, ground, z)) })
                 throw CivsRejection("building-overlap")
             val native = surface.at(x, z) ?: throw CivsRejection("autonomy-no-path")
@@ -285,6 +317,9 @@ internal object CivsAutonomousTerraform {
             if (!retained && !native.natural && !control && !ownWallShoulder) throw CivsRejection("autonomy-terrain")
             if (!retained && abs(native.groundY - ground) > MAXIMUM_CHANGE) throw CivsRejection("autonomy-slope")
             if (targetFloor <= surface.minHeight || targetGround + 2 >= surface.maxHeight) throw CivsRejection("outside-world")
+            if (!retained && visibleFillLimit != null && targetGround.toLong() - native.groundY > visibleFillLimit)
+                throw CivsRejection("autonomy-slope", mapOf("stage" to "approach-fill", "x" to "$x", "z" to "$z",
+                    "floor" to "$targetGround", "surface" to "${native.groundY}"))
             val existing = columns[key]
             // Existing entrances and roads keep their whole column, including support below the surface.
             if (existing?.preserve == true) return
@@ -341,9 +376,10 @@ internal object CivsAutonomousTerraform {
             }
             start = end
         }
+        val apronFillLimit = LARGE_FILL_DEPTH.takeIf { unpaidTerrace(city, building) && !compactTerrace(building) }
         CivsAutonomousGeometry.approach(building).forEach { point ->
             add(point.x, point.z, building.entrance.y - 1, building.entrance.y - 1,
-                point.x == route.first().x && point.z == route.first().z)
+                point.x == route.first().x && point.z == route.first().z, visibleFillLimit = apronFillLimit)
         }
         val floor = minOf(building.anchor.y, building.bounds.min.y - 1)
         for (x in building.bounds.min.x..building.bounds.max.x) for (z in building.bounds.min.z..building.bounds.max.z)
@@ -384,7 +420,8 @@ internal object CivsAutonomousTerraform {
         }.orEmpty()
         return sources(city, building).asSequence().mapNotNull {
             route(city, building, surface, obstacles, standing, it, preferredRoads = preferred, inspect = inspectRoute,
-                destination = frontage ?: building.entrance, arrival = arrival, streets = streets, prepared = prepared)
+                destination = frontage ?: building.entrance, arrival = arrival, streets = streets, prepared = prepared,
+                preferSharedTrunk = unpaidTerrace(city, building))
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
     }
 
@@ -587,7 +624,7 @@ internal object CivsAutonomousTerraform {
         arrival: List<CivPosition> = emptyList(),
         streets: List<CivRouteStreet> = emptyList(),
         prepared: RoutePreparation = RoutePreparation(surface, standing, preferredRoads, building),
-        rejected: (String) -> Unit = {}): List<CivPosition>? {
+        preferSharedTrunk: Boolean = false, rejected: (String) -> Unit = {}): List<CivPosition>? {
         val started = System.nanoTime()
         val start = Node(from.x, from.y - 1, from.z)
         var to = destination
@@ -659,6 +696,26 @@ internal object CivsAutonomousTerraform {
         }
         fun offStreetCost(x: Int, z: Int): Int =
             if (streets.isEmpty() || streets.any { if (it.alongX) z == it.center.z else x == it.center.x }) 0 else 4
+
+        fun onSharedRoad(key: Long): Boolean = preferred.contains(key) && retained.containsKey(key)
+
+        // A new road parallel to a nearby shared run can usually branch later. Keep this
+        // a cost preference so an obstacle or unsuitable grade can still require the other lane.
+        fun parallelRoadCost(from: Node, to: Node, dx: Int, dz: Int): Int {
+            for (offset in PARALLEL_OFFSETS) {
+                val x = dz * offset
+                val z = -dx * offset
+                val first = civsTerrainKey(from.x + x, from.z + z)
+                val next = civsTerrainKey(to.x + x, to.z + z)
+                if (!preferred.contains(first) || !preferred.contains(next)) continue
+                val firstFeet = retained.get(first)?.y ?: continue
+                val nextFeet = retained.get(next)?.y ?: continue
+                if (abs(firstFeet - nextFeet) <= 1 && abs(firstFeet - (from.y + 1)) <= 1 &&
+                    abs(nextFeet - (to.y + 1)) <= 1) return PARALLEL_ROAD_COST
+            }
+            return 0
+        }
+
         // Relax only height/history constraints: static footprints and retained road costs still bound every valid route.
         // The reverse edge charges its forward destination. This leaves the actual grading and safety checks unchanged.
         val horizontalDistances by lazy { prepared.distances.getOrPut(to) {
@@ -766,6 +823,7 @@ internal object CivsAutonomousTerraform {
                 }
             }
             var ancestorsReady = false
+            val offSharedTrunk = preferSharedTrunk && discountedBounds != null && !onSharedRoad(civsTerrainKey(n.x, n.z))
             for ((direction, offset) in DIRECTIONS.withIndex()) for (dy in 0..2) {
                 val (dx, dz) = offset
                 val rise = when (dy) { 1 -> -1; 2 -> 1; else -> 0 }
@@ -779,14 +837,15 @@ internal object CivsAutonomousTerraform {
                 val native = requireNotNull(columns.get(civsTerrainKey(candidate.x, candidate.z)))
                 // A brief hummock or hollow should be cut/filled instead of adding two gratuitous climbs.
                 val column = civsTerrainKey(candidate.x, candidate.z)
-                val shared = preferred.contains(column) && retained.containsKey(column)
+                val shared = onSharedRoad(column)
+                val parallel = if (offSharedTrunk && !shared) parallelRoadCost(n, candidate, dx, dz) else 0
                 val offStreet = offStreetCost(candidate.x, candidate.z)
                 val forecourtTurn = if (n.direction < 0 || n.direction == direction) 0 else
                     (turnStreets.maxOfOrNull { (12 - abs(n.x - it.center.x) - abs(n.z - it.center.z)).coerceAtLeast(0) } ?: 0) * 12
                 // Positive preferences keep the existing distance field a lower bound. Native
                 // obstacles and grades still decide whether a shared axial street can exist.
                 val cost = current.cost + (if (shared) 6 else 10) + abs(candidate.y - n.y) * 8 +
-                    (if (shared) 0 else abs(native.groundY - candidate.y) * 2) + offStreet + forecourtTurn
+                    (if (shared) 0 else abs(native.groundY - candidate.y) * 2) + offStreet + forecourtTurn + parallel
                 if (cost >= costs.getOrDefault(candidate, Int.MAX_VALUE)) continue
                 // A column has exactly one finished ground height. A cheap 3-D route can otherwise
                 // climb by zigzagging through the same two columns at successively higher levels.
@@ -811,6 +870,7 @@ internal object CivsAutonomousTerraform {
 
     private fun air(data: String) = data.substringBefore('[') in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
     private val DIRECTIONS = listOf(0 to 1, 1 to 0, 0 to -1, -1 to 0)
+    private val PARALLEL_OFFSETS = intArrayOf(-2, -1, 1, 2)
     private val FALLING_GROUND = setOf("minecraft:sand", "minecraft:red_sand", "minecraft:gravel")
 }
 

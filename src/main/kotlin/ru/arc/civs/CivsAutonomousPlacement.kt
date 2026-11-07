@@ -585,7 +585,8 @@ internal class CivsAutonomousPlacement(
         }
 
         private fun grade(choices: List<CivsAutonomousCandidate>): List<CivTerraformOption> =
-            CivsAutonomousTerraform.options(city, choices, surface, pinned != null || reservation != null) { reason, at ->
+            CivsAutonomousTerraform.options(city, choices, surface, fixed = pinned != null || reservation != null,
+                tryNearbyCut = preferredTerrace) { reason, at ->
                 rejections.merge(reason, 1, Int::plus)
                 if (gradingSamples.size < 4) gradingSamples = gradingSamples +
                     mapOf("source" to candidateSource, "reason" to reason, "at" to at)
@@ -611,8 +612,8 @@ internal class CivsAutonomousPlacement(
             options = if (infrastructure && pinned != null) listOf(CivTerraformOption(pinned.building, 0))
                 else grade(candidates).take(familyLimit - attempted)
             infillOptions = if (candidateSource == "infill") options.indices else IntRange.EMPTY
-            if (preferredTerrace) {
-                val oldY = requireNotNull(initialPlan).plots.single { it.building.id == buildingId }.building.anchor.y
+            if (preferredTerrace && CivsAutonomousTerraform.compactTerrace(candidates.single().building)) {
+                val oldY = candidates.single().building.anchor.y
                 options = options.sortedWith(compareBy<CivTerraformOption> {
                     when { it.building.anchor.y > oldY -> 0; it.building.anchor.y == oldY -> 1; else -> 2 }
                 }.thenBy { abs(it.building.anchor.y - oldY) })

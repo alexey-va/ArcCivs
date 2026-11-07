@@ -141,6 +141,30 @@ class CivsFarmExpansionTest : FunSpec({
         }
     }
 
+    test("two flat beds may use the natural stepped rim seen at Auto5") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val f = farmExpansionFixture(paper, rotation = 90)
+            fun set(offset: CivPosition, material: Material) {
+                val p = CivsWorksiteLayouts.point(f.farm, offset)
+                f.world.getBlockAt(p.x, p.y, p.z).type = material
+            }
+            fun admit() = CivsFarmExpansion.validate(f.city, f.farm, CivAutonomousAccess(), f.world, listOf(f.city)) { _, _ -> true }
+            for (z in -16..-6) {
+                set(CivPosition(20, 1, z), Material.DIRT)
+                if (z >= -8) set(CivPosition(20, 2, z), Material.GRASS_BLOCK)
+            }
+            // The two-block corner cannot be used directly; every rim column
+            // still joins the flat approach via the other cardinal direction.
+            admit()
+            f.farm.farmFieldVersion shouldBe null
+            set(CivPosition(20, 3, -8), Material.STONE)
+            shouldThrow<CivsRejection> { admit() }
+            set(CivPosition(20, 3, -8), Material.AIR)
+            set(CivPosition(20, 1, -9), Material.STONE)
+            shouldThrow<CivsRejection> { admit() }
+        }
+    }
+
     test("automatic admission publishes one state-only intent through the existing five-second development owner") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val f = farmExpansionFixture(paper)

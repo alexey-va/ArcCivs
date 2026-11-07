@@ -3,7 +3,9 @@ package ru.arc.civs
 /** Frozen retained-field profile; curator metadata still owns every unversioned farm. */
 internal object CivsFarmFields {
     const val VERSION = 1
-    private const val SOURCE = "civs/v2/nordic/agriculture-horticulture-farmer/c0ad265fc22f522f22f9/level"
+    private const val FAMILY = "civs/v2/nordic/agriculture-horticulture-farmer"
+    // Identical authored field/entrance geometry; only generated exterior gravel changed.
+    private val revisions = setOf("c0ad265fc22f522f22f9", "660de08515ed8f6e5b27")
     private val originalWater = listOf(CivPosition(15, 0, -14))
     private val originalSoil = (11..19).flatMap { x -> (-18..-10).map { z -> CivPosition(x, 0, z) } }
         .filter { it !in originalWater }
@@ -12,7 +14,7 @@ internal object CivsFarmFields {
     val columns: Set<Pair<Int, Int>> = (soil + water).mapTo(hashSetOf()) { it.x to it.z }
 
     fun supported(building: CivBuilding): Boolean = building.type == BuildingType.FARM && building.level in 1..3 &&
-        building.schematicId == "$SOURCE${building.level}"
+        revisions.any { building.schematicId == "$FAMILY/$it/level${building.level}" }
 
     fun originalMetadata(building: CivBuilding): Boolean = supported(building) &&
         CivsWorksiteLayouts.points(building, "farm", "soilCells").toSet() == originalSoil.map { CivsWorksiteLayouts.point(building, it) }.toSet() &&

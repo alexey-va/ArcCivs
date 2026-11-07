@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -32,11 +33,17 @@ class CivsInitialMineProofLifecycleTest : FunSpec({
         initialMineLifecycle(Material.COBBLESTONE, Material.COBBLESTONE, openingExpected = true,
             shallow = true, delayInitialPlan = true, restartFirstCap = true)
     }
+
+    test("the paid upper shaft opens its three rows before any deeper spine work") {
+        initialMineLifecycle(Material.COBBLESTONE, Material.COBBLESTONE, openingExpected = true,
+            shallow = true, restartFirstCap = true, upperOnly = true)
+    }
 })
 
 /** Constructed public bank, not a replay of native Auto1 terrain or an NPC-arrival test. */
 private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, openingExpected: Boolean,
-    shallow: Boolean = false, delayInitialPlan: Boolean = false, restartFirstCap: Boolean = false) =
+    shallow: Boolean = false, delayInitialPlan: Boolean = false, restartFirstCap: Boolean = false,
+    upperOnly: Boolean = false) =
     failOnUnsupportedMockBukkitOperation {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("initial-mine-proof").also(paper.server::addWorld)
@@ -54,8 +61,8 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                 val opening = "0/shaft/opening"
                 val entrance = "0/shaft/entrance"
                 plan.sections.getValue(opening).size shouldBe 27
-                val cap = plan.sections.getValue(opening).map { plan.steps[it].point }
-                    .filter { it.y == plan.bottom.y }.map { CivsWorksiteLayouts.point(mine, it) }
+                val openingCells = plan.sections.getValue(opening).map { CivsWorksiteLayouts.point(mine, plan.steps[it].point) }
+                val cap = openingCells.filter { it.y == CivsWorksiteLayouts.point(mine, plan.bottom).y }
                 cap.size shouldBe 9
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                 // The original controls isolate ownership. The shallow case has no six-block overburden.
@@ -68,8 +75,21 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                 }
                 // Explicit supported historical starting contract: paid spine and its native rungs.
                 // No entrance/opening progress, seals or fabricated mining receipt are supplied.
-                val state = seedMinePaidSpine(world, mine,
-                    CivMinePlanState(CivsMinePlan.VERSION, 0, sectionSteps = emptyMap()))
+                val spine = plan.sections.getValue("spine")
+                val upperSpine = spine.takeWhile { plan.steps[it].point.y >= plan.transferFeetY }
+                val initial = CivMinePlanState(CivsMinePlan.VERSION, 0, sectionSteps = emptyMap())
+                fun native(local: CivPosition) = CivsWorksiteLayouts.point(mine, local).let { world.getBlockAt(it.x, it.y, it.z) }
+                val lowerSpine = if (upperOnly) spine.drop(upperSpine.size).mapTo(hashSetOf()) {
+                    CivsWorksiteLayouts.point(mine, plan.steps[it].point)
+                } else emptySet()
+                val state = if (!upperOnly) seedMinePaidSpine(world, mine, initial) else {
+                    upperSpine.size shouldBe 4
+                    upperSpine.forEach { ordinal ->
+                        native(plan.steps[ordinal].point).blockData = Bukkit.createBlockData(plan.expectedAfter(ordinal, mine.rotation))
+                    }
+                    val (prefix, sections) = plan.normalizedProgress(0, mapOf("spine" to upperSpine.size.toLong()))
+                    initial.copy(nextStep = prefix, sectionSteps = sections)
+                }
                 CivsMineProgress.valid(plan, state, mine) shouldBe true
                 plan.sectionCount(entrance, state.nextStep, state.sectionSteps.orEmpty()) shouldBe 0L
                 plan.sectionCount(opening, state.nextStep, state.sectionSteps.orEmpty()) shouldBe 0L
@@ -189,6 +209,7 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                 val maximumReceipts = plan.sections.getValue(entrance).size + plan.sections.getValue(opening).size +
                     requireNotNull(plan.entranceLanding).torches.size + 16
                 var restarted = false
+                var earlyWitnessChecked = false
                 for (receipt in 0 until maximumReceipts) {
                     if (openingCount() == 27L) break
                     var work: CivWorldWork? = null
@@ -203,6 +224,30 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                     if (refusal != null) break
                     val selected = withClue("before cap: ${runtime.debug()}") { requireNotNull(work) }
                     val live = current()
+                    if (upperOnly) {
+                        if (receipt == 0) selected.miningOrdinal shouldBe plan.sections.getValue(entrance).first()
+                        selected.changes.none { it.position in lowerSpine } shouldBe true
+                        if (!earlyWitnessChecked && selected.miningOrdinal == plan.sections.getValue(opening).first()) {
+                            val active = selected.changes.single().position
+                            val floor = cap.first { it.x != active.x || it.z != active.z }
+                                .copy(y = CivsWorksiteLayouts.point(mine, plan.bottom).y - 3)
+                                .let { world.getBlockAt(it.x, it.y, it.z) }
+                            val priorFloor = floor.blockData
+                            for (unsafe in listOf(Material.AIR, Material.WATER)) {
+                                floor.type = unsafe
+                                shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(live, selected) }.reason shouldBe "mine-early-floor"
+                            }
+                            floor.blockData = priorFloor
+                            val rung = native(plan.steps[upperSpine.last()].point)
+                            val priorRung = rung.blockData
+                            rung.type = Material.AIR
+                            shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(live, selected) }.reason shouldBe "mine-upper-access"
+                            rung.blockData = priorRung
+                            runtime.invalidate(worker.id)
+                            earlyWitnessChecked = true
+                            continue
+                        }
+                    }
                     runtime.validate(live, selected)
                     citizenStandable(world, selected.standing) shouldBe true
                     citizenPacketBodyClear(world, selected.standing.point(), false) shouldBe true
@@ -257,6 +302,12 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                     if (openingExpected) {
                         openingCount() shouldBe 27L
                         cap.forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.AIR }
+                        if (upperOnly) {
+                            earlyWitnessChecked shouldBe true
+                            plan.sectionCount("spine", finalState.nextStep, finalState.sectionSteps.orEmpty()) shouldBe upperSpine.size.toLong()
+                            openingCells.forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.AIR }
+                            lowerSpine.all { world.getBlockAt(it.x, it.y, it.z).type == Material.STONE } shouldBe true
+                        }
                     } else {
                         refusal?.get("reason") shouldBe "mine-foreign-block"
                         openingCount() shouldBe 18L
