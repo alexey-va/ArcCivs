@@ -26,11 +26,12 @@ internal data class CitizenRouteReuseKey private constructor(
     val geometry: CivsPaths.Geometry,
     val allowedBuildings: Set<UUID>,
     val preferred: Set<CivPosition>,
+    val retainedRoads: CivsPaths.RetainedRoads,
 ) {
     companion object {
         fun of(trip: CivsPaths.Trip, allowedBuildings: Set<UUID>) = CitizenRouteReuseKey(
             trip.network.geometry.copy(buildings = trip.network.geometry.buildings.toList()),
-            allowedBuildings.toSet(), trip.reuseSignature.toSet())
+            allowedBuildings.toSet(), trip.reuseSignature.toSet(), trip.retainedRoads)
     }
 }
 

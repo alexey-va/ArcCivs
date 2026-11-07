@@ -6,6 +6,7 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.spyk
 import io.mockk.verify
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.TextComponent
@@ -173,6 +174,47 @@ class CivsHologramsTest : FunSpec({
                         "offset" to CIVS_CONTROL_TEXT_OFFSET),
                 )))
             }
+        }
+    }
+
+    test("movement reuses nameplate text and each changed text input renders again") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val plugin = paper.createSimplePlugin("CivsHologramTextReuseTest")
+            val world = paper.addPlayer("Viewer").world
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            val displays = mockk<PaperPacketDisplays>(relaxed = true)
+            every { displays.closeAsync() } returns CompletableFuture.completedFuture(null)
+            val text = spyk(CivsText.fromYaml(civsLocaleSource()))
+            val rendered = mutableListOf<Component>()
+            every { text.render("hologram.npc", null, *anyVararg()) } answers {
+                callOriginal().also { rendered += it }
+            }
+            val inputs = mutableListOf("COBBLESTONE")
+            var npc = CivsNpcHologramSnapshot(UUID(0, 1), world.uid, 2.0, 64.0, 3.0, "Василий",
+                "workers.status.waiting-inputs", 18.5, 20.0, profession = "farmer", statusInputs = inputs)
+            CivsHolograms(plugin, tasks, text, { listOf(npc) }, displays).use { owner ->
+                owner.pulse()
+                plainText(rendered.single()) shouldContain "Булыжник"
+                npc = npc.copy(x = 3.0, yaw = 10f, nativeHeight = 1.5, courierCart = true, cargo = mapOf("DIRT" to 4))
+                owner.pulse()
+                rendered.size shouldBe 1
+
+                inputs[0] = "CHARCOAL"
+                owner.pulse()
+                rendered.size shouldBe 2
+                plainText(rendered.last()) shouldContain "Древесный уголь"
+                val changes = listOf<(CivsNpcHologramSnapshot) -> CivsNpcHologramSnapshot>(
+                    { it.copy(name = "Фёдор") }, { it.copy(status = "walking") }, { it.copy(profession = "forester") },
+                    { it.copy(child = true) }, { it.copy(health = 17.0) }, { it.copy(maxHealth = 28.0) }, { it.copy(hunger = 6) },
+                    { it.copy(health = -0.0) }, { it.copy(health = 0.0) },
+                )
+                for ((index, change) in changes.withIndex()) {
+                    npc = change(npc)
+                    owner.pulse()
+                    rendered.size shouldBe index + 3
+                }
+            }
+            tasks.close()
         }
     }
 })

@@ -115,7 +115,8 @@ class CivsCitizens(
     private val residentTasks = navigationTasks ?: LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val navigation = CivsResidentNavigation(residentTasks, navigationWork, navigationExecutor,
         settings = navigationSettings, snapshotContextFree = navigationContextFree)
-    private val paths = CivsPaths()
+    internal var retainedCourierRoads: (Settlement) -> CivsPaths.RetainedRoads = { CivsPaths.RetainedRoads.EMPTY }
+    private val paths = CivsPaths { city -> retainedCourierRoads(city) }
     private val threats: CivsResidentThreats
     private val life: CivsCitizenLife
     private val collisions: CivsCitizenCollisions

@@ -127,8 +127,17 @@ internal class CivsCitizenRoutes(
             }
         val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
         val mealTarget = actor.mealVisit?.target?.takeIf { it == target }
+        val preferCourierRoads = idleAnchor == null && waypoint == null && actor.plan.type == BuildingType.WAREHOUSE &&
+            city.inventory?.mode == CivStorageMode.PHYSICAL && actor.attacker == null && actor.combatDestination == null &&
+            actor.foodSource == null && actor.mealVisit == null && actor.plan.courier?.let { courier ->
+                when (actor.cycle.phase) {
+                    CitizenPhase.TO_WORK -> !courier.carrying && target == actor.plan.workplace
+                    CitizenPhase.RETURNING -> courier.carrying && target == actor.plan.storage
+                    else -> false
+                }
+            } == true
         val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
-            workRuntime.workingTravel(actor)) paths.begin(city) else null
+            workRuntime.workingTravel(actor)) paths.begin(city, preferCourierRoads) else null
         val inbound = actor.plan.courier?.takeIf { actor.plan.type == BuildingType.WAREHOUSE && !it.carrying &&
             actor.cycle.phase == CitizenPhase.TO_WORK && it.cargo.sourceWorkerId == null && idleAnchor == null &&
             !actor.sheltering && !actor.returningToWarehouse && actor.foodSource == null && actor.mealVisit == null }

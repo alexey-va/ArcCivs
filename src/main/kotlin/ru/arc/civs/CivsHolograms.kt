@@ -59,7 +59,13 @@ class CivsHolograms internal constructor(
         this(plugin, tasks, text, snapshots, nativeWork?.let { PaperPacketDisplays(plugin, "civs-residents", it) }
             ?: PaperPacketDisplays(plugin, "civs-residents"), nativeWork, workplaces)
 
-    private data class Desired(val snapshot: CivsNpcHologramSnapshot, val text: Component)
+    private data class Desired(val snapshot: CivsNpcHologramSnapshot, val text: Component,
+        private val textInputs: List<String> = snapshot.statusInputs.toList()) {
+        fun textMatches(next: CivsNpcHologramSnapshot): Boolean =
+            snapshot.name == next.name && snapshot.profession == next.profession && snapshot.child == next.child &&
+                snapshot.status == next.status && textInputs == next.statusInputs && snapshot.hunger == next.hunger &&
+                snapshot.health.toBits() == next.health.toBits() && snapshot.maxHealth.toBits() == next.maxHealth.toBits()
+    }
     private data class Rendered(val handle: PacketTextDisplay, var value: Desired?)
     private val work = nativeWork ?: BudgetedTaskQueue(tasks)
     private val epoch = tasks.token()
@@ -76,11 +82,17 @@ class CivsHolograms internal constructor(
     internal fun pulse() {
         check(Bukkit.isPrimaryThread()) { "Resident nameplates require the server thread" }
         if (closed || !tasks.isCurrent(epoch)) return
+        val previous = desired
         desired = snapshots().asSequence().filter { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() &&
             it.health.isFinite() && it.maxHealth.isFinite() && it.health >= 0 && it.maxHealth > 0 &&
             it.health <= it.maxHealth && it.hunger in 0..20 && it.nativeHeight.isFinite() && it.nativeHeight > 0 &&
             Bukkit.getWorld(it.worldId) != null && (it.actor == null || it.actor.isValid) }
-            .associate { it.workerId to Desired(it, civsNpcHologramText(text, it)) }
+            .associate { npc ->
+                // The locale catalog is fixed for this owner; the snapshot still tracks pose and cargo every pulse.
+                val last = previous[npc.workerId]
+                npc.workerId to if (last?.textMatches(npc) == true) last.copy(snapshot = npc)
+                    else Desired(npc, civsNpcHologramText(text, npc))
+            }
         decor.capture(workplaces())
         if (pending || decor.current() && rendered.size == desired.size && rendered.all { (id, shown) -> samePresentation(shown.value, desired[id]) }) return
         pending = true

@@ -9,7 +9,7 @@ import kotlin.math.abs
 import kotlin.math.floor
 
 /** Remember walked corridors; Trails alone owns their wear, material and walking speed. Main thread only. */
-internal class CivsPaths {
+internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads = { RetainedRoads.EMPTY }) {
     internal data class Geometry(val world: UUID, val center: CivPosition, val radius: Int,
                                  val buildings: List<CivBuilding>, val planned: CivBuilding?) {
         private val protectedBuildings = buildings + listOfNotNull(planned)
@@ -24,7 +24,31 @@ internal class CivsPaths {
 
     internal class Network(val geometry: Geometry, val cells: LinkedHashSet<CivPosition> = linkedSetOf())
 
-    class Trip internal constructor(internal val cityId: UUID, internal val network: Network) {
+    /** Built from the existing detached receipts, without native terrain reads. */
+    internal class RetainedRoads private constructor(private val supports: Set<CivPosition>) {
+        private val signature = supports.hashCode()
+        operator fun contains(point: CivPosition): Boolean = point in supports
+        override fun hashCode(): Int = signature
+        override fun equals(other: Any?): Boolean = this === other || other is RetainedRoads &&
+            signature == other.signature && supports == other.supports
+
+        companion object {
+            val EMPTY = RetainedRoads(emptySet())
+
+            fun from(city: Settlement, access: CivAutonomousAccess): RetainedRoads {
+                val supports = buildSet {
+                    for (building in city.buildings) {
+                        if (building.phase != BuildingPhase.ACTIVE || building.type.isInfrastructure) continue
+                        for (feet in access.routes[building.id].orEmpty()) add(feet.copy(y = feet.y - 1))
+                    }
+                }
+                return if (supports.isEmpty()) EMPTY else RetainedRoads(supports)
+            }
+        }
+    }
+
+    class Trip internal constructor(internal val cityId: UUID, internal val network: Network,
+        internal val retainedRoads: RetainedRoads) {
         // Costs cannot change halfway through one A* search as other residents finish their trips.
         private val preferred = network.cells.toHashSet()
         internal val reuseSignature: Set<CivPosition> get() = preferred
@@ -48,9 +72,12 @@ internal class CivsPaths {
             val point = CivPosition(ground.x, ground.y, ground.z)
             if (!network.geometry.outside(point)) return 1.0
             // A remembered line never licenses climbing an outdoor tree.
-            if (Tag.LOGS.isTagged(ground.type) || Tag.LEAVES.isTagged(ground.type)) return Double.POSITIVE_INFINITY
+            val material = ground.type
+            if (Tag.LOGS.isTagged(material) || Tag.LEAVES.isTagged(material)) return Double.POSITIVE_INFINITY
             return when {
-                ground.type == Material.DIRT_PATH -> 1.0
+                material == Material.DIRT_PATH -> 1.0
+                point in retainedRoads && (material == Material.COARSE_DIRT ||
+                    CivsRoadMaintenance.surface(ground.blockData.asString)) -> 1.0
                 // The provider may recognize untracked materials when its configuration permits it.
                 recognizedSurface(ground) > 1.0 -> 1.0
                 point in preferred -> 1.5
@@ -65,12 +92,12 @@ internal class CivsPaths {
     private val networks = LinkedHashMap<UUID, Network>(MAX_CITIES, .75f, true)
     private val learning = ArrayDeque<Learning>()
 
-    fun begin(city: Settlement): Trip {
+    fun begin(city: Settlement, preferCourierRoads: Boolean = false): Trip {
         val geometry = geometry(city)
         val network = networks[city.id]?.takeIf { it.geometry == geometry }
             ?: Network(geometry).also { networks[city.id] = it }
         while (networks.size > MAX_CITIES) networks.remove(networks.keys.first())
-        return Trip(city.id, network)
+        return Trip(city.id, network, if (preferCourierRoads) courierRoads(city) else RetainedRoads.EMPTY)
     }
 
     fun complete(city: Settlement, trip: Trip) {

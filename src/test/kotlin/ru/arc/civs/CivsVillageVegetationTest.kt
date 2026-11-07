@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import org.bukkit.Bukkit
 import org.bukkit.Material
 import org.bukkit.block.Barrel
 import org.bukkit.block.data.type.Leaves
@@ -33,6 +34,56 @@ class CivsVillageVegetationTest : FunSpec({
         civsVillageVegetationCandidates(found) shouldBe emptyList()
         civsVillageVegetationCandidates(found, mapOf(stump.position to stump.before)) shouldBe listOf(stump)
         civsVillageVegetationCandidates(found, mapOf(stump.position to "minecraft:birch_log[axis=y]")) shouldBe emptyList()
+    }
+
+    test("a retained construction cut clears only a detached branch with no live or paid continuation") {
+        VillageVegetationFixture().use { h ->
+            val hall = h.city.buildings.single()
+            val timber = "minecraft:oak_log[axis=x]"
+            val naturalLeaf = "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]"
+            val cut = CivPosition(2, 68, -2)
+            val livingCut = cut.copy(z = 2)
+            val paidCut = livingCut.copy(x = -2)
+            val branch = listOf(cut.copy(x = 3), cut.copy(x = 4))
+            val rooted = livingCut.copy(x = 3)
+            val paidApproach = paidCut.copy(x = -3)
+            val paid = paidCut.copy(x = -4)
+            val orphan = CivPosition(5, 68, 5)
+            val persistent = orphan.copy(y = 69)
+            val annex = hall.copy(id = UUID(0, 12), bounds = CivBox(paid, paid))
+            h.city = h.city.copy(buildings = h.city.buildings + annex)
+            h.retained[hall.id] = CivPlacementPlan(hall.id, h.city.id, h.city.worldId, hall,
+                listOf(cut, livingCut, paidCut).flatMap {
+                    listOf(CivPlanBlock(it, timber, "minecraft:air"),
+                        CivPlanBlock(it.copy(y = it.y + 1), naturalLeaf, "minecraft:air"))
+                })
+            h.retained[annex.id] = CivPlacementPlan(annex.id, h.city.id, h.city.worldId, annex,
+                listOf(CivPlanBlock(paid, "minecraft:air", timber)))
+            (branch + listOf(rooted, paidApproach, paid)).forEach { h.put(it, timber) }
+            for (y in 64..67) h.put(rooted.copy(y = y), Material.OAK_LOG)
+            h.put(rooted.copy(y = 63), Material.DIRT)
+            h.put(orphan, naturalLeaf)
+            h.put(persistent, "minecraft:oak_leaves[distance=7,persistent=true,waterlogged=false]")
+
+            h.startCapture()
+            h.finishCapture()
+            // A fresh native support after the detached capture must block the entire branch.
+            val laterSupport = branch.last().copy(y = branch.last().y - 1)
+            h.put(laterSupport, Material.STONE)
+            h.drain()
+            branch.forEach { h.type(it) shouldBe Material.OAK_LOG }
+            h.put(laterSupport, Material.AIR)
+
+            h.now = 120_001
+            h.startCapture()
+            h.finishCapture()
+            h.drain()
+            branch.forEach { h.type(it) shouldBe Material.AIR }
+            listOf(rooted, paidApproach, paid).forEach { h.type(it) shouldBe Material.OAK_LOG }
+            h.type(orphan) shouldBe Material.AIR
+            h.type(persistent) shouldBe Material.OAK_LEAVES
+            h.notifications shouldBe (branch + orphan).toSet()
+        }
     }
 
     test("a detached stump capture rechecks newly attached support geometry before removal") {
@@ -238,6 +289,7 @@ private class VillageVegetationFixture : AutoCloseable {
     val pending = ArrayDeque<Runnable>()
     val blocked = hashSetOf<CivPosition>()
     val notifications = hashSetOf<CivPosition>()
+    val retained = hashMapOf<UUID, CivPlacementPlan>()
     var owner = newOwner()
         private set
 
@@ -248,7 +300,7 @@ private class VillageVegetationFixture : AutoCloseable {
         if (rejectCaptures > 0) { rejectCaptures--; throw RejectedExecutionException("full fixture queue") }
         pending += it
     }, { current -> CompletableFuture.completedFuture(current.buildings.map {
-        CivPlacementPlan(it.id, current.id, current.worldId, it, emptyList())
+        retained[it.id] ?: CivPlacementPlan(it.id, current.id, current.worldId, it, emptyList())
     }) }, { city }, { _, _ -> true }, { _, p -> p in blocked }, { _, _ -> false },
         { _, positions -> notifications += positions }, clock = { now }, nanoTime = { 0L })
 
@@ -260,6 +312,8 @@ private class VillageVegetationFixture : AutoCloseable {
     fun type(p: CivPosition): Material = world.getBlockAt(p.x, p.y, p.z).type
 
     fun put(p: CivPosition, material: Material) { world.getBlockAt(p.x, p.y, p.z).type = material }
+
+    fun put(p: CivPosition, state: String) { world.getBlockAt(p.x, p.y, p.z).blockData = Bukkit.createBlockData(state) }
 
     fun startCapture() { owner.pulse(listOf(city)); paper.server.scheduler.performOneTick() }
 

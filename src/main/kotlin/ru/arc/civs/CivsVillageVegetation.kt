@@ -31,8 +31,11 @@ internal fun civsVillageVegetationColumn(city: Settlement, x: Int, z: Int): Bool
 
 internal data class CivVegetationCell(val position: CivPosition, val before: String, val log: Boolean, val leaf: Boolean)
 
+private data class CivVegetationRemnant(val logs: List<CivVegetationCell>, val air: Set<CivPosition>)
+
 private data class CivVegetationSelection(val cells: List<CivVegetationCell>,
-    val proofParents: Map<CivPosition, CivPosition>, val stumps: Set<CivPosition> = emptySet())
+    val proofParents: Map<CivPosition, CivPosition>, val stumps: Set<CivPosition> = emptySet(),
+    val remnants: Map<CivPosition, CivVegetationRemnant> = emptyMap())
 
 /** A bare, upright, unowned root on natural soil; attached timber and supports remain intact. */
 internal fun civsVillageVegetationStump(cell: CivVegetationCell, typeAt: (CivPosition) -> Material?): Boolean {
@@ -202,12 +205,81 @@ internal class CivsVillageVegetation(
                 if (leaf || material in logs) found[p] = CivVegetationCell(p, state, material in logs, leaf)
             }
         }
-        val stumps = found.values.filter { cell -> civsVillageVegetationStump(cell) { p ->
+        fun typeAt(p: CivPosition): Material? =
             if (p.y !in frame.minimumY until frame.maximumY) null
             else frame.chunks[(p.x shr 4) to (p.z shr 4)]?.getBlockType(p.x and 15, p.y, p.z and 15)
-        } }.mapTo(hashSetOf()) { it.position }
+        val stumps = found.values.filter { civsVillageVegetationStump(it, ::typeAt) }.mapTo(hashSetOf()) { it.position }
         val selection = civsVillageVegetationSelection(found, previousNatural, stumps)
-        return selection.copy(cells = selection.cells.take(MAXIMUM_CELLS))
+        val extended = withConstructionRemnants(frame, found, selection, ::typeAt)
+        return extended.copy(cells = extended.cells.take(MAXIMUM_CELLS))
+    }
+
+    /** A completed, still-clear timber cut and its own original crown can witness a severed branch. */
+    private fun retainedTimberCuts(frame: Frame, typeAt: (CivPosition) -> Material?): Map<CivPosition, String> = buildMap {
+        val completed = frame.city.buildings.filter { it.phase == BuildingPhase.ACTIVE }
+            .associate { CivsWarehouseRefit.retainedPlanId(it) to it.id }
+        for (plan in frame.plans) {
+            if (completed[plan.id] != plan.building.id || plan.id == frame.city.construction?.id ||
+                plan.cityId != frame.city.id || plan.worldId != frame.city.worldId) continue
+            val cleared = hashMapOf<CivPosition, String>()
+            for (cell in plan.terrain?.blocks.orEmpty().asSequence() + plan.blocks.asSequence()) {
+                val material = cell.before.substringBefore('[')
+                if (cell.after != "minecraft:air") cleared.remove(cell.position)
+                else if (material.endsWith("_log") || material.endsWith("_leaves")) cleared.putIfAbsent(cell.position, cell.before)
+            }
+            for ((p, state) in cleared) {
+                val timber = CivsForestry.material(state)
+                if (!timber.endsWith("_LOG") || timber.startsWith("STRIPPED_") || typeAt(p) != Material.AIR) continue
+                if (vegetationNeighbors(p).any { near ->
+                    cleared[near]?.let { CivsForestry.naturalLeaf(it, timber) } == true && typeAt(near) == Material.AIR
+                }) put(p, state)
+            }
+        }
+    }
+
+    private fun withConstructionRemnants(frame: Frame, found: Map<CivPosition, CivVegetationCell>,
+        selection: CivVegetationSelection, typeAt: (CivPosition) -> Material?): CivVegetationSelection {
+        val selected = selection.cells.mapTo(hashSetOf()) { it.position }
+        val unproved = found.filter { (p, cell) -> cell.log && p !in selected }
+        if (unproved.isEmpty()) return selection
+        val additions = mutableListOf<CivVegetationCell>()
+        val parents = selection.proofParents.toMutableMap()
+        val remnants = hashMapOf<CivPosition, CivVegetationRemnant>()
+        val checked = hashSetOf<CivPosition>()
+        for ((cut, before) in retainedTimberCuts(frame, typeAt)) {
+            val timber = CivsForestry.material(before)
+            val axis = when (before.substringAfter("[axis=", "").substringBefore(']')) {
+                "x" -> CivPosition(1, 0, 0)
+                "y" -> CivPosition(0, 1, 0)
+                "z" -> CivPosition(0, 0, 1)
+                else -> continue
+            }
+            for (direction in listOf(-1, 1)) {
+                val seed = CivPosition(cut.x + direction * axis.x, cut.y + direction * axis.y, cut.z + direction * axis.z)
+                if (unproved[seed]?.before != before || !checked.add(seed)) continue
+                val connected = linkedMapOf(seed to cut)
+                val queue = ArrayDeque(listOf(seed))
+                val air = hashSetOf<CivPosition>()
+                while (queue.isNotEmpty() && connected.size <= MAXIMUM_REMNANT_LOGS) {
+                    val parent = queue.removeFirst()
+                    for (near in vegetationNeighbors(parent)) {
+                        val candidate = unproved[near]
+                        if (candidate == null || CivsForestry.material(candidate.before) != timber) air += near
+                        else if (connected.putIfAbsent(near, parent) == null) queue += near
+                    }
+                }
+                checked += connected.keys
+                // A support, live crown, paid log or unknown chunk anywhere on the edge vetoes the branch.
+                if (connected.size > MAXIMUM_REMNANT_LOGS || air.any { typeAt(it)?.isAir != true }) continue
+                val logs = connected.keys.toList().asReversed().map(unproved::getValue)
+                val remnant = CivVegetationRemnant(logs, air)
+                additions += logs
+                parents.putAll(connected)
+                logs.forEach { remnants[it.position] = remnant }
+            }
+        }
+        return if (additions.isEmpty()) selection else selection.copy(cells = selection.cells + additions,
+            proofParents = parents, remnants = remnants)
     }
 
     private fun apply(current: Sweep) {
@@ -225,6 +297,8 @@ internal class CivsVillageVegetation(
         val touched = mutableListOf<CivPosition>()
         val pending = settlement.forestryJobs.orEmpty().values.flatMap { job -> job.cells.map(job::position) }.toHashSet()
         val cells = current.selection.cells
+        fun loaded(p: CivPosition) = if (p.y in world.minHeight until world.maxHeight && world.isChunkLoaded(p.x shr 4, p.z shr 4))
+            world.getBlockAt(p.x, p.y, p.z) else null
         fun skip(cell: CivVegetationCell) {
             current.skipped++
             // Children precede their proof parent. Keep that native chain through the crown
@@ -244,10 +318,12 @@ internal class CivsVillageVegetation(
                     p.x + 1.0, p.y + 2.8, p.z + 1.0)).any { it is LivingEntity }) { skip(cell); continue }
             val block = world.getBlockAt(p.x, p.y, p.z)
             if (block.blockData.asString != cell.before || !canModify(settlement, block)) { skip(cell); continue }
-            if (p in current.selection.stumps && !civsVillageVegetationStump(cell) { near ->
-                if (!world.isChunkLoaded(near.x shr 4, near.z shr 4)) null
-                else world.getBlockAt(near.x, near.y, near.z).type
-            }) { skip(cell); continue }
+            if (p in current.selection.stumps && !civsVillageVegetationStump(cell) { loaded(it)?.type }) { skip(cell); continue }
+            val remnant = current.selection.remnants[p]
+            if (remnant != null && (remnant.air.any { loaded(it)?.type?.isAir != true } || remnant.logs.any {
+                val live = loaded(it.position)
+                live == null || !live.type.isAir && live.blockData.asString != it.before
+            })) { skip(cell); continue }
             block.setType(Material.AIR, false)
             touched += p
             current.removed++
@@ -263,7 +339,16 @@ internal class CivsVillageVegetation(
 
     override fun close() { closed = true; sweep = null; nextSweep.clear() }
 
-    companion object { const val MAXIMUM_CELLS = 32_768 }
+    companion object {
+        const val MAXIMUM_CELLS = 32_768
+        private const val MAXIMUM_REMNANT_LOGS = 8
+    }
+}
+
+private fun vegetationNeighbors(p: CivPosition): Sequence<CivPosition> = sequence {
+    for (dx in -1..1) for (dy in -1..1) for (dz in -1..1) {
+        if (dx != 0 || dy != 0 || dz != 0) yield(CivPosition(p.x + dx, p.y + dy, p.z + dz))
+    }
 }
 
 /** Connected natural crowns prove their trunks; retained natural before-images also identify construction stumps. */
@@ -278,13 +363,8 @@ private fun civsVillageVegetationSelection(found: Map<CivPosition, CivVegetation
     val reached = hashSetOf<CivPosition>()
     val todo = ArrayDeque<CivPosition>()
     val trunks = mutableListOf<CivVegetationCell>()
-    fun neighbors(p: CivPosition): Sequence<CivPosition> = sequence {
-        for (dx in -1..1) for (dy in -1..1) for (dz in -1..1) {
-            if (dx != 0 || dy != 0 || dz != 0) yield(CivPosition(p.x + dx, p.y + dy, p.z + dz))
-        }
-    }
     for ((p, log) in logs) {
-        val leaf = neighbors(p).firstOrNull { found[it]?.leaf == true }
+        val leaf = vegetationNeighbors(p).firstOrNull { found[it]?.leaf == true }
         if (previousNatural[p] == log.before || p in stumps || leaf != null) {
             if (previousNatural[p] != log.before && p !in stumps) proofs[p] = requireNotNull(leaf)
             reached += p
@@ -294,7 +374,7 @@ private fun civsVillageVegetationSelection(found: Map<CivPosition, CivVegetation
     while (todo.isNotEmpty()) {
         val p = todo.removeFirst()
         trunks += logs.getValue(p)
-        for (near in neighbors(p)) {
+        for (near in vegetationNeighbors(p)) {
             if (near in logs && reached.add(near)) {
                 proofs[near] = p
                 todo += near

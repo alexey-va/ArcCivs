@@ -14,8 +14,14 @@ internal class CivsCityPlans(
     private val executor: Executor,
     private val roadMaintenance: CivsRoadMaintenance,
 ) {
-    /** Detached columns from the existing saved terrain routes; never a second road journal. */
-    private val forestryRoutes = mutableMapOf<UUID, Pair<UUID, Set<Pair<Int, Int>>>>()
+    /** Detached projections of the existing saved terrain routes. */
+    private data class RetainedRoutes(val worldId: UUID, val buildings: List<CivBuilding>,
+        val overrides: Map<String, CivRoadRouteOverride>?, val columns: Set<Pair<Int, Int>>,
+        val courierRoads: CivsPaths.RetainedRoads) {
+        fun matches(city: Settlement): Boolean = worldId == city.worldId && civsSameBuildingLayout(buildings, city.buildings) &&
+            overrides == city.roadRouteOverrides
+    }
+    private val retainedRoutes = mutableMapOf<UUID, RetainedRoutes>()
     private val routeChunkPositions = mutableMapOf<UUID, List<CivPosition>>()
 
     internal data class InitialMineKey(val city: UUID, val owner: UUID, val world: UUID, val plan: UUID,
@@ -76,11 +82,13 @@ internal class CivsCityPlans(
     }
 
     fun forestryPath(worldId: UUID, x: Int, z: Int): Boolean =
-        forestryRoutes.values.any { it.first == worldId && (x to z) in it.second }
-    fun forestryRoute(cityId: UUID): Set<Pair<Int, Int>> = forestryRoutes[cityId]?.second.orEmpty()
+        retainedRoutes.values.any { it.worldId == worldId && (x to z) in it.columns }
+    fun forestryRoute(cityId: UUID): Set<Pair<Int, Int>> = retainedRoutes[cityId]?.columns.orEmpty()
+    fun courierRoads(city: Settlement): CivsPaths.RetainedRoads =
+        retainedRoutes[city.id]?.takeIf { it.matches(city) }?.courierRoads ?: CivsPaths.RetainedRoads.EMPTY
     fun chunkPositions(cityId: UUID): List<CivPosition> = routeChunkPositions[cityId].orEmpty()
-    fun clear() { forestryRoutes.clear(); routeChunkPositions.clear(); initialMines.clear() }
-    fun remove(cityId: UUID) { forestryRoutes.remove(cityId); routeChunkPositions.remove(cityId); initialMines.remove(cityId) }
+    fun clear() { retainedRoutes.clear(); routeChunkPositions.clear(); initialMines.clear() }
+    fun remove(cityId: UUID) { retainedRoutes.remove(cityId); routeChunkPositions.remove(cityId); initialMines.remove(cityId) }
 
     /** Completed building captures retain their actual road grades across later development. */
     fun loadAutonomousPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
@@ -95,15 +103,19 @@ internal class CivsCityPlans(
                     "Warehouse retained capture does not match its building"
                 }
             }
-            Triple(saved, CivAutonomousAccess.from(city, saved).routes.values.flatten().mapTo(hashSetOf()) { it.x to it.z },
-                CivsRoadMaintenance.prepare(city, saved))
+            val access = CivAutonomousAccess.from(city, saved)
+            val routes = RetainedRoutes(city.worldId, city.buildings.toList(), city.roadRouteOverrides,
+                access.routes.values.asSequence().flatten().mapTo(hashSetOf()) { it.x to it.z },
+                CivsPaths.RetainedRoads.from(city, access))
+            Triple(saved, routes, CivsRoadMaintenance.prepare(city, saved))
         }, executor).whenCompleteSync(tasks) { captured, failure ->
             if (records.closed) result.completeExceptionally(CivsRejection("not-ready"))
             else if (failure != null) result.completeExceptionally(failure)
             else {
-                val (saved, columns, upkeep) = requireNotNull(captured)
-                if (records.cities[city.id]?.buildings == city.buildings && records.cities[city.id]?.roadRouteOverrides == city.roadRouteOverrides) {
-                    forestryRoutes[city.id] = city.worldId to columns
+                val (saved, routes, upkeep) = requireNotNull(captured)
+                if (records.cities[city.id]?.let { it.buildings == city.buildings && routes.matches(it) } == true) {
+                    retainedRoutes[city.id] = routes
+                    val columns = routes.columns
                     routeChunkPositions[city.id] = if (columns.isEmpty()) emptyList() else listOf(
                         CivPosition(columns.minOf { it.first }, city.center.y, columns.minOf { it.second }),
                         CivPosition(columns.maxOf { it.first }, city.center.y, columns.maxOf { it.second }))

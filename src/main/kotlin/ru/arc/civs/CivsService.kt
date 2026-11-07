@@ -364,6 +364,7 @@ class CivsService(
             store = store,
             executor = executor,
             roadMaintenance = roadMaintenance)
+        citizens.retainedCourierRoads = cityPlans::courierRoads
         villageSites = CivsVillageSites(plugin, tasks, settings, blueprints, world, planningExecutor,
             cities = { cities.values.toList() }, ready = ::ready,
             checkSpace = { worldId, center -> buildingRequests.checkSettlementSpace(worldId, center) },

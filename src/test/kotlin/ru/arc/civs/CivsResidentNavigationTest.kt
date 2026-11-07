@@ -1812,6 +1812,84 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("a courier prefers a retained coarse dirt road and can detour past an obstruction") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val road = (0..3).map { CivPosition(0, 63, it) } + (1..16).map { CivPosition(it, 63, 3) } +
+                (2 downTo 0).map { CivPosition(16, 63, it) }
+            val routeFeet = road.map { it.copy(y = it.y + 1) }
+            val base = pathsCity().copy(worldId = terrain.world.uid)
+            val destination = base.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
+                anchor = CivPosition(17, 63, 0), entrance = routeFeet.last(),
+                bounds = CivBox(CivPosition(17, 63, -1), CivPosition(20, 67, 1)))
+            val city = base.copy(buildings = base.buildings + destination)
+            fun retained(route: List<CivPosition>): CivsPaths.RetainedRoads {
+                val journal = CivPlacementPlan(destination.id, city.id, city.worldId, destination, emptyList(),
+                    terrain = CivTerraformPlan(CivBox(road.first(), CivPosition(16, 65, 3)),
+                        emptyList(), route, 63, 0, 0))
+                return CivsPaths.RetainedRoads.from(city, CivAutonomousAccess.from(city, listOf(journal)))
+            }
+            for (x in 0..16) for (z in 0..3) terrain.blocks[CivPosition(x, 63, z)] = Material.GRASS_BLOCK
+            road.forEach { terrain.blocks[it] = Material.COARSE_DIRT }
+            var published = retained(routeFeet)
+            val paths = CivsPaths { published }
+
+            fun walk(trip: CivsPaths.Trip): Set<CivPosition> {
+                var at = Location(terrain.world, .5, 64.0, .5)
+                val target = Location(terrain.world, 16.5, 64.0, .5)
+                val route = CitizenPacketRoute(terrain.world, at, target,
+                    { p -> p.x in 0..16 && p.z in 0..3 && p.y == 64 }, { _, _ -> true },
+                    { ground -> trip.cost(ground) { 1.0 } })
+                route.prepare()
+                route.failure shouldBe null
+                val walked = linkedSetOf<CivPosition>()
+                repeat(300) {
+                    route.move(at, 1.0) { true }?.let { next ->
+                        walked += CivPosition(next.blockX, citizenSupportY(next.y), next.blockZ)
+                        at = next
+                    }
+                }
+                route.finished shouldBe true
+                at.distanceSquared(target) shouldBe 0.0
+                return walked
+            }
+
+            val courier = paths.begin(city, preferCourierRoads = true)
+            walk(courier).count { it.x in 2..14 && it.z == 3 } shouldBe 13
+            val ordinary = paths.begin(city)
+            walk(ordinary).none { it.z == 3 } shouldBe true
+            val blocked = CivPosition(8, 64, 3)
+            terrain.blocks[blocked] = Material.STONE
+            terrain.blocks[blocked.copy(y = 65)] = Material.STONE
+            walk(courier).none { it.x == blocked.x && it.z == blocked.z } shouldBe true
+
+            fun cost(trip: CivsPaths.Trip, point: CivPosition) =
+                trip.cost(terrain.world.getBlockAt(point.x, point.y, point.z)) { 1.0 }
+            val support = CivPosition(5, 63, 3)
+            cost(courier, support) shouldBe 1.0
+            cost(ordinary, support) shouldBe CivsPaths.ORDINARY_COST
+            val unowned = listOf(support.copy(z = 2), support.copy(y = 66))
+            unowned.forEach {
+                terrain.blocks[it] = Material.COARSE_DIRT
+                cost(courier, it) shouldBe CivsPaths.ORDINARY_COST
+            }
+            terrain.blocks[support] = Material.GRASS_BLOCK
+            cost(courier, support) shouldBe CivsPaths.ORDINARY_COST
+            terrain.blocks[support] = Material.OAK_PLANKS
+            cost(courier, support) shouldBe 1.0
+
+            val key = CitizenRouteReuseKey.of(courier, emptySet())
+            (key != CitizenRouteReuseKey.of(ordinary, emptySet())) shouldBe true
+            published = retained(routeFeet)
+            CitizenRouteReuseKey.of(paths.begin(city, preferCourierRoads = true), emptySet()) shouldBe key
+            published = retained(routeFeet.map { if (it.x == 5 && it.z == 3) it.copy(y = 65) else it })
+            val repaired = paths.begin(city, preferCourierRoads = true)
+            (key != CitizenRouteReuseKey.of(repaired, emptySet())) shouldBe true
+            cost(repaired, support) shouldBe CivsPaths.ORDINARY_COST
+            cost(courier, support) shouldBe 1.0
+        }
+    }
+
     test("a path at fifteen sixteenths height reaches its endpoint and emits every actual cell crossing") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
