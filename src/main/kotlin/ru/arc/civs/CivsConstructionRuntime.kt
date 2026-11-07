@@ -43,6 +43,7 @@ internal class CivsConstructionRuntime(
     private val handoffHallControl: (Settlement, CivConstruction) -> CompletableFuture<Settlement> = { _, _ ->
         CompletableFuture.failedFuture(CivsRejection("not-ready"))
     },
+    private val acceleratedPlacement: (Settlement) -> Boolean = { false },
 ) : AutoCloseable {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -445,17 +446,24 @@ internal class CivsConstructionRuntime(
             }
             require(parts.isNotEmpty() && partIndex in parts.indices) { "Empty construction tile" }
             placementAccess[cityId] = access
+            val intervalTicks = CivsLabGrowth.placementTicks(cities[cityId], order, plan, access.batch, acceleratedPlacement)
             CivsDiagnostics.event("construction_part_started", "city" to cityId, "order" to orderId,
-                "batch" to order.workDone, "part" to partIndex + 1, "parts" to parts.size)
+                "batch" to order.workDone, "part" to partIndex + 1, "parts" to parts.size, "interval_ticks" to intervalTicks)
             val operation = blueprints.paste(parts[partIndex], plan.worldId, plan.building.anchor,
                 java.util.function.Consumer { cell -> constructionPlaced(cityId, orderId, access, cell) },
                 java.util.function.BooleanSupplier {
+                    val current = cities[cityId]
+                    // Core fixes its cadence when a part starts. The live guard restores ordinary pacing on expiry or off.
+                    val liveTicks = if (intervalTicks == CivsLabGrowth.ORDINARY_PLACEMENT_TICKS) intervalTicks
+                        else CivsLabGrowth.placementTicks(current, order, plan, access.batch, acceleratedPlacement)
                     ready() && cityId !in busy && cityId !in unhealthy &&
-                        cities[cityId]?.autonomy?.paused != true && placementAccess[cityId] === access && !access.repairing &&
-                        cities[cityId]?.construction?.let { it.id == orderId && it.workDone == order.workDone } == true &&
-                        constructionFocus[cityId]?.let { it.orderId != orderId || Bukkit.getCurrentTick() - it.tick >= 5 } != false &&
+                        current?.autonomy?.paused != true && placementAccess[cityId] === access && !access.repairing &&
+                        current?.construction?.let { it.id == orderId && it.workDone == order.workDone } == true &&
+                        constructionFocus[cityId]?.let {
+                            it.orderId != orderId || Bukkit.getCurrentTick() - it.tick >= liveTicks
+                        } != false &&
                         citizens.constructionReady(cityId, orderId)
-                })
+                }, intervalTicks)
             operations[cityId] = operation
             operation.completion.whenCompleteSync(tasks) { mutation, failure ->
                 if (placementAccess[cityId] !== access) return@whenCompleteSync

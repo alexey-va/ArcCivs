@@ -53,6 +53,38 @@ class CivsLabGrowthTest : FunSpec({
         CivsLabGrowth.paidConstruction(paid.copy(construction = order.copy(payment = null)), order.id) shouldBe false
     }
 
+    test("only a selected reserved authored row gets two ticks until the run stops or expires") {
+        val base = roadAdmissionCity()
+        val building = base.buildings.last()
+        val order = CivConstruction(UUID(300, 7), building.id, 1, 2, 0, ConstructionPhase.PLACING, Stock(),
+            plannedBuilding = building, batches = CivConstructionBatches(2, 16), payment = CivConstructionPayment(0))
+        val city = base.copy(construction = order)
+        val plan = CivPlacementPlan(order.id, city.id, city.worldId, building, emptyList())
+        val batch = CivBuildBatch(building.anchor, building.anchor)
+        var at = 10_000L
+        val growth = CivsLabGrowth { at }
+        fun interval(current: Settlement = city, capture: CivPlacementPlan = plan, row: CivBuildBatch? = batch) =
+            CivsLabGrowth.placementTicks(current, order, capture, row, growth::active)
+
+        interval() shouldBe 5
+        growth.start(city)
+        interval() shouldBe 2
+        interval(city.copy(id = UUID(300, 8))) shouldBe 5
+        interval(city.copy(autonomy = null)) shouldBe 5
+        interval(city.copy(inventory = null)) shouldBe 5
+        interval(city.copy(construction = order.copy(payment = CivConstructionPayment()))) shouldBe 5
+        interval(city.copy(construction = order.copy(automaticPreparationBatches = 1))) shouldBe 5
+        interval(capture = plan.copy(adminPlacement = true)) shouldBe 5
+        interval(row = batch.copy(terrainStart = 0, terrainCount = 1)) shouldBe 5
+        interval(row = null) shouldBe 5
+
+        growth.stop(city.id)
+        interval() shouldBe 5
+        growth.start(city)
+        at += 600_000
+        interval() shouldBe 5
+    }
+
     test("the faster observed builder schedules only the next interval and owes the same paid row") {
         val base = roadAdmissionCity()
         val site = base.buildings.last().copy(type = BuildingType.HOUSE, phase = BuildingPhase.SITE, transit = null)

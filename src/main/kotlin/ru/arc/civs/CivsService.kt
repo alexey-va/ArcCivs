@@ -178,7 +178,8 @@ class CivsService(
         { id, action -> afterCityAvailable(id, action) }, { id, transform -> mutate(id, transform = transform) },
         { city, building -> admitRoadDevelopment(city) { buildingRequests.activateBuilding(city, building) } },
         { city, order, required -> buildingRequests.payBatch(city, order, required) }, ::updateHealth, clock,
-        handoffHallControl = { city, order -> controlRelocations.handoffHall(city, order) })
+        handoffHallControl = { city, order -> controlRelocations.handoffHall(city, order) },
+        acceleratedPlacement = ::labGrowthActive)
 
     private val inventoryJournal: CivsInventoryJournal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy,
         unhealthy, { closed }, { city -> publish(city) }, { id, transform -> mutate(id, transform = transform) },

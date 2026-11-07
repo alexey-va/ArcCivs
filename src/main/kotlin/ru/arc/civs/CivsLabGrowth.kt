@@ -48,6 +48,18 @@ internal class CivsLabGrowth(private val clock: () -> Long) {
     companion object {
         private const val RUN_MILLIS = 600_000L
         private const val WORK_RATE = 4
+        const val ORDINARY_PLACEMENT_TICKS = 5
+        private const val FAST_PLACEMENT_TICKS = 2
+
+        fun placementTicks(city: Settlement?, order: CivConstruction, plan: CivPlacementPlan, batch: CivBuildBatch?,
+            active: (Settlement) -> Boolean): Int {
+            if (city == null || batch == null || batch.terrainStart != null || plan.adminPlacement)
+                return ORDINARY_PLACEMENT_TICKS
+            val current = city.construction ?: return ORDINARY_PLACEMENT_TICKS
+            return if (current.phase == ConstructionPhase.PLACING && current.workDone == order.workDone &&
+                current.payment?.reservedBatch == order.workDone && current.automaticPreparationBatches == null &&
+                paidConstruction(city, order.id) && active(city)) FAST_PLACEMENT_TICKS else ORDINARY_PLACEMENT_TICKS
+        }
 
         fun workMillis(base: Long): Long = minOf(base, maxOf(500L, base / WORK_RATE))
 

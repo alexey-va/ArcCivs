@@ -415,9 +415,10 @@ class CivsBlueprints(
             }, executor)
 
     fun paste(snapshot: ArcSchematicSnapshot, worldId: UUID, anchor: CivPosition,
-        onPlaced: java.util.function.Consumer<ArcSchematicBlock>, ready: java.util.function.BooleanSupplier): ArcSchematicOperation =
+        onPlaced: java.util.function.Consumer<ArcSchematicBlock>, ready: java.util.function.BooleanSupplier,
+        intervalTicks: Int = CivsLabGrowth.ORDINARY_PLACEMENT_TICKS): ArcSchematicOperation =
         captured.paste(snapshot, ArcSchematicPasteTarget(worldId, ArcSchematicPoint(anchor.x, anchor.y, anchor.z)),
-            ArcSchematicPasteOptions(false, true, false), onPlaced, ready, 5)
+            ArcSchematicPasteOptions(false, true, false), onPlaced, ready, intervalTicks)
 
     internal fun crop(snapshot: ArcSchematicSnapshot, building: CivBuilding, batch: CivBuildBatch): CompletableFuture<ArcSchematicSnapshot> =
         captured.crop(snapshot,

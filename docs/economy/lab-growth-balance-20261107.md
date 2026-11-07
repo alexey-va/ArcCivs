@@ -23,3 +23,19 @@ calculated before/after scenarios. For acceptance compare real work timestamps
 and paid debits for the selected city and a normal city; distinguish materials
 and route refusals from elapsed work. Confirm that expired/off mode restores
 the normal timing and that no bonus items or credit were created.
+
+The second LAB trial shortens the pause between native placement units for
+a selected city with an already reserved and paid physical construction row.
+At 20 TPS, a five-tick pause limits this timer to four units per second;
+two ticks allow at most ten. One unit can be an atomic pair. Payment per
+row, worker arrival, legal placement, retry behavior and the shared world
+budget are unchanged. These timer ceilings are not rates of income or
+completed construction. Turning the mode off restores the five-tick minimum
+between native placements, including the remainder of an active paste.
+
+The first native trial with the original work-timer mode measured 168 changed
+batches in 120 seconds before and 150 paid changed batches in 100.54 seconds
+during Auto1's test. The sample does not establish an end-to-end speedup.
+Auto5 repeatedly had to fetch 16 cobblestone. Continue measuring same-order
+work and paid native changes before, during and after, and report supply
+or movement waits separately.
