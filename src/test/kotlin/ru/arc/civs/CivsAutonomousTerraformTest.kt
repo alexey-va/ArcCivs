@@ -16,6 +16,72 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.civs.CivsAutonomousTerraform.Node
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a unanimous paid Hall lead-out keeps the source and shoulders while a new farm can use its actual grade") {
+        val original = terraceCity()
+        val entrance = CivPosition(0, 66, 0)
+        val hall = original.buildings.single().copy(anchor = entrance.copy(y = 65), entrance = entrance,
+            phase = BuildingPhase.ACTIVE)
+        // Auto4 x11506/z9790 translated to the origin. All three retained routes rise at z9791.
+        val leadOut = listOf(entrance) + (1..4).map { CivPosition(0, 67, it) }
+        val owners = listOf(Triple(BuildingType.BUILDER_HUT, -8, 6), Triple(BuildingType.FORESTER, 8, 9),
+            Triple(BuildingType.QUARRY, -8, 12)).mapIndexed { index, (type, x, z) ->
+            val edge = if (x < 0) -1 else 1
+            CivBuilding(UUID(230, index.toLong()), type, 1, CivPosition(x, 66, z), if (edge < 0) 270 else 90,
+                "fixture", CivBox(CivPosition(minOf(x + edge, x + 3 * edge), 66, z - 1),
+                    CivPosition(maxOf(x + edge, x + 3 * edge), 70, z + 1)), CivPosition(x, 67, z), BuildingPhase.ACTIVE)
+        }
+        val city = original.copy(buildings = listOf(hall) + owners)
+        val journalBounds = CivBox(CivPosition(-12, 64, 0), CivPosition(12, 68, 13))
+        val plans = owners.map { owner ->
+            val end = owner.entrance
+            val direction = end.x.compareTo(0)
+            val route = leadOut + (5..end.z).map { CivPosition(0, 67, it) } +
+                (1..abs(end.x)).map { CivPosition(it * direction, 67, end.z) }
+            CivPlacementPlan(owner.id, city.id, city.worldId, owner, emptyList(), terrain =
+                CivTerraformPlan(journalBounds, emptyList(), route, 66, 0, 0))
+        }
+        val farm = terraceBuilder(city, ground = 66).copy(type = BuildingType.FARM)
+        val option = CivTerraformOption(farm, 0)
+        // Loaded height capture reported surface Y65 at the source and Y66 over the next three rows.
+        val surface = terraceSurface { _, z -> if (z <= 0) 65 else 66 }
+        val access = CivAutonomousAccess.from(city, plans)
+        access.routes.keys shouldBe owners.mapTo(hashSetOf()) { it.id }
+        val draft = CivsAutonomousTerraform.draft(city, option, surface, access)
+        val cells = terraceCapture(draft, surface)
+        val prepared = CivsAutonomousTerraform.materialize(draft, cells)
+        prepared.route.take(4) shouldBe leadOut.take(4)
+        prepared.route.last() shouldBe farm.entrance
+        checkTerrace(prepared, draft, cells)
+        prepared.blocks.none { it.position.x in -1..1 && it.position.z in 0..3 } shouldBe true
+        val standing = access.standing(city, farm.id)
+        standing[civsTerrainKey(0, 0)] shouldBe entrance
+        for (x in listOf(-1, 1)) for (z in 1..3)
+            standing[civsTerrainKey(x, z)] shouldBe CivPosition(x, 66, z)
+
+        fun rejectsUnownedLeadOut(journals: List<CivPlacementPlan>) {
+            val guarded = CivAutonomousAccess.from(city, journals)
+            guarded.routes.keys shouldBe access.routes.keys
+            val refusal = shouldThrow<CivsRejection> {
+                CivsAutonomousTerraform.draft(city, option, surface, guarded, reservedRoute = prepared.route)
+            }
+            refusal.reason shouldBe "autonomy-no-path"
+            refusal.values["stage"] shouldBe "retained-grade"
+            val retained = guarded.standing(city, farm.id)
+            (0..3).forEach { z -> retained[civsTerrainKey(0, z)] shouldBe CivPosition(0, 66, z) }
+        }
+        // A disagreement at the first cell cannot be bypassed to accept later agreement.
+        val first = plans.first()
+        val terrain = requireNotNull(first.terrain)
+        rejectsUnownedLeadOut(listOf(first.copy(terrain = terrain.copy(route = terrain.route.mapIndexed { index, feet ->
+            if (index == 1) feet.copy(y = 66) else feet
+        }))) + plans.drop(1))
+        // A structurally valid journal is no lead-out witness if it starts above the actual Hall entrance.
+        rejectsUnownedLeadOut(plans.map { plan ->
+            val path = requireNotNull(plan.terrain)
+            plan.copy(terrain = path.copy(route = listOf(entrance.copy(y = 67)) + path.route.drop(1)))
+        })
+    }
+
     test("a reconnected ordinary road preserves the reserved fortification port and its shoulder") {
         val city = terraceCity()
         val building = terraceBuilder(city)

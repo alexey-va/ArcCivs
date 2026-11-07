@@ -332,6 +332,53 @@ internal class CivsCitizenCollisions(
         return moved
     }
 
+    /** A finished food route can have no normal body-separation step even though its terrain is passable. */
+    fun recoverFoodOverlap(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
+        val since = route.bodyBlockedSince ?: return false
+        val food = actor.foodPickupSource ?: return false
+        if (actor.foodSource != food.buildingId || route.authored != food.standing || route.completion != null ||
+            !route.motion.finished || route.motion.failure != null || route.timedOut(now) ||
+            runtime.navigationTick - maxOf(since, route.progressTick) < 80L ||
+            actor.sheltering || actor.attacker != null || actor.mineVisit != null || actor.plan.courier?.carrying == true ||
+            actor.workerId in runtime.pendingHarm || life.residentLifePending(actor) || actor.supplyPickup != null ||
+            logistics.collectedPending(actor)) return false
+        val clock = recoveryClock()
+        if (runtime.recoveryBudget == 0 || actor.nextRecoveryAt?.let { clock < it } == true) return false
+        val npc = actor.npc
+        val from = npc.location
+        val blocker = blockingResident(actor, from, from)?.let(runtime.actors::get)?.takeIf { it.cityId == actor.cityId }
+            ?: return false
+        if (!yieldPlayerClear(actor, from, from)) return false
+        val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL || city.building(food.buildingId) == null) return false
+        runtime.recoveryBudget--
+        actor.nextRecoveryAt = clock + 5_000
+        citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+        val origin = CivPosition(from.blockX, from.blockY, from.blockZ)
+        val safe: (CivPosition) -> Boolean = { point ->
+            val to = point.location(npc.world)
+            recoveryPointSafe(actor, city, point, route.allowedBuildings) && yieldPlayerClear(actor, from, to) &&
+                citizenControlStepClear(city, from.point(), to.point()) &&
+                citizenPacketStepClear(npc.world, from.point(), to.point(), false)
+        }
+        val point = citizenRecoveryTarget(city, origin) {
+            safe(it) && !civsCanReachContainer(it.location(npc.world), food.container)
+        } ?: citizenRecoveryTarget(city, origin, safe) ?: return false
+        val to = point.location(npc.world).also { it.yaw = from.yaw; it.pitch = from.pitch }
+        routes.cancelRoute(actor, to)
+        if (!npc.isValid || !safe(point)) return false
+        npc.teleport(to)
+        actor.arrivalWait = null
+        actor.navigationEpisodeProgress = 0.0
+        actor.nextRecoveryAt = clock + 60_000
+        actor.footsteps.reset()
+        // Food, delivery and work still wait for the next ordinary reach and receipt.
+        CivsDiagnostics.event("citizen_route_recovered", "city" to city.id, "worker" to actor.workerId,
+            "mode" to "food-overlap-staging", "blocker" to blocker.workerId, "requested" to route.authored,
+            "from" to from.point().coordinates(), "actual" to npc.location.point().coordinates(), "destination" to point)
+        return true
+    }
+
     fun idleDestinationFree(actor: CitizenActor, to: Location): Boolean {
         val body = citizenStandingBounds(to, actor.npc.scale).expand(.15, 0.0, .15)
         if (shelterOccupied(actor).any(body::overlaps)) return false

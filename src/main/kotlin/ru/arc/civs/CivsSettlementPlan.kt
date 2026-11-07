@@ -289,9 +289,8 @@ internal object CivsSettlementPlans {
             adopted?.plots.orEmpty().none { it.building.id.toString() == id } }.mapKeys { UUID.fromString(it.key) }.toMutableMap()
         routes += retained.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
         val preferredRoads = routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
-        fun planningAccess() = CivAutonomousAccess(if (candidateFrame == null) routes else routes + retained.routes,
-            retained.infrastructure, retained.acceptedFortifications,
-            plots.flatMap { it.fortification?.let { metadata -> portReservations(metadata.proof) }.orEmpty() })
+        fun planningAccess() = retained.copy(routes = if (candidateFrame == null) routes else routes + retained.routes,
+            reservedFortificationPorts = plots.flatMap { it.fortification?.let { metadata -> portReservations(metadata.proof) }.orEmpty() })
         if (count > 0) {
             val template = requireNotNull(fortification)
             var reserved = 0

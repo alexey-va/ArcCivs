@@ -7,7 +7,8 @@ import kotlin.math.abs
 internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>> = emptyMap(),
     val infrastructure: List<CivSettlementPiece> = emptyList(),
     val acceptedFortifications: Set<UUID> = emptySet(),
-    val reservedFortificationPorts: List<CivBox> = emptyList()) {
+    val reservedFortificationPorts: List<CivBox> = emptyList(),
+    val paidHallLeadOut: List<CivPosition> = emptyList()) {
     /** Earlier roads win when an older release recorded incompatible heights at the same column. */
     fun standing(city: Settlement, exceptBuildingId: UUID): Map<Long, CivPosition> = buildMap {
         require(city.buildings.size <= CivsRules.MAX_SITES)
@@ -15,7 +16,11 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
             // A pinned SITE prepares only its entrance column; its wider terrace does not exist yet.
             val approach = if (building.phase == BuildingPhase.ACTIVE) CivsAutonomousGeometry.approach(building)
                 else listOf(building.entrance)
-            (approach + routes[building.id].orEmpty() +
+            val graded = if (building.type == BuildingType.TOWN_HALL && building.phase == BuildingPhase.ACTIVE &&
+                paidHallLeadOut.firstOrNull() == building.entrance)
+                approach.map { nominal -> paidHallLeadOut.firstOrNull { it.x == nominal.x && it.z == nominal.z } ?: nominal }
+            else approach
+            (graded + routes[building.id].orEmpty() +
                 building.transit.orEmpty().takeIf { building.phase == BuildingPhase.ACTIVE }.orEmpty()).forEach { feet ->
                 putIfAbsent(civsTerrainKey(feet.x, feet.z), feet)
             }
@@ -35,7 +40,7 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                     CivsSettlementPlans.sameFortificationGeometry(actual, plot.building) &&
                     CivsSettlementPlans.sameFortificationGeometry(plan.building, plot.building) }
             }.toSet()
-            return CivAutonomousAccess(buildMap {
+            val routes = buildMap {
                 city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.forEach { building ->
                     val plan = retained[building.id] ?: return@forEach
                     val route = plan.terrain?.route ?: return@forEach
@@ -54,10 +59,33 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                         put(building.id, override.route.toList())
                     } else put(building.id, route.toList())
                 }
-            }, CivsSettlementLayout.accepted(city, plans), fortifications,
+            }
+            return CivAutonomousAccess(routes, CivsSettlementLayout.accepted(city, plans), fortifications,
                 CivsSettlementPlans.current(city)?.plots.orEmpty().flatMap { plot ->
                     plot.fortification?.let { CivsSettlementPlans.portReservations(it.proof) }.orEmpty()
-                })
+                }, paidHallLeadOut(city, routes))
+        }
+
+        /** Only an exact, corroborated paid centreline can replace the Hall's synthetic flat apron. */
+        private fun paidHallLeadOut(city: Settlement, routes: Map<UUID, List<CivPosition>>): List<CivPosition> {
+            val hall = city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.ACTIVE }
+                ?: return emptyList()
+            val hallFeet = hall.entrance
+            val alongZ = hall.rotation in listOf(0, 180)
+            val centre = CivsAutonomousGeometry.approach(hall).filter {
+                if (alongZ) it.x == hallFeet.x else it.z == hallFeet.z
+            }
+            val prefixes = routes.filterKeys { id -> id != hall.id && city.building(id)?.type?.isInfrastructure == false }
+                .values.filter { route -> route.firstOrNull() == hallFeet && route.size >= centre.size }
+                .map { it.take(centre.size) }.filter { path ->
+                    path.map { it.copy(y = hallFeet.y) } == centre && path.all { abs(it.y.toLong() - hallFeet.y) <= 1L }
+                }
+            if (prefixes.size < 2) return emptyList()
+            val selected = prefixes.first()
+            val grades = selected.associate { civsTerrainKey(it.x, it.z) to it.y }
+            if (routes.values.any { path -> path.any { p -> grades[civsTerrainKey(p.x, p.z)]?.let { it != p.y } == true } })
+                return emptyList()
+            return selected
         }
     }
 }
