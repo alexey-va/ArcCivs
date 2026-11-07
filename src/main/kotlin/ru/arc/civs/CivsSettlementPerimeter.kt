@@ -304,6 +304,7 @@ internal object CivsSettlementPerimeter {
                 } ?: run {
                     throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "gate-junction",
                         "first" to "${first.x},${first.z}", "group" to group.joinToString(";") { "${it.x},${it.z}" },
+                        "retained_crossing" to paidGroup.toString(),
                         "selected" to gates.joinToString(";") { "${it.center.x},${it.center.z}" },
                         "near_cut" to candidates.asSequence().filter { abs(it.x - first.x) + abs(it.z - first.z) <= 8 }
                             .take(64).joinToString(";") { "${it.x},${it.z}" }) +

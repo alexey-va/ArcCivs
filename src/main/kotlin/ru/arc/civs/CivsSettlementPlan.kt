@@ -33,6 +33,9 @@ internal object CivsSettlementPlans {
         return when (values["stage"]) {
             "retained-road-wall" -> failure.reason == "autonomy-layout-obstructed" &&
                 values["first"] != null && values["retained_floor"]?.toIntOrNull() != null
+            "gate-junction" -> failure.reason == "autonomy-layout-obstructed" &&
+                values["retained_crossing"] == "true" && values["first"] != null &&
+                (values["candidate_retained-route"]?.toIntOrNull() ?: 0) > 0
             "gate-connection" -> {
                 val outcomes = values.keys.filter { it.startsWith("route-") }
                 failure.reason == "autonomy-no-path" && outcomes.isNotEmpty() && outcomes.all { it in geometricGateOutcomes }
@@ -455,7 +458,8 @@ internal object CivsSettlementPlans {
                         frame.gates.map { it.passage }, frame.gates.map { it.side }),
                         CivSettlementInfrastructure(emptyList(), mapOf("perimeter-failed" to 1), false))
                 }.onFailure(failure::addSuppressed)
-                if (failure.reason == "autonomy-layout-obstructed" && failure.values["stage"] == "retained-road-wall")
+                if (failure.reason == "autonomy-layout-obstructed" && (failure.values["stage"] == "retained-road-wall" ||
+                        failure.values["stage"] == "gate-junction" && failure.values["retained_crossing"] == "true"))
                     throw CivsRejection(failure.reason, failure.values +
                         mapOf("fully_loaded" to fullyLoadedSurvey(city, surface).toString(),
                             "half_width" to frame.halfWidth.toString())).also { it.initCause(failure) }

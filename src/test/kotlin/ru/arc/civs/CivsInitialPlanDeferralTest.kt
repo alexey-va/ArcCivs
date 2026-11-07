@@ -83,6 +83,63 @@ class CivsInitialPlanDeferralTest : FunSpec({
         }
     }
 
+    val paidGateJunction = mapOf("stage" to "gate-junction", "fully_loaded" to "true", "first" to "0,9",
+        "retained_crossing" to "true", "candidate_retained-route" to "2")
+
+    test("a paid gate junction on an unbuilt perimeter leaves the first exterior quarry to ordinary admission") {
+        InitialPlanHarness().use { h ->
+            val hut = h.hutDesign().blueprint.building.copy(phase = BuildingPhase.ACTIVE)
+            val templates = settlementPlanTemplates()
+            val forester = CivsSettlementPlans.at(templates.getValue(BuildingType.FORESTER).first,
+                h.city.center.copy(x = h.city.center.x - 48), 270, UUID(213, 2)).copy(phase = BuildingPhase.ACTIVE)
+            h.city = h.city.copy(buildings = h.city.buildings + hut + forester)
+            val before = h.city
+            CivsAutonomy.nextGoal(before)?.type shouldBe BuildingType.QUARRY
+            val conflict = CivsRejection("autonomy-layout-obstructed", paidGateJunction)
+            val exhausted = CivsRejection("autonomy-no-site", mapOf("type" to "QUARRY"))
+            val refusal = shouldThrow<CivsRejection> {
+                growthWithWidths(before) { width -> throw if (width == 32) conflict else exhausted }
+            }
+            refusal shouldBe conflict
+            h.start(); h.rejectPlan(refusal)
+            h.city shouldBe before
+            h.time = 5_001; h.pulse()
+            verify(exactly = 1) { h.placement.search(before, BuildingType.QUARRY, 1, any(), false, null, 0) }
+            val quarry = CivsSettlementPlans.at(templates.getValue(BuildingType.QUARRY).first,
+                before.center.copy(x = before.center.x + 48), 90, UUID(213, 3))
+            CivsSettlementGrowth.outside(before, quarry.bounds) shouldBe true
+            val design = CivAutonomousDesign(CivBlueprint(quarry, before.worldId, mockk(relaxed = true),
+                emptyList(), emptyList(), byteArrayOf(1)))
+            h.searches.single().complete(design); h.drain()
+            verify(exactly = 1) { h.world.captureAutonomousSite(before.id, before.owner, before.worldId,
+                quarry, emptyList(), null) }
+            h.city.autonomy shouldBe before.autonomy
+            h.city.buildings.dropLast(1) shouldBe before.buildings
+            h.city.building(quarry.id)?.phase shouldBe BuildingPhase.SITE
+            h.city.constructionQueue shouldBe listOf(quarry.id)
+            h.city.construction shouldBe null
+            h.city.stock shouldBe before.stock
+            h.city.inventory shouldBe before.inventory
+        }
+    }
+
+    test("a paid gate junction cannot defer any established perimeter") {
+        InitialPlanHarness().use { h ->
+            val failure = CivsRejection("autonomy-layout-obstructed", paidGateJunction)
+            val before = h.city
+            val wall = CivsInfrastructure.building(CivSettlementPiece(UUID(213, 4), BuildingType.WALL,
+                CivBox(CivPosition(31, 64, -10), CivPosition(33, 73, -1)), CivPosition(32, 65, -1), emptyList())).copy(phase = BuildingPhase.ACTIVE)
+            for (city in listOf(before.copy(buildings = before.buildings + wall),
+                before.copy(autonomy = before.autonomy!!.copy(plan = h.plan())))) {
+                val initial = CivsSettlementGrowth.halfWidths(city).first()
+                val later = CivsRejection("autonomy-no-site")
+                shouldThrow<CivsRejection> {
+                    growthWithWidths(city) { width -> throw if (width == initial) failure else later }
+                } shouldBe later
+            }
+        }
+    }
+
     for ((label, failure) in listOf(
         "unknown" to CivsRejection("autonomy-no-path"),
         "partial gate terrain" to CivsRejection("autonomy-no-path", mapOf("stage" to "gate-connection",
@@ -92,6 +149,10 @@ class CivsInitialPlanDeferralTest : FunSpec({
         "partial paid road terrain" to CivsRejection("autonomy-layout-obstructed",
             paidRoadConflict + ("fully_loaded" to "false")),
         "missing paid road witness" to CivsRejection("autonomy-layout-obstructed", paidRoadConflict - "first"),
+        "partial gate junction terrain" to CivsRejection("autonomy-layout-obstructed", paidGateJunction + ("fully_loaded" to "false")),
+        "unpaid gate crossing" to CivsRejection("autonomy-layout-obstructed", paidGateJunction + ("retained_crossing" to "false")),
+        "gate junction without paid-route conflict" to CivsRejection("autonomy-layout-obstructed", paidGateJunction - "candidate_retained-route"),
+        "gate junction with route budget exhaustion" to CivsRejection("autonomy-layout-obstructed", paidGateJunction + ("route-budget" to "1")),
     )) test("a perimeter forecast cannot yield ordinary work with $label evidence") {
         InitialPlanHarness().use { h ->
             val before = h.city
