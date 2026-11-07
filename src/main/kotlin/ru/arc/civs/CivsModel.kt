@@ -276,6 +276,7 @@ data class CivTerraformPlan(
     val cutCount: Int,
     val fillCount: Int,
     val waterFoundations: List<CivWaterFoundation>? = null,
+    val requiredGrass: List<CivPosition>? = null,
 )
 data class CivPlacementPlan(
     val id: UUID,

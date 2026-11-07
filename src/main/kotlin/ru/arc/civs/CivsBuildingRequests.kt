@@ -523,7 +523,8 @@ internal class CivsBuildingRequests(
                                         blueprint.cells, executor, building, adminPlacement = sitePlan.adminPlacement)
                                         .thenApply { CivAutonomousDesign(blueprint, it) }
                                 city.autonomy != null && building.phase == BuildingPhase.SITE ->
-                                    autonomousPlacement.prepareExisting(city, blueprint, sitePlan.terrain?.waterFoundations.orEmpty())
+                                    autonomousPlacement.prepareExisting(city, blueprint, sitePlan.terrain?.waterFoundations.orEmpty(),
+                                        sitePlan.terrain?.requiredGrass.orEmpty())
                                 else -> CompletableFuture.completedFuture(CivAutonomousDesign(blueprint, sitePlan.terrain))
                             }
                             design.thenCompose { prepared -> world.capture(city.id, city.owner, city.worldId,

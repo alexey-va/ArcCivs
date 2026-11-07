@@ -291,7 +291,10 @@ internal fun CivRoadUpkeepReceipt.detached(): CivRoadUpkeepReceipt = copy(
 /** Detached, reconstructible read model of existing retained journals. No new persistent job or registry. */
 internal data class CivRoadUpkeepNetwork(val cityId: UUID, val worldId: UUID,
     val buildings: List<CivBuilding>, val targets: List<CivRoadUpkeep>,
-    val routeOverrides: Map<String, CivRoadRouteOverride>? = null)
+    val routeOverrides: Map<String, CivRoadRouteOverride>? = null,
+    val deferredDescent: CivRoadDescentDeferral? = null)
+
+internal data class CivRoadDescentDeferral(val floor: CivPosition, val downhill: CivPosition, val count: Int)
 
 /** Main-thread native scan owner; only preparation of the detached network runs off-thread. */
 internal class CivsRoadMaintenance(private val world: CivsWorld,
@@ -347,6 +350,10 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         }
         awaitingGradeNetwork[city.id]?.takeIf { it.buildings == prepared.buildings && it.overrides == prepared.routeOverrides }
             ?.let { awaitingGradeNetwork.remove(city.id) }
+        prepared.deferredDescent?.takeIf { it != previous?.deferredDescent }?.let { deferred ->
+            CivsDiagnostics.event("road_upkeep_targets_deferred", "city" to city.id, "reason" to "ordered-downhill-unavailable",
+                "count" to deferred.count, "floor" to deferred.floor, "downhill" to deferred.downhill)
+        }
     }
 
     private fun gradeTargets(city: Settlement, network: CivRoadUpkeepNetwork): List<CivRoadUpkeep> {
@@ -926,6 +933,18 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 CivsAutonomousGeometry.horizontalContains(reserved.getValue(it.id), floor) ||
                     CivsWorksiteLayouts.isField(it, floor.x, floor.z)
             }
+            var deferredDescent: CivRoadDescentDeferral? = null
+            fun approachFinish(floor: CivPosition, profile: Map<Long, Int>, route: List<CivPosition>): String? {
+                val atTurn = floor in CivsSettlementLayout.turnFloors(route)
+                val downhill = CivsSettlementLayout.routeDownhill(floor, route)
+                val available = downhill?.takeIf { profile[civsTerrainKey(it.x, it.z)] == it.y }
+                val finish = CivsSettlementLayout.pathPavement(floor, profile, city.style, atTurn, available)
+                // A proved full turn landing stays valid. A straight stair needs its exact ordered descent.
+                if (downhill == available || atTurn && landing(finish)) return finish
+                deferredDescent = deferredDescent?.let { it.copy(count = it.count + 1) }
+                    ?: CivRoadDescentDeferral(floor, requireNotNull(downhill), 1)
+                return null
+            }
             // Every accepted centreline wins before any shoulder. Never regrade another paid route.
             val centreColumns = floors.keys.toSet()
             city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }.forEach { source ->
@@ -1029,9 +1048,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                         val neighbours = finalColumns?.get(civsTerrainKey(floor.x, floor.z))?.neighbours ?: directions.mapNotNull { (dx, dz) -> corrected[civsTerrainKey(floor.x + dx, floor.z + dz)] }
                             .filter { abs(it.y.toLong() - floor.y) <= 1L && !excluded(it) }
                         val profile = (neighbours + floor).associate { civsTerrainKey(it.x, it.z) to it.y }
-                        val finish = CivsSettlementLayout.pathPavement(floor, profile, city.style,
-                            atTurn = floor in CivsSettlementLayout.turnFloors(repair.route),
-                            downhill = CivsSettlementLayout.routeDownhill(floor, repair.route))
+                        val finish = approachFinish(floor, profile, repair.route) ?: return@candidate null
                         val touched = linked.keys + source.id.toString()
                         CivRoadUpkeep(city.id, city.worldId, city.owner, source.id, source, floor,
                             finish, repair.route, neighbours, repair, linkedRouteOverrides = linked.takeIf { it.isNotEmpty() },
@@ -1053,16 +1070,16 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 if (authored != null && !authoredStep(floor, authored, profile, city.style) &&
                     !(landing(authored) && authored == CivsSettlementLayout.pathPavement(floor, profile, city.style, atTurn = true)))
                     return@mapNotNull null
-                val finish = authored ?: CivsSettlementLayout.pathPavement(floor, profile, city.style,
-                    atTurn = route != null && floor in CivsSettlementLayout.turnFloors(route),
-                    downhill = route?.let { CivsSettlementLayout.routeDownhill(floor, it) },
-                    legacyStairAtTurn = source.type == BuildingType.ROAD)
+                val finish = authored ?: if (route == null)
+                    CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = source.type == BuildingType.ROAD)
+                else approachFinish(floor, profile, route) ?: return@mapNotNull null
                 CivRoadUpkeep(city.id, city.worldId, city.owner, source.id, source, floor, finish,
                     route, neighbours.toList(), authoredAfter = saved,
                     junction = retainedJunctions.firstOrNull { key in it.columns() && it.owners.any { owner -> owner.source == source } })
                     .also { it.validated(city) }
             }
-            return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(), gradeTargets + targets, city.roadRouteOverrides)
+            return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(), gradeTargets + targets,
+                city.roadRouteOverrides, deferredDescent)
         }
     }
 }

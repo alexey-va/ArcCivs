@@ -304,7 +304,8 @@ internal object CivsInfrastructureRebuild {
         val before = source.blocks.associate { it.position to it.after }
         return source.copy(id = capture, building = target, blocks = piece.blocks.map {
             CivPlanBlock(it.position, before[it.position] ?: "minecraft:air", it.after)
-        }, terrain = source.terrain?.copy(blocks = emptyList(), cutCount = 0, fillCount = 0, waterFoundations = null), capturedSha256 = null)
+        }, terrain = source.terrain?.copy(blocks = emptyList(), cutCount = 0, fillCount = 0, waterFoundations = null,
+            requiredGrass = null), capturedSha256 = null)
     }
 
     private fun captureId(source: UUID, stage: Int, survivor: UUID? = null): UUID = UUID.nameUUIDFromBytes(

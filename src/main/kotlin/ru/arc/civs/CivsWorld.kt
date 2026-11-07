@@ -394,9 +394,9 @@ class CivsWorld(
                 else Math.addExact(citySnapshot.center.z, index / width - radius)
             val key = civsTerrainKey(x, z)
             fun complete(ground: Int, natural: Boolean, loaded: Boolean = true, water: CivTerrainSurfaceColumn? = null,
-                dirtPath: Boolean = false) {
+                dirtPath: Boolean = false, cleanGrass: Boolean = false) {
                 columns[key] = water?.copy(topY = topY ?: ground) ?:
-                    CivTerrainSurfaceColumn(ground, natural, loaded, topY ?: ground, dirtPath = dirtPath)
+                    CivTerrainSurfaceColumn(ground, natural, loaded, topY ?: ground, dirtPath = dirtPath, cleanGrass = cleanGrass)
                 index++; topY = null; waterTopY = null; probes = 0
             }
             if (!world.isChunkLoaded(x shr 4, z shr 4) ||
@@ -439,7 +439,7 @@ class CivsWorld(
             }
             val canopy = Tag.LOGS.isTagged(block.type) || block.blockData is org.bukkit.block.data.type.Leaves
             if (!canopy && block.type.isSolid && naturalTerraform(block)) {
-                complete(probeY, true)
+                complete(probeY, true, cleanGrass = block.type == Material.GRASS_BLOCK && topY == probeY)
                 return
             }
             val clearable = naturalTerraform(block)
@@ -945,8 +945,9 @@ class CivsWorld(
     ) : CivsWorldScan<CivPlacementPlan>(this@CivsWorld, cityId, owner, worldId, building) {
         private val blocks = ArrayList<CivPlanBlock>()
         private val terraform = terrain?.copy(blocks = terrain.blocks.toList(), route = terrain.route.toList(),
-            waterFoundations = terrain.waterFoundations?.toList())
+            waterFoundations = terrain.waterFoundations?.toList(), requiredGrass = terrain.requiredGrass?.toList())
         private val terrainOverlay = terraform?.blocks.orEmpty().associateBy { it.position }
+        private val requiredGrass = terraform?.requiredGrass.orEmpty().toSet()
         private val terrainBlocks = ArrayList<CivPlanBlock>()
         private val waterColumns = civsWaterFoundationColumns(building, terraform?.waterFoundations.orEmpty(), terraform?.blocks.orEmpty())
         private val waterFoundations = waterColumns.values.toList()
@@ -971,6 +972,8 @@ class CivsWorld(
             terraform?.let {
                 requireCivs(cells.size.toLong() + it.blocks.size <= CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
                 requireTerrainRoute(it.route, building, allowManualFoundation = true)
+                requireCivs(requiredGrass.isEmpty() || building.type == BuildingType.WALL && it.route.isNotEmpty() &&
+                    requiredGrass.all { p -> infrastructureGround[civsTerrainKey(p.x, p.z)] == p.y }, "invalid-plan")
                 if (it.route.isNotEmpty()) strictAutonomous = true
             }
         }
@@ -1076,6 +1079,9 @@ class CivsWorld(
             checkCell(position)
             // Even skipped barrier cells must belong to loaded chunks; Core skips these exact cells.
             val block = read(position)
+            if (position in requiredGrass && (block.type != Material.GRASS_BLOCK ||
+                    world.getHighestBlockYAt(position.x, position.z, HeightMap.MOTION_BLOCKING) != position.y))
+                rejectAt("world-changed", block)
             if (cell.isBarrier) {
                 requireCivs(parse(cell.blockData).material == Material.BARRIER, "invalid-plan")
                 if (!canModify(owner, block)) rejectAt("lands-denied", block)

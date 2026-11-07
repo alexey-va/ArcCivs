@@ -148,7 +148,8 @@ class CivsStore(
 
     fun savePlan(plan: CivPlacementPlan): CompletableFuture<CivPlacementPlan> {
         val snapshot = plan.copy(building = snapshotBuilding(plan.building), blocks = plan.blocks.toList(), terrain = plan.terrain?.let {
-            it.copy(blocks = it.blocks.toList(), route = it.route.toList(), waterFoundations = it.waterFoundations?.toList())
+            it.copy(blocks = it.blocks.toList(), route = it.route.toList(), waterFoundations = it.waterFoundations?.toList(),
+                requiredGrass = it.requiredGrass?.toList())
         })
         return submit {
             // A failed atomic write can have reached rename; never retain its previous cached value.
@@ -486,7 +487,8 @@ class CivsStore(
         building = plan.building.copy(transit = plan.building.transit?.let { java.util.List.copyOf(it) }),
         blocks = java.util.List.copyOf(plan.blocks),
         terrain = plan.terrain?.let { it.copy(blocks = java.util.List.copyOf(it.blocks),
-            route = java.util.List.copyOf(it.route), waterFoundations = it.waterFoundations?.let { java.util.List.copyOf(it) }) },
+            route = java.util.List.copyOf(it.route), waterFoundations = it.waterFoundations?.let { java.util.List.copyOf(it) },
+            requiredGrass = it.requiredGrass?.let { java.util.List.copyOf(it) }) },
     ).also { planCache[it.id] = it }
 
     private fun snapshotBuilding(building: CivBuilding) = building.copy(transit = building.transit?.toList())
@@ -540,6 +542,9 @@ class CivsStore(
         requireSafePosition(building.anchor)
         requireSafePosition(building.entrance)
 
+        val grass = plan.terrain?.requiredGrass.orEmpty().toSet()
+        require(grass.size == plan.terrain?.requiredGrass.orEmpty().size)
+        require(grass.isEmpty() || building.type == BuildingType.WALL && !plan.terrain?.route.isNullOrEmpty())
         val coordinates = HashSet<CivPosition>(plan.blocks.size)
         plan.blocks.forEach { block ->
             val position = requireNotNull(requireNotNull(block).position)
@@ -548,7 +553,9 @@ class CivsStore(
             require(coordinates.add(position)) { "Placement plan contains duplicate coordinates" }
             require(validBoundedText(block.before, MAX_BLOCK_STATE_CHARS)) { "Plan before-state is invalid" }
             require(validBoundedText(block.after, MAX_BLOCK_STATE_CHARS)) { "Plan after-state is invalid" }
+            if (position in grass) require(block.before.substringBefore('[') == "minecraft:grass_block")
         }
+        require(coordinates.containsAll(grass))
         plan.terrain?.let { terrain ->
             require(terrain.blocks.size <= MAX_PLAN_BLOCKS && terrain.blocks.size + plan.blocks.size <= MAX_PLAN_BLOCKS)
             require(terrain.route.size <= 4096)

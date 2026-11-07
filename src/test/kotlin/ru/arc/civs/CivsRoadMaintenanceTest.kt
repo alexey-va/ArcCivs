@@ -341,6 +341,42 @@ class CivsRoadMaintenanceTest : FunSpec({
         CivsRoadMaintenance.prepare(town, listOf(foreign)).targets shouldBe emptyList()
     }
 
+    test("a queued gate only defers upkeep whose exact downhill is in its footprint") {
+        val route = (10365..10369).map { z -> CivPosition(12562, if (z <= 10366) 69 else 70, z) }
+        val base = upkeepCity()
+        val hall = base.buildings.first().copy(anchor = CivPosition(12552, 68, 10362),
+            bounds = CivBox(CivPosition(12552, 68, 10360), CivPosition(12557, 73, 10364)), entrance = route.first())
+        val forester = base.buildings.last().copy(type = BuildingType.FORESTER, transit = null,
+            schematicId = "fixture/forester", anchor = CivPosition(12562, 69, 10370),
+            bounds = CivBox(CivPosition(12560, 69, 10370), CivPosition(12564, 75, 10375)), entrance = route.last())
+        val city = base.copy(center = route.first(), style = "original", buildings = listOf(hall, forester), workers = emptyList())
+        val retained = upkeepApproach(city, forester, route)
+        val stair = CivPosition(12562, 69, 10367)
+        val lower = CivPosition(12562, 68, 10366)
+        val adjacent = CivPosition(12562, 69, 10368)
+        val baseline = CivsRoadMaintenance.prepare(city, listOf(retained))
+        baseline.targets.single { it.floor == stair }.after shouldBe
+            "minecraft:oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+        val gateId = UUID(0, 99)
+        val gateBounds = CivBox(CivPosition(12560, 68, 10362), CivPosition(12564, 73, 10366))
+        val gate = forester.copy(id = gateId, type = BuildingType.GATE, phase = BuildingPhase.SITE,
+            schematicId = CivsInfrastructureRebuild.schematicId(BuildingType.GATE, 1, gateId), anchor = gateBounds.min,
+            bounds = gateBounds, entrance = CivPosition(12563, 69, 10361),
+            transit = CivsInfrastructureRebuild.openColumns(gateBounds, alongX = true).map { (x, z) -> CivPosition(x, 69, z) })
+        val queued = CivsRules.enqueue(CivsRules.placeSite(city, city.owner, gate), city.owner, gateId)
+
+        val prepared = CivsRoadMaintenance.prepare(queued, listOf(retained))
+
+        prepared.deferredDescent shouldBe CivRoadDescentDeferral(stair, lower, 1)
+        prepared.targets.none { it.floor == stair || it.floor == lower } shouldBe true
+        prepared.targets.single { it.floor == adjacent }.let { surviving ->
+            surviving.after shouldBe baseline.targets.single { it.floor == adjacent }.after
+            surviving.route shouldBe route
+            surviving.validated(queued)
+        }
+        CivAutonomousAccess.from(queued, listOf(retained)).routes.getValue(forester.id) shouldBe route
+    }
+
     test("ROAD upkeep retains its exact authored plank landing without inventing an ordered turn") {
         val city = upkeepCity()
         val floor = CivPosition(0, 63, 0)

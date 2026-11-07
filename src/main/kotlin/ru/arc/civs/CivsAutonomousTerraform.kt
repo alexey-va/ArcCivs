@@ -19,7 +19,7 @@ internal data class CivTerrainSurface(
 /** Water metadata is opt-in survey evidence; a water column always remains non-natural. */
 internal data class CivTerrainSurfaceColumn(val groundY: Int, val natural: Boolean, val loaded: Boolean = true,
     val topY: Int = groundY, val waterTopY: Int? = null, val waterBottomY: Int? = null,
-    val dirtPath: Boolean = false)
+    val dirtPath: Boolean = false, val cleanGrass: Boolean = false)
 
 /** Native capture covers [supportY, maxOf(surfaceY, groundY) + 2]. */
 internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int, val floorY: Int,
@@ -28,7 +28,8 @@ internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int,
 
 internal data class CivTerraformDraft(val building: CivBuilding, val columns: List<CivTerraformColumn>,
     val route: List<CivPosition>, val groundY: Int, val access: CivAutonomousAccess = CivAutonomousAccess(),
-    val waterFoundations: List<CivWaterFoundation> = emptyList(), val prepareControl: Boolean = false)
+    val waterFoundations: List<CivWaterFoundation> = emptyList(), val prepareControl: Boolean = false,
+    val requiredGrass: List<CivPosition> = emptyList())
 
 /** Exact native state; [supportSafe] permits retaining a solid block, never changing it. */
 internal data class CivTerraformCell(val position: CivPosition, val data: String, val safe: Boolean,
@@ -433,6 +434,10 @@ internal object CivsAutonomousTerraform {
         fun rejectTerrain(cell: CivTerraformCell, stage: String): Nothing = throw CivsRejection("autonomy-terrain",
             mapOf("x" to cell.position.x.toString(), "y" to cell.position.y.toString(),
                 "z" to cell.position.z.toString(), "block" to cell.data, "stage" to stage))
+        for (p in draft.requiredGrass) {
+            val cell = at(p.x, p.y, p.z)
+            if (cell.data.substringBefore('[') != "minecraft:grass_block") rejectTerrain(cell, "wall-approach-grass")
+        }
         fun change(cell: CivTerraformCell, after: String) {
             if ((cell.position == draft.building.control && !draft.prepareControl) || cell.data == after) return
             if (cell.position == draft.building.control && after != "minecraft:air") throw CivsRejection("invalid-plan")
@@ -487,7 +492,9 @@ internal object CivsAutonomousTerraform {
             CivPosition(points.maxOf { it.x }, points.maxOf { it.y }, points.maxOf { it.z }))
         val blocks = result.values.toList()
         return CivTerraformPlan(bounds, blocks, draft.route.toList(), draft.groundY,
-            blocks.count { air(it.after) }, blocks.count { !air(it.after) }, draft.waterFoundations.takeIf { it.isNotEmpty() }?.toList())
+            blocks.count { air(it.after) }, blocks.count { !air(it.after) },
+            draft.waterFoundations.takeIf { it.isNotEmpty() }?.toList(),
+            draft.requiredGrass.takeIf { it.isNotEmpty() }?.toList())
     }
 
     /** Three-wide road surface. Equal-distance shoulders use the lower grade, never a raised curb. */

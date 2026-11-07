@@ -8,7 +8,8 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     val infrastructure: List<CivSettlementPiece> = emptyList(),
     val acceptedFortifications: Set<UUID> = emptySet(),
     val reservedFortificationPorts: List<CivBox> = emptyList(),
-    val paidHallLeadOut: List<CivPosition> = emptyList()) {
+    val paidHallLeadOut: List<CivPosition> = emptyList(),
+    val wallApproachWrites: Map<UUID, Set<Long>> = emptyMap()) {
     /** Earlier roads win when an older release recorded incompatible heights at the same column. */
     fun standing(city: Settlement, exceptBuildingId: UUID): Map<Long, CivPosition> = buildMap {
         require(city.buildings.size <= CivsRules.MAX_SITES)
@@ -31,7 +32,8 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
         fun from(city: Settlement, plans: List<CivPlacementPlan>): CivAutonomousAccess {
             require(city.buildings.size <= CivsRules.MAX_SITES && plans.size <= CivsRules.MAX_SITES)
             val retained = plans.associateBy { it.building.id }
-            val fortifications = CivsSettlementPlans.current(city)?.plots.orEmpty().mapNotNull { plot ->
+            val adopted = CivsSettlementPlans.current(city)
+            val fortifications = adopted?.plots.orEmpty().mapNotNull { plot ->
                 val metadata = plot.fortification ?: return@mapNotNull null
                 val actual = city.building(plot.building.id) ?: return@mapNotNull null
                 val plan = retained[actual.id] ?: return@mapNotNull null
@@ -60,10 +62,22 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                     } else put(building.id, route.toList())
                 }
             }
+            val wallApproachWrites = if (adopted?.deferredPerimeter == null) emptyMap() else buildMap {
+                for (wall in city.buildings.filter { it.type == BuildingType.WALL && it.id in routes }) {
+                    val plan = retained.getValue(wall.id)
+                    val terrain = requireNotNull(plan.terrain)
+                    // A profile refit retains the route but its new capture omits the original earthworks.
+                    if (plan.id != wall.id || plan.id != CivsGateRefit.retainedPlanId(wall) ||
+                        plan.building.copy(phase = BuildingPhase.ACTIVE) != wall || plan.capturedSha256 == null ||
+                        terrain.route != routes[wall.id]) continue
+                    put(wall.id, terrain.blocks.asSequence().filter { it.before != it.after }
+                        .mapTo(hashSetOf()) { civsTerrainKey(it.position.x, it.position.z) })
+                }
+            }
             return CivAutonomousAccess(routes, CivsSettlementLayout.accepted(city, plans), fortifications,
-                CivsSettlementPlans.current(city)?.plots.orEmpty().flatMap { plot ->
+                adopted?.plots.orEmpty().flatMap { plot ->
                     plot.fortification?.let { CivsSettlementPlans.portReservations(it.proof) }.orEmpty()
-                }, paidHallLeadOut(city, routes))
+                }, paidHallLeadOut(city, routes), wallApproachWrites)
         }
 
         /** Only an exact, corroborated paid centreline can replace the Hall's synthetic flat apron. */

@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
@@ -594,6 +595,103 @@ class CivsSettlementLayoutTest : FunSpec({
         val passage = result.pieces.single { it.type == BuildingType.GATE &&
             it.bounds.min.x == gate.passage.min.x && it.bounds.min.z == gate.passage.min.z }
         passage.transit.single { it.x == gate.center.x && it.z == gate.center.z }.y shouldBe 66
+    }
+
+    test("a deferred wall joins across bare grass beside its retained work approach") {
+        val base = layoutFixtureCity()
+        val hall = base.buildings.single()
+        val west = CivBox(CivPosition(-31, 64, 4), CivPosition(-29, 64, 16))
+        val gate = CivsSettlementLayout.frame(base, 32).gates.first()
+        val accepted = listOf(4..9, 11..16).map { span ->
+            val bounds = CivBox(west.min.copy(z = span.first), west.max.copy(y = 68, z = span.last))
+            val cells = (-31..-29).flatMap { x -> span.flatMap { z ->
+                CivsInfrastructureRebuild.wallColumn(base.style, 1, x, 64, z, false, -30, 4)
+            } }
+            CivSettlementPiece(layoutId("west-wall-${span.first}"), BuildingType.WALL, bounds,
+                CivPosition(-28, 65, span.last), cells, profileStage = 1)
+        }
+        val intent = CivSettlementPlan(CivsSettlementPlans.VERSION, 7, 32,
+            listOf(CivSettlementPlot(hall, hall.bounds)), emptyMap(), listOf(west), listOf(gate.passage),
+            listOf(gate.side), CivDeferredPerimeter("infrastructure", hall.id, hall.anchor))
+        val city = base.copy(buildings = base.buildings + accepted.map {
+            CivsInfrastructure.building(it).copy(phase = BuildingPhase.ACTIVE)
+        }, autonomy = CivAutonomy(layoutHalfWidth = 32, plan = intent))
+        val frame = CivsSettlementLayout.frame(city)
+        val corner = hall.entrance.copy(z = 9)
+        val approach = layoutAxisRoute(hall.entrance, corner) + layoutAxisRoute(corner, accepted.first().entrance).drop(1)
+        val left = city.building(accepted.first().id)!!
+        val routePlan = CivTerraformPlan(CivBox(CivPosition(-28, 64, 0), CivPosition(0, 65, 10)),
+            emptyList(), approach, 64, 0, 0)
+        val journal = CivPlacementPlan(left.id, city.id, city.worldId, left, emptyList(), "a".repeat(64), routePlan)
+        val access = CivAutonomousAccess.from(city, listOf(journal))
+        val shoulder = CivPosition(-29, 64, 10)
+        val key = civsTerrainKey(shoulder.x, shoulder.z)
+        val grass = CivTerrainSurfaceColumn(64, true, cleanGrass = true)
+        val flat = layoutSurface(city, "flat")
+        val surface = flat.copy(columns = flat.columns + (key to grass))
+        fun generate(terrain: CivTerrainSurface = surface, retained: CivAutonomousAccess = access) =
+            CivsSettlementLayout.infrastructure(city, frame, terrain, retained.routes.values.toList(), accepted,
+                pavingRoutes = emptyList(), retainedRoutes = retained.routes.values, retainedAccess = retained)
+        val generated = generate()
+        val seam = generated.pieces.filterNot { it in accepted }.single()
+        seam.bounds shouldBe CivBox(CivPosition(-31, 64, 10), CivPosition(-29, 68, 10))
+        seam.requiredGrass shouldBe listOf(shoulder)
+        generated.pieces.take(accepted.size) shouldBe accepted
+        generated.rejected["deferred-gate"] shouldBe 1
+        generated.perimeterClosed shouldBe false
+
+        val floors = seam.blocks.groupBy { civsTerrainKey(it.position.x, it.position.z) }
+            .mapValues { (_, cells) -> cells.minOf { it.position.y } }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(CivsInfrastructure.building(seam), 0),
+            surface, access, frame.wallObstacles, floors).copy(requiredGrass = seam.requiredGrass)
+        draft.columns.filter { it.x in -31..-29 && it.z == 10 }.map { it.floorY to it.preserve } shouldBe
+            List(3) { 64 to false }
+        val cells = buildMap {
+            for (column in draft.columns) for (y in column.supportY..(maxOf(column.surfaceY, column.groundY) + 2)) {
+                val p = CivPosition(column.x, y, column.z)
+                val material = when {
+                    y > column.surfaceY -> "minecraft:air"
+                    y == column.surfaceY -> "minecraft:grass_block[snowy=false]"
+                    else -> "minecraft:dirt"
+                }
+                put(p, CivTerraformCell(p, material, true, y <= column.surfaceY, y > column.surfaceY))
+            }
+        }
+        val earthworks = CivsAutonomousTerraform.materialize(draft, cells)
+        earthworks.requiredGrass shouldBe listOf(shoulder)
+        val newlyPaved = CivTerraformCell(shoulder, "minecraft:dirt_path", safe = true, solid = true, passable = false)
+        shouldThrow<CivsRejection> {
+            CivsAutonomousTerraform.materialize(draft, cells + (shoulder to newlyPaved))
+        }.values["stage"] shouldBe "wall-approach-grass"
+
+        for (native in listOf(grass.copy(cleanGrass = false), grass.copy(loaded = false),
+            grass.copy(groundY = 65, topY = 65), grass.copy(topY = 65),
+            CivTerrainSurfaceColumn(64, false, dirtPath = true))) {
+            val protected = generate(surface.copy(columns = surface.columns + (key to native)))
+            protected.pieces shouldBe accepted
+            protected.rejected["route-crosses-wall"] shouldBe (generated.rejected["route-crosses-wall"] ?: 0) + 1
+        }
+        generate(retained = access.copy(routes = access.routes + (hall.id to approach))).pieces shouldBe accepted
+        val paidTerrain = routePlan.copy(blocks = listOf(CivPlanBlock(shoulder, "minecraft:dirt", "minecraft:grass_block[snowy=false]")))
+        val paidGrass = CivAutonomousAccess.from(city, listOf(journal.copy(terrain = paidTerrain)))
+        generate(retained = paidGrass).pieces shouldBe accepted
+        val centerline = listOf(shoulder.copy(y = 65), approach.last().copy(z = 10), approach.last())
+        val centerAccess = CivAutonomousAccess.from(city, listOf(journal.copy(terrain = routePlan.copy(route = centerline))))
+        generate(retained = centerAccess).pieces shouldBe accepted
+
+        val built = CivsInfrastructure.building(seam).copy(phase = BuildingPhase.ACTIVE)
+        val source = journal.copy(id = built.id, building = built, terrain = earthworks, blocks = seam.blocks.map {
+            CivPlanBlock(it.position, cells[it.position]?.data ?: "minecraft:air", it.after)
+        })
+        val upgradedCity = city.copy(buildings = listOf(hall.copy(level = 2)) + city.buildings.drop(1) + built)
+        val refit = CivsInfrastructureRebuild.proposal(upgradedCity, source, emptyList())
+        refit.terrain?.requiredGrass shouldBe null
+        refit.terrain?.route shouldBe earthworks.route
+        val rebuilt = refit.building.copy(phase = BuildingPhase.ACTIVE)
+        val rebuiltCity = upgradedCity.copy(buildings = upgradedCity.buildings.dropLast(1) + rebuilt)
+        val rebuiltAccess = CivAutonomousAccess.from(rebuiltCity, listOf(refit.copy(capturedSha256 = "b".repeat(64))))
+        rebuiltAccess.routes[rebuilt.id] shouldBe earthworks.route
+        rebuiltAccess.wallApproachWrites.containsKey(rebuilt.id) shouldBe false
     }
 
     test("gate floors retain route grades and steep infrastructure has an explicit rejection") {

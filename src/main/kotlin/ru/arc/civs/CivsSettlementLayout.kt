@@ -31,6 +31,7 @@ internal data class CivSettlementPiece(
     val transit: List<CivPosition> = emptyList(),
     val waterFoundations: List<CivWaterFoundation> = emptyList(),
     val profileStage: Int? = null,
+    val requiredGrass: List<CivPosition> = emptyList(),
 )
 
 internal data class CivSettlementInfrastructure(
@@ -361,7 +362,8 @@ internal object CivsSettlementLayout {
         retainedRoutes: Collection<List<CivPosition>> = emptyList(),
         acceptedFortifications: Set<UUID> = emptySet(),
         forecastFortifications: Set<UUID> = emptySet(),
-        wallProfileStage: Int? = null, wallFloors: Map<Long, Int> = emptyMap()): CivSettlementInfrastructure {
+        wallProfileStage: Int? = null, wallFloors: Map<Long, Int> = emptyMap(),
+        retainedAccess: CivAutonomousAccess = CivAutonomousAccess()): CivSettlementInfrastructure {
         val rejected = sortedMapOf<String, Int>()
         val samples = linkedMapOf<String, MutableList<CivPosition>>()
         fun reject(reason: String, at: CivPosition? = null) {
@@ -370,8 +372,28 @@ internal object CivsSettlementLayout {
         }
         val adopted = CivsSettlementPlans.current(city)
         val deferred = adopted?.deferredPerimeter
-        val deferredRoads = if (deferred == null) emptySet() else retainedRoutes.flatMapTo(hashSetOf()) {
-            CivsAutonomousTerraform.roadProfile(it).keys
+        val wallGrass = mutableMapOf<Long, CivPosition>()
+        val deferredRoads = if (deferred == null) emptySet() else buildSet {
+            val wallRoutes = retainedAccess.routes.entries.groupBy({ it.value }, { it.key })
+                .filterValues { owners -> owners.all { it in retainedAccess.wallApproachWrites } }.keys
+            val paid = retainedAccess.wallApproachWrites.values.flatten().toSet()
+            for (route in retainedRoutes) {
+                val profile = CivsAutonomousTerraform.roadProfile(route)
+                if (route !in wallRoutes) {
+                    addAll(profile.keys)
+                    continue
+                }
+                val centers = route.mapTo(hashSetOf(), ::key)
+                // A wall work approach can reserve a shoulder that was never prepared or paved.
+                for ((column, floor) in profile) {
+                    val native = surface.columns[column]
+                    if (column !in centers && column !in paid && native?.cleanGrass == true &&
+                        native.loaded && native.natural && !native.dirtPath &&
+                        native.groundY == floor.y && native.topY == floor.y)
+                        wallGrass[column] = floor
+                    else add(column)
+                }
+            }
         }
         val fortifications = adopted?.plots.orEmpty().filter { it.fortification != null }
         if (frame.fortified && (fortifications.isEmpty() || fortifications.any { plot ->
@@ -519,7 +541,8 @@ internal object CivsSettlementLayout {
             pieces += CivSettlementPiece(UUID.nameUUIDFromBytes(identity.toByteArray(StandardCharsets.UTF_8)),
                 type, bounds, entrance, cells, transit, waterFoundations,
                 (if (type == BuildingType.WALL) wallProfileStage ?: fortificationStage else fortificationStage)
-                    .takeIf { it > 0 && type in setOf(BuildingType.WALL, BuildingType.GATE) })
+                    .takeIf { it > 0 && type in setOf(BuildingType.WALL, BuildingType.GATE) },
+                requiredGrass = if (type == BuildingType.WALL) floors.keys.mapNotNull(wallGrass::get) else emptyList())
             cells.forEach { used += key(it.position) }
             return true
         }

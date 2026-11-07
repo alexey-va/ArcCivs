@@ -288,7 +288,8 @@ internal class CivsAutonomousPlacement(
 
     /** Legacy, player-pinned SITE plans retain their exact anchor and receive the same durable earthworks. */
     fun prepareExisting(city: Settlement, blueprint: CivBlueprint,
-        waterFoundations: List<CivWaterFoundation> = emptyList()): CompletableFuture<CivAutonomousDesign> {
+        waterFoundations: List<CivWaterFoundation> = emptyList(),
+        requiredGrass: List<CivPosition> = emptyList()): CompletableFuture<CivAutonomousDesign> {
         val previous = city.building(blueprint.building.id)
         if (previous?.phase != BuildingPhase.SITE || previous.entrance != blueprint.building.entrance ||
             previous.rotation != blueprint.building.rotation)
@@ -300,7 +301,7 @@ internal class CivsAutonomousPlacement(
         return admit(Search(city, blueprint.building.type, blueprint.building.level, blueprint.building.id, blueprint, previous,
             infrastructure = blueprint.building.type.isInfrastructure, reservation = reserved,
             pinnedRoute = adopted?.routes?.get(blueprint.building.id.toString()),
-            pinnedWaterFoundations = waterFoundations.toList()))
+            pinnedWaterFoundations = waterFoundations.toList(), pinnedRequiredGrass = requiredGrass.toList()))
     }
 
     private fun admit(job: Search): CompletableFuture<CivAutonomousDesign> = synchronized(jobs) {
@@ -350,6 +351,7 @@ internal class CivsAutonomousPlacement(
         private val infrastructure: Boolean = false, private val reservation: CivSettlementPlot? = null,
         private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null,
         private val pinnedWaterFoundations: List<CivWaterFoundation> = emptyList(),
+        private val pinnedRequiredGrass: List<CivPosition> = emptyList(),
         private val captureVolume: Boolean = false, private val nativeCity: Settlement = city,
         private val initialPlan: CivSettlementPlan? = null, skipPrepared: Int = 0,
         private val wallInfill: CivWallInfillTarget? = null,
@@ -445,7 +447,7 @@ internal class CivsAutonomousPlacement(
                         .filter { city.building(it.building.id) == null }.map { it.building.copy(bounds = it.envelope) })
                     val plan = CivsSettlementLayout.infrastructure(reservedCity, frame(), field,
                         (access.routes.values + pavingRoutes).distinct(), access.infrastructure, pavingRoutes, access.routes.values,
-                        acceptedFortifications = access.acceptedFortifications)
+                        acceptedFortifications = access.acceptedFortifications, retainedAccess = access)
                     rejections.putAll(plan.rejected)
                     blockers = plan.blockers
                     if (blockers.isNotEmpty() || !plan.perimeterClosed) CivsDiagnostics.record(java.util.logging.Level.WARNING, city.id,
@@ -492,7 +494,7 @@ internal class CivsAutonomousPlacement(
                     pinned.building.type, pinned.building.bounds, pinned.building.entrance,
                     pinned.cells.filterNot { it.isBarrier }.map { CivSettlementBlock(
                         CivPosition(it.position.x, it.position.y, it.position.z), it.blockData) }, pinned.building.transit.orEmpty(),
-                    pinnedWaterFoundations))
+                    pinnedWaterFoundations, requiredGrass = pinnedRequiredGrass))
                 candidates = listOf(CivsAutonomousCandidate(pinned.building.copy(bounds =
                     CivsAutonomousGeometry.futureBounds(city, pinned.building))))
                 captureSurface()
@@ -702,7 +704,8 @@ internal class CivsAutonomousPlacement(
                     else frame().wallObstacles) + futureObstacles,
                 infrastructureFloors, waterFoundations = piece?.waterFoundations.orEmpty(),
                 reservedRoute = paidApproach?.route ?: reservedRoute,
-                preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }) }
+                preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) })
+                    .copy(requiredGrass = piece?.requiredGrass.orEmpty()) }
             catch (failure: RuntimeException) { retryApproach(failure); return }
             phase = "earthworks"
             await(world.captureTerraform(nativeCity, draft, executor, previous), { failure ->
