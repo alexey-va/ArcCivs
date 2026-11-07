@@ -23,6 +23,29 @@ data class CivSettlementPlot(val building: CivBuilding, val envelope: CivBox,
 internal object CivsSettlementPlans {
     const val VERSION = 1
     private val deferredPerimeterStages = setOf("no-dry-perimeter", "gate-junction", "infrastructure")
+    private val geometricGateOutcomes = setOf("route-target-blocked", "route-disconnected",
+        "route-exhausted", "route-length-or-repeat")
+
+    internal fun initialRoadPerimeterMayWait(city: Settlement, failure: CivsRejection): Boolean {
+        val values = failure.values
+        if (values["fully_loaded"] != "true" || city.buildings.any { it.type.isInfrastructure } ||
+            !CivsRetainedGrowthPerimeter.geometric(failure)) return false
+        return when (values["stage"]) {
+            "retained-road-wall" -> failure.reason == "autonomy-layout-obstructed" &&
+                values["first"] != null && values["retained_floor"]?.toIntOrNull() != null
+            "gate-connection" -> {
+                val outcomes = values.keys.filter { it.startsWith("route-") }
+                failure.reason == "autonomy-no-path" && outcomes.isNotEmpty() && outcomes.all { it in geometricGateOutcomes }
+            }
+            else -> false
+        }
+    }
+
+    private fun fullyLoadedSurvey(city: Settlement, surface: CivTerrainSurface): Boolean {
+        val radius = city.radius.coerceIn(0, 127)
+        val diameter = radius * 2 + 1
+        return city.radius == radius && surface.columns.size == diameter * diameter && surface.columns.values.all { it.loaded }
+    }
 
     fun detached(plan: CivSettlementPlan?): CivSettlementPlan? = runCatching { plan?.copy(
         plots = plan.plots.map { it.copy(building = it.building.copy(transit = it.building.transit?.toList()),
@@ -179,6 +202,7 @@ internal object CivsSettlementPlans {
             it.plan == null && it.layoutHalfWidth == CivsSettlementGrowth.initialHalfWidth(city)
         } == true
         var deferredInfrastructure: CivsRejection? = null
+        var deferredRoadPerimeter: CivsRejection? = null
         val prior = current(city)
         val actual = city.buildings.filter { !it.type.isInfrastructure && it.type != BuildingType.DECORATION }.map { it.type }
         val paidInfrastructure = city.buildings.filter { it.type.isInfrastructure }.mapTo(hashSetOf()) { it.id }
@@ -202,6 +226,8 @@ internal object CivsSettlementPlans {
                 if (failure.reason !in setOf("autonomy-no-site", "autonomy-layout-obstructed", "autonomy-no-path")) throw failure
                 if (compactFounding && deferredInfrastructure == null && failure.reason == "autonomy-layout-obstructed" &&
                     failure.values["stage"] == "infrastructure") deferredInfrastructure = failure
+                if (compactFounding && deferredRoadPerimeter == null && initialRoadPerimeterMayWait(city, failure))
+                    deferredRoadPerimeter = failure
                 last = failure
                 if (ordinaryWithoutNewPerimeter == null && !routeBudget && civicTarget != null && forecast != null &&
                     failure.reason == "autonomy-layout-obstructed" && failure.values["stage"] in deferredPerimeterStages &&
@@ -231,7 +257,7 @@ internal object CivsSettlementPlans {
                 }
             }
         }
-        return ordinaryWithoutNewPerimeter ?: throw requireNotNull(deferredInfrastructure ?: last)
+        return ordinaryWithoutNewPerimeter ?: throw requireNotNull(deferredInfrastructure ?: deferredRoadPerimeter ?: last)
     }
 
     private fun ordinaryGrowth(city: Settlement, forecast: CivSettlementPlan, retained: CivAutonomousAccess,
@@ -429,6 +455,10 @@ internal object CivsSettlementPlans {
                         frame.gates.map { it.passage }, frame.gates.map { it.side }),
                         CivSettlementInfrastructure(emptyList(), mapOf("perimeter-failed" to 1), false))
                 }.onFailure(failure::addSuppressed)
+                if (failure.reason == "autonomy-layout-obstructed" && failure.values["stage"] == "retained-road-wall")
+                    throw CivsRejection(failure.reason, failure.values +
+                        mapOf("fully_loaded" to fullyLoadedSurvey(city, surface).toString(),
+                            "half_width" to frame.halfWidth.toString())).also { it.initCause(failure) }
                 throw failure
             }
             else CivsPerimeterCrossings.adapt(frame, planningAccess().routes.values, retained.infrastructure)
@@ -494,10 +524,16 @@ internal object CivsSettlementPlans {
                         if (shift !in 1..6 || abs(normal) < 6 || normal.toLong() * sourceNormal >= 0)
                             null else (if (acrossX) entry.copy(x = gate.center.x) else entry.copy(z = gate.center.z)) to abs(normal)
                     }.minByOrNull { it.second }?.first
+                val routeOutcomes = linkedMapOf<String, Int>()
+                var lastConnection: CivRouteSearchStats? = null
                 routes[id] = try {
                     val access = planningAccess()
                     val connected = CivsAutonomousTerraform.connection(navigable, target, surface,
-                        access, obstacles + centreObstacles, inspectRoute, frontage, streets)
+                        access, obstacles + centreObstacles, { stats ->
+                            inspectRoute(stats)
+                            lastConnection = stats
+                            routeOutcomes.merge(stats.outcome, 1, Int::plus)
+                        }, frontage, streets)
                     val paid = retained.copy(reservedFortificationPorts = access.reservedFortificationPorts)
                     val otherPlots = plots.filter { it.building.id != id }.map { it.envelope }
                     val reuse = CivsAutonomousTerraform.paidApproach(city, target, connected, adoptedFrame,
@@ -520,7 +556,16 @@ internal object CivsSettlementPlans {
                             adoptedFrame.gates.map { it.passage }, adoptedFrame.gates.map { it.side }),
                             CivSettlementInfrastructure(emptyList(), mapOf("gate-connection-failed" to 1), false))
                     }.onFailure(failure::addSuppressed)
-                    throw failure
+                    if (failure.reason != "autonomy-no-path") throw failure
+                    fun coordinates(p: CivPosition) = "${p.x},${p.y},${p.z}"
+                    throw CivsRejection(failure.reason, failure.values +
+                        mapOf("stage" to "gate-connection", "fully_loaded" to fullyLoadedSurvey(city, surface).toString(),
+                            "half_width" to adoptedFrame.halfWidth.toString()) +
+                        routeOutcomes.mapValues { it.value.toString() } +
+                        mapOf("type" to target.type.name, "plot" to id.toString(),
+                            "entrance" to coordinates(target.entrance), "from" to coordinates(lastConnection?.from ?: previous.first()),
+                            "to" to coordinates(lastConnection?.to ?: target.entrance)))
+                        .also { it.initCause(failure) }
                 }
             }
         }

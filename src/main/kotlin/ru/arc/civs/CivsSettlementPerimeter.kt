@@ -333,8 +333,11 @@ internal object CivsSettlementPerimeter {
             wallCells.removeAll { CivsAutonomousGeometry.horizontalContains(passage, it) }
         }
         if (gates.isEmpty() || gates.size > 8) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "dry-gates"))
-        if (!frame.fortified && wallCells.any { civsTerrainKey(it.x, it.z) in retainedFloors })
-            throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-road-wall"))
+        val roadConflict = if (frame.fortified) null else wallCells.firstOrNull { civsTerrainKey(it.x, it.z) in retainedFloors }
+        if (roadConflict != null)
+            throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-road-wall",
+                "first" to "${roadConflict.x},${roadConflict.z}",
+                "retained_floor" to retainedFloors.getValue(civsTerrainKey(roadConflict.x, roadConflict.z)).toString()))
         val walls = mutableListOf<CivBox>()
         while (wallCells.isNotEmpty()) {
             val start = wallCells.minWith(compareBy<CivPosition> { it.z }.thenBy { it.x })

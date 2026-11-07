@@ -48,6 +48,60 @@ class CivsInitialPlanDeferralTest : FunSpec({
         }
     }
 
+    val paidRoadConflict = mapOf("stage" to "retained-road-wall", "fully_loaded" to "true",
+        "first" to "12,9", "retained_floor" to "64")
+    for ((label, obstruction) in listOf(
+        "geometric gate reconnect" to CivsRejection("autonomy-no-path", mapOf("stage" to "gate-connection",
+            "fully_loaded" to "true", "route-disconnected" to "1")),
+        "paid road and wall conflict" to CivsRejection("autonomy-layout-obstructed", paidRoadConflict),
+    )) test("a $label refusal leaves the first forester to ordinary native admission") {
+        InitialPlanHarness().use { h ->
+            val hut = h.hutDesign().blueprint.building.copy(phase = BuildingPhase.ACTIVE)
+            h.city = h.city.copy(buildings = h.city.buildings + hut)
+            val before = h.city
+            val exhausted = CivsRejection("autonomy-no-site", mapOf("type" to "FORESTER"))
+            val refusal = shouldThrow<CivsRejection> {
+                growthWithWidths(before) { width -> throw if (width == 40) obstruction else exhausted }
+            }
+            h.start(); h.rejectPlan(refusal)
+            h.city shouldBe before
+            h.saves shouldBe 0
+            h.time = 5_001; h.pulse()
+            h.searches.size shouldBe 1
+            val forester = CivsSettlementPlans.at(settlementPlanTemplates().getValue(BuildingType.FORESTER).first,
+                before.center.copy(x = before.center.x + 40), 0, UUID(213, 1))
+            val design = CivAutonomousDesign(CivBlueprint(forester, before.worldId, mockk(relaxed = true),
+                emptyList(), emptyList(), byteArrayOf(1)))
+            h.searches.single().complete(design); h.drain()
+            verify(exactly = 1) { h.world.captureAutonomousSite(before.id, before.owner, before.worldId,
+                forester, emptyList(), null) }
+            h.city.autonomy shouldBe before.autonomy
+            h.city.building(hut.id) shouldBe hut
+            h.city.building(forester.id)?.phase shouldBe BuildingPhase.SITE
+            h.city.constructionQueue shouldBe listOf(forester.id)
+            h.city.construction shouldBe null
+        }
+    }
+
+    for ((label, failure) in listOf(
+        "unknown" to CivsRejection("autonomy-no-path"),
+        "partial gate terrain" to CivsRejection("autonomy-no-path", mapOf("stage" to "gate-connection",
+            "fully_loaded" to "false", "route-disconnected" to "1")),
+        "route budget" to CivsRejection("autonomy-no-path", mapOf("stage" to "gate-connection",
+            "fully_loaded" to "true", "route-disconnected" to "1", "route-budget" to "1")),
+        "partial paid road terrain" to CivsRejection("autonomy-layout-obstructed",
+            paidRoadConflict + ("fully_loaded" to "false")),
+        "missing paid road witness" to CivsRejection("autonomy-layout-obstructed", paidRoadConflict - "first"),
+    )) test("a perimeter forecast cannot yield ordinary work with $label evidence") {
+        InitialPlanHarness().use { h ->
+            val before = h.city
+            h.start(); h.rejectPlan(failure)
+            h.time = 5_001; h.pulse()
+            h.searches shouldBe emptyList()
+            h.city shouldBe before
+        }
+    }
+
     test("an unavailable world or storage immediately stops growth even after an earlier completed plot proof") {
         InitialPlanHarness().use { h ->
             for (reason in listOf("chunks-unloaded", "storage-unavailable", "autonomy-search-budget")) {

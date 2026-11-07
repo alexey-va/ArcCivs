@@ -326,11 +326,12 @@ internal class CivsAutonomousDevelopment(
                         searchFailures.remember(city, goal, rejection.reason, now()))
                         failedGrowthYields[city.id] = FailedGrowthYield(city.owner, city.worldId, key, goal,
                             requireNotNull(autonomyPlanRetryAt[city.id]))
-                    if (compactFounding && adopted == null && city.autonomy.plan == null &&
-                        rejection?.reason == "autonomy-layout-obstructed" && rejection.values["stage"] == "infrastructure" &&
+                    if (compactFounding && adopted == null && city.autonomy.plan == null && rejection != null &&
+                        (rejection.reason == "autonomy-layout-obstructed" && rejection.values["stage"] == "infrastructure" ||
+                            CivsSettlementPlans.initialRoadPerimeterMayWait(city, rejection)) &&
                         !closed && ready() && latest != null && latest.owner == city.owner && latest.autonomy?.paused == false &&
                         latest.pendingDeletion == null && latest.autonomy.plan == null && civsPlanBoardLayoutKey(latest) == key) {
-                        // Only rejected unadopted infrastructure is deferred. Each ordinary site still proves its native work.
+                        // Only the unadopted perimeter waits. Each ordinary site still proves its native work.
                         deferredInitialPlans[city.id] = DeferredInitialPlan(city.owner, key)
                         developmentFinished(city.id)
                         autonomyProgress.remove(city.id)
