@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import com.google.gson.JsonParser
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
@@ -217,6 +218,116 @@ class CivsMineBoundarySealTest : FunSpec({
                     }
                 }
             } finally { directory.toFile().deleteRecursively() }
+        }
+    }
+
+    test("a completed V7 spine rung keeps the shallow frontier repair available") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-spine-rung").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineSpineRung")
+                val publicMine = spatialBuilding("nordic", "miner", 1, CivPosition(0, 71, 0), 90)
+                val layout = requireNotNull(CivsWorksiteLayouts.site(publicMine)).deepCopy()
+                val id = "fixture/nordic/spine-rung1"
+                // Reproduce the authored Nordic shaft on LAB, translated in X/Z.
+                val nativeShaft = JsonParser.parseString("""{
+                    "ladderBottom":[8,-3,-12],"shaftCenter":[8,-4,-9],"ladderFacing":"south",
+                    "shaftFootprint":[[9,-13],[8,-13],[7,-13],[9,-12],[8,-12],[7,-12],[9,-11],[8,-11],[7,-11]]
+                }""").asJsonObject
+                nativeShaft.entrySet().forEach { (key, value) -> layout.getAsJsonObject("mine").add(key, value) }
+                CivsWorksiteLayouts.installCatalog(mapOf(id to layout))
+                try {
+                    val mine = publicMine.copy(schematicId = id,
+                        bounds = CivBox(CivPosition(1, 68, -6), CivPosition(23, 95, 14)),
+                        control = CivPosition(16, 72, 7))
+                    val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                    val spine = geometry.sections.getValue("spine")
+                    val rung = CivPosition(8, -8, -12)
+                    val wall = CivPosition(10, -8, -12)
+                    val wallPoint = CivsWorksiteLayouts.point(mine, wall)
+                    spine.slice(9..10) shouldBe listOf(332, 333)
+                    geometry.steps[332].point shouldBe rung
+                    geometry.steps[333].point shouldBe CivPosition(8, -9, -13)
+                    geometry.steps[333].shaftSupport shouldBe true
+                    val rungData = geometry.expectedAfter(332, mine.rotation)
+                    rungData shouldBe "minecraft:ladder[facing=west,waterlogged=false]"
+                    val state = CivMinePlanState(7, 4, sectionSteps = mapOf("spine" to 10L), excavation = rung)
+                    val worker = spatialWorker(mine, "IRON_PICKAXE").copy(completedCycles = 498)
+                    val city = CivsRules.validate(spatialCity(world.uid, listOf(mine), worker).copy(
+                        inventory = CivInventory(CivStorageMode.PHYSICAL), minePlans = mapOf(mine.id.toString() to state)))
+
+                    for (x in -2..2) for (z in -2..2) world.loadChunk(x, z)
+                    seedMineNaturalCover(world, mine, top = 67)
+                    fun put(local: CivPosition, data: String) {
+                        val point = CivsWorksiteLayouts.point(mine, local)
+                        world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(data)
+                    }
+                    for ((ordinal, step) in geometry.steps.withIndex()) {
+                        if (geometry.completed(ordinal, state.nextStep, state.sectionSteps.orEmpty()))
+                            put(step.point, geometry.expectedAfter(ordinal, mine.rotation))
+                    }
+                    for (dy in 0..3) {
+                        put(geometry.bottom.copy(y = geometry.bottom.y + dy), rungData)
+                        put(geometry.backing.copy(y = geometry.backing.y + dy), "minecraft:cobblestone")
+                    }
+                    for (y in -8..-7) {
+                        put(wall.copy(x = 9, y = y), "minecraft:air")
+                        put(wall.copy(y = y), "minecraft:air")
+                    }
+                    put(wall.copy(y = -3), "minecraft:cobblestone")
+                    put(wall.copy(y = 0), "minecraft:spruce_slab[type=top,waterlogged=false]")
+
+                    LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                        CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+                            repeat(256) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                            val seal = withClue(runtime.debug(setOf(worker.id))) { requireNotNull(runtime.plan(city, worker)) }
+                            seal.status shouldBe "securing-mine"
+                            seal.miningOrdinal shouldBe 333
+                            seal.miningFrontier shouldBe rung
+                            seal.focus shouldBe wallPoint
+                            seal.changes shouldBe listOf(CivPlanBlock(wallPoint, "minecraft:air", "minecraft:cobblestone"))
+                            seal.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                            seal.outputs shouldBe emptyMap()
+                            seal.durationMillis shouldBe 2_000L
+                            assertBoundaryStanding(world, mine, seal)
+                            for (changedRung in listOf("minecraft:air", "minecraft:ladder[facing=east,waterlogged=false]")) {
+                                put(rung, changedRung)
+                                shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(city, seal) }
+                                    .reason shouldBe "mine-thin-cover"
+                            }
+                            put(rung, rungData)
+                            runtime.validate(city, seal)
+
+                            CivsStorage(plugin) { emptyArray() }.use { storage ->
+                                storage.validateMineNative = { transaction ->
+                                    val receipt = requireNotNull(transaction.mine)
+                                    runtime.validateMineReceiptNative(receipt.before(transaction.after), receipt.work)
+                                    null
+                                }
+                                val transactionId = UUID.randomUUID()
+                                storage.reserve(city, transactionId)
+                                val prepared = storage.prepareWork(city, mine.id, seal.storageInputs(worker), emptyMap(), seal.changes, seal)
+                                val after = CivsRules.finishWorldWork(city, seal, 100_000).copy(inventory = prepared.inventoryAfter)
+                                val receipt = CivInventoryTransaction(transactionId, city.id, city.revision, after,
+                                    prepared.changes, worldChanges = prepared.worldChanges, mine = prepared.mine).validated()
+                                requireNotNull(receipt.mine).work shouldBe seal
+                                storage.seal(receipt, keepViewersOpen = true)
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                storage.unlock(transactionId)
+                                world.getBlockAt(wallPoint.x, wallPoint.y, wallPoint.z).type shouldBe Material.COBBLESTONE
+                                CivsEquipment.plainCount(after.workers.single(), "COBBLESTONE") shouldBe
+                                    CivsEquipment.plainCount(worker, "COBBLESTONE") - 1
+                                after.workers.single().completedCycles shouldBe worker.completedCycles + 1
+                                after.stock shouldBe city.stock
+                                after.minePlans!!.getValue(mine.id.toString()) shouldBe state.copy(
+                                    seals = mapOf(CivsMineProgress.key(wall) to "minecraft:cobblestone"))
+                            }
+                        }
+                    }
+                } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+            }
         }
     }
 

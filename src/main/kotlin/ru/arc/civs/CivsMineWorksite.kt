@@ -356,8 +356,14 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val previous = plan.steps.getOrNull(ordinal - 1)
         val currentSeal = plan.version == 7 && sealing && before.isAir && cell.after == "minecraft:cobblestone" &&
             saved != null && saved.version == plan.version && sealingOrigin != null && sealingOrigin == saved.excavation &&
-            (sealingOrigin == plan.steps[ordinal].point || previous?.let {
-                it.point == sealingOrigin && it.after == null && plan.completed(ordinal - 1, saved.nextStep, saved.sectionSteps.orEmpty())
+            (sealingOrigin == plan.steps[ordinal].point || previous?.let { step ->
+                val sections = saved.sectionSteps.orEmpty()
+                step.point == sealingOrigin && plan.completed(ordinal - 1, saved.nextStep, sections) &&
+                    (step.after == null || step.after.startsWith("minecraft:ladder[") &&
+                        plan.section(ordinal - 1) == "spine" && plan.steps[ordinal].shaftSupport &&
+                        plan.sections.getValue("spine").getOrNull(plan.sectionCount("spine", saved.nextStep, sections).toInt()) == ordinal &&
+                        observeMineHazard(world, CivsWorksiteLayouts.point(building, sealingOrigin))?.blockData?.asString ==
+                            plan.expectedAfter(ordinal - 1, building.rotation))
             } == true) && pendingLandingClearance(plan, local, saved.nextStep, saved.sectionSteps.orEmpty()) == null
         if (currentSeal) return true
         // A safety repair carries the active frontier ordinal; cover belongs to its exact authored action.
