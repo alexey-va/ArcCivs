@@ -157,6 +157,16 @@ class CivsVillageSiteScoringTest : FunSpec({
         (ids.first() != CivsVillageSiteScoring.id(reference.id, "Other-", 1)) shouldBe true
     }
 
+    test("a reset epoch starts a different identity and repeated execution keeps that new identity") {
+        val initial = CivVillageBootstrap(UUID(0, 9), UUID(0, 10), "nordic", "Auto5", CivPosition(32, 63, -48))
+        val epoch = UUID(0, 11)
+        val reset = initial.copy(resetEpoch = epoch)
+        (reset.id != initial.id) shouldBe true
+        reset.id shouldBe initial.copy(resetEpoch = epoch).id
+        (reset.id != initial.copy(resetEpoch = UUID(0, 12)).id) shouldBe true
+        (CivsVillageSiteScoring.id(reset.id, reset.name, 1) != CivsVillageSiteScoring.id(initial.id, initial.name, 1)) shouldBe true
+    }
+
     test("ranking prefers timber but accepts bare connected land and rejects water cliffs and missing chunks") {
         val flat = villageSurface(CivPosition(0, 63, 0), 12)
         val eligible = CivsVillageSiteScoring.score(flat)

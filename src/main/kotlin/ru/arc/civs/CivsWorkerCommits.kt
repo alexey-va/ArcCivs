@@ -53,8 +53,10 @@ internal class CivsWorkerCommits(
                 } else {
                     rejectIf(city.construction?.id != constructionId, "stale-delivery")
                     citizens.requireConstructionArrival(cityId, workerId, constructionId)
-                    authority.mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
-                        .thenApply { saved ->
+                    authority.mutate(cityId) { current ->
+                        CivsRules.deliver(current, current.owner, workerId, assignment, cycle, nextAt, at,
+                            acceleratedBuilder = authority.labGrowthActive(current))
+                    }.thenApply { saved ->
                             tasks.runLater(1) { construction.pulse() }
                             saved
                         }

@@ -44,8 +44,10 @@ class CivsService(
     supplyExecutor: Executor? = null,
     private val residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
     planningExecutor: Executor = executor,
+    private val labBackend: Boolean = false,
 ) : CivsUiHost, Listener, AutoCloseable {
     private var cities = linkedMapOf<UUID, Settlement>()
+    private val labGrowth = CivsLabGrowth(clock)
     private val busy = mutableSetOf<UUID>()
     private val cityAvailability = linkedMapOf<UUID, ArrayDeque<CompletableFuture<Unit>>>()
     private val unhealthy = mutableSetOf<UUID>()
@@ -82,7 +84,8 @@ class CivsService(
         { city, design -> admitRoadDevelopment(city) { buildingRequests.commitAutonomousDesign(city, design) } }, { construction.pulse() }, clock,
         developmentFinished = roadMaintenance::developmentFinished,
         storageCapacityPressure = ::storageCapacityPressure,
-        developmentAdmission = roadMaintenance::admitDevelopment)
+        developmentAdmission = roadMaintenance::admitDevelopment,
+        acceleratedCity = { labGrowth.cityId()?.let(cities::get)?.takeIf(::labGrowthActive)?.id })
     private val physics = CivsPhysics(plugin, tasks)
     private val controlCleanup = CivsControlCleanup(plugin) { owner, block -> world.canModify(owner, block) }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)
@@ -162,7 +165,8 @@ class CivsService(
         constructionSite = { cityId, orderId -> construction.site(cityId, orderId) },
         collectionAvailable = ::collectionAvailable, collectionHome = ::collectedHome,
         pickupGround = ::pickupGround, depositCollected = ::depositCollected,
-        immortalResidents = { id -> cities[id]?.let(::immortalResidents) == true })).also(onCitizensCreated)
+        immortalResidents = { id -> cities[id]?.let(::immortalResidents) == true },
+        acceleratedWork = ::labGrowthActive)).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
     private val supply = CivsSupplyDispatcher(tasks, nativeWork,
         { cityId, retained -> cargoRequests.captureSupply(cityId, retained) },
@@ -441,12 +445,13 @@ class CivsService(
     }
 
     internal fun foundVillageAt(owner: UUID, worldName: String, style: String, name: String,
-        anchor: CivPosition): CompletableFuture<Any> {
+        anchor: CivPosition, resetEpoch: UUID? = null): CompletableFuture<Any> {
         checkMain()
         rejectIf(!ready(), "not-ready")
         val target = plugin.server.getWorld(worldName) ?: throw CivsRejection("world-unavailable")
         rejectIf(target.name !in settings.worlds, "world-not-allowed")
-        return villageSites.bootstrap(CivVillageBootstrap(owner, target.uid, style, name, anchor)).thenApply { it }
+        rejectIf(resetEpoch != null && (store.homeServer()?.value != "lab" || target.name != "arccivs_lab"), "not-authorized")
+        return villageSites.bootstrap(CivVillageBootstrap(owner, target.uid, style, name, anchor, resetEpoch)).thenApply { it }
     }
 
     internal fun villageSearchStatus(): Map<String, Any?> = villageSites.status()
@@ -492,6 +497,46 @@ class CivsService(
         val after = before.with(setting, enabled)
         return if (before == after) city else CivsRules.validate(city.copy(settings = after, revision = Math.addExact(city.revision, 1)))
     }
+
+    internal fun configureLabGrowth(cityId: UUID, action: String): Map<String, Any?> {
+        checkMain()
+        rejectIf(!labBackend, "lab-growth-unavailable")
+        rejectIf(!ready(), "not-ready")
+        val city = cities[cityId]
+        if (city == null) {
+            if (action != "off" || !labGrowth.stop(cityId)) throw CivsRejection("city-not-found")
+            CivsDiagnostics.event("lab_growth_mode", "city" to cityId, "active" to false)
+            return mapOf("schema" to 1, "city" to cityId, "active" to false)
+        }
+        val changed = when (action) {
+            "on" -> {
+                rejectIf(!labGrowthEligible(city), "lab-growth-ineligible")
+                rejectIf(!testingAllowed(city), "not-authorized")
+                labGrowth.start(city)
+            }
+            "off" -> labGrowth.stop(cityId)
+            "status" -> false
+            else -> throw CivsRejection("invalid-lab-growth-arguments")
+        }
+        val active = labGrowthActive(city)
+        if (changed) CivsDiagnostics.event("lab_growth_mode", "city" to cityId, "world" to city.worldId,
+            "active" to active, "revision" to city.revision)
+        return labGrowth.debug(city) + mapOf("schema" to 1, "city" to cityId, "world" to city.worldId,
+            "revision" to city.revision, "active" to active, "eligible" to labGrowthEligible(city),
+            "last_autonomy" to autonomousDevelopment.progress(cityId),
+            "autonomy_retry_at" to autonomousDevelopment.debug(cityId)["retry_at"],
+            "construction" to construction.debug(city),
+            "queue_failure" to construction.queueFailure(cityId, city.constructionQueue?.firstOrNull()))
+    }
+
+    private fun labGrowthEligible(city: Settlement): Boolean =
+        city.autonomy?.paused == false && city.pendingDeletion == null && city.id !in unhealthy &&
+            CivsAutoStorageMigration.ready(city) && plugin.server.getWorld(city.worldId)?.let {
+                it.name == "arccivs_lab" && it.name in settings.worlds
+            } == true
+
+    internal fun labGrowthActive(city: Settlement): Boolean =
+        labBackend && ready() && labGrowth.active(city) && labGrowthEligible(city) && testingAllowed(city)
 
     internal fun testingAllowed(city: Settlement): Boolean = plugin.server.getWorld(city.worldId)?.let {
         testingPermissions.allowed(city.owner, it.name)
@@ -1001,6 +1046,7 @@ class CivsService(
     private fun loadCities(maximumLoadedChunks: Int = settings.maximumLoadedChunks): CompletableFuture<Unit> {
         checkMain()
         rejectIf(loading || closed, "not-ready")
+        labGrowth.clear()
         villageSites.cancel("reload")
         loading = true
         planBoardSnapshots.retain(emptySet())

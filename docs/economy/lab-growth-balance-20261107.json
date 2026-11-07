@@ -1,0 +1,254 @@
+{
+  "version": 1,
+  "title": "Isolated ArcCivs LAB village work acceleration and single-parcel reset",
+  "assumptions": [
+    "One lab operator and one selected autonomous physical city at a time. Low/base/high: zero, one or three non-overlapping test periods of 10 minutes in a day; scenarios, not telemetry.",
+    "Healthy work timer: 2000 ms baseline, 500 ms minimum/4x mode. Construction material and journal checks, shared native caps, routes, food, sleep and storage remain. Physical work still waits ordinary next-action cooldown. Throughput is bounded by all these, not predicted at 4x.",
+    "At most 64 construction row credits after a real builder session and paid placement remains the same. No credit is itself an item. No change to quantities per physical work result or exact paid construction input.",
+    "Existing shared lab AutoSupply rate and material batches unchanged. Physical emerald barter moves existing inventory items; ordinary player trade prices, vault, tokens, XP, production SELL and contract configuration are untouched.",
+    "A reset archives discarded stock and does not drop it to anyone. Re-founding uses the ordinary initial lab grant for a fresh ID once. This is disposable admin-only lab state; no network redemption or transfer is modeled."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "direct_vault",
+          "kind": "mint",
+          "source": "ArcCivs: CivsLabGrowth, CivsRules and CivsWorkerCommits",
+          "basis": "No direct grant, burn, price change or currency conversion in this LAB-only feature.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "direct_tokens",
+          "kind": "mint",
+          "source": "ArcCivs: CivsLabGrowth, CivsRules and CivsWorkerCommits",
+          "basis": "No direct grant, burn, price change or currency conversion in this LAB-only feature.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "physical_emerald": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "direct_physical_emerald",
+          "kind": "mint",
+          "source": "ArcCivs: CivsLabGrowth, CivsRules and CivsWorkerCommits",
+          "basis": "No direct grant, burn, price change or currency conversion in this LAB-only feature.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "direct_player_xp",
+          "kind": "mint",
+          "source": "ArcCivs: CivsLabGrowth, CivsRules and CivsWorkerCommits",
+          "basis": "No direct grant, burn, price change or currency conversion in this LAB-only feature.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "builder_paid_session": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "ideal_session_count",
+          "kind": "item",
+          "source": "ArcCivs: CivsLabGrowth, CivsRules and CivsWorkerCommits",
+          "basis": "Upper bound from elapsed duration alone, at most 64 paid construction batches per observed session; not an item award or forecast. Exact unit price and placement budget per batch stay unchanged.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              300,
+              900
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1200,
+              3600
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

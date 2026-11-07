@@ -70,6 +70,7 @@ class CivsCorpseRenderer internal constructor(
     private val skins: List<CitizenSkin> = loadCitizenSkins(),
     private val space: PaperSpatialSpace = PaperSpatialSpace(),
     private val interact: ((Player, UUID, UUID, Long) -> Unit)? = null,
+    private val work: BudgetedTaskQueue = BudgetedTaskQueue(tasks),
 ) : Listener, AutoCloseable {
     constructor(plugin: Plugin, tasks: LifecycleTaskScope, text: CivsText,
                 cities: () -> Collection<Settlement>, open: (Player, UUID, UUID) -> Unit,
@@ -82,7 +83,6 @@ class CivsCorpseRenderer internal constructor(
         var geometry: CivsCorpseGeometry, var value: Desired, var items: List<CivResidentItem?>? = null)
 
     private val epoch = tasks.token()
-    private val work = BudgetedTaskQueue(tasks)
     private val rendered = linkedMapOf<CivsCorpseIdentity, Rendered>()
     private var desired = emptyMap<CivsCorpseIdentity, Desired>()
     private var remaining = ArrayDeque<CivsCorpseIdentity>()

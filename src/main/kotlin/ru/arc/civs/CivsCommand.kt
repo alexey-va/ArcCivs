@@ -48,17 +48,39 @@ class CivsCommand(
         CompletableFuture.failedFuture(CivsRejection("not-ready")) },
     private val foundVillageAt: (UUID, String, String, String, CivPosition) -> CompletableFuture<Any> = { _, _, _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("village-search-unavailable")) },
+    private val refoundVillageAt: (UUID, String, String, String, CivPosition, UUID) -> CompletableFuture<Any> = { _, _, _, _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
+    private val labGrowth: (UUID, String) -> Map<String, Any?> = { _, _ -> throw CivsRejection("lab-growth-unavailable") },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
-        if (args.firstOrNull() == "found-village-at") {
+        if (args.firstOrNull() == "lab-growth") {
+            val cityId = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val action = args.getOrNull(2)
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                args.size != 3 || cityId == null || action !in setOf("on", "off", "status") -> "invalid-lab-growth-arguments"
+                hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
+                else -> null
+            }
+            val result = if (error != null) mapOf("error" to error) else runCatching {
+                labGrowth(requireNotNull(cityId), requireNotNull(action))
+            }.getOrElse { mapOf("error" to (CivsDiagnostics.rejection(it)?.reason ?: "lab-growth-failed")) }
+            sender.sendMessage("ARCCIVS_LAB_GROWTH " + Gson().toJson(result))
+            return true
+        }
+        if (args.firstOrNull() in setOf("found-village-at", "lab-refound-village-at")) {
+            val refound = args.first() == "lab-refound-village-at"
+            val epoch = args.getOrNull(8)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val source = if (refound) "lab-reset-anchor" else "explicit-bootstrap-anchor"
             val owner = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
             val worldName = args.getOrNull(2)
             val style = args.getOrNull(3)
             val name = args.getOrNull(4)
-            val coordinates = args.drop(5).map { it.toIntOrNull() }
+            val coordinates = args.drop(5).take(3).map { it.toIntOrNull() }
             val error = when {
                 sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
-                args.size != 8 || owner == null || worldName.isNullOrBlank() || style.isNullOrBlank() ||
+                args.size != (if (refound) 9 else 8) || refound && (epoch == null || worldName != "arccivs_lab") ||
+                    owner == null || worldName.isNullOrBlank() || style.isNullOrBlank() ||
                     name.isNullOrBlank() || name.length > 32 || name.any(Char::isISOControl) ||
                     coordinates.any { it == null } -> "invalid-village-search-arguments"
                 hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
@@ -66,13 +88,17 @@ class CivsCommand(
             }
             fun reply(value: Any) = sender.sendMessage("ARCCIVS_VILLAGE_BOOTSTRAP " + Gson().toJson(value))
             if (error != null) reply(mapOf("state" to "failed", "error" to error))
-            else runCatching { foundVillageAt(requireNotNull(owner), requireNotNull(worldName), requireNotNull(style),
-                requireNotNull(name), CivPosition(requireNotNull(coordinates[0]), requireNotNull(coordinates[1]), requireNotNull(coordinates[2]))) }
+            else runCatching {
+                val origin = CivPosition(requireNotNull(coordinates[0]), requireNotNull(coordinates[1]), requireNotNull(coordinates[2]))
+                if (refound) refoundVillageAt(requireNotNull(owner), requireNotNull(worldName), requireNotNull(style),
+                    requireNotNull(name), origin, requireNotNull(epoch))
+                else foundVillageAt(requireNotNull(owner), requireNotNull(worldName), requireNotNull(style), requireNotNull(name), origin)
+            }
                 .onSuccess { future ->
                     reply(mapOf("state" to "accepted", "owner" to owner, "world" to worldName, "name" to name,
-                        "source" to "explicit-bootstrap-anchor", "requested" to 1))
+                        "source" to source, "requested" to 1))
                     future.whenCompleteSync(tasks) { result, failure ->
-                        if (failure == null && result != null) reply(mapOf("source" to "explicit-bootstrap-anchor", "result" to result))
+                        if (failure == null && result != null) reply(mapOf("source" to source, "result" to result))
                         else reply(mapOf("state" to "failed", "error" to
                             (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "village-search-failed")))
                     }

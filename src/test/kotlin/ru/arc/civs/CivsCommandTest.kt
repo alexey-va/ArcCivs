@@ -167,6 +167,33 @@ class CivsCommandTest : FunSpec({
         JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_BOOTSTRAP ")).asJsonObject["state"].asString shouldBe "accepted"
     }
 
+    test("LAB refounding validates console authority and passes the stable reset epoch") {
+        val host = mockk<CivsUiHost> { every { ready() } returns true }
+        val owner = UUID(0, 221)
+        val epoch = UUID(0, 222)
+        val calls = mutableListOf<UUID>()
+        val router = CivsCommand(host, mockk(), mockk(), mockk(relaxed = true),
+            refoundVillageAt = { actualOwner, world, style, name, anchor, reset ->
+                actualOwner shouldBe owner
+                world shouldBe "arccivs_lab"
+                style shouldBe "nordic"
+                name shouldBe "Auto5"
+                anchor shouldBe CivPosition(32, 63, -48)
+                calls += reset
+                java.util.concurrent.CompletableFuture<Any>()
+            })
+        val console = mockk<ConsoleCommandSender>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
+        val player = mockk<Player>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
+        val args = arrayOf("lab-refound-village-at", owner.toString(), "arccivs_lab", "nordic", "Auto5",
+            "32", "63", "-48", epoch.toString())
+        router.onCommand(player, mockk(), "civs", args)
+        router.onCommand(console, mockk(), "civs", args.copyOf().also { it[2] = "world" })
+        router.onCommand(console, mockk(), "civs", args.copyOf().also { it[8] = "not-an-epoch" })
+        calls shouldBe emptyList()
+        router.onCommand(console, mockk(), "civs", args)
+        calls shouldBe listOf(epoch)
+    }
+
     test("automatic village founding requires ready console administration and bounded exact arguments") {
         val host = mockk<CivsUiHost> { every { ready() } returns true }
         val calls = mutableListOf<Pair<Triple<UUID, Int, String>, Int>>()

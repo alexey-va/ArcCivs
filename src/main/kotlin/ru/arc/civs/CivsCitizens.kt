@@ -91,6 +91,7 @@ class CivsCitizens(
     private val workStatusInputs: (Settlement, CivWorker) -> List<String> = { _, _ -> emptyList() },
     private val workstation: ((Settlement, CivWorker) -> CivWorkstation?)? = null,
     navigationContextFree: ((org.bukkit.block.data.BlockData) -> Boolean)? = null,
+    acceleratedWork: (Settlement) -> Boolean = { false },
 ) : Listener, AutoCloseable {
     private val runtime = CitizenRuntime(plugin, cityProvider)
     internal var residentLifeEnabled: Boolean
@@ -350,7 +351,7 @@ class CivsCitizens(
             workInputsReady = workInputsReady,
             craftPlan = craftPlan,
             workstation = workstation,
-            remove = ::remove, residentFoods = residentFoods)
+            remove = ::remove, residentFoods = residentFoods, acceleratedWork = acceleratedWork)
         equipment = CivsCitizenEquipment(runtime,
             threats = threats)
         audience = CivsCitizenAudience(runtime,

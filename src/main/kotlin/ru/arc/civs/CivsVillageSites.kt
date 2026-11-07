@@ -23,9 +23,9 @@ import kotlin.math.sin
 
 /** An explicit console request is an authority/anchor, never a synthetic saved reference city. */
 internal data class CivVillageBootstrap(val owner: UUID, val worldId: UUID, val style: String,
-    val name: String, val anchor: CivPosition) {
-    val id: UUID get() = UUID.nameUUIDFromBytes(listOf("arccivs-bootstrap", owner, worldId, style, name,
-        anchor.x, anchor.y, anchor.z).joinToString("\u0000").toByteArray(Charsets.UTF_8))
+    val name: String, val anchor: CivPosition, val resetEpoch: UUID? = null) {
+    val id: UUID get() = UUID.nameUUIDFromBytes((listOf("arccivs-bootstrap", owner, worldId, style, name,
+        anchor.x, anchor.y, anchor.z) + listOfNotNull(resetEpoch)).joinToString("\u0000").toByteArray(Charsets.UTF_8))
 }
 
 internal data class CivVillageSiteAdmission(val city: Settlement, val blueprint: CivBlueprint,

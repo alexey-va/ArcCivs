@@ -550,6 +550,7 @@ object CivsRules {
         city: Settlement, actor: UUID, workerId: UUID, assignmentId: UUID,
         expectedCompletedCycles: Long, expectedNextDeliveryAt: Long, now: Long, outputHandled: Boolean = false,
         craftJob: CivCraftJob? = null, equipmentAfter: List<CivResidentItem?>? = null,
+        acceleratedBuilder: Boolean = false,
     ): Settlement {
         authorized(city, actor)
         check(city.autonomy?.paused != true, "autonomy-paused")
@@ -606,9 +607,12 @@ object CivsRules {
                 check(CivsEquipment.inputsReady(worker, productionInputs, emptyMap()), "materials-missing")
             }
         }
-        val interval = CivsResidents.workDuration(worker,
-            if (isBuilder(city, building) && (construction?.payment != null || city.autonomy != null && construction?.batches != null))
-                BUILDER_SESSION_INTERVAL else deliveryInterval(city, building))
+        val baseInterval = if (isBuilder(city, building) &&
+            (construction?.payment != null || city.autonomy != null && construction?.batches != null)) {
+            if (acceleratedBuilder && CivsLabGrowth.paidConstruction(city, construction.id))
+                CivsLabGrowth.workMillis(BUILDER_SESSION_INTERVAL) else BUILDER_SESSION_INTERVAL
+        } else deliveryInterval(city, building)
+        val interval = CivsResidents.workDuration(worker, baseInterval)
         val equipped = equipmentAfter?.let { CivsEquipment.replace(worker, it) } ?: worker
         val supplied = if (!isBuilder(city, building) && city.inventory != null && outputHandled)
             CivsEquipment.consumeInputs(equipped, productionInputs) else equipped

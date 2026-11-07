@@ -19,6 +19,7 @@ internal class CivsCitizenPlanning(
     private val workstation: ((Settlement, CivWorker) -> CivWorkstation?)?,
     private val remove: (CitizenActor, String) -> Unit,
     private val residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
+    private val acceleratedWork: (Settlement) -> Boolean = { false },
 ) {
     private val routes get() = routesOwner()
     private val couriers get() = couriersOwner()
@@ -189,8 +190,12 @@ internal class CivsCitizenPlanning(
             } else base.copy(workplace = work.standing, workMillis = work.durationMillis,
                 completeAtWorkplace = true, worldWork = work, autonomousWork = if (work.autonomousVisual) null else base.autonomousWork)
         }
+        val accelerated = acceleratedWork(city) && (planned.idleReason == null || planned.idleReason == "placing") &&
+            (planned.worldWork?.let { !it.autonomousVisual && it.changes.isNotEmpty() } == true ||
+                planned.type == BuildingType.BUILDER_HUT && CivsLabGrowth.paidConstruction(city, planned.token.constructionId))
+        val baseMillis = if (accelerated) CivsLabGrowth.workMillis(planned.workMillis) else planned.workMillis
         return planned.copy(workMillis = if (nativeAuto && planned.worldWork == null && session != null)
-            session.remainingMillis else CivsResidents.workDuration(worker, planned.workMillis),
+            session.remainingMillis else CivsResidents.workDuration(worker, baseMillis),
             suppliesNeeded = !workInputsReady(city, worker))
     }
 }

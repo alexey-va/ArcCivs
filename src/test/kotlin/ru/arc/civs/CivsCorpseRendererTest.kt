@@ -20,6 +20,7 @@ import org.bukkit.event.world.ChunkUnloadEvent
 import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.ItemStack
 import ru.arc.core.BukkitTaskScheduler
+import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.display.PacketTextDisplay
 import ru.arc.paper.display.PaperPacketDisplays
@@ -334,7 +335,8 @@ private class CorpseRendererFixture(val paper: MockBukkitTestRuntime) : AutoClos
         every { space.clearBounds(any(), any(), any()) } answers { loaded }
         renderer = CivsCorpseRenderer(plugin, tasks, CivsText.fromYaml(civsLocaleSource(), "en"),
             { if (available) listOf(city.copy(corpses = listOf(corpse))) else emptyList() },
-            { _, city, worker -> opened += city to worker }, packetNpcs, displays, { clock }, loadCitizenSkins(), space)
+            { _, city, worker -> opened += city to worker }, packetNpcs, displays, { clock }, loadCitizenSkins(), space,
+            work = BudgetedTaskQueue(tasks, nanoTime = { 0L }))
     }
 
     fun id() = CivsCorpseIdentity(city.id, corpse.worker.id, corpse.diedAt)
