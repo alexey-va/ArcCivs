@@ -318,7 +318,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
     /** Same pending-mutation authority at selection, admission, saved receipt and recovery. */
     private fun mineMutationAllowed(city: Settlement, building: CivBuilding, world: World, cell: CivPlanBlock,
         ordinal: Int, worker: CivWorker? = null, budgeted: Boolean = false, generator: Boolean = false,
-        sealing: Boolean = false, planVersion: Int = CivsMinePlan.VERSION, clearingLava: Boolean = false): Boolean? {
+        sealing: Boolean = false, planVersion: Int = CivsMinePlan.VERSION, clearingLava: Boolean = false,
+        sealingOrigin: CivPosition? = null): Boolean? {
         fun denied(reason: String): Boolean {
             if (worker == null) throw CivsRejection(reason)
             context.blocked(worker, "worksite-protected", point = cell.position, reason = reason,
@@ -351,6 +352,14 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         } == cell.after
         // Removing an exact paid block reuses its existing mine opening instead of requiring untouched ground above it.
         if (generatorFace || restoredSolid || ownedBefore && after.isAir) return true
+        // Only the saved current excavation owns this cover-free AIR repair; ready body cuts retain their own frontier.
+        val previous = plan.steps.getOrNull(ordinal - 1)
+        val currentSeal = plan.version == 7 && sealing && before.isAir && cell.after == "minecraft:cobblestone" &&
+            saved != null && saved.version == plan.version && sealingOrigin != null && sealingOrigin == saved.excavation &&
+            (sealingOrigin == plan.steps[ordinal].point || previous?.let {
+                it.point == sealingOrigin && it.after == null && plan.completed(ordinal - 1, saved.nextStep, saved.sectionSteps.orEmpty())
+            } == true) && pendingLandingClearance(plan, local, saved.nextStep, saved.sectionSteps.orEmpty()) == null
+        if (currentSeal) return true
         // A safety repair carries the active frontier ordinal; cover belongs to its exact authored action.
         val coverOrdinal = if (sealing && plan.version == 7) sequenceOf("0/shaft/entrance", "0/shaft/opening")
             .flatMap { plan.sections[it].orEmpty().asSequence() }.firstOrNull {
@@ -478,7 +487,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                     } == true }, "stale-worksite")
             }
             requireCivs(mineMutationAllowed(city, building, world, cell, ordinal, generator = work.miningGenerator,
-                sealing = sealing, planVersion = plan.version, clearingLava = clearingLava) == true, "protected-area")
+                sealing = sealing, planVersion = plan.version, clearingLava = clearingLava,
+                sealingOrigin = work.miningFrontier) == true, "protected-area")
         }
         val oldFrontier = validateLandingClearanceFrontier(city, building, world, plan, work, ordinal)
         // Removing liquid opens no new rock face; adjacent flows may drain after this exact source is removed.
@@ -1144,7 +1154,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             if (!CivsAutonomousWorksites.supports(city, building) && CivsEquipment.plainCount(worker, task.material.name) == 0)
                 return prepareQuarry(city, worker, building, world)
             if (mineMutationAllowed(city, building, world, change(block, task.material.createBlockData().asString),
-                    execution?.ordinal ?: progress.toInt(), worker, budgeted = true, sealing = true) != true) return null
+                    execution?.ordinal ?: progress.toInt(), worker, budgeted = true, sealing = true,
+                    sealingOrigin = scan.target) != true) return null
             val miningStep = city.minePlans?.get(building.id.toString())?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0L
             val standing = beside(city, worker, building, world, point, ladder = true, miningStep = miningStep,
                 miningAccessStep = effectiveProgress,

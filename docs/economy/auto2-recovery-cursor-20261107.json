@@ -1,0 +1,272 @@
+{
+  "version": 1,
+  "title": "Auto2 recovery cursor BEFORE assessment",
+  "assessment_state": "BEFORE_PRODUCTION_SOURCE_CHANGE",
+  "recorded_at_utc": "2026-11-07T04:20:11.571874+00:00",
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "assumptions": [
+    "Low/base/high currency deltas are exact direct-new-mint zeros in separate units.",
+    "One backend owner is used for the unchanged AutoSupply envelope and is not multiplied by five villages.",
+    "Earlier usable quarry access can increase realized native items, supplies, tool/food use, internal skills and eventual trade. Their amounts and timing are UNKNOWN.",
+    "Current SELL/AutoSell and the future SELL-to-contract transition remain separate scenarios. No conversion or stacking revenue is assumed.",
+    "The native A-to-B candidate outcome and valid Auto2 gate alternative remain unproven."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_new_vault",
+          "kind": "mint",
+          "source": "Candidate continuation bookkeeping in CivsAutonomousDevelopment only",
+          "basis": "No direct currency, physical EMERALD or player-XP issuance is added. Existing item production and supply demand remain separate unknown effects.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_new_tokens",
+          "kind": "mint",
+          "source": "Candidate continuation bookkeeping in CivsAutonomousDevelopment only",
+          "basis": "No direct currency, physical EMERALD or player-XP issuance is added. Existing item production and supply demand remain separate unknown effects.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "physical_emerald": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_new_physical_emerald",
+          "kind": "mint",
+          "source": "Candidate continuation bookkeeping in CivsAutonomousDevelopment only",
+          "basis": "No direct currency, physical EMERALD or player-XP issuance is added. Existing item production and supply demand remain separate unknown effects.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_new_player_xp",
+          "kind": "mint",
+          "source": "Candidate continuation bookkeeping in CivsAutonomousDevelopment only",
+          "basis": "No direct currency, physical EMERALD or player-XP issuance is added. Existing item production and supply demand remain separate unknown effects.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "native_item_service_units": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unchanged_shared_autosupply_upper_envelope",
+          "kind": "item",
+          "source": "CivsAutoSupplies.kt:24-25 and CivsResidentSupplies.kt:391-403",
+          "basis": "One backend-shared service owner, at most 8 material kinds times 64 units per receipt and one admission per second. Low/base/high assume 0.25/1/4 active hours/day. Counts combine unlike materials only as an upper service-workload unit, not item value or measured grants.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "512",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              900,
+              3600,
+              14400
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "512",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              900,
+              3600,
+              14400
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "canonical_inventory": {
+    "path": "/Users/alexey23/RusCrafting/ruscrafting-ops/docs/knowledge/economy-inventory.md",
+    "sha256": "9e863e5c55c06c284428c359d97f39c086b067f414da562e0c76a68a6058d627",
+    "read_for_assessment": true,
+    "fresh_live_ledger_read": false,
+    "scope": "No rates, prices or currency operations are changed; parent owns any canonical inventory follow-up."
+  },
+  "evaluator": {
+    "path": "/Users/alexey23/RusCrafting/ruscrafting-ops/.agents/skills/balance-ruscrafting-economy/scripts/evaluate.py",
+    "sha256": "3164f77dcfe05e5d72e07b593db43c5db099a9c2bcc119068fb181138af82e18"
+  },
+  "source_before": {
+    "published_commit": "0b9be9ce429e1c9d5a7ae70a910d9b320bf0786a",
+    "active_version_parent_handoff": "0.1.227",
+    "active_pid_parent_handoff": 3905828,
+    "startup_ready_parent_handoff": "2026-11-07T04:16:38.178474660Z",
+    "sha256": {
+      "src/main/kotlin/ru/arc/civs/CivsAutonomousDevelopment.kt": "ef03d235b4907daa50a698eb8692785563174a96649ece51d3f947685cb8c7ba",
+      "src/test/kotlin/ru/arc/civs/CivsInitialUnpaidPlanRecoveryTest.kt": "4bfc95567e11f20d1ec30a07ffa09a3300a3bd35cc5f1af1ee18f8da4f8e5992",
+      "src/main/kotlin/ru/arc/civs/CivsAutoSupplies.kt": "bbce864c935d88c41b7f1800eec442509e31ebb3e143b14ae0517c6d25f6125e",
+      "src/main/kotlin/ru/arc/civs/CivsResidentSupplies.kt": "6cb5f19559cf718015a359eb2e5b6985f7d52a4b9f862aab1add2fb4170c3f78",
+      "src/main/kotlin/ru/arc/civs/CivsRules.kt": "d4aea4238ccf932efdcb738cb84df8543bbe521d172be33c1611feb5c6e50923",
+      "src/main/kotlin/ru/arc/civs/CivsWorkerCommits.kt": "925b9e4bed5453928f676e2d4045b15940e953691ca41ad23c89cfb53a46f55e"
+    }
+  },
+  "proposed_change": "Preserve the layout/goal/plot-key-owned unpaid replacement cursor when a broad terrain notification clears geometric refusal evidence. Each skipped and next candidate still repeats native proof and the complete forecast. Existing exhaustion/key reset/backoff/budgets remain authoritative.",
+  "observed_before": {
+    "city": "127d5ad9-3f84-3d57-aefa-16a6a475b967",
+    "history_pid": 3824623,
+    "history_version": "0.1.226",
+    "window_utc": [
+      "2026-11-07T03:15:00Z",
+      "2026-11-07T03:52:33Z"
+    ],
+    "requests": 17,
+    "gate_junction_refusals": 16,
+    "city_busy_transitions": 9,
+    "construction_reservations": 0,
+    "read_jobs": [
+      "60edb77d939a4fde3bc55b336ea16df9a449379949d569d961aad811cebf8eda",
+      "1521544c49632d0a8e2c23d9e1b75c9895d92de34d81f736b6821be3385dc192"
+    ]
+  },
+  "unquantified_flows": [
+    {
+      "id": "realized_native_items_and_internal_skills",
+      "status": "UNKNOWN",
+      "units": [
+        "each material separately",
+        "resident internal skill",
+        "elapsed work time"
+      ],
+      "before": null,
+      "after": null,
+      "delta": null
+    },
+    {
+      "id": "actual_autosupply_draws_and_tool_food_sinks",
+      "status": "UNKNOWN",
+      "before": null,
+      "after": null,
+      "delta": null
+    },
+    {
+      "id": "existing_player_trade_availability",
+      "status": "UNKNOWN",
+      "units": [
+        "physical goods",
+        "existing physical EMERALD transfers"
+      ],
+      "before": null,
+      "after": null,
+      "delta": null
+    }
+  ],
+  "decision": "Supports the scoped continuation regression and a separately authorized source fix. The arithmetic upper envelope and direct currency amounts remain unchanged. Candidate continuation cannot waive native, claim, gate, item-journal, arrival or paid-work checks; runtime growth and throughput remain acceptance obligations."
+}

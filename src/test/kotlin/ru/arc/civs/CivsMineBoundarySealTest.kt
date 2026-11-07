@@ -110,6 +110,116 @@ class CivsMineBoundarySealTest : FunSpec({
         }
     }
 
+    test("a paid V7 AIR frontier seal retains native authority and item conservation with four blocks of cover") {
+        withMineBoundary { world, mine, original, access, plugin ->
+            var city = original
+            var runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+            val directory = Files.createTempDirectory("mine-shallow-frontier-seal-")
+            try {
+                CivsStore(directory, Executor(Runnable::run)).use { store ->
+                    store.save(city).join() shouldBe city
+                    var sealed: CivInventoryTransaction? = null
+                    CivsStorage(plugin) { emptyArray() }.use { storage ->
+                        storage.validateMineNative = { transaction ->
+                            val receipt = requireNotNull(transaction.mine)
+                            runtime.validateMineReceiptNative(receipt.before(transaction.after), receipt.work)
+                            null
+                        }
+                        fun commit(work: CivWorldWork, retainJournal: Boolean = false) {
+                            runtime.validate(city, work)
+                            val id = UUID.randomUUID()
+                            storage.reserve(city, id)
+                            val prepared = storage.prepareWork(city, mine.id, work.storageInputs(city.workers.single()),
+                                emptyMap(), work.changes, work)
+                            val after = CivsRules.finishWorldWork(city, work, 100_000 + work.cycle * 5_000)
+                                .copy(inventory = prepared.inventoryAfter)
+                            val transaction = CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes,
+                                worldChanges = prepared.worldChanges, mine = prepared.mine).validated()
+                            requireNotNull(transaction.mine).work shouldBe work
+                            store.saveInventoryTransaction(transaction).join() shouldBe transaction
+                            val durable = store.loadInventoryTransactions().join().single()
+                            storage.seal(durable, keepViewersOpen = true)
+                            storage.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
+                            storage.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
+                            storage.unlock(id)
+                            city = store.save(durable.after).join()
+                            if (retainJournal) sealed = durable else store.deleteInventoryTransaction(id).join() shouldBe true
+                            runtime.invalidate(work.workerId)
+                        }
+                        val cut = nextBoundaryWork(runtime, city, world)
+                        cut.status shouldBe "digging-mine"
+                        cut.focus shouldBe BOUNDARY_CUT
+                        commit(cut)
+                        city = store.load().join().single()
+                        runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+                        val before = city
+                        val planBefore = before.minePlans!!.getValue(mine.id.toString())
+                        // The physical wall is still AIR. Authored cobble/slab above it is excluded from natural cover.
+                        for (y in BOUNDARY_WALL.y + 5..world.maxHeight - 1)
+                            world.getBlockAt(BOUNDARY_WALL.x, y, BOUNDARY_WALL.z).type = Material.AIR
+                        world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y + 4, BOUNDARY_WALL.z).type = Material.STONE
+                        world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y + 5, BOUNDARY_WALL.z).type = Material.COBBLESTONE
+                        world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y + 8, BOUNDARY_WALL.z).blockData =
+                            Bukkit.createBlockData("minecraft:spruce_slab[type=top,waterlogged=false]")
+                        val seal = nextBoundaryWork(runtime, city, world)
+                        seal.status shouldBe "securing-mine"
+                        seal.focus shouldBe BOUNDARY_WALL
+                        seal.changes shouldBe listOf(CivPlanBlock(BOUNDARY_WALL, "minecraft:air", "minecraft:cobblestone"))
+                        seal.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                        seal.outputs shouldBe emptyMap()
+                        seal.durationMillis shouldBe 2_000L
+                        seal.autonomousVisual shouldBe false
+                        assertBoundaryStanding(world, mine, seal)
+                        // The same shallow target gains no permission for a natural cut or an ordinary solid step.
+                        val wall = world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z)
+                        wall.type = Material.STONE
+                        shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(city, seal.copy(status = "digging-mine",
+                            changes = listOf(CivPlanBlock(BOUNDARY_WALL, "minecraft:stone", "minecraft:air")))) }
+                            .reason shouldBe "mine-thin-cover"
+                        wall.type = Material.WATER
+                        shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(city, seal.copy(
+                            changes = listOf(CivPlanBlock(BOUNDARY_WALL, "minecraft:water[level=0]", "minecraft:cobblestone")))) }
+                            .reason shouldBe "mine-thin-cover"
+                        wall.type = Material.AIR
+                        shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(city, seal.copy(status = "digging-mine")) }
+                            .reason shouldBe "mine-thin-cover"
+                        val outside = BOUNDARY_WALL.copy(x = BOUNDARY_WALL.x + 20)
+                        world.getBlockAt(outside.x, outside.y, outside.z).type = Material.AIR
+                        shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(city, seal.copy(
+                            changes = listOf(CivPlanBlock(outside, "minecraft:air", "minecraft:cobblestone")))) }
+                            .reason shouldBe "stale-worksite"
+                        commit(seal, retainJournal = true)
+                        CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe
+                            CivsEquipment.plainCount(before.workers.single(), "COBBLESTONE") - 1
+                        city.workers.single().completedCycles shouldBe before.workers.single().completedCycles + 1
+                        city.stock shouldBe before.stock
+                        city.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe planBefore.nextStep
+                        city.minePlans!!.getValue(mine.id.toString()).sectionSteps shouldBe planBefore.sectionSteps
+                        wall.type shouldBe Material.COBBLESTONE
+                    }
+                    // An apply-before-retire restart reuses the exact native authority and after-state.
+                    val durable = store.loadInventoryTransactions().join().single()
+                    durable shouldBe requireNotNull(sealed)
+                    val saved = store.load().join().single()
+                    val restarted = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+                    CivsStorage(plugin) { emptyArray() }.use { recovered ->
+                        recovered.validateMineNative = { transaction ->
+                            val receipt = requireNotNull(transaction.mine)
+                            restarted.validateMineReceiptNative(receipt.before(transaction.after), receipt.work)
+                            null
+                        }
+                        recovered.lock(durable)
+                        recovered.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
+                        recovered.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
+                        store.load().join().single() shouldBe saved
+                        world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type shouldBe Material.COBBLESTONE
+                        store.deleteInventoryTransaction(durable.id).join() shouldBe true
+                    }
+                }
+            } finally { directory.toFile().deleteRecursively() }
+        }
+    }
+
     test("Auto scenery cuts a deferred AIR frontier then repairs it without replaying a cosmetic receipt") {
         withMineBoundary { world, mine, original, access, plugin ->
             var city = CivsRules.validate(original.copy(inventory = null, autonomy = CivAutonomy()))

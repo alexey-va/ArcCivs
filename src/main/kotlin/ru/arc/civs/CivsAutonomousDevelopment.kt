@@ -766,7 +766,7 @@ internal class CivsAutonomousDevelopment(
         searchFailures.changed(world, point).forEach { cityId ->
             autonomyPlanRetryAt.remove(cityId)
             autonomyLayoutChecked.remove(cityId)
-            unpaidRecoveryCursors.remove(cityId)
+            // Layout/plot identity owns continuation; every next candidate still repeats native proof.
         }
     }
 

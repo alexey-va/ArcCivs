@@ -257,7 +257,7 @@ class CivsDevelopedUnpaidPlanRecoveryTest : FunSpec({
 
 class CivsUnpaidRecoveryTerrainInvalidationTest : FunSpec({
     for (target in listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER)) {
-        test("terrain outside captured $target work can invalidate the cursor while its original forecast still adopts") {
+        test("terrain outside captured $target work clears the refusal while its original forecast still adopts") {
             initialRecoveryScenario(continuation = true, targetType = target,
                 draftRefusal = target == BuildingType.FORESTER) { s ->
                 s.holdForecast = true
@@ -279,26 +279,37 @@ class CivsUnpaidRecoveryTerrainInvalidationTest : FunSpec({
             }
         }
 
-        test("a refused $target forecast cannot resurrect its invalidated cursor or refusal and restarts from ordinal zero") {
+        test("unrelated terrain preserves replacement continuation after a refused $target forecast") {
             initialRecoveryScenario(continuation = true, targetType = target,
                 draftRefusal = target == BuildingType.FORESTER) { s ->
                 s.holdForecast = true
                 s.start(); s.finish { s.forecasts == 1 }
                 val candidate = requireNotNull(s.selected)
+                val key = civsPlanBoardLayoutKey(s.city)
+                val paid = s.paidPlans.toList()
                 invalidateRecoveryCacheOutsideCapture(s)
+                civsPlanBoardLayoutKey(s.city) shouldBe key
                 s.holdForecast = false
-                s.forecast.completeExceptionally(CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure")))
+                s.forecast.completeExceptionally(CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "gate-junction")))
                 s.finish { s.subject.debug(s.city.id)["request"] == null }
-                (s.subject.debug(s.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe false
                 s.subject.progress(s.city.id)?.reason shouldBe "autonomy-layout-obstructed"
                 s.saves shouldBe emptyList()
                 s.city shouldBe s.before
+                s.reserveItems() shouldBe s.beforeItems
                 s.time += 30_001; s.subject.pulse(); s.scheduler.tick()
                 s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
-                // The first proven choice is proved again; the externally invalidated skip was not advanced.
-                s.forecastDesigns shouldBe listOf(candidate, candidate)
-                s.nativeProofs shouldBe listOf(candidate, candidate)
+                val replacement = s.forecastDesigns.last()
+                (replacement == candidate) shouldBe false
+                s.forecastDesigns shouldBe listOf(candidate, replacement)
+                // Skipping A still repeats its native proof before B receives its own complete forecast.
+                s.nativeProofs.takeLast(2) shouldBe listOf(candidate, replacement)
                 s.forecasts shouldBe 2
+                (s.searchDebug()["attempted"] as Int <= 64) shouldBe true
+                val plan = requireNotNull(s.city.autonomy?.plan)
+                CivsVillageSiteScoring.completeProfile(plan) shouldBe true
+                plan.revision shouldBe s.oldPlan.revision + 1
+                plan.plots.single { it.building.id == s.oldTarget.id }.building shouldBe replacement.copy(phase = BuildingPhase.SITE)
+                s.paidPlans shouldBe paid
                 s.city.copy(revision = s.before.revision, autonomy = s.before.autonomy) shouldBe s.before
                 s.constructionAdmissions shouldBe 0
                 s.reserveItems() shouldBe s.beforeItems
@@ -314,6 +325,9 @@ private fun invalidateRecoveryCacheOutsideCapture(s: InitialRecoveryScenario) {
     val point = s.city.center.copy(x = s.city.center.x + s.city.radius, z = s.city.center.z + s.city.radius)
     s.volumeCells.isNotEmpty() shouldBe true
     s.volumeCells.flatten().none { it.position.x == point.x && it.position.z == point.z } shouldBe true
+    s.selectedRoute.none { kotlin.math.abs(it.x - point.x) <= 1 && kotlin.math.abs(it.z - point.z) <= 1 } shouldBe true
+    CivsAutonomousGeometry.horizontalContains(CivsSettlementLayout.frame(s.city).core, point) shouldBe false
+    (s.oldPlan.walls + s.oldPlan.gates).none { CivsAutonomousGeometry.horizontalContains(it, point) } shouldBe true
     s.subject.terrainChanged(s.city.worldId, point)
     (s.subject.debug(s.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe false
     s.subject.debug(s.city.id)["request"] shouldBe request
@@ -371,10 +385,14 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
         }
     }
 
-    test("recovery continuation discards declined choices when the owner context changes") {
+    for (context in listOf("owner", "adopted plan revision"))
+    test("recovery continuation discards declined choices when the $context changes") {
         initialRecoveryScenario(continuation = true) { s ->
             val candidate = s.rejectFirstForecast("autonomy-layout-obstructed")
-            val current = s.city.copy(owner = UUID(169, 9))
+            val current = if (context == "owner") s.city.copy(owner = UUID(169, 9)) else s.city.copy(
+                autonomy = requireNotNull(s.city.autonomy).copy(plan = s.oldPlan.copy(revision = s.oldPlan.revision + 1)))
+            if (context == "adopted plan revision")
+                (civsPlanBoardLayoutKey(current) == civsPlanBoardLayoutKey(s.city)) shouldBe false
             s.city = current
             s.time += 300_001; s.subject.pulse(); s.scheduler.tick()
             s.finish { s.saves.size == 1 && s.subject.debug(s.city.id)["request"] == null }
@@ -387,9 +405,15 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
         }
     }
 
-    test("recovery continuation reruns native guards within sixty four attempts and resets on exhaustion") {
+    test("a changed refused junction is re-evaluated after bounded continuation exhaustion") {
         initialRecoveryScenario(continuation = true) { s ->
-            val candidate = s.rejectFirstForecast("autonomy-layout-obstructed")
+            val candidate = s.rejectFirstForecast("autonomy-layout-obstructed", stage = "gate-junction")
+            val gate = s.oldPlan.gates.first()
+            val point = CivPosition((gate.min.x + gate.max.x) / 2, s.city.center.y, (gate.min.z + gate.max.z) / 2)
+            val key = civsPlanBoardLayoutKey(s.city)
+            s.subject.terrainChanged(s.city.worldId, point)
+            (s.subject.debug(s.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe false
+            civsPlanBoardLayoutKey(s.city) shouldBe key
             s.failure = "native-quota"
             s.time += 300_001; s.subject.pulse(); s.scheduler.tick()
             s.finish { s.subject.debug(s.city.id)["request"] == null }
