@@ -4,8 +4,14 @@ import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.every
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.block.data.BlockData
+import org.bukkit.inventory.ItemStack
+import org.mockbukkit.mockbukkit.block.data.BlockDataMock
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -26,61 +32,69 @@ class CivsMineAutoFallbackTest : FunSpec({
     }
 
     test("native Auto keeps working at its own safe storage when a real liquid branch is blocked") {
-        mineFallbackFixture(automatic = true) { paper, world, runtime, city, mine, worker, target ->
-            repeat(32) { runtime.pulse(listOf(city)); paper.performTicks(5) }
-            val work = requireNotNull(runtime.plan(city, worker)) { runtime.debug().toString() }
-            work.status shouldBe "digging-mine"
-            work.durationMillis shouldBe 6_000L
-            work.changes shouldBe emptyList()
-            work.inputs shouldBe emptyMap()
-            work.outputs.values.single() shouldBe 1L
-            (work.outputs.keys.single() in CivsMineFallback.OUTPUTS) shouldBe true
-            work.miningStep shouldBe null
-            work.miningPlanVersion shouldBe null
-            work.miningSections shouldBe null
-            work.miningGenerator shouldBe false
-            work.autonomousVisual shouldBe false
-            citizenWorkFocus(work) shouldBe null
-            runtime.validate(city, work)
-            for (material in listOf("RAW_GOLD", "REDSTONE", "DIAMOND")) {
-                val selected = work.copy(outputs = mapOf(material to 1L))
-                CivsMineFallback.matches(selected) shouldBe true
-                val after = CivsRules.finishWorldWork(city, selected, 10_000)
-                CivsEquipment.plainCount(after.workers.single(), material) shouldBe
-                    CivsEquipment.plainCount(worker, material) + 1
-                val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList())
-                Gson().fromJson(Gson().toJson(receipt), CivInventoryTransaction::class.java).validated().after shouldBe after
-                shouldThrow<CivsRejection> { CivsRules.finishWorldWork(after, selected, 10_000) }.reason shouldBe "stale-delivery"
-            }
-            world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.WATER
-            val completed = CivsRules.finishWorldWork(city, work, 10_000)
-            completed.minePlans shouldBe city.minePlans
-            completed.stock shouldBe city.stock
-            completed.workers.single().completedCycles shouldBe worker.completedCycles + 1
-            val material = work.outputs.keys.single()
-            CivsEquipment.plainCount(completed.workers.single(), material) shouldBe CivsEquipment.plainCount(worker, material) + 1
-            shouldThrow<CivsRejection> { CivsRules.finishWorldWork(completed, work, 10_000) }.reason shouldBe "stale-delivery"
-            val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, completed, emptyList())
-            Gson().fromJson(Gson().toJson(tx), CivInventoryTransaction::class.java).validated().after shouldBe completed
-            val directory = Files.createTempDirectory("arc-civs-mine-fallback-receipt-")
-            try {
-                CivsStore(directory, Executor(Runnable::run)).use { store -> store.saveInventoryTransaction(tx).join() shouldBe tx }
-                CivsStore(directory, Executor(Runnable::run)).use { restarted ->
-                    val accepted = restarted.loadInventoryTransactions().join().single()
-                    accepted.after shouldBe completed
-                    shouldThrow<CivsRejection> { CivsRules.finishWorldWork(accepted.after, work, 10_000) }.reason shouldBe "stale-delivery"
-                    restarted.deleteInventoryTransaction(tx.id).join() shouldBe true
+        withDiamondFallbackOutput {
+            for ((pickaxe, expectedOutput) in listOf("IRON_PICKAXE" to "DIAMOND", "STONE_PICKAXE" to "COBBLESTONE")) {
+                mineFallbackFixture(automatic = true, pickaxe = pickaxe) { paper, world, runtime, city, mine, worker, target ->
+                    repeat(32) { runtime.pulse(listOf(city)); paper.performTicks(5) }
+                    val work = requireNotNull(runtime.plan(city, worker)) { runtime.debug().toString() }
+                    work.status shouldBe "digging-mine"
+                    work.durationMillis shouldBe 6_000L
+                    work.changes shouldBe emptyList()
+                    work.inputs shouldBe emptyMap()
+                    work.outputs shouldBe mapOf(expectedOutput to 1L)
+                    work.miningStep shouldBe null
+                    work.miningPlanVersion shouldBe null
+                    work.miningSections shouldBe null
+                    work.miningGenerator shouldBe false
+                    work.autonomousVisual shouldBe false
+                    citizenWorkFocus(work) shouldBe null
+                    runtime.validate(city, work)
+                    runtime.validateMineFallbackReceiptNative(city, work)
+                    for (material in listOf("RAW_GOLD", "REDSTONE", "DIAMOND")) {
+                        val selected = work.copy(outputs = mapOf(material to 1L))
+                        CivsMineFallback.matches(selected) shouldBe true
+                        val after = CivsRules.finishWorldWork(city, selected, 10_000)
+                        CivsEquipment.plainCount(after.workers.single(), material) shouldBe
+                            CivsEquipment.plainCount(worker, material) + 1
+                        val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList())
+                        Gson().fromJson(Gson().toJson(receipt), CivInventoryTransaction::class.java).validated().after shouldBe after
+                        shouldThrow<CivsRejection> { CivsRules.finishWorldWork(after, selected, 10_000) }.reason shouldBe "stale-delivery"
+                    }
+                    world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.WATER
+                    val completed = CivsRules.finishWorldWork(city, work, 10_000)
+                    completed.minePlans shouldBe city.minePlans
+                    completed.stock shouldBe city.stock
+                    completed.workers.single().completedCycles shouldBe worker.completedCycles + 1
+                    val material = work.outputs.keys.single()
+                    CivsEquipment.plainCount(completed.workers.single(), material) shouldBe CivsEquipment.plainCount(worker, material) + 1
+                    shouldThrow<CivsRejection> { CivsRules.finishWorldWork(completed, work, 10_000) }.reason shouldBe "stale-delivery"
+                    val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, completed, emptyList())
+                    Gson().fromJson(Gson().toJson(tx), CivInventoryTransaction::class.java).validated().after shouldBe completed
+                    val directory = Files.createTempDirectory("arc-civs-mine-fallback-receipt-")
+                    try {
+                        CivsStore(directory, Executor(Runnable::run)).use { store -> store.saveInventoryTransaction(tx).join() shouldBe tx }
+                        CivsStore(directory, Executor(Runnable::run)).use { restarted ->
+                            val accepted = restarted.loadInventoryTransactions().join().single()
+                            accepted.after shouldBe completed
+                            CivsEquipment.plainCount(accepted.after.workers.single(), expectedOutput) shouldBe
+                                CivsEquipment.plainCount(worker, expectedOutput) + 1
+                            CivsEquipment.plainCount(accepted.after.workers.single(), "DIAMOND") shouldBe
+                                CivsEquipment.plainCount(worker, "DIAMOND") + if (expectedOutput == "DIAMOND") 1 else 0
+                            shouldThrow<CivsRejection> { CivsRules.finishWorldWork(accepted.after, work, 10_000) }.reason shouldBe "stale-delivery"
+                            restarted.deleteInventoryTransaction(tx.id).join() shouldBe true
+                        }
+                    } finally { directory.toFile().deleteRecursively() }
+                    val cycle = CitizenCycle(CitizenToken(mine.id, worker.completedCycles, 1, null), work.durationMillis,
+                        completeAtWorkplace = true)
+                    cycle.start()
+                    cycle.arrive(0)
+                    cycle.arrive(0)
+                    for (at in 1_000L..5_000L step 1_000) cycle.work(at)
+                    cycle.phase shouldBe CitizenPhase.WORKING
+                    cycle.work(6_000)
+                    cycle.phase shouldBe CitizenPhase.READY
                 }
-            } finally { directory.toFile().deleteRecursively() }
-            val cycle = CitizenCycle(CitizenToken(mine.id, worker.completedCycles, 1, null), work.durationMillis,
-                completeAtWorkplace = true)
-            cycle.start()
-            cycle.arrive(0)
-            cycle.arrive(0)
-            for (at in 1_000L..5_000L step 1_000) cycle.work(at)
-            cycle.phase shouldBe CitizenPhase.WORKING
-            cycle.work(6_000)
-            cycle.phase shouldBe CitizenPhase.READY
+            }
         }
     }
 
@@ -143,13 +157,25 @@ class CivsMineAutoFallbackTest : FunSpec({
     }
 })
 
+// The class has its own JVM (forkEvery = 1); keep the selector override scoped and restore it on failure.
+private fun withDiamondFallbackOutput(body: () -> Unit) {
+    mockkObject(CivsWorksites.Companion)
+    try {
+        every { CivsWorksites.generatorOutput(any(), any(), any()) } answers {
+            if (thirdArg<(String) -> Boolean>()("DIAMOND")) "DIAMOND" else "COBBLESTONE"
+        }
+        body()
+    } finally { unmockkObject(CivsWorksites.Companion) }
+}
+
 private fun mineFallbackFixture(automatic: Boolean, locked: (CivPosition) -> Boolean = { false }, hazard: Material = Material.WATER, settings: CivsWorksiteSettings = CivsWorksiteSettings(),
+    pickaxe: String = "IRON_PICKAXE",
     body: (MockBukkitTestRuntime, CivsWorksiteWorldFixture, CivsWorksites, Settlement, CivBuilding, CivWorker, CivPosition) -> Unit) = failOnUnsupportedMockBukkitOperation {
-    MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+    MockBukkitTestRuntime.open(MineFallbackServerFixture()).use { paper ->
         val world = CivsWorksiteWorldFixture("mine-auto-fallback-$automatic").also(paper.server::addWorld)
         val plugin = paper.createSimplePlugin("MineAutoFallback")
         val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
-        val worker = spatialWorker(mine, "IRON_PICKAXE")
+        val worker = spatialWorker(mine, pickaxe)
         val city = spatialCity(world.uid, listOf(mine), worker).copy(autonomy = if (automatic) CivAutonomy() else null,
             inventory = CivInventory(if (automatic) CivStorageMode.PHYSICAL else CivStorageMode.VIRTUAL))
         for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
@@ -172,5 +198,29 @@ private fun mineFallbackFixture(automatic: Boolean, locked: (CivPosition) -> Boo
                 body(paper, world, runtime, city, mine, worker, target)
             }
         }
+    }
+}
+
+// Pinned MockBukkit omits this API; its bundled incorrect_for_*_tool tags supply the vanilla tier rules.
+// Restrict the adapter to the four ordinary ore states used by the production generator.
+private class MineFallbackServerFixture : CivsWorksiteServerFixture() {
+    override fun createBlockData(data: String): BlockData {
+        val material = when (data) {
+            "minecraft:iron_ore" -> Material.IRON_ORE
+            "minecraft:gold_ore" -> Material.GOLD_ORE
+            "minecraft:redstone_ore" -> Material.REDSTONE_ORE
+            "minecraft:diamond_ore" -> Material.DIAMOND_ORE
+            else -> return super.createBlockData(data)
+        }
+        return OreData(material)
+    }
+
+    private class OreData(material: Material) : BlockDataMock(material) {
+        override fun isPreferredTool(tool: ItemStack): Boolean = when (tool.type) {
+            Material.IRON_PICKAXE, Material.DIAMOND_PICKAXE, Material.NETHERITE_PICKAXE -> true
+            Material.STONE_PICKAXE, Material.COPPER_PICKAXE -> material == Material.IRON_ORE
+            else -> false
+        }
+        override fun clone(): BlockDataMock = OreData(material)
     }
 }
