@@ -219,6 +219,43 @@ internal class CivsAutonomousPlacement(
     fun reserved(city: Settlement, plot: CivSettlementPlot): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, plot.building.type, 1, plot.building.id, reservation = plot))
 
+    /** Reuse the immutable founding capture and choose the least earthwork at this same horizontal site. */
+    fun captureHallSite(city: Settlement, blueprint: CivBlueprint): CompletableFuture<CivPlacementPlan> {
+        val source = city.building(blueprint.building.id)
+            ?: return CompletableFuture.failedFuture(CivsRejection("stale-building"))
+        if (!civsAutonomousHallSite(city, source) || city.construction != null ||
+            blueprint.building != source.copy(phase = BuildingPhase.CONSTRUCTING))
+            return CompletableFuture.failedFuture(CivsRejection("stale-building"))
+        fun capture(selected: CivBlueprint) = world.captureManualFoundation(city.id, city.owner, city.worldId,
+            selected.building, selected.cells, executor, source, autonomous = true).thenCompose { terrain ->
+            if (selected.building.control != source.control && terrain?.blocks.orEmpty().any { it.position == source.control })
+                throw CivsRejection("hall-source-overlap")
+            world.capture(city.id, city.owner, city.worldId, selected.building, selected.cells, source, terrain)
+        }
+        return world.autonomousHeightField(city, source, source, localFootprint = true).thenApplyAsync({ surface ->
+            val option = CivsAutonomousTerraform.options(city,
+                listOf(CivsAutonomousCandidate(blueprint.building)), surface).firstOrNull()
+                ?: throw CivsRejection("hall-no-local-grade")
+            val target = option.building
+            if (target == blueprint.building) return@thenApplyAsync blueprint
+            if (!civsAutonomousHallRetarget(city, source, target)) throw CivsRejection("hall-target-control-incompatible")
+            val cells = CivsBlueprints.worldCells(blueprint.snapshot, target.anchor)
+            if (cells.any { !it.isBarrier && CivPosition(it.position.x, it.position.y, it.position.z) == source.control })
+                throw CivsRejection("hall-source-overlap")
+            blueprint.copy(building = target, cells = cells)
+        }, executor).thenCompose(::capture).exceptionallyCompose { failure ->
+            val reason = CivsDiagnostics.rejection(failure)?.reason
+            if (reason !in setOf("hall-source-overlap", "hall-target-control-incompatible", "hall-no-local-grade"))
+                CompletableFuture.failedFuture(failure)
+            else {
+                // Keep a previously valid site buildable without selecting an expensive grade to evade its stock.
+                CivsDiagnostics.event("hall_retarget_declined", "city" to city.id, "building" to source.id,
+                    "source_y" to source.anchor.y, "reason" to reason)
+                capture(blueprint)
+            }
+        }
+    }
+
     /** Legacy, player-pinned SITE plans retain their exact anchor and receive the same durable earthworks. */
     fun prepareExisting(city: Settlement, blueprint: CivBlueprint,
         waterFoundations: List<CivWaterFoundation> = emptyList()): CompletableFuture<CivAutonomousDesign> {

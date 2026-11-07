@@ -37,6 +37,8 @@ internal abstract class CivsWorldScan<T>(
     private val palette = HashMap<String, BlockData>()
     private val standingColumns = HashMap<UUID, Pair<List<CivBuilding>, Map<Long, CivPosition>>>()
     private val authoredControl = building.control.takeIf { CivsBlueprints.hasAuthoredControl(building) }
+    protected var retargetSource: CivBuilding? = null
+        private set
     protected var index = 0
     private val startedAt = System.nanoTime()
 
@@ -79,6 +81,9 @@ internal abstract class CivsWorldScan<T>(
                 }
             }
         }, "building-overlap")
+        retargetSource = if (city != null && building.type == BuildingType.TOWN_HALL && building.level == 1 &&
+            building.phase == BuildingPhase.CONSTRUCTING && (city.construction == null || city.construction.plannedBuilding == building))
+            city.building(building.id)?.takeIf { civsAutonomousHallRetarget(city, it, building) } else null
         validateIdentity(city)
     }
 
@@ -106,13 +111,15 @@ internal abstract class CivsWorldScan<T>(
             requireCivs(city.owner == owner && city.worldId == worldId && city.pendingDeletion == null, "not-authorized")
             requireCivs(city.contains(position.x, position.z), "outside-city")
         }
-        requireCivs(position != building.control, "protected-terrain")
+        val futureControl = position == building.control && retargetSource?.control?.let { it != position } == true
+        requireCivs(position != building.control || futureControl, "protected-terrain")
         for (other in all) {
             if (other.worldId != worldId) continue
             requireCivs(other.id == cityId || !other.contains(position.x, position.z), "city-overlap")
             requireCivs(other.inventory?.containers?.contains(position) != true, "registered-container")
             for (occupied in civsProtectedBuildings(other)) {
-                requireCivs(position != occupied.control, "building-overlap")
+                requireCivs(position != occupied.control || futureControl && other.id == cityId && occupied == building,
+                    "building-overlap")
                 val retained = other.id != cityId || occupied.id != building.id || occupied.phase == BuildingPhase.ACTIVE
                 requireCivs(!retained || !occupied.bounds.contains(position.x, position.y, position.z) &&
                     !CivsWorksiteLayouts.isField(occupied, position.x, position.z), "building-overlap")
@@ -196,7 +203,8 @@ internal abstract class CivsWorldScan<T>(
 
     protected fun checkTerraformCell(cell: CivPlanBlock, terrain: CivTerraformPlan) {
         requireCivs(terrain.bounds.contains(cell.position.x, cell.position.y, cell.position.z) &&
-            seenTerrain.add(cell.position) && cell.position != building.control, "invalid-plan")
+            seenTerrain.add(cell.position) && (cell.position != building.control ||
+                cell.after == "minecraft:air" && retargetSource != null), "invalid-plan")
         val source = terrain.route.firstOrNull()
         if (source == null) {
             val p = cell.position
@@ -255,6 +263,12 @@ internal abstract class CivsWorldScan<T>(
 
     /** Only the preserved control needs a separate read; approach terrain is not part of construction. */
     protected fun checkPreservedControl() {
+        retargetSource?.takeIf { it.control != building.control }?.control?.let { source ->
+            val block = read(source)
+            if (block.type != Material.BARREL) rejectAt("control-position-missing", block)
+            if (!access.canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+            return
+        }
         val position = building.control ?: return
         val block = read(position)
         if (authoredControl != null) return checkControl(block)

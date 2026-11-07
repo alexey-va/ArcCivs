@@ -503,13 +503,18 @@ internal class CivsVillageSites(
         } else finish(search, "autonomy-no-site")
     }
 
-    private fun prove(search: Search, ordinal: Int, city: Settlement, surface: CivTerrainSurface,
+    private fun prove(search: Search, ordinal: Int, candidateCity: Settlement, surface: CivTerrainSurface,
         allowRaised: Boolean = true) {
         search.phase = "growth-area-ranking"
-        await(search, CompletableFuture.supplyAsync({ CivsVillageSiteScoring.coreScore(surface, city.center) to
-            surface.columns.values.count { it.loaded && it.natural && it.topY.toLong() - it.groundY >= 2 } }, executor), failed = {
+        await(search, CompletableFuture.supplyAsync({
+            val hall = candidateCity.buildings.single()
+            Triple(CivsVillageSiteScoring.coreScore(surface, candidateCity.center),
+                surface.columns.values.count { it.loaded && it.natural && it.topY.toLong() - it.groundY >= 2 },
+                CivsAutonomousTerraform.options(candidateCity, listOf(CivsAutonomousCandidate(hall)), surface,
+                    fixed = !allowRaised).firstOrNull())
+        }, executor), failed = {
             finish(search, rejection(it))
-        }) { (score, provinceTrees) ->
+        }) { (score, provinceTrees, localGrade) ->
             val refused = score.rejection()
             if (refused != null) {
                 reject(search, refused, score, provinceTrees)
@@ -522,6 +527,14 @@ internal class CivsVillageSites(
                     observed?.values?.get("usable-tree-columns")?.toIntOrNull(), observed?.values.orEmpty())
                 release(search) { full(search) }
             }
+            if (localGrade == null) {
+                rejectCandidate(CivsRejection("autonomy-no-site"))
+                return@await
+            }
+            val originalHall = candidateCity.buildings.single()
+            val city = if (localGrade.building.anchor.y == originalHall.anchor.y) candidateCity
+                else draft(search, ordinal, originalHall.anchor.copy(y = localGrade.building.anchor.y))
+            search.point = city.center
             val hall = city.buildings.single()
             val prepared = if (hall.schematicId.startsWith("civs/v2/")) blueprints.prepareEntry(hall.schematicId,
                 hall.id, city.worldId, hall.anchor, hall.rotation / 90, hall.rotation)

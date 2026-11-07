@@ -73,13 +73,17 @@ internal class CivsControlRelocations(
         failures.keys.retainAll(current.map { it.id }.toSet())
         val choices = cities.filter { it.autonomy != null && it.inventory?.mode == CivStorageMode.PHYSICAL &&
             it.pendingDeletion == null && available(it) }.flatMap { city ->
-            city.buildings.filter { it.phase == BuildingPhase.ACTIVE && CivsBuildingControls.supported(it.type) &&
-                now >= (failures[it.id]?.after ?: 0L) &&
-                it.control?.let { p -> it.bounds.contains(p.x, p.y, p.z) } == true &&
-                city.construction?.buildingId != it.id &&
-                (it.id !in city.constructionQueue.orEmpty() ||
-                    city.pendingControls.orEmpty().any { pending -> pending.buildingId == it.id && pending.retire != null }) &&
-                city.pendingControls.orEmpty().none { pending -> pending.buildingId == it.id && pending.retire == null }
+            city.buildings.filter { building ->
+                val pending = city.pendingControls.orEmpty().firstOrNull { it.buildingId == building.id }
+                val hallHandoff = pending?.retire?.let {
+                    civsAutonomousHallHandoff(city, building, it.position, pending.position)
+                } == true
+                now >= (failures[building.id]?.after ?: 0L) && (hallHandoff ||
+                    building.phase == BuildingPhase.ACTIVE && CivsBuildingControls.supported(building.type) &&
+                    building.control?.let { p -> building.bounds.contains(p.x, p.y, p.z) } == true &&
+                    city.construction?.buildingId != building.id &&
+                    (building.id !in city.constructionQueue.orEmpty() || pending?.retire != null) &&
+                    (pending == null || pending.retire != null))
             }.map { city to it }
         }
         if (choices.isEmpty()) return
@@ -178,28 +182,56 @@ internal class CivsControlRelocations(
     }
 
     private fun move(city: Settlement, building: CivBuilding, candidate: CivControlCandidate): CompletableFuture<Settlement> {
-        val old = requireNotNull(building.control)
         reject(!usable(city, building, candidate), "worksite-blocked")
+        return stage(city, building, candidate.position, candidate.existing, candidate.retirePrevious, candidate.support)
+    }
+
+    /** Called only after the immutable terrain prefix and before the last authored row's debit. */
+    fun handoffHall(city: Settlement, order: CivConstruction): CompletableFuture<Settlement> {
+        checkCitizenMainThread()
+        reject(closed || !available(city), "world-busy")
+        reject(civsAutonomousHallHandoff(city) != order, "stale-construction")
+        val source = requireNotNull(city.building(order.buildingId))
+        val point = requireNotNull(order.plannedBuilding?.control)
+        reject(city.pendingControls.orEmpty().any { it.buildingId == source.id }, "world-busy")
+        if (source.control == point) {
+            installations.requirePresent(city.worldId, source)
+            return CompletableFuture.completedFuture(city)
+        }
+        reject(active.isNotEmpty(), "world-busy")
+        return stage(city, source, point, existing = false, retirePrevious = true, support = null, order = order)
+            .also { track(city, source, it) }
+    }
+
+    private fun stage(city: Settlement, building: CivBuilding, point: CivPosition, existing: Boolean,
+        retirePrevious: Boolean, support: CivPlanBlock?, order: CivConstruction? = null): CompletableFuture<Settlement> {
+        val old = requireNotNull(building.control)
+        if (order != null) reject(!civsAutonomousHallHandoff(city, building, old, point), "stale-construction")
         val native = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
         reject(!native.isChunkLoaded(old.x shr 4, old.z shr 4), "chunk-unloaded")
         val source = native.getBlockAt(old.x, old.y, old.z)
         reject(source.type != Material.BARREL, "control-obstructed")
-        val placement = installations.prepare(city.id, city.worldId, city.owner, building.copy(control = candidate.position), false)
-            .copy(retire = if (candidate.retirePrevious) CivPlanBlock(old, source.blockData.asString, "minecraft:air") else null,
-                approach = candidate.support?.let(::listOf))
-        val destination = native.getBlockAt(candidate.position.x, candidate.position.y, candidate.position.z)
-        reject(if (candidate.existing) destination.type != Material.BARREL else !destination.type.isAir, "control-obstructed")
-        reject(civsControlOccupied(plugin, city.worldId, candidate.position, blocked), "worksite-blocked")
+        if (order != null) {
+            reject(!world.canModify(city.owner, source, Material.AIR), "lands-denied")
+            reject(civsControlOccupied(plugin, city.worldId, old, blocked), "world-busy")
+        }
+        val placement = installations.prepare(city.id, city.worldId, city.owner, building.copy(control = point), false)
+            .copy(retire = if (retirePrevious) CivPlanBlock(old, source.blockData.asString, "minecraft:air") else null,
+                approach = support?.let(::listOf))
+        val destination = native.getBlockAt(point.x, point.y, point.z)
+        reject(if (existing) destination.type != Material.BARREL else !destination.type.isAir, "control-obstructed")
+        reject(civsControlOccupied(plugin, city.worldId, point, blocked),
+            if (order == null) "worksite-blocked" else "world-busy")
         return mutate(city.id) { fresh ->
-            reject(fresh != city || fresh.construction?.buildingId == building.id ||
-                building.id in fresh.constructionQueue.orEmpty() ||
+            val currentOrder = fresh.construction?.takeIf { it.buildingId == building.id }
+            reject(fresh != city || currentOrder != order || building.id in fresh.constructionQueue.orEmpty() ||
                 fresh.pendingControls.orEmpty().any { it.buildingId == building.id }, "control-location-changed")
             CivsRules.validate(fresh.copy(
                 // This durable intent protects both cells before the empty receiver is created.
-                buildings = if (candidate.retirePrevious) fresh.buildings else fresh.buildings.map {
-                    if (it.id == building.id) it.copy(control = candidate.position) else it },
-                inventory = if (candidate.retirePrevious) fresh.inventory else
-                    fresh.inventory?.copy(containers = fresh.inventory.containers - candidate.position),
+                buildings = if (retirePrevious) fresh.buildings else fresh.buildings.map {
+                    if (it.id == building.id) it.copy(control = point) else it },
+                inventory = if (retirePrevious) fresh.inventory else
+                    fresh.inventory?.copy(containers = fresh.inventory.containers - point),
                 pendingControls = fresh.pendingControls.orEmpty() + placement, revision = fresh.revision + 1))
         }.thenCompose { saved ->
             if (closed) CompletableFuture.completedFuture(saved)

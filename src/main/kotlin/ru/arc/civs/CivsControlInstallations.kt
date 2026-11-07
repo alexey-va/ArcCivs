@@ -1,11 +1,31 @@
 package ru.arc.civs
 
 import org.bukkit.Bukkit
+import org.bukkit.FluidCollisionMode
 import org.bukkit.Material
+import org.bukkit.World
+import org.bukkit.block.Block
 import org.bukkit.plugin.Plugin
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.logging.Level
+
+/** The cap stays inside this unworked hall, where other accepted construction cannot write. */
+private fun campControlCap(city: Settlement, hall: CivBuilding): CivPosition? {
+    val control = hall.control ?: return null
+    if (control.y == Int.MAX_VALUE || city.autonomy == null || city.inventory?.mode != CivStorageMode.PHYSICAL || city.center != control ||
+        hall.type != BuildingType.TOWN_HALL || hall.level != 1 || hall.phase != BuildingPhase.SITE ||
+        city.construction?.buildingId == hall.id || hall.id in city.constructionQueue.orEmpty()) return null
+    return control.copy(y = control.y + 1).takeIf { hall.bounds.contains(it.x, it.y, it.z) }
+}
+
+/** This exact shape extends the existing receipt without changing the serialized fields. */
+internal fun civsCampControlApproach(city: Settlement, hall: CivBuilding, receipt: CivControlPlacement): CivPlanBlock? {
+    val cap = campControlCap(city, hall) ?: return null
+    if (receipt.retire != null || receipt.position != hall.control ||
+        receipt.before.substringBefore('[') != "minecraft:barrel") return null
+    return receipt.approach?.singleOrNull()?.takeIf { it.position == cap && it.after == "minecraft:air" }
+}
 
 /** One-time native control grants and restart recovery through the existing pendingControls receipt. */
 internal class CivsControlInstallations(
@@ -29,6 +49,7 @@ internal class CivsControlInstallations(
     private val initialApproachRetryAt = mutableMapOf<UUID, Long>()
     private val initialApproachFailures = mutableSetOf<UUID>()
     internal var controlOccupied: (UUID, CivPosition) -> Boolean = { _, _ -> false }
+    internal var campApproachAllowed: (Settlement) -> Boolean = { false }
 
     fun forgetFailure(buildingId: UUID) { controlFailures.remove(buildingId) }
     fun clear() {
@@ -138,6 +159,57 @@ internal class CivsControlInstallations(
         return receipt.copy(approach = changes.takeIf { it.isNotEmpty() })
     }
 
+    private fun campCapAllowed(city: Settlement): Boolean = city.autonomy?.paused == false &&
+        city.pendingDeletion == null && CivsAutoStorageMigration.ready(city) && campApproachAllowed(city)
+
+    private fun repairCampCap(city: Settlement, hall: CivBuilding): CompletableFuture<Unit> {
+        val cap = campControlCap(city, hall) ?: return CompletableFuture.completedFuture(Unit)
+        val control = requireNotNull(hall.control)
+        val native = plugin.server.getWorld(city.worldId) ?: return CompletableFuture.completedFuture(Unit)
+        if (cap.y.toLong() + 1 >= native.maxHeight || control.y < native.minHeight ||
+            !citizenChunkReady(native, cap.x shr 4, cap.z shr 4)) return CompletableFuture.completedFuture(Unit)
+        val block = native.getBlockAt(cap.x, cap.y, cap.z)
+        if (!campCapSafe(city, hall, native, block) || citizenCollectedHomeTarget(city, hall, native, control) != null)
+            return CompletableFuture.completedFuture(Unit)
+        checkApproachCell(city.id, city.owner, hall, block, Material.AIR)
+        val receipt = prepare(city.id, city.worldId, city.owner, hall, prepareApproach = false).copy(
+            approach = listOf(CivPlanBlock(cap, block.blockData.asString, "minecraft:air")))
+        return mutate(city.id) { current ->
+            rejectIf(current != city || !campCapAllowed(current), "stale-building")
+            CivsRules.validate(current.copy(pendingControls = current.pendingControls.orEmpty() + receipt,
+                revision = Math.addExact(current.revision, 1)))
+        }.thenCompose { install(city.id, hall.id).thenApply { Unit } }
+    }
+
+    /** With a cardinal stance at cap Y, the centre ray crosses only its own column, the cap and the barrel. */
+    private fun campCapSafe(city: Settlement, hall: CivBuilding, native: World, capBlock: Block): Boolean {
+        val control = requireNotNull(hall.control)
+        val cap = CivPosition(capBlock.x, capBlock.y, capBlock.z)
+        val above = cap.copy(y = cap.y + 1)
+        if (!campCapAllowed(city) || capBlock.type !in CivsTerrainPolicy.TREE_GROUND ||
+            !CivsTerrainPolicy.naturalTerraform(capBlock) || above.y >= native.maxHeight ||
+            !citizenChunkReady(native, cap.x shr 4, cap.z shr 4) ||
+            !citizenStorageReady(native, control) || !world.canModify(city.owner, native.getBlockAt(control.x, control.y, control.z))) return false
+        if (listOf(control, cap, above).any { storage.isWorldLocked(city.worldId, it) } ||
+            listOf(cap, above).any { civsControlOccupied(plugin, city.worldId, it, controlOccupied) }) return false
+        val upper = native.getBlockAt(above.x, above.y, above.z)
+        if (!upper.type.isAir && (upper.type !in CivsTerrainPolicy.TREE_GROUND || !CivsTerrainPolicy.naturalTerraform(upper))) return false
+        val aim = control.location(native).add(0.0, .5, 0.0)
+        return listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1).any { (dx, dz) ->
+            val feet = cap.copy(x = cap.x + dx, z = cap.z + dz)
+            if (!city.contains(feet.x, feet.z) || !citizenControlClear(city, feet) ||
+                civsProtectedBuildings(city).any { it.id != hall.id && it.bounds.contains(feet.x, feet.y, feet.z) } ||
+                (-1..1).any { storage.isWorldLocked(city.worldId, feet.copy(y = feet.y + it)) } ||
+                !citizenStandable(native, feet) || !citizenPacketBodyClear(native, feet.point(), false)) return@any false
+            val eye = feet.location(native).add(0.0, 1.5, 0.0)
+            val delta = aim.toVector().subtract(eye.toVector())
+            val distance = delta.length()
+            if (distance > 3.0 || !citizenBlockTraceReady(native, eye, control)) return@any false
+            val hit = native.rayTraceBlocks(eye, delta.normalize(), distance, FluidCollisionMode.ALWAYS, true)?.hitBlock
+            hit != null && hit.x == cap.x && hit.y == cap.y && hit.z == cap.z
+        }
+    }
+
     private fun standingFloor(block: org.bukkit.block.Block): Boolean =
         CivsTerrainPolicy.naturalTerraform(block) && !CivsTerrainPolicy.naturalLeaves(block.blockData) &&
             CivsTerrainPolicy.routeTerraformSupport(block)
@@ -179,6 +251,8 @@ internal class CivsControlInstallations(
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         rejectIf(cityId in busy || cityId in unhealthy, "city-busy")
         val point = receipt.position
+        val campCap = civsCampControlApproach(city, building, receipt)
+        if (campCap != null) rejectIf(!campCapAllowed(city), "city-busy")
         // Until exact-slot evacuation is durable, the old barrel remains the authoritative control.
         val staging = receipt.retire != null && receipt.retire.position == building.control
         rejectIf(building.control != point && !staging, "control-location-changed")
@@ -186,6 +260,7 @@ internal class CivsControlInstallations(
         rejectIf(point.y !in target.minHeight until target.maxHeight, "outside-world")
         rejectIf(!target.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
         val block = target.getBlockAt(point.x, point.y, point.z)
+        if (campCap != null) rejectIf(block.type != Material.BARREL, "control-position-missing")
         rejectIf(block.type != Material.BARREL && block.blockData.asString != receipt.before, "control-obstructed")
         rejectIf(block.type != Material.BARREL && (block.type == Material.BEDROCK || block.state is org.bukkit.block.TileState), "control-obstructed")
         rejectIf(!world.canModify(city.owner, block, Material.BARREL), "lands-denied")
@@ -230,6 +305,8 @@ internal class CivsControlInstallations(
             val (native, after) = prepared
             rejectIf(native.blockData.asString !in setOf(cell.before, cell.after), "world-changed")
             checkApproachCell(city.id, city.owner, building, native, after.material)
+            if (cell == campCap && native.blockData.asString != cell.after)
+                rejectIf(!campCapSafe(city, building, target, native), "worksite-blocked")
             if (cell == civsControlSupport(point, cell.before))
                 rejectIf(civsControlOccupied(plugin, city.worldId, cell.position, controlOccupied), "worksite-blocked")
         }
@@ -300,13 +377,19 @@ internal class CivsControlInstallations(
             nextInitialApproachAt = now + 5_000
             initialApproachRetryAt.keys.retainAll(cities.keys)
             initialApproachFailures.retainAll(cities.keys)
-            val initial = nearby.filter { it.id !in busy && it.id !in unhealthy && it.id !in initialApproachRequests &&
-                now >= (initialApproachRetryAt[it.id] ?: 0L) && initialApproachAllowed(it) &&
-                initialAutonomousHall(it)?.let { hall -> initialApproachNeeded(it, hall) } == true }
+            val initial: List<Pair<Settlement, CivBuilding?>> = nearby.filter { it.id !in busy && it.id !in unhealthy &&
+                it.id !in initialApproachRequests && now >= (initialApproachRetryAt[it.id] ?: 0L) }.mapNotNull { city ->
+                if (initialApproachAllowed(city) && initialAutonomousHall(city)?.let { initialApproachNeeded(city, it) } == true)
+                    city to null
+                else if (city.pendingControls.orEmpty().isEmpty() && campCapAllowed(city))
+                    city.buildings.firstOrNull { campControlCap(city, it) != null }?.let { city to it }
+                else null
+            }
             if (initial.isNotEmpty()) {
-                val city = initial[Math.floorMod(initialApproachCursor++, initial.size)]
+                val (city, camp) = initial[Math.floorMod(initialApproachCursor++, initial.size)]
                 initialApproachRequests += city.id
-                runCatching { repairInitialApproach(city) }.getOrElse { CompletableFuture.failedFuture(it) }
+                runCatching { if (camp == null) repairInitialApproach(city) else repairCampCap(city, camp) }
+                    .getOrElse { CompletableFuture.failedFuture(it) }
                     .whenComplete { _, failure ->
                         initialApproachRequests -= city.id
                         if (failure == null) {

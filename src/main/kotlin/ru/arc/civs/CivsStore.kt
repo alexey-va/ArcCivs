@@ -562,7 +562,11 @@ class CivsStore(
             terrain.blocks.forEach { cell ->
                 requireSafePosition(cell.position)
                 require(terrain.bounds.contains(cell.position.x, cell.position.y, cell.position.z))
-                require(cell.position != building.control && terrainCoordinates.add(cell.position))
+                // This only validates capture shape; native admission still requires the exact linked SITE/order.
+                val hallMarkerCut = cell.position == building.control && building.type == BuildingType.TOWN_HALL && building.level == 1 &&
+                    building.phase == BuildingPhase.CONSTRUCTING && plan.capturedSha256 != null && !plan.adminPlacement &&
+                    terrain.route.isEmpty() && cell.after == "minecraft:air" && cell.position !in coordinates
+                require((cell.position != building.control || hallMarkerCut) && terrainCoordinates.add(cell.position))
                 require(validBoundedText(cell.before, MAX_BLOCK_STATE_CHARS) && validBoundedText(cell.after, MAX_BLOCK_STATE_CHARS))
                 if (terrain.route.isEmpty()) {
                     val p = cell.position

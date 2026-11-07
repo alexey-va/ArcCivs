@@ -831,7 +831,9 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.city = h.city.copy(autonomy = CivAutonomy(), buildings = h.city.buildings.map {
                 it.copy(phase = BuildingPhase.SITE, control = CivPosition(0, 64, 0))
             })
-            for (x in -2..2) for (z in -2..2) for (y in 60..69) h.world.getBlockAt(x, y, z).type = Material.STONE
+            // The native surface fallback must also be unsafe; a plain stone hill now has valid outdoor footing.
+            for (x in -2..2) for (z in -2..2) for (y in 60..69)
+                h.world.getBlockAt(x, y, z).type = if (y == 69) Material.MAGMA_BLOCK else Material.STONE
             h.viewing = true
             h.owner.pulse(2_000)
             h.owner.pulse(7_000)
@@ -872,7 +874,9 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.city = h.city.copy(autonomy = CivAutonomy(), workers = List(5) { ordinal ->
                 h.city.workers.single().copy(id = if (ordinal == 0) h.workerId else UUID.randomUUID(), name = "Resident$ordinal")
             }, buildings = h.city.buildings.map { it.copy(phase = BuildingPhase.SITE, control = CivPosition(0, 64, 0)) })
-            for (x in -2..2) for (z in -2..2) for (y in 60..69) h.world.getBlockAt(x, y, z).type = Material.STONE
+            // The native surface fallback must also be unsafe; a plain stone hill now has valid outdoor footing.
+            for (x in -2..2) for (z in -2..2) for (y in 60..69)
+                h.world.getBlockAt(x, y, z).type = if (y == 69) Material.MAGMA_BLOCK else Material.STONE
             h.viewing = true
 
             h.owner.pulse(2_000)

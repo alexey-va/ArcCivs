@@ -173,7 +173,8 @@ class CivsService(
         ::ready, { closed }, ::settlementActive, autonomousDevelopment::accessReady,
         { id, action -> afterCityAvailable(id, action) }, { id, transform -> mutate(id, transform = transform) },
         { city, building -> admitRoadDevelopment(city) { buildingRequests.activateBuilding(city, building) } },
-        { city, order, required -> buildingRequests.payBatch(city, order, required) }, ::updateHealth, clock)
+        { city, order, required -> buildingRequests.payBatch(city, order, required) }, ::updateHealth, clock,
+        handoffHallControl = { city, order -> controlRelocations.handoffHall(city, order) })
 
     private val inventoryJournal: CivsInventoryJournal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy,
         unhealthy, { closed }, { city -> publish(city) }, { id, transform -> mutate(id, transform = transform) },
@@ -233,6 +234,7 @@ class CivsService(
 
     init {
         controlInstallations.controlOccupied = citizens::growthBlocked
+        controlInstallations.campApproachAllowed = ::approachRepairAllowed
         placement = CivsPlacementSession(this,
             records,
             buildingRequestsOwner = { buildingRequests },
@@ -1186,10 +1188,12 @@ class CivsService(
         }
     }
 
+    private fun approachRepairAllowed(city: Settlement): Boolean = ready() && city.id !in unhealthy &&
+        !inventoryJournal.pending(city.id) && !construction.isPlacing(city.id) && settlementActive(city)
+
     /** The repair owner already holds the city reservation during proof; inventory and native locks remain independent fences. */
     internal fun initialAutonomousApproachAllowed(city: Settlement): Boolean {
-        if (!ready() || city.id in unhealthy || inventoryJournal.pending(city.id) || construction.isPlacing(city.id) ||
-            !settlementActive(city)) return false
+        if (!approachRepairAllowed(city)) return false
         val hall = controlInstallations.initialAutonomousHall(city) ?: return false
         val points = listOfNotNull(hall.control) + (-1..1).map { dy -> hall.entrance.copy(y = Math.addExact(hall.entrance.y, dy)) }
         return points.none { storage.isWorldLocked(city.worldId, it) }

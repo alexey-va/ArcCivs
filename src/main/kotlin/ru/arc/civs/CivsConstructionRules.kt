@@ -2,6 +2,52 @@ package ru.arc.civs
 
 import java.util.UUID
 
+/** Only an untouched automatic founding hall can retain its old SITE during a local Y correction. */
+internal fun civsAutonomousHallSite(city: Settlement, building: CivBuilding): Boolean =
+    city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL && city.pendingDeletion == null &&
+        building.type == BuildingType.TOWN_HALL && building.level == 1 && building.phase == BuildingPhase.SITE &&
+        building.control != null && building.bounds.contains(building.control.x, building.control.y, building.control.z)
+
+/** Geometry and the existing order identify this transition; no independent migration state is needed. */
+internal fun civsAutonomousHallRetarget(city: Settlement, source: CivBuilding?, target: CivBuilding?): Boolean {
+    if (source == null || target == null || !civsAutonomousHallSite(city, source) ||
+        target.phase != BuildingPhase.CONSTRUCTING || target.control == null) return false
+    val delta = target.anchor.y.toLong() - source.anchor.y
+    if (delta == 0L || kotlin.math.abs(delta) > CivsAutonomousTerraform.MAXIMUM_CHANGE) return false
+    val originalControl = civsAutonomousHallOriginalControl(source, target) ?: return false
+    if (!source.bounds.contains(originalControl.x, originalControl.y, originalControl.z)) return false
+    if (source.control != originalControl && (source.control != target.control ||
+            city.construction?.plannedBuilding != target)) return false
+    return CivsAutonomousGeometry.atHeight(source.copy(control = originalControl), target.anchor.y)
+        .copy(phase = BuildingPhase.CONSTRUCTING) == target &&
+        source.bounds.contains(target.control.x, target.control.y, target.control.z)
+}
+
+internal fun civsAutonomousHallOriginalControl(source: CivBuilding, target: CivBuilding): CivPosition? {
+    val control = target.control ?: return null
+    val y = control.y.toLong() - target.anchor.y + source.anchor.y
+    return y.takeIf { it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }?.let { control.copy(y = it.toInt()) }
+}
+
+internal fun civsAutonomousHallRetargetOrder(city: Settlement): CivConstruction? = city.construction?.takeIf {
+    civsAutonomousHallRetarget(city, city.building(it.buildingId), it.plannedBuilding)
+}
+
+/** An admitted retirement may recover while paused, but can never reserve a construction debit. */
+internal fun civsAutonomousHallHandoff(city: Settlement): CivConstruction? = civsAutonomousHallRetargetOrder(city)?.takeIf {
+    it.workDone == it.workRequired - 1 && it.payment != null && it.payment.reservedBatch == null &&
+        it.workDone >= (it.automaticPreparationBatches ?: 0) &&
+        it.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.WAITING_MATERIALS, ConstructionPhase.PAUSED)
+}
+
+internal fun civsAutonomousHallHandoff(city: Settlement, building: CivBuilding,
+    from: CivPosition, to: CivPosition): Boolean {
+    val order = civsAutonomousHallHandoff(city) ?: return false
+    val target = requireNotNull(order.plannedBuilding)
+    return order.buildingId == building.id && city.building(building.id) == building &&
+        to == target.control && from == civsAutonomousHallOriginalControl(building, target)
+}
+
 /** Pure construction admission, exact payment and durable batch transitions. */
 internal object CivsConstructionRules {
     fun reserveBuild(city: Settlement, actor: UUID, building: CivBuilding, order: CivConstruction): Settlement {
@@ -25,6 +71,8 @@ internal object CivsConstructionRules {
             return city
         }
         val existing = city.building(plan.id)
+        val retarget = civsAutonomousHallRetarget(city, existing, plan)
+        if (retarget) CivsRules.check(order.id != plan.id && order.payment != null, "invalid-construction")
         if (existing?.phase != BuildingPhase.SITE && plan.id !in city.constructionQueue.orEmpty())
             CivsResearch.required(plan.type, plan.level)?.let { CivsRules.check(CivsResearch.has(city, it), "research-required") }
         if (city.constructionQueue.orEmpty().isNotEmpty())
@@ -34,7 +82,8 @@ internal object CivsConstructionRules {
             CivsRules.check(plan.type != BuildingType.TOWN_HALL && plan.level == 1, "invalid-level")
             CivsRules.requireBuildingSlot(city, plan.type, CivsRules.ESSENTIAL_BUILDINGS)
         } else if (existing.phase == BuildingPhase.SITE) {
-            CivsRules.check(order.batches != null && existing.copy(phase = BuildingPhase.CONSTRUCTING) == plan, "invalid-building")
+            CivsRules.check(order.batches != null && (existing.copy(phase = BuildingPhase.CONSTRUCTING) == plan ||
+                retarget), "invalid-building")
         } else {
             CivsRules.check(existing.phase == BuildingPhase.ACTIVE &&
                 (existing.type == plan.type || CivsInfrastructureRebuild.refit(city, existing, plan)) &&
@@ -52,7 +101,7 @@ internal object CivsConstructionRules {
             .filter { type -> plan.type != type && city.buildings.none { it.type == type } }.map { CivsRules.cost(it, 1) }
         if (order.batches == null) CivsRules.check(Resource.entries.all { resource -> remaining[resource] >= bootstrap.sumOf { it[resource] } }, "resources.bootstrap-reserve")
         return CivsRules.changed(city, city.copy(stock = remaining,
-            buildings = if (existing == null) city.buildings + plan else if (existing.phase == BuildingPhase.SITE)
+            buildings = if (existing == null) city.buildings + plan else if (existing.phase == BuildingPhase.SITE && !retarget)
                 city.buildings.map { if (it.id == plan.id) plan else it } else city.buildings,
             construction = reserved, constructionQueue = city.constructionQueue?.filterNot { it == plan.id }))
     }
@@ -87,6 +136,7 @@ internal object CivsConstructionRules {
             order.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.WAITING_MATERIALS), "stale-construction")
         CivsRules.check(CivsSnapshotValidation.validMaterials(materials) && materials.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value }, "invalid-construction")
         CivsRules.check(payment.awaiting == null || CivsMaterials.unpaid(payment.awaiting) == materials, "invalid-construction")
+        if (batch == order.workRequired - 1) requireHallHandoff(city, order)
         CivsRules.check(CivsRules.constructionStorageInputs(city, order.buildingId, materials).isEmpty(), "materials-missing")
         val remaining = CivsMaterials.unpaid(order.materials.orEmpty()).mapValues { (key, value) -> value - materials.getOrDefault(key, 0) }.filterValues { it > 0 }
         var storageInputs = materials
@@ -154,7 +204,17 @@ internal object CivsConstructionRules {
             payment = order.payment?.let { CivConstructionPayment() })))
     }
 
+    private fun requireHallHandoff(city: Settlement, order: CivConstruction) {
+        val target = order.plannedBuilding ?: return
+        val source = city.building(order.buildingId) ?: return
+        if (civsAutonomousHallRetarget(city, source, target)) {
+            CivsRules.check(source.control == target.control &&
+                city.pendingControls.orEmpty().none { it.buildingId == target.id }, "control-location-changed")
+        }
+    }
+
     private fun finishConstruction(city: Settlement, order: CivConstruction): Settlement {
+        requireHallHandoff(city, order)
         val finished = order.plannedBuilding!!.copy(phase = BuildingPhase.ACTIVE)
         val previous = city.building(finished.id)!!
         val mineUpgrade = finished.type == BuildingType.QUARRY && finished.level > previous.level

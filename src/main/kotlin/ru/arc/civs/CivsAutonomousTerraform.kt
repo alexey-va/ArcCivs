@@ -28,7 +28,7 @@ internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int,
 
 internal data class CivTerraformDraft(val building: CivBuilding, val columns: List<CivTerraformColumn>,
     val route: List<CivPosition>, val groundY: Int, val access: CivAutonomousAccess = CivAutonomousAccess(),
-    val waterFoundations: List<CivWaterFoundation> = emptyList())
+    val waterFoundations: List<CivWaterFoundation> = emptyList(), val prepareControl: Boolean = false)
 
 /** Exact native state; [supportSafe] permits retaining a solid block, never changing it. */
 internal data class CivTerraformCell(val position: CivPosition, val data: String, val safe: Boolean,
@@ -150,6 +150,7 @@ internal object CivsAutonomousTerraform {
         fixed: Boolean = false, standing: Map<Long, CivPosition> = emptyMap(),
         rejected: (String, CivPosition) -> Unit = { _, _ -> }): List<CivTerraformOption> = candidates.flatMap { candidate ->
         val b = candidate.building
+        val ownSite = city.building(b.id)?.takeIf { civsAutonomousHallSite(city, it) }
         val heights = ArrayList<Int>()
         for (x in b.bounds.min.x..b.bounds.max.x) for (z in b.bounds.min.z..b.bounds.max.z) {
             val c = surface.at(x, z)
@@ -157,7 +158,8 @@ internal object CivsAutonomousTerraform {
                 rejected("chunks-unloaded", CivPosition(x, c?.groundY ?: b.anchor.y, z))
                 return@flatMap emptyList()
             }
-            val ownMarker = fixed && b.control?.let { it.x == x && it.z == z } == true
+            val ownMarker = (fixed && b.control?.let { it.x == x && it.z == z } == true) ||
+                ownSite?.control?.let { it.x == x && it.z == z } == true
             if (!c.natural && !ownMarker) {
                 rejected("autonomy-terrain", CivPosition(x, c.groundY, z))
                 return@flatMap emptyList()
@@ -395,7 +397,8 @@ internal object CivsAutonomousTerraform {
             mapOf("x" to cell.position.x.toString(), "y" to cell.position.y.toString(),
                 "z" to cell.position.z.toString(), "block" to cell.data, "stage" to stage))
         fun change(cell: CivTerraformCell, after: String) {
-            if (cell.position == draft.building.control || cell.data == after) return
+            if ((cell.position == draft.building.control && !draft.prepareControl) || cell.data == after) return
+            if (cell.position == draft.building.control && after != "minecraft:air") throw CivsRejection("invalid-plan")
             if (!cell.safe) rejectTerrain(cell, "change")
             result[cell.position] = CivPlanBlock(cell.position, cell.data, after)
             if (result.size > MAXIMUM_CHANGED_CELLS) throw CivsRejection("autonomy-search-budget")

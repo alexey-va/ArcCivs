@@ -40,6 +40,9 @@ internal class CivsConstructionRuntime(
     private val payBatch: (Settlement, CivConstruction, Map<String, Long>) -> CompletableFuture<Settlement>,
     private val updateHealth: () -> Unit,
     private val clock: () -> Long,
+    private val handoffHallControl: (Settlement, CivConstruction) -> CompletableFuture<Settlement> = { _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("not-ready"))
+    },
 ) : AutoCloseable {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -268,6 +271,8 @@ internal class CivsConstructionRuntime(
     private fun startPlacement(city: Settlement, order: CivConstruction) {
         placing += city.id
         val run = UUID.randomUUID().also { placementRuns[city.id] = it }
+        val retarget = civsAutonomousHallRetargetOrder(city) == order
+        val finalHallBatch = retarget && order.workDone == order.workRequired - 1
         store.loadPlan(order.id).thenCompose { plan ->
             requireNotNull(plan) { "Missing captured construction plan ${order.id}" }
             require(plan.cityId == city.id && plan.worldId == city.worldId && plan.building == order.plannedBuilding)
@@ -281,6 +286,12 @@ internal class CivsConstructionRuntime(
                     batches[order.workDone]
                 }
                 val cells = civsBatchBlocks(plan, batch)
+                if (retarget) {
+                    val source = requireNotNull(city.building(order.buildingId))
+                    val oldControl = requireNotNull(civsAutonomousHallOriginalControl(source, plan.building))
+                    rejectIf(cells.any { it.position == oldControl }, "hall-source-overlap")
+                    rejectIf(finalHallBatch && (batch == null || batch.terrainStart != null), "invalid-plan")
+                }
                 val materials = cells.associate { cell ->
                     val name = cell.after.substringBefore('[')
                     cell.position to palette.getOrPut(name) {
@@ -331,18 +342,36 @@ internal class CivsConstructionRuntime(
                     val required = if (order.payment != null && order.payment.reservedBatch == null)
                         if (batch?.terrainStart != null) emptyMap() else CivsMaterials.required(batchPlan) else null
                     if (required != null) constructionSupplyNeeds[city.id] = ConstructionSupplyNeed(order.id, order.workDone, required)
-                    val begin = afterCityAvailable(city.id) {
+                    fun beginBatch(): CompletableFuture<Settlement> = afterCityAvailable(city.id) {
                         rejectIf(placementRuns[city.id] != run, "stale-construction")
                         val current = cities[city.id] ?: throw CivsRejection("no-city")
                         rejectIf(current.construction?.id != order.id || current.construction.workDone != order.workDone,
                             "stale-construction")
+                        if (finalHallBatch) {
+                            val point = requireNotNull(plan.building.control)
+                            rejectIf(current.building(order.buildingId)?.control != point ||
+                                current.pendingControls.orEmpty().any { it.buildingId == order.buildingId }, "control-location-changed")
+                            val native = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+                            rejectIf(!native.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
+                            val control = native.getBlockAt(point.x, point.y, point.z)
+                            rejectIf(control.type != Material.BARREL, "control-position-missing")
+                            rejectIf(!world.canModify(city.owner, control, Material.BARREL), "lands-denied")
+                        }
                         if (required != null) payBatch(current, requireNotNull(current.construction), required)
                         else mutate(city.id) { CivsRules.beginPlacement(it, it.owner, order.id) }
                     }
+                    val begin = if (finalHallBatch && required != null)
+                        prepareFinalHallBatch(city, order, plan, run, ::beginBatch) else beginBatch()
                     begin
                         .whenCompleteSync(tasks) { paid, beginFailure ->
                             if (closed || placementRuns[city.id] != run) return@whenCompleteSync
-                            if (beginFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, beginFailure)
+                            if (beginFailure != null) {
+                                // Accepted pendingControls recover independently while placement waits.
+                                if (finalHallBatch && cities[city.id]?.pendingControls.orEmpty().any {
+                                        it.buildingId == order.buildingId && it.retire != null }) releasePlacement(city.id)
+                                else placementFailed(city.id, order.id, beginFailure)
+                                return@whenCompleteSync
+                            }
                             if (required != null && paid?.construction?.payment?.reservedBatch != order.workDone) {
                                 releasePlacement(city.id)
                                 runCatching {
@@ -376,6 +405,32 @@ internal class CivsConstructionRuntime(
                 }.onFailure { placementFailed(city.id, order.id, it) }
             }
         }
+    }
+
+    private fun prepareFinalHallBatch(city: Settlement, order: CivConstruction, plan: CivPlacementPlan, run: UUID,
+        beginBatch: () -> CompletableFuture<Settlement>): CompletableFuture<Settlement> {
+        val result = CompletableFuture<Settlement>()
+        afterCityAvailable(city.id) {
+            rejectIf(placementRuns[city.id] != run, "stale-construction")
+            val current = cities[city.id] ?: throw CivsRejection("no-city")
+            rejectIf(civsAutonomousHallHandoff(current) != order, "stale-construction")
+            handoffHallControl(current, order)
+        }.thenCompose { moved ->
+            rejectIf(moved.construction != order || moved.building(order.buildingId)?.control != plan.building.control ||
+                moved.pendingControls.orEmpty().any { it.buildingId == order.buildingId }, "control-location-changed")
+            // The unique order remains authoritative through a crash here; publish the retained capture before final debit.
+            store.loadSchematic(plan.id).thenCompose { bytes ->
+                store.saveSchematic(plan.building.id, requireNotNull(bytes))
+            }.thenCompose { store.savePlan(plan.copy(id = plan.building.id)) }
+        }.whenCompleteSync(tasks) { _, failure ->
+            if (failure != null) result.completeExceptionally(failure)
+            else runCatching {
+                beginBatch().whenComplete { saved, debitFailure ->
+                    if (debitFailure == null) result.complete(saved) else result.completeExceptionally(debitFailure)
+                }
+            }.onFailure(result::completeExceptionally)
+        }
+        return result
     }
 
     private fun pasteCaptured(cityId: UUID, order: CivConstruction, plan: CivPlacementPlan, parts: List<ArcSchematicSnapshot>,

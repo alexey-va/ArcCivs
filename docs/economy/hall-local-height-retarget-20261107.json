@@ -1,0 +1,364 @@
+{
+  "version": 1,
+  "title": "ArcCivs local hall height and pre-work SITE Y retarget; BEFORE-source economy assessment",
+  "recorded_at_utc": "2026-11-07T02:50:24.113566+00:00",
+  "assessment_state": "BEFORE_PROTOTYPE_CONDITIONAL_SCOPE_NOT_RUNTIME_ACCEPTANCE",
+  "assumptions": [
+    "Scope supplied by parent before implementation: initial village hall chooses a local native-footprint height via existing CivsAutonomousTerraform.options and existing guards, rather than the coarse25-column province median. An existing autonomous L1SITE hall may select a pure-Y replacement only before any hall work. No scheduler, profile, reset, grants or new money mechanism is added.",
+    "Preserve oldSITE, oldcontrol and allnative stock until the normal uniquely identified construction order owns its accepted terrain/authored batches. Handoff before a batch would overwrite the oldstock barrel, and by the finalbatch, must use existing pendingControls plus an exact27-slot relocation journal to a proven AIR receiver; retire the oldbarrel only after it is empty. Exact overlap/handoff sequencing is still being designed and is not claimed implemented.",
+    "STRUCTURE_VOID is zero authored BARREL in the existing material recipe. An actual native control barrel still exists; its placement/retirement and allexisting contents must be conserved through the ordinary receipt. If the canonical newmarker needs one AIR cut, it must be a saved ordinary terrain cell, never immediate free digging. Additional marker cut is conditional0or1; total candidate earthworks remainUNKNOWN.",
+    "Actual Auto3 original retained plan has7358cut+144fill=7502planned cells, including5174earthcuts, max9earthcut cells/column and max5fill cells/column. Entry earthcuts are y72..80. This is planned work, not completed native mutation. Current footprint has1085loaded columns, native min/median/max69/76/80 and anchor71; original ground is explicitly unproven. Native current heights are not original terrain or a chosen after-height.",
+    "The proposed recipe, prices, per-action duration, production/research and AutoSupply policy are unchanged. CivsMaterials.required skips before==after, so moving identical authored geometry can still change its realized payable bill. Candidate targetY, actual cut/fill, material bill, work/batch totals, elapsed completion, supply quantities and long-run throughput areUNKNOWN until real capture and validation; no zero item/earthwork delta is encoded.",
+    "Low/base/high are sensitivity to0.25/1/4active hours/day on ONE shared backend (900/3600/14400possible supply receipts). Five already-founded LAB villages compete inside the same at-most1receipt/s service, not five times that rate. Existing supply emission is nonzero; actual demand/materialmix/grant timing may change.",
+    "Direct new mint/burn stays separately0Vault,0premiumtokens,0physicalEMERALD and0playerXP under this proposed scope. Native goods/EMERALD use the existing physical journalled trade and unchanged rates/reserves; earlier completion can alter when or how much existing trade/production occurs. No treasury seed, clone, refund, payout or repeated bootstrap supplies is allowed.",
+    "Existing terrain application uses normal saved batches with an empty terrain item requirement map and no breakNaturally/drops/inventory transfer. World block creation/removal and changes in later manual extraction are not zero just because direct inventory payout is absent. Tools, food, production, resident skills and available progress can change indirectly; their numerical delta is not measured.",
+    "Current SELL/AutoSell, future SELL-to-contract replacement and SHADOW flows remain distinct and unchanged. No item-to-money conversion is invented. No new product price/progression/savings time is introduced; no live ledger/rate was queried in this worker's no-runtime scope. One owner-authorized wipe already occurred and allfive cities alreadyexist; this assessment authorizes or performs no further wipe."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_new_vault",
+          "kind": "mint",
+          "source": "Proposed hall local-height selection and exact existing-item control relocation; no currency or player-XP API/price/reward change",
+          "basis": "Only direct new emission is numerically zero; no new burn/fee is introduced. Physical goods, native earthworks, realized supplies and earlier existing trade are separate and not assumed zero.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_new_tokens",
+          "kind": "mint",
+          "source": "Proposed hall local-height selection and exact existing-item control relocation; no currency or player-XP API/price/reward change",
+          "basis": "Only direct new emission is numerically zero; no new burn/fee is introduced. Physical goods, native earthworks, realized supplies and earlier existing trade are separate and not assumed zero.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "physical_emerald": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_new_physical_emerald",
+          "kind": "mint",
+          "source": "Proposed hall local-height selection and exact existing-item control relocation; no currency or player-XP API/price/reward change",
+          "basis": "Only direct new emission is numerically zero; no new burn/fee is introduced. Physical goods, native earthworks, realized supplies and earlier existing trade are separate and not assumed zero.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_new_player_xp",
+          "kind": "mint",
+          "source": "Proposed hall local-height selection and exact existing-item control relocation; no currency or player-XP API/price/reward change",
+          "basis": "Only direct new emission is numerically zero; no new burn/fee is introduced. Physical goods, native earthworks, realized supplies and earlier existing trade are separate and not assumed zero.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "native_item_service_units": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unchanged_backend_shared_autosupply_envelope",
+          "kind": "item",
+          "source": "CivsAutoSupplies.kt:24-25; CivsResidentSupplies.kt:391-420",
+          "basis": "Upper gross service envelope: at most8material kinds x64units/receipt, one backend-shared admission/second. Low/base/high assume0.25/1/4active hours/day for ONE backend owner, not five independent rates. Unlike material units are counted for service sensitivity only, not fungible value, actual grants or total item delta.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "512",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              900,
+              3600,
+              14400
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "512",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              900,
+              3600,
+              14400
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "canonical_inventory": {
+    "path": "../ruscrafting-ops/docs/knowledge/economy-inventory.md",
+    "sha256": "9e863e5c55c06c284428c359d97f39c086b067f414da562e0c76a68a6058d627",
+    "read_for_assessment": true,
+    "updated_by_assessment": false,
+    "parent_owns_scoped_inventory_followup": true,
+    "fresh_live_ledger_read": false
+  },
+  "evaluator": {
+    "path": "../ruscrafting-ops/.agents/skills/balance-ruscrafting-economy/scripts/evaluate.py",
+    "sha256": "3164f77dcfe05e5d72e07b593db43c5db099a9c2bcc119068fb181138af82e18",
+    "coverage": "Arithmetic of separate direct currencies and the unchanged gross AutoSupply envelope only; UNKNOWN flows deliberately remain outside numeric flow rows."
+  },
+  "source_before": {
+    "repository": "ArcCivs",
+    "version_in_build_gradle_kts": "0.1.226",
+    "production_or_test_source_edited_by_assessment": false,
+    "sha256": {
+      "build.gradle.kts": "4508aa32ab797363cfc6719c3b97d6f5bde6b1dfc140f3f58ce3c563c5808e31",
+      "src/main/kotlin/ru/arc/civs/CivsVillageSites.kt": "7c1e1ab3a13cb5fb7463d44f7e569c160a1eebebaef5e8892b540958c149e56c",
+      "src/main/kotlin/ru/arc/civs/CivsAutonomousTerraform.kt": "983ba75daa5648f22a79a46f2e22d00dd70107095a156ede84d8ac89fa39001d",
+      "src/main/kotlin/ru/arc/civs/CivsBuildingRequests.kt": "92e3da1b940c9cb2c747eb1c6ab7f40695fbba0de723ca1908f70c1b39ce256c",
+      "src/main/kotlin/ru/arc/civs/CivsControlInstallations.kt": "a879bc42b82fae550682273d3fad81bf1b5b786bde0f90f2894d7a2c1db7064e",
+      "src/main/kotlin/ru/arc/civs/CivsControlRelocations.kt": "8165debe34e181e10855f2501921a56ab61f2b176c032744952b8ea05fd1134e",
+      "src/main/kotlin/ru/arc/civs/CivsStorage.kt": "4eb76ebfacba84b367e5705e011ac60cc4410c8b6469e836301b53ba019f9b79",
+      "src/main/kotlin/ru/arc/civs/CivsInventoryJournal.kt": "748b649b8f47de7db19a6cea408566584b423ed8fb271129ea59bee5b13f1019",
+      "src/main/kotlin/ru/arc/civs/CivsMaterials.kt": "197fa5e6e525dad69f647b7335f434a25ea3aee9eab09263377788cd5689afcb",
+      "src/main/kotlin/ru/arc/civs/CivsConstructionRuntime.kt": "499640dab664f4063ebb41c65bcbca8244684424f89c7c04afddc6a30454a29b",
+      "src/main/kotlin/ru/arc/civs/CivsAutoSupplies.kt": "bbce864c935d88c41b7f1800eec442509e31ebb3e143b14ae0517c6d25f6125e",
+      "src/main/kotlin/ru/arc/civs/CivsResidentSupplies.kt": "6cb5f19559cf718015a359eb2e5b6985f7d52a4b9f862aab1add2fb4170c3f78",
+      "src/main/kotlin/ru/arc/civs/CivsWorld.kt": "e8668f39244b7822e50168f4d1af0a16a496055a8f08c8c1e662cb50b6e20278",
+      "src/main/kotlin/ru/arc/civs/CivsTrade.kt": "3e19e1589477bcc8b21046fe441f1a53a76e92b7c47e22163774131fcef8a171"
+    }
+  },
+  "proposed_mechanism": {
+    "implemented": false,
+    "initial_hall": "existing local fullfootprint median/median-4/median+4 option selection with unchanged terrain, ownership, route/world and budget guards; actual option still must pass native proof",
+    "site_hall": "pureY replacement before anyhall work only; preserve oldSITE/control/stock until ordinary unique order and exactdurable handoff",
+    "marker_baseline_authored_barrel_items": 0,
+    "marker_air_cut_cells": {
+      "status": "CONDITIONAL",
+      "minimum": 0,
+      "maximum": 1,
+      "execution": "normal saved terrain batch; no immediate mutation"
+    },
+    "stock_transfer": {
+      "slots": 27,
+      "existing_item_quantities": "UNKNOWN; must capture exactexisting native slots/metadata",
+      "mint_or_burn_allowed": false,
+      "receiver_requires": "proven AIR; exactownership/support/native safety and inventory journal",
+      "old_barrel_retirement": "only after exactnative transfer, empty-source proof and durable handoff",
+      "handoff_sequence_status": "DESIGN_PENDING; sourceoverlap/current active-construction relocation guards require explicit integration and regression evidence"
+    }
+  },
+  "observed_before": {
+    "city": "3f1c466f-4ce7-30a7-aaaf-5371950c1025",
+    "world": "605ad396-dffd-487f-aeae-9a9f19a265f5",
+    "hall": "43125f2a-2d1a-37bb-afac-88832fedb79d",
+    "original_plan_evidence": {
+      "path": "artifacts/lab-five-Auto3-original-hall-grading-20261107.json",
+      "sha256": "01e74b4078a9dc8c64feb8fe9c15d8a4ab44662237052f18b2ef6b0dc4c8a0e8",
+      "reference_job": "a578f46b1680b5dbf27d45956c7afc440cd19ae1062ae266fb327c7815933dcf",
+      "plan_job": "c5705bac3872802605cb548a51aaec755f472359fcf2029c59793b6a3c675f9f",
+      "column_job": "2c28340e36e323b74a2e488c8e262fd9404446ed575be283fc58f68082e38643",
+      "plan_sha256": "9d7417e6c02623d3918001db83161698816f143f3669be93cd54674155f1ddb0",
+      "ground_y": 71,
+      "cut_count": 7358,
+      "fill_count": 144,
+      "total_changed_cells": 7502,
+      "earth_cut_count": 5174,
+      "max_earth_cut_cells_in_one_column": 9,
+      "max_fill_cells_in_one_column": 5,
+      "entry_earth_cut_y": [
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80
+      ],
+      "scope": "retained originalplanned earthworks, NOT completed native mutation"
+    },
+    "current_native_evidence": {
+      "path": "artifacts/lab-five-Auto2-Auto3-early-pads-20261107.json",
+      "sha256": "282b5af106a71a6c07ccba038215364aae7b7485352c972c68de5a003c7067ff",
+      "captured_at_ms": 1794017584769,
+      "layout_sha256": "6fcf6b21c242ee9a815539177b96aedccf3a456d9d4d613e92f4154aa00ffd55",
+      "source_revision": 11,
+      "phase": "SITE",
+      "loaded_footprint_columns": 1085,
+      "native_current_ground_y_min": 69,
+      "native_current_ground_y_median": 76,
+      "native_current_ground_y_max": 80,
+      "anchor_y": 71,
+      "native_current_entry_ground_y": 80,
+      "original_ground_proven": false
+    }
+  },
+  "unquantified_flows": [
+    {
+      "id": "candidate_earthworks_and_work",
+      "units": [
+        "native_world_cut_cells",
+        "native_world_fill_cells",
+        "earth_cut_cells",
+        "construction_batches",
+        "elapsed_time"
+      ],
+      "before": "Auto3 retained planned counts above; othercities and actualcompleted work are not aggregated",
+      "after": null,
+      "delta": null,
+      "status": "UNKNOWN until actualcandidate/native capture; no disabled/zero placeholder in evaluator"
+    },
+    {
+      "id": "authored_item_bill_and_actual_autosupply",
+      "units": [
+        "each vanilla material separately",
+        "native_items",
+        "receipt_timing"
+      ],
+      "before": null,
+      "after": null,
+      "delta": null,
+      "status": "UNKNOWN; before==after skips, grade, resumedprogress and itemmix can changeactualdebit and grants despite unchangedrecipes and uppercaps"
+    },
+    {
+      "id": "existing_control_contents",
+      "units": [
+        "exact27native inventory slots with metadata",
+        "physical_items"
+      ],
+      "before": null,
+      "after": null,
+      "delta": null,
+      "status": "AmountsUNKNOWN; exactconservation is mandatory, not measured; neither mint nor loss may be used to completehandoff"
+    },
+    {
+      "id": "existing_physical_trade_and_production_access",
+      "units": [
+        "physical_EMERALD_transfer",
+        "each physicalgood",
+        "resident_internal_skill",
+        "elapsed_time"
+      ],
+      "before": null,
+      "after": null,
+      "delta": null,
+      "status": "Existingtrade/recipes/rates/reserves unchanged; earlierhall completion can change realizedtiming/volume. Not a new currency mint."
+    }
+  ],
+  "invariants_and_verification": [
+    "Run canonical evaluator on thisJSON; do not interpret arithmeticsuccess as completeness, implementationapproval or nativeacceptance.",
+    "Beforeimplementation prototypeGO, parent must resolve oldsourcebarrel overlap and exactsavedorder/handoffsequence. Current ControlRelocations.move rejects samebuilding active/queuedconstruction; existingmethods are not claimed a dropin completedintegration.",
+    "Require nohallworldwork and exactcurrentSITE/control/stock identity before Y-replacement. Unaccepted search/admission failure retains oldSITE, stock, journal and accepted work; no stale paidorder or mutable-source reuse.",
+    "Marker cut, ifneeded, must be one explicit normal terraincell with nativebefore-image and ordinary commit/work rules; STRUCTURE_VOID remains zero authoredBARREL input, not permission for instantdigging.",
+    "Beforeany batch overwrites oldstockbarrel and byfinalbatch, preserve exact27slots including custommetadata through existingnative inventorytransaction; test interruption/restart/retry, changedreceiver, fullsource, protectedblock, sourceoverlap and nonemptyoldbarrel retirement refusal. Never clear or regrant supplies.",
+    "Read actualcandidate targetY, capturedcut/fill/materialbill/orderUUID/batches and safeentrance on existingfive without anotherwipe. Compare against retainedbeforeplan while keeping originalterrain vs currentnative vs plannedafter separate.",
+    "Measure realizedAutoSupply demand/grants/materialmix and actualconstruction time only afteractivation; caps remain8kinds x64units and shared1000ms. Do not claim zero realizeditem effect from unchangedcaps.",
+    "Preserve source/package/publication/delivery/activation/nativeclient and citygrowth evidence separately; allfive realgrowth/wall/expandedcity outcomes remain open."
+  ],
+  "decision": "BEFORE assessment supports prototyping only the specified source-contained localheight/pre-workSITE retarget using exactexisting-item conservation and ordinary paidconstruction. Directcurrencies/rates remainunchanged; physical/work/AutoSupply delta is UNKNOWN and may be nonzero. Parent must amend this assessment beforeGO if handoff, itempolicy, scheduler, freework, grants or economic scope materially changes."
+}

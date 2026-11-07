@@ -97,10 +97,11 @@ class CivsWorld(
 
     /** Only explicitly requested columns survey water; ordinary building searches retain their dry-only scan. */
     internal fun autonomousHeightField(city: Settlement, envelope: CivBuilding,
-        previous: CivBuilding? = null, waterColumns: Set<Long> = emptySet()): CompletableFuture<CivTerrainSurface> =
-        admit(area = surveyArea(city)) {
+        previous: CivBuilding? = null, waterColumns: Set<Long> = emptySet(),
+        localFootprint: Boolean = false): CompletableFuture<CivTerrainSurface> =
+        admit(area = if (localFootprint) null else surveyArea(city)) {
         requireCivs(waterColumns.size <= CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS, "autonomy-search-budget")
-        AutonomousHeightField(city, envelope, previous, waterColumns.toSet())
+        AutonomousHeightField(city, envelope, previous, waterColumns.toSet(), localFootprint = localFootprint)
     }
 
     /** Administrative discovery retains the same explicit bounded survey footprint until its result retires. */
@@ -360,11 +361,13 @@ class CivsWorld(
 
     private inner class AutonomousHeightField(private val citySnapshot: Settlement, envelope: CivBuilding,
         private val previous: CivBuilding?, private val waterColumns: Set<Long>,
-        private val prospective: Boolean = false, private val requested: List<CivPosition>? = null) :
+        private val prospective: Boolean = false, private val requested: List<CivPosition>? = null,
+        private val localFootprint: Boolean = false) :
         CivsWorldScan<CivTerrainSurface>(this@CivsWorld, citySnapshot.id, citySnapshot.owner, citySnapshot.worldId, envelope) {
         private val radius = citySnapshot.radius.coerceIn(0, 127)
-        private val width = radius * 2 + 1
-        private val area = requested?.size ?: (width * width)
+        private val width = if (localFootprint) building.bounds.max.x - building.bounds.min.x + 1 else radius * 2 + 1
+        private val depth = if (localFootprint) building.bounds.max.z - building.bounds.min.z + 1 else width
+        private val area = requested?.size ?: (width * depth)
         private val columns = linkedMapOf<Long, CivTerrainSurfaceColumn>()
         private var topY: Int? = null
         private var waterTopY: Int? = null
@@ -378,8 +381,10 @@ class CivsWorld(
         }
         override fun step() {
             if (index == area) return finish(CivTerrainSurface(world.minHeight, world.maxHeight, columns))
-            val x = requested?.get(index)?.x ?: Math.addExact(citySnapshot.center.x, index % width - radius)
-            val z = requested?.get(index)?.z ?: Math.addExact(citySnapshot.center.z, index / width - radius)
+            val x = requested?.get(index)?.x ?: if (localFootprint) building.bounds.min.x + index % width
+                else Math.addExact(citySnapshot.center.x, index % width - radius)
+            val z = requested?.get(index)?.z ?: if (localFootprint) building.bounds.min.z + index / width
+                else Math.addExact(citySnapshot.center.z, index / width - radius)
             val key = civsTerrainKey(x, z)
             fun complete(ground: Int, natural: Boolean, loaded: Boolean = true, water: CivTerrainSurfaceColumn? = null,
                 dirtPath: Boolean = false) {
@@ -463,8 +468,10 @@ class CivsWorld(
         override fun step() {
             planned?.let { return finish(it.join()) }
             if (columnIndex == totalColumns) {
+                val prepareControl = retargetSource != null
                 planned = CompletableFuture.supplyAsync({
-                    val draft = CivTerraformDraft(building, columns, emptyList(), building.anchor.y)
+                    val draft = CivTerraformDraft(building, columns, emptyList(), building.anchor.y,
+                        prepareControl = prepareControl)
                     CivsAutonomousTerraform.materialize(draft, captured).takeIf { it.blocks.isNotEmpty() }.also {
                         requireCivs(schematicCells.toLong() + (it?.blocks?.size ?: 0) <= CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
                     }
@@ -493,10 +500,12 @@ class CivsWorld(
             val position = CivPosition(x, currentY, z)
             val block = read(position)
             val data = block.blockData
+            if (position == previous?.control && previous?.control != building.control && retargetSource != null)
+                rejectAt("hall-source-overlap", block)
             if (position == building.control && !(previous?.control == position && block.type == Material.BARREL) &&
                 (if (strictAutonomous) !naturalTerraform(block) else block.isLiquid ||
                     (data as? Waterlogged)?.isWaterlogged == true || block.state is TileState || block.type in PROTECTED_TERRAIN))
-                rejectAt("autonomy-terrain", block)
+                rejectAt(if (retargetSource != null) "hall-target-control-incompatible" else "autonomy-terrain", block)
             // Air above the terrace stays untouched; schematic capture still validates its own cells.
             val accessFailure = if (currentY > ground && block.type.isAir) null
                 else if (!canModify(owner, block)) "lands-denied"
@@ -960,6 +969,15 @@ class CivsWorld(
         }
 
         override fun checkControl(block: Block) {
+            val oldControl = retargetSource?.control
+            if (oldControl != null && oldControl != building.control) {
+                val preparation = terrainOverlay[building.control]
+                if (!block.type.isAir && (preparation == null || preparation.after != "minecraft:air" ||
+                        preparation.before != block.blockData.asString)) rejectAt("hall-target-control-incompatible", block)
+                if (preparation != null) checkTerraformBlock(block, parse(preparation.after))
+                if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+                return
+            }
             if (adminPlacement && previous?.control != building.control &&
                 (block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false)
                 rejectAt("container-not-empty", block)
@@ -981,13 +999,14 @@ class CivsWorld(
         override fun validateIdentity(city: Settlement?) {
             if (city?.autonomy != null && !adminPlacement) strictAutonomous = true
             requireCivs(city?.building(building.id) == previous, "invalid-building")
-            if (previous != null) requireCivs(previous.id == building.id &&
+            val retarget = retargetSource != null && !adminPlacement && city?.construction == null
+            if (previous != null && !retarget) requireCivs(previous.id == building.id &&
                 (previous.type == building.type || city != null && CivsInfrastructureRebuild.refit(city, previous, building)) &&
                 previous.entrance == building.entrance && previous.rotation == building.rotation &&
                 (previous.phase == BuildingPhase.ACTIVE && (previous.level + 1 == building.level ||
                     CivsPlanBoardBlueprint.refit(previous, building) || CivsInfrastructureRebuild.refit(previous, building)) ||
                     previous.level == building.level && previous.phase == BuildingPhase.SITE), "invalid-building")
-            if (previous != null) requireCivs(civsContainsBox(building.bounds, previous.bounds), "upgrade-footprint-changed")
+            if (previous != null && !retarget) requireCivs(civsContainsBox(building.bounds, previous.bounds), "upgrade-footprint-changed")
             if (previous?.type == BuildingType.GATE && building.type == BuildingType.WALL) {
                 val survivor = requireNotNull(CivsInfrastructureRebuild.closureSurvivor(requireNotNull(city), previous, building))
                 requireCivs(gateReadiness == null || gateReadiness!!.gate == survivor, "stale-building")
@@ -1060,6 +1079,8 @@ class CivsWorld(
                 checkControl(block)
                 return
             }
+            if (position == retargetSource?.control && position != building.control)
+                rejectAt("hall-source-overlap", block)
             val state = if (block.type.isAir) null else block.state
             val waterFoundation = waterColumns[civsTerrainKey(position.x, position.z)]?.takeIf { it.contains(position) }
             if (waterFoundation != null) {
@@ -1129,6 +1150,10 @@ class CivsWorld(
             checkTerraformCell(cell, terraform)
             val block = read(cell.position)
             val after = parse(cell.after)
+            if (cell.position == building.control && retargetSource != null) {
+                if (block.blockData.asString !in setOf(cell.before, cell.after)) rejectAt("world-changed", block)
+                if (!naturalTerraform(block)) rejectAt("autonomy-terrain", block)
+            }
             checkTerraformBlock(block, after, acceptedPlan = true)
             val applied = sameConstructionState(block.blockData, after)
             if (!applied) {
@@ -1163,13 +1188,14 @@ class CivsWorld(
         }
         override fun validateIdentity(city: Settlement?) {
             val current = city?.building(building.id)
-            requireCivs(current == null || current == building ||
+            val retarget = retargetSource != null && city?.construction?.id == plan.id
+            requireCivs(current == null || current == building || retarget ||
                 (current.type == building.type || CivsInfrastructureRebuild.refit(city, current, building)) &&
                 current.entrance == building.entrance && current.rotation == building.rotation &&
                 (current.level + 1 == building.level || CivsPlanBoardBlueprint.refit(current, building) ||
                     CivsInfrastructureRebuild.refit(current, building)) &&
                 current.phase == BuildingPhase.ACTIVE, "invalid-building")
-            if (current != null) requireCivs(civsContainsBox(building.bounds, current.bounds), "upgrade-footprint-changed")
+            if (current != null && !retarget) requireCivs(civsContainsBox(building.bounds, current.bounds), "upgrade-footprint-changed")
             if (current?.type == BuildingType.GATE && building.type == BuildingType.WALL) {
                 val survivor = requireNotNull(CivsInfrastructureRebuild.closureSurvivor(requireNotNull(city), current, building))
                 requireCivs(gateReadiness == null || gateReadiness!!.gate == survivor, "stale-building")

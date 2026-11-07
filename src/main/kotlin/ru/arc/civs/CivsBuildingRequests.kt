@@ -510,19 +510,27 @@ internal class CivsBuildingRequests(
                         return@cellsReady
                     }
                     // Waiting designs reserve against fresh before-images, never the terrain at confirmation.
-                    val terrain: CompletableFuture<Pair<CivTerraformPlan?, CivPaidApproachReuse?>> = if (building.phase == BuildingPhase.SITE &&
-                        (sitePlan.adminPlacement || city.autonomy == null || sitePlan.terrain?.route?.isEmpty() == true))
-                        world.captureManualFoundation(city.id, city.owner, city.worldId, target,
-                            requireNotNull(cells), executor, building, adminPlacement = sitePlan.adminPlacement).thenApply { it to null }
-                    else if (city.autonomy != null && building.phase == BuildingPhase.SITE)
-                        autonomousPlacement.prepareExisting(city, CivBlueprint(target, city.worldId, snapshot,
-                            requireNotNull(cells), emptyList(), bytes), sitePlan.terrain?.waterFoundations.orEmpty())
-                            .thenApply { it.terrain to it.paidApproach }
-                    else CompletableFuture.completedFuture(sitePlan.terrain to null)
-                    terrain.thenCompose { (preparation, reuse) -> world.capture(city.id, city.owner, city.worldId,
-                        target, requireNotNull(cells), building, preparation, adminPlacement = sitePlan.adminPlacement)
-                        .thenApply { it to reuse } }
-                        .whenCompleteSync(tasks) capturedReady@ { prepared, captureFailure ->
+                    val blueprint = CivBlueprint(target, city.worldId, snapshot, requireNotNull(cells), emptyList(), bytes)
+                    val capturedDesign: CompletableFuture<Pair<CivPlacementPlan, CivPaidApproachReuse?>> =
+                        if (player == null && civsAutonomousHallSite(city, building) && !sitePlan.adminPlacement &&
+                            sitePlan.capturedSha256 != null && sitePlan.terrain?.route.isNullOrEmpty())
+                            autonomousPlacement.captureHallSite(city, blueprint).thenApply { it to null }
+                        else {
+                            val design = when {
+                                building.phase == BuildingPhase.SITE && (sitePlan.adminPlacement || city.autonomy == null ||
+                                    sitePlan.terrain?.route?.isEmpty() == true) ->
+                                    world.captureManualFoundation(city.id, city.owner, city.worldId, target,
+                                        blueprint.cells, executor, building, adminPlacement = sitePlan.adminPlacement)
+                                        .thenApply { CivAutonomousDesign(blueprint, it) }
+                                city.autonomy != null && building.phase == BuildingPhase.SITE ->
+                                    autonomousPlacement.prepareExisting(city, blueprint, sitePlan.terrain?.waterFoundations.orEmpty())
+                                else -> CompletableFuture.completedFuture(CivAutonomousDesign(blueprint, sitePlan.terrain))
+                            }
+                            design.thenCompose { prepared -> world.capture(city.id, city.owner, city.worldId,
+                                prepared.blueprint.building, prepared.blueprint.cells, building, prepared.terrain,
+                                adminPlacement = sitePlan.adminPlacement).thenApply { it to prepared.paidApproach } }
+                        }
+                    capturedDesign.whenCompleteSync(tasks) capturedReady@ { prepared, captureFailure ->
                             if (captureFailure != null) return@capturedReady completeActivation(captureFailure)
                             runCatching {
                                 val (captured, reuse) = requireNotNull(prepared)
@@ -584,13 +592,22 @@ internal class CivsBuildingRequests(
         rejectIf(city.inventory == null && city.autonomy == null, "materials-migration-pending")
         rejectIf(!city.canManage(actor), "not-authorized")
         val building = plan.building
+        val source = city.building(building.id)
+        val retarget = civsAutonomousHallRetarget(city, source, building)
+        if (retarget) {
+            val control = requireNotNull(source?.control)
+            rejectIf(plan.id == building.id || plan.capturedSha256 == null || plan.adminPlacement,
+                "invalid-plan")
+            rejectIf(plan.blocks.any { it.position == control } ||
+                plan.terrain?.blocks.orEmpty().any { it.position == control }, "hall-source-overlap")
+        }
         requireAssignedBuilder(city, building.id)
         if (building.type == BuildingType.TOWN_HALL && building.level > city.level()) {
             rejectIf(records.cities.values.any { it.id != city.id && it.worldId == city.worldId &&
                 CivsService.areasOverlap(city.center, city.radius + 32, it.center, it.radius) }, "city-overlap")
         }
         rejectIf(city.pendingControls.orEmpty().any { it.buildingId == building.id }, "city-busy")
-        val approach = if (plan.terrain != null || building.type.isInfrastructure || building.type == BuildingType.DECORATION) null
+        val approach = if (retarget || plan.terrain != null || building.type.isInfrastructure || building.type == BuildingType.DECORATION) null
             else controlInstallations.prepare(city.id, city.worldId, city.owner, building).takeIf { !it.approach.isNullOrEmpty() }
         val result = authority.tracked<Settlement>()
         CompletableFuture.supplyAsync({
@@ -610,7 +627,7 @@ internal class CivsBuildingRequests(
         }, executor).thenCompose { order ->
             store.saveSchematic(plan.id, bytes).thenCompose { store.savePlan(plan) }.thenCompose {
                 // Order captures are deleted on completion; keep the admitted access road with its building.
-                if (city.autonomy != null && (plan.terrain != null || CivsInfrastructureRebuild.stage(building) > 0)) {
+                if (!retarget && city.autonomy != null && (plan.terrain != null || CivsInfrastructureRebuild.stage(building) > 0)) {
                     val retained = CivsGateRefit.retainedPlanId(building)
                     store.saveSchematic(retained, bytes).thenCompose { store.savePlan(plan.copy(id = retained)) }
                 }
@@ -625,6 +642,7 @@ internal class CivsBuildingRequests(
                 val batches = requireNotNull(order.batches)
                 authority.releaseCity(city.id)
                 authority.mutate(city.id) { before ->
+                    rejectIf(retarget && before != city, "stale-building")
                     val reserved = CivsRules.reserveBuild(replacement?.apply(before) ?: before, actor, building, order)
                     if (approach == null) reserved else CivsRules.validate(reserved.copy(
                         pendingControls = reserved.pendingControls.orEmpty() + approach))

@@ -21,12 +21,24 @@ data class CivContainerRelocation(val building: CivBuilding, val containers: Lis
         inventory = unregister?.let { requireNotNull(after.inventory).copy(containers = it.registeredBefore) } ?: after.inventory)
 
     fun validated(city: Settlement) {
-        require(city.building(building.id) == building && building.phase == BuildingPhase.ACTIVE &&
+        val hallHandoff = if (building.phase == BuildingPhase.SITE) city.pendingControls.orEmpty().firstOrNull { pending ->
+            pending.buildingId == building.id && pending.retire?.let {
+                civsAutonomousHallHandoff(city, building, it.position, pending.position)
+            } == true
+        } else null
+        require(city.building(building.id) == building && (building.phase == BuildingPhase.ACTIVE || hallHandoff != null) &&
             !building.type.isInfrastructure && city.pendingDeletion == null)
         val metadataOnly = unregister != null && containers.all { it.before.all { item -> item == null } && it.before == it.after }
         require(containers.size in (if (metadataOnly) 1 else 2)..MAX_CONTAINERS &&
             containers.map { it.position }.distinct().size == containers.size)
         require(containers.map { (it.position.x shr 4) to (it.position.z shr 4) }.distinct().size <= 8)
+        hallHandoff?.let { pending ->
+            require(unregister == null && containers.size == 2)
+            val source = containers.single { it.position == requireNotNull(pending.retire).position }
+            val receiver = containers.single { it.position == pending.position }
+            require(source.type == "BARREL" && receiver.type == "BARREL" && source.after.all { it == null } &&
+                receiver.before.all { it == null } && receiver.after == source.before)
+        }
         val delta = mutableMapOf<Pair<String, String?>, Long>()
         fun count(item: CivResidentItem?, sign: Long) {
             item?.validated()?.let { delta.merge(it.material to it.data, sign * it.amount, Math::addExact) }

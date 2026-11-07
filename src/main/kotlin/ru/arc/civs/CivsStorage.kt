@@ -534,8 +534,10 @@ class CivsStorage(private val plugin: Plugin,
     /** The pending-control owner installs and persists its receiver before this exact-slot evacuation. */
     internal fun prepareControlRelocation(city: Settlement, building: CivBuilding, from: CivPosition, to: CivPosition): CivContainerRelocation? {
         checkClaim(city)
+        val hallHandoff = building.phase == BuildingPhase.SITE && civsAutonomousHallHandoff(city, building, from, to) &&
+            city.pendingControls.orEmpty().any { it.buildingId == building.id && it.retire?.position == from && it.position == to }
         require(city.building(building.id) == building && city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
-            building.phase == BuildingPhase.ACTIVE && CivsBuildingControls.supported(building.type) && from != to &&
+            (building.phase == BuildingPhase.ACTIVE || hallHandoff) && CivsBuildingControls.supported(building.type) && from != to &&
             building.bounds.contains(from.x, from.y, from.z) && building.bounds.contains(to.x, to.y, to.z) &&
             (from == building.control || city.pendingControls.orEmpty().any { it.buildingId == building.id && it.retire?.position == from && it.position == to }))
         val target = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
@@ -553,6 +555,15 @@ class CivsStorage(private val plugin: Plugin,
             return CivRelocatedContainer(point, source.type, native.blockData.asString, items, items)
         }
         val previous = capture(from)
+        if (hallHandoff) {
+            // A staged marker has exactly one receiver. Preserve every slot, including holes and item data.
+            reject(replacement.type != Material.BARREL, "control-obstructed")
+            if (previous.before.all { it == null }) return null
+            val receiver = capture(to)
+            reject(receiver.before.any { it != null }, "storage-busy")
+            return CivContainerRelocation(building, listOf(previous.copy(after = List(STORAGE_SLOTS) { null }),
+                receiver.copy(after = previous.before))).also { it.validated(city) }
+        }
         if (previous.before.all { it == null }) return null
         fun plan(holders: List<CivRelocatedContainer>) = civsPlanContainerRelocation(building, building.copy(control = to),
             holders.associate { it.position to if (it.position == from) "minecraft:air" else it.blockData }, holders)?.also { it.validated(city) }

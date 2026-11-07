@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import org.bukkit.Chunk
+import org.bukkit.HeightMap
 import org.bukkit.World
 import org.bukkit.util.BoundingBox
 import java.util.UUID
@@ -82,8 +83,25 @@ internal class CivsCitizenAdmissions(
         val samples = mutableListOf<CitizenSpawnSample>()
         val rejections = linkedMapOf<String, Int>()
         var inspected = 0
-        // Two admissions per pulse give at most 234 candidate checks across all cities.
-        for (point in citizenSpawnCandidates(storage, ordinal)) {
+        // Two admissions per pulse share at most 234 candidate checks and 26 loaded heightmap reads.
+        val nearby = citizenSpawnCandidates(storage, ordinal)
+        val candidates = sequence {
+            val originalFloor = nearby.takeWhile { it.y == storage.y }.toList()
+            yieldAll(originalFloor)
+            // A buried camp can be more than four blocks below its actual outdoor footing.
+            // Resolve only these same columns; an authored interior floor still has first choice.
+            for (column in originalFloor) {
+                if (!city.contains(column.x, column.z) || !citizenChunkReady(world, column.x shr 4, column.z shr 4) ||
+                    city.buildings.any { it.phase == BuildingPhase.ACTIVE && it.type != BuildingType.ROAD &&
+                        CivsAutonomousGeometry.horizontalContains(it.bounds, column) }) continue
+                val feetY = world.getHighestBlockYAt(column.x, column.z, HeightMap.MOTION_BLOCKING_NO_LEAVES).toLong() + 1
+                if (feetY == column.y.toLong() || feetY <= world.minHeight || feetY + 1 >= world.maxHeight) continue
+                val surface = column.copy(y = feetY.toInt())
+                if (citizenIdleTerrain(world, surface)) yield(surface)
+            }
+            yieldAll(nearby.drop(originalFloor.size))
+        }.distinct().take(CITIZEN_SPAWN_CANDIDATE_LIMIT)
+        for (point in candidates) {
             inspected++
             val location = point.location(world)
             val reason = when {

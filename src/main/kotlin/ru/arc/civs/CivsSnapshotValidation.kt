@@ -50,8 +50,10 @@ internal object CivsSnapshotValidation {
                 snapshot(CivsRules.present(order.id) && current != null && order.buildingId == target.id && order.targetLevel == target.level)
                 snapshot(target.phase == BuildingPhase.CONSTRUCTING && city.buildings.none { it.id != target.id && it.bounds.overlaps(target.bounds) })
                 val founding = CivsRules.isFounding(city)
+                val retarget = civsAutonomousHallRetarget(city, current, target)
+                if (retarget) snapshot(order.id != target.id && order.payment != null)
                 snapshot(if (current!!.phase == BuildingPhase.CONSTRUCTING) current == target && target.level == 1 else
-                    current.phase == BuildingPhase.ACTIVE &&
+                    retarget || current.phase == BuildingPhase.ACTIVE &&
                         (current.type == target.type || CivsInfrastructureRebuild.refit(city, current, target)) &&
                         (current.level + 1 == target.level || CivsPlanBoardBlueprint.refit(current, target) ||
                             CivsInfrastructureRebuild.refit(current, target)) &&
@@ -84,6 +86,8 @@ internal object CivsSnapshotValidation {
                     snapshot(payment.reservedBatch == null || payment.reservedBatch == order.workDone &&
                         order.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING, ConstructionPhase.PAUSED))
                     snapshot(order.phase != ConstructionPhase.PLACING || payment.reservedBatch == order.workDone)
+                    if (retarget && order.workDone == order.workRequired - 1 && payment.reservedBatch != null)
+                        snapshot(current.control == target.control && city.pendingControls.orEmpty().none { it.buildingId == target.id })
                     snapshot(payment.awaiting == null || order.phase in setOf(ConstructionPhase.WAITING_MATERIALS, ConstructionPhase.PAUSED) &&
                         payment.reservedBatch == null && payment.awaiting.isNotEmpty() && validMaterials(payment.awaiting) &&
                         payment.awaiting.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value })
@@ -185,9 +189,12 @@ internal object CivsSnapshotValidation {
                 pending.forEach { receipt ->
                     val building = requireNotNull(city.building(receipt.buildingId))
                     receipt.retire?.let { cell ->
+                        val hallHandoff = civsAutonomousHallHandoff(city, building, cell.position, receipt.position)
+                        if (hallHandoff) snapshot(receipt.before in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air") &&
+                            receipt.approach.orEmpty().isEmpty())
                         snapshot(city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
-                            building.phase == BuildingPhase.ACTIVE && CivsBuildingControls.supported(building.type) &&
-                            city.construction?.buildingId != building.id &&
+                            (building.phase == BuildingPhase.ACTIVE && city.construction?.buildingId != building.id || hallHandoff) &&
+                            CivsBuildingControls.supported(building.type) &&
                             cell.position != receipt.position && cell.position.y in -4_096..4_096 &&
                             city.contains(cell.position.x, cell.position.z) &&
                             building.bounds.contains(receipt.position.x, receipt.position.y, receipt.position.z) &&
@@ -197,12 +204,13 @@ internal object CivsSnapshotValidation {
                             civsRetainContainerState(cell.before) && cell.before.startsWith("minecraft:barrel[") && cell.after == "minecraft:air")
                     }
                     val approach = receipt.approach.orEmpty()
+                    val campCap = civsCampControlApproach(city, building, receipt)
                     snapshot(approach.size <= 3 && approach.map { it.position }.distinct().size == approach.size)
                     snapshot(approach.all { cell ->
                         val point = cell.position
                         CivsRules.present(point, cell.before, cell.after) && point.y in -4_096..4_096 && point != receipt.position &&
                             CivsRules.validText(cell.before, CivsStore.MAX_BLOCK_STATE_CHARS) && cell.before.startsWith("minecraft:") &&
-                            cell.before != cell.after && (if (building.bounds.contains(point.x, point.y, point.z))
+                            cell.before != cell.after && (cell == campCap || if (building.bounds.contains(point.x, point.y, point.z))
                                 approach.size == 1 && !building.type.isInfrastructure && building.phase == BuildingPhase.ACTIVE &&
                                     city.construction?.buildingId != building.id && cell == civsControlSupport(receipt.position, cell.before)
                             else point.x == building.entrance.x && point.z == building.entrance.z &&
