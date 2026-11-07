@@ -1,0 +1,27 @@
+# Exterior entry foundation recapture: before-source assessment
+
+The proposed change gives the exterior entry column the same lower capture floor already used for footprint columns: `floor = minOf(ground, building.bounds.min.y - 1)`. The BEFORE `CivsWorld.kt` SHA-256 is `c06ebad17e105b6a389bbcae3ce93e4386be3782de441b88a9623f74d88844d6` (source version `0.1.225`); the one-line-only proposed SHA-256 is `e8668f39244b7822e50168f4d1af0a16a496055a8f08c8c1e662cb50b6e20278`. This assessment precedes the production edit and does not activate code.
+
+`CivsControlInstallations.provedInitialApproach` preserves its existing at-most-three-cell receipt: entry ground and two headroom cells. The deeper admitted foundation stays in the ordinary construction plan. The old recapture can stop on the already installed top DIRT. Requiring the footprint floor for the exterior entry makes the scan continue below that top block, retaining strict native ownership, natural/support, protection, world-height and aggregate-budget checks. The existing ACTIVE-building preservation is unchanged.
+
+## Exact representative quantity
+
+For the parent-specified regression geometry, entry ground is y68, genuine solid base y64, the approach has already installed DIRT at y68, and y65..67 are AIR. BEFORE recapture proposes zero missing support cells. AFTER it proposes three native DIRT cells at y65,66,67. This is one deterministic column, not a measurement of future cities, a universal depth/cost, a recurring payout or a five-town bill. The calculator's cap of three belongs only to this finite single-column witness; it is not a runtime or network limit. Low/base/high deliberately use the same witness, so no activity or population forecast is invented.
+
+These are **world terrain blocks**, with **zero additional inventory DIRT debit** for the terrain prefix. `CivsMaterials.required` prices `plan.blocks` (authored building cells), while `CivsConstructionRuntime` passes an empty requirement map for `terrainStart` batches. `CivsBuildingRequests` retains both the terrain plan and its normal automatic-preparation batch prefix. The existing authored recipe, item prices and debit rules stay unchanged. Zero material debit is not zero world-material creation.
+
+`TerraformApply` validates the exact durable slice and current before/after state, uses `setBlockData(..., false)`, and explicitly performs no `breakNaturally`, inventory transfer or drop generation. It skips already-correct cells. The route-empty prefix remains automatic preparation; native changes are throttled to one changed cell per owner tick and normal batch completion is committed. Three added cells mean three additional native mutations in this witness, not a guaranteed extra batch or NPC session. Capture reads and full-plan batch totals can change; their actual elapsed-time delta is unmeasured. Construction feedback uses cosmetic equipment/gestures and creates no durable items or tool wear.
+
+## Separate units and indirect effects
+
+Direct new mint/burn remains separately **0 Vault, 0 premium tokens, 0 physical EMERALD and 0 player XP**. Direct inventory DIRT mint/debit and terraforming drops are zero; native world DIRT creation is three for the witness. No prices, salaries, production recipes, research effects, trade reserves, ordinary action durations or reward rates are retuned. There is no new product price or savings-time calculation. Later manual extraction of accessible support DIRT is an external native block-to-item conversion; neither its occurrence nor a monetary redemption value is assumed.
+
+The existing AutoSupply emission is nonzero and remains bounded by at most **8 material kinds × 64 units per receipt**, with a **backend-shared one-second admission cadence**. It is not a separate rate for every town. Five new LAB towns replacing the old three can change population, demand, actual supply draws and competition; they do not multiply this shared cadence. Restored passage/construction can change subsequent work, food/tools, output and trade timing. These realized effects are unknown, so no blanket item-delta-zero or income multiplier is claimed.
+
+Current SELL/AutoSell, future SELL-off/contract replacement and SHADOW states remain distinct. No outside-LAB flow is changed or freshly observed here. The canonical ops economy inventory was read; the parent owns its scoped follow-up. No rates were taken from an old live snapshot. The canonical evaluator checks separate direct currencies and the finite representative native-DIRT quantity; it does not validate model completeness or native behavior.
+
+## Verification boundary
+
+The focused regression must preinstall the top approach DIRT, recapture the SITE foundation and require the missing y65..67 support while keeping solid/protected/unsafe controls meaningful. The owner then verifies the exact source change and normal source/package checks. Native acceptance needs a fresh city/world/entry readback of the resulting support column, ordinary batch completion and absence of an additional DIRT item debit/drop. This worker performs no Gradle, source edit, Git operation, live query, reset, item grant or deployment. Full wall closure, gate joins, player traversal and five-town growth remain separate observations.
+
+This is evidence for the parent's narrow source decision, not another approval gate. The permissible conclusion is restoration of the existing foundation policy with an explicit nonzero native-world material delta; runtime recovery is pending.

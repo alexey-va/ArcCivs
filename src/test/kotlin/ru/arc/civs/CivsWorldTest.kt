@@ -1852,6 +1852,49 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("a founding entrance keeps its missing deep fill when the bootstrap floor is recaptured") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 66, 0), CivPosition(0, 70, 0)))
+                .copy(anchor = CivPosition(0, 68, 0), entrance = CivPosition(-1, 69, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            s.cities += city
+            for (x in -1..0) s.world.getBlockAt(x, 64, 0).type = Material.STONE
+            val cells = worldSchematicCells(building)
+            val executor = java.util.concurrent.Executor(Runnable::run)
+            val initial = s.subject.captureManualFoundation(city.id, city.owner, city.worldId, building, cells,
+                executor, autonomous = true)
+            s.scheduler.tick()
+            val originalTerrain = requireNotNull(completed(initial))
+            val entry = building.entrance
+            originalTerrain.blocks.filter { it.position.x == entry.x }.map { it.position.y } shouldBe (65..68).toList()
+            val founding = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building, cells, originalTerrain)
+            s.scheduler.tick()
+            completed(founding).terrain shouldBe originalTerrain
+
+            val site = building.copy(phase = BuildingPhase.SITE)
+            s.cities[0] = city.copy(buildings = listOf(site))
+            // The founding control receipt installs only the top floor before a builder starts.
+            val bootstrap = originalTerrain.blocks.single { it.position == entry.copy(y = entry.y - 1) }
+            s.world.getBlockAt(bootstrap.position.x, bootstrap.position.y, bootstrap.position.z).blockData =
+                Bukkit.createBlockData(bootstrap.after)
+            for (y in 65..67) s.world.getBlockAt(entry.x, y, entry.z).type shouldBe Material.AIR
+
+            val refresh = s.subject.captureManualFoundation(city.id, city.owner, city.worldId, building, cells,
+                executor, previous = site)
+            s.scheduler.tick()
+            val refreshedTerrain = requireNotNull(completed(refresh))
+            val missingFill = refreshedTerrain.blocks.filter { it.position.x == entry.x }
+            missingFill shouldBe (65..67).map { y ->
+                CivPlanBlock(CivPosition(entry.x, y, entry.z), "minecraft:air", "minecraft:dirt")
+            }
+            val capture = s.subject.capture(city.id, city.owner, city.worldId, building, cells, site, refreshedTerrain)
+            s.scheduler.tick()
+            completed(capture).terrain?.blocks?.filter { it.position.x == entry.x } shouldBe missingFill
+            s.world.getBlockAt(entry.x, entry.y - 1, entry.z).type shouldBe Material.DIRT
+            for (y in 65..67) s.world.getBlockAt(entry.x, y, entry.z).type shouldBe Material.AIR
+        }
+    }
+
     test("manual foundation cuts uneven natural terrain before the founding site is published") {
         worldScenario(collisionWorld = true) { s ->
             val marker = CivPosition(0, 69, 0)

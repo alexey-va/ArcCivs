@@ -481,7 +481,7 @@ class CivsWorld(
                 return
             }
             val ground = if (footprint) building.anchor.y else building.entrance.y - 1
-            val floor = if (footprint) minOf(ground, building.bounds.min.y - 1) else ground
+            val floor = minOf(ground, building.bounds.min.y - 1)
             requireCivs(floor >= world.minHeight && ground + 2 < world.maxHeight, "outside-world")
             val currentY = y ?: run {
                 requireCivs(world.isChunkLoaded(x shr 4, z shr 4), "chunks-unloaded")

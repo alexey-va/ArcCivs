@@ -1,0 +1,350 @@
+{
+  "version": 1,
+  "title": "ArcCivs exterior entry foundation recapture; before-source assessment",
+  "recorded_at_utc": "2026-11-07T01:09:38.980762+00:00",
+  "assumptions": [
+    "BEFORE source change. Exact CivsWorld baseline hash below; build.gradle.kts currently says0.1.225. Scope is the one-line manual-foundation exterior-entry floor parity fix; no production/test source, Git, build, runtime or live economy mutation was performed by the assessment worker.",
+    "The existing three-cell initial approach receipt installs only entry ground/headroom. Its top DIRT can be floating over an already captured deeper fill. Old SITE activation recapture accepts this top DIRT as support; the proposed floor=minOf(ground,bounds.min.y-1), already used for footprint columns, continues native reads to the lower foundation floor. Existing ACTIVE-building preservation, natural/support/protection checks and all budgets remain authoritative.",
+    "Low/base/high are the SAME one-column deterministic witness: one representative actor/owner and one recapture, ground68/base64/topDIRT68/AIR65..67. Identical scenario values avoid inventing population or incident frequency. Calculator native_dirt_block weekly cap3 merely counts this exact finite witness once; it is NOT a global runtime cap, recurring entitlement, five-town bill or network forecast.",
+    "Terrain prefix placements are native world materialization included in the existing foundation policy, not authored item-bill cells. Extra inventory DIRT debit, inventory DIRT mint, direct native drop and tool durability debit for this prefix are0. World DIRT placement is NONZERO3 for the witness; existing substrate is not a refundable inventory entitlement.",
+    "Direct new mint/burn separately0Vault,0premium tokens,0physical EMERALD,0playerXP. Resident skill/reward APIs, building recipes, trade prices, per-action production, cadence and XP policies are unchanged. No item-to-money rate, savings time or price progression is introduced or inferred.",
+    "The existing AutoSupply policy is NONZERO: at most8material kinds x64units per accepted receipt and a backend-shared one-second admission cadence. This proposed line does not alter that envelope. Five new LAB towns replacing three old ones can change total population, demand, actual grants and competition within the shared envelope; neither three nor five multiplies the global admission rate.",
+    "A usable foundation can resume resident work/construction and change realized supplies, food/tool consumption, item output and trade timing. No numerical throughput, money income, labor-time or realized-grant forecast is claimed. A later player breaking an accessible new DIRT block is an external native item conversion, not a direct terraforming drop.",
+    "LAB-only fixture reset/founding is a separately owner-authorized operation; this assessment does not execute it or make statements about outside-LAB flows. No fresh native ledger, world capture or post-change client outcome was observed here. Current SELL/AutoSell and future SELL-to-contract/SHADOW scenarios remain distinct; no future state is counted as current revenue."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_vault",
+          "kind": "mint",
+          "source": "CivsWorld.ManualFoundationCapture -> CivsAutonomousTerraform.materialize -> terrain prefix in CivsConstructionRuntime; no reward API or inventory item creation",
+          "basis": "One representative recapture; direct mint and burn remain zero in this own unit. Restored later gameplay and external conversion are unmeasured.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_tokens",
+          "kind": "mint",
+          "source": "CivsWorld.ManualFoundationCapture -> CivsAutonomousTerraform.materialize -> terrain prefix in CivsConstructionRuntime; no reward API or inventory item creation",
+          "basis": "One representative recapture; direct mint and burn remain zero in this own unit. Restored later gameplay and external conversion are unmeasured.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "physical_emerald": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_physical_emerald",
+          "kind": "mint",
+          "source": "CivsWorld.ManualFoundationCapture -> CivsAutonomousTerraform.materialize -> terrain prefix in CivsConstructionRuntime; no reward API or inventory item creation",
+          "basis": "One representative recapture; direct mint and burn remain zero in this own unit. Restored later gameplay and external conversion are unmeasured.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_player_xp",
+          "kind": "mint",
+          "source": "CivsWorld.ManualFoundationCapture -> CivsAutonomousTerraform.materialize -> terrain prefix in CivsConstructionRuntime; no reward API or inventory item creation",
+          "basis": "One representative recapture; direct mint and burn remain zero in this own unit. Restored later gameplay and external conversion are unmeasured.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "inventory_dirt_item": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_inventory_dirt_item",
+          "kind": "mint",
+          "source": "CivsWorld.ManualFoundationCapture -> CivsAutonomousTerraform.materialize -> terrain prefix in CivsConstructionRuntime; no reward API or inventory item creation",
+          "basis": "One representative recapture; direct mint and burn remain zero in this own unit. Restored later gameplay and external conversion are unmeasured.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "native_dirt_block": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "one_representative_entry_support",
+          "kind": "item",
+          "source": "CivsWorld.kt:484; CivsAutonomousTerraform.kt:410-435; CivsConstructionRuntime.kt:330-332,421-453; CivsWorld.kt:1128-1140",
+          "basis": "Exactly one exterior-entry recapture: ground y68, genuine solid base y64, preinstalled DIRT at y68, AIR at65..67. Three native DIRT blocks materialize once; no inventory item debit/drop. Evaluator cap3 is only this finite single-column fixture scope, not a runtime network/daily limit or five-town estimate. Identical low/base/high cases intentionally repeat the same deterministic witness, not measured activity.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ],
+            "network_weekly_cap": {
+              "value": "0",
+              "unit": "major"
+            }
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ],
+            "network_weekly_cap": {
+              "value": "3",
+              "unit": "major"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "source_before": {
+    "repository": "ArcCivs",
+    "version_in_build_gradle_kts": "0.1.225",
+    "path": "src/main/kotlin/ru/arc/civs/CivsWorld.kt",
+    "sha256": "c06ebad17e105b6a389bbcae3ce93e4386be3782de441b88a9623f74d88844d6",
+    "line": 484,
+    "exact_expression": "val floor = if (footprint) minOf(ground, building.bounds.min.y - 1) else ground",
+    "production_source_edited_by_assessment": false
+  },
+  "proposed_source": {
+    "exact_expression": "val floor = minOf(ground, building.bounds.min.y - 1)",
+    "sha256_if_only_this_replacement_is_made": "e8668f39244b7822e50168f4d1af0a16a496055a8f08c8c1e662cb50b6e20278",
+    "implemented_by_assessment": false,
+    "scope": "ManualFoundationCapture exterior entrance column uses the same minimum floor as footprint; completed ACTIVE building skipping remains unchanged"
+  },
+  "canonical_inventory": {
+    "path": "../ruscrafting-ops/docs/knowledge/economy-inventory.md",
+    "sha256": "9e863e5c55c06c284428c359d97f39c086b067f414da562e0c76a68a6058d627",
+    "read_for_assessment": true,
+    "updated_by_assessment": false,
+    "parent_owns_scoped_inventory_followup": true,
+    "status": "source inventory reference only, no current-live rates claimed"
+  },
+  "one_shot_reproduction": {
+    "evidence_kind": "parent-specified deterministic regression geometry; source-traced, not fresh native observation",
+    "entry_ground_y": 68,
+    "actual_solid_base_y": 64,
+    "preinstalled_top_dirt_y": 68,
+    "air_gap_y": [
+      65,
+      66,
+      67
+    ],
+    "before_extra_native_dirt_blocks": 0,
+    "after_extra_native_dirt_blocks": 3,
+    "inventory_dirt_item_debit_before": 0,
+    "inventory_dirt_item_debit_after": 0,
+    "direct_drop_before": 0,
+    "direct_drop_after": 0,
+    "tool_durability_debit_for_prefix_before": 0,
+    "tool_durability_debit_for_prefix_after": 0,
+    "scope": "one column in one construction; not an aggregate for five towns"
+  },
+  "unchanged_auto_supply_envelope": {
+    "material_kinds_per_receipt_max": 8,
+    "buffer_units_per_material_max": 64,
+    "gross_unlike_item_units_per_receipt_max": 512,
+    "backend_shared_admission_interval_ms": 1000,
+    "basis": "CivsAutoSupplies.kt:24-25; CivsResidentSupplies.kt:391-420",
+    "actual_item_emission_zero": false,
+    "realized_delta": "unknown; demand and completion can change",
+    "multiply_rate_by_town_count": false
+  },
+  "preserved_contracts": [
+    {
+      "path": "CivsControlInstallations.kt",
+      "lines": "99-111",
+      "fact": "Proved initial approach keeps its existing at-most-three-cell receipt; deeper fill remains in the normal terrain construction plan."
+    },
+    {
+      "path": "CivsWorld.kt",
+      "lines": "439-525",
+      "fact": "Manual capture remains loaded-only, owning-thread, bounded and strict for autonomous cities, with same ownership/material protection and ACTIVE retention."
+    },
+    {
+      "path": "CivsAutonomousTerraform.kt",
+      "lines": "390-439",
+      "fact": "Route-empty missing support materializes as DIRT; before==after and existing safe solid cells are skipped."
+    },
+    {
+      "path": "CivsMaterials.kt",
+      "lines": "51-78,182-188",
+      "fact": "Terrain has separate batches, at most16 cells each; authored material bill iterates plan.blocks, not plan.terrain.blocks."
+    },
+    {
+      "path": "CivsBuildingRequests.kt",
+      "lines": "597-615,735-744",
+      "fact": "Order stores plan/batches/block totals and automatic preparation; batch payment uses existing inventory mutation and exact required map."
+    },
+    {
+      "path": "CivsConstructionRuntime.kt",
+      "lines": "330-332,421-489",
+      "fact": "Terrain batch required map is empty; route-empty prefix is automatic preparation, uses normal world application and durable batch completion."
+    },
+    {
+      "path": "CivsWorld.kt",
+      "lines": "1090-1148",
+      "fact": "TerraformApply validates exact journal slice and native state; applies at most one changed cell per owner tick, skips already-after state, never breakNaturally/drops/inventory transfer."
+    },
+    {
+      "path": "CivsCitizenWork.kt",
+      "lines": "510-527",
+      "fact": "constructionPlaced only invalidates geometry and presents cosmetic equipment/gesture; cosmetic items are never durable inventory."
+    }
+  ],
+  "uncertainties": [
+    "Actual number and depth of affected exterior entry columns in the five future towns are not captured. Three is not a universal support cost.",
+    "Extra safe native reads/placements can increase capture work, block totals and possibly terrain batch count. Full-foundation grouping is unknown; no fixed completion-time or extra NPC-session count is promised.",
+    "A fixed manual route-empty prefix can proceed without a new resident work-session credit under existing automaticPreparation policy. This behavior is preserved, not newly broadened to authored building cells.",
+    "Historical source ledger/inventory claims do not establish current activated world behavior; fresh regression result, focused/full owner checks and scoped native readback remain pending.",
+    "External manual mining, protection availability and eventual sale of world DIRT are unmeasured; this assessment introduces no money conversion or exploit-loop claim."
+  ],
+  "verification_required_after_implementation": [
+    "Focused regression must preinstall the top approach DIRT, recapture the SITE foundation and require exactly the missing65..67 fill while preserving already-safe solid blocks and protected/unsafe refusals.",
+    "Owner checks exact intended source diff/hash, existing foundation/recapture tests and normal package requirements; this assessment worker runs no Gradle.",
+    "After supported LAB delivery, resolve fresh city/world/entry coordinates and read actual support65..68 down to solid base; verify ordinary construction batch completion and no extra inventory DIRT debit/drop.",
+    "Keep five-town reset, founding, delivery, activation, native traversal and full wall/gate outcomes as separate evidence. Do not infer full settlement acceptance from this fix."
+  ],
+  "decision": "Source-supported narrow restoration of the existing foundation fill policy. Preserve original bills/rates and nonzero AutoSupply envelope; accept the explicit finite world-DIRT delta only within independently validated native foundation safety. This is assessment evidence for the parent source decision, not an approval gate or runtime acceptance."
+}
