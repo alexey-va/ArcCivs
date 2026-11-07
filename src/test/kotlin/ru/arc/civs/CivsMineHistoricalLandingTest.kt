@@ -219,7 +219,7 @@ private class HistoricalLandingFixture(val paper: MockBukkitTestRuntime, val wor
         val method = CivsMineWorksite::class.java.declaredMethods.single { it.name == "mineMutationAllowed" }
             .also { it.isAccessible = true }
         return try { method.invoke(owner, city, mine, world,
-            CivPlanBlock(point, block(point).blockData.asString, "minecraft:air"), ordinal, worker, true, false, false, 7, false, null) as Boolean? }
+            CivPlanBlock(point, block(point).blockData.asString, "minecraft:air"), ordinal, worker, true, false, false, 7, false, null, null) as Boolean? }
         catch (failure: InvocationTargetException) { throw requireNotNull(failure.cause) }
     }
 }

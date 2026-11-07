@@ -368,7 +368,12 @@ internal object CivsSettlementLayout {
             rejected.merge(reason, 1, Int::plus)
             if (at != null) samples.getOrPut(reason) { mutableListOf() }.let { if (it.size < 4) it += at }
         }
-        val fortifications = CivsSettlementPlans.current(city)?.plots.orEmpty().filter { it.fortification != null }
+        val adopted = CivsSettlementPlans.current(city)
+        val deferred = adopted?.deferredPerimeter
+        val deferredRoads = if (deferred == null) emptySet() else retainedRoutes.flatMapTo(hashSetOf()) {
+            CivsAutonomousTerraform.roadProfile(it).keys
+        }
+        val fortifications = adopted?.plots.orEmpty().filter { it.fortification != null }
         if (frame.fortified && (fortifications.isEmpty() || fortifications.any { plot ->
                 plot.building.id !in forecastFortifications && (plot.building.id !in acceptedFortifications ||
                     city.building(plot.building.id)?.let { it.phase == BuildingPhase.ACTIVE &&
@@ -521,6 +526,10 @@ internal object CivsSettlementLayout {
         // Gates own their threshold. Adjacent roads stop at it, avoiding overlapping building boxes.
         for (gate in frame.gates) {
             if (accepted.any { it.type == BuildingType.GATE && sameColumns(it.bounds, gate.passage) }) continue
+            if (deferred != null) {
+                reject("deferred-gate", gate.center)
+                continue
+            }
             val cells = mutableListOf<CivSettlementBlock>()
             val transit = mutableListOf<CivPosition>()
             val crossing = routes.flatten().filter { contains(gate.passage, it) }.distinctBy(::key)
@@ -602,7 +611,7 @@ internal object CivsSettlementLayout {
                     for (cross in (if (alongX) wall.min.z..wall.max.z else wall.min.x..wall.max.x)) {
                         val x = if (alongX) axis else cross
                         val z = if (alongX) cross else axis
-                        if (key(x, z) in acceptedRoads || key(x, z) in oldCrossings) {
+                        if (key(x, z) in acceptedRoads || key(x, z) in oldCrossings || key(x, z) in deferredRoads) {
                             reject("route-crosses-wall"); valid = false; continue
                         }
                         if (key(x, z) in used) { valid = false; continue }
@@ -693,7 +702,7 @@ internal object CivsSettlementLayout {
             reject("fortification-walk-disconnected")
         val perimeter = pieces.filter { it.type == BuildingType.WALL || it.type == BuildingType.GATE }
             .flatMapTo(hashSetOf()) { piece -> piece.blocks.map { key(it.position) } }.apply { addAll(fortificationGround.keys) }
-        val closed = (frame.wallObstacles + frame.gates.map { it.passage }).all { edge ->
+        val closed = deferred == null && (frame.wallObstacles + frame.gates.map { it.passage }).all { edge ->
             (edge.min.x..edge.max.x).all { x -> (edge.min.z..edge.max.z).all { z -> key(x, z) in perimeter } }
         } && fortificationGround.keys.all { it in perimeter } && "fortification-port-unjoined" !in rejected &&
             "fortification-walk-disconnected" !in rejected

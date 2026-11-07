@@ -347,6 +347,10 @@ internal class CivsAutonomousDevelopment(
                         failedGrowthYields.remove(city.id)
                         CivsDiagnostics.event("autonomous_plan_adopted", "city" to city.id,
                             "plots" to requireNotNull(plan).plots.size, "roads" to plan.routes.size, "revision" to plan.revision)
+                        plan.deferredPerimeter?.let { deferred ->
+                            CivsDiagnostics.event("autonomous_perimeter_deferred", "city" to city.id, "stage" to deferred.stage,
+                                "plot" to deferred.plotId, "plot_anchor" to deferred.plotAnchor, "crossing" to deferred.crossing)
+                        }
                     }
                 }
             }

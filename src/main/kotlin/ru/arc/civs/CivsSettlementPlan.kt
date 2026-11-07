@@ -7,7 +7,12 @@ import kotlin.math.abs
 /** Adopted spatial intent. Native before-images and payment remain owned by each construction order. */
 data class CivSettlementPlan(val version: Int, val revision: Long, val halfWidth: Int,
     val plots: List<CivSettlementPlot>, val routes: Map<String, List<CivPosition>>,
-    val walls: List<CivBox>, val gates: List<CivBox>, val gateSides: List<Int>? = null)
+    val walls: List<CivBox>, val gates: List<CivBox>, val gateSides: List<Int>? = null,
+    val deferredPerimeter: CivDeferredPerimeter? = null)
+
+/** A usable ordinary parcel was planned, but its new perimeter was not proven. */
+data class CivDeferredPerimeter(val stage: String, val plotId: UUID, val plotAnchor: CivPosition,
+    val crossing: CivPosition? = null)
 
 data class CivSettlementFortification(val sourceSha256: String, val recipeSha256: String,
     val proof: CivFortificationProof)
@@ -17,6 +22,7 @@ data class CivSettlementPlot(val building: CivBuilding, val envelope: CivBox,
 
 internal object CivsSettlementPlans {
     const val VERSION = 1
+    private val deferredPerimeterStages = setOf("no-dry-perimeter", "gate-junction", "infrastructure")
 
     fun detached(plan: CivSettlementPlan?): CivSettlementPlan? = runCatching { plan?.copy(
         plots = plan.plots.map { it.copy(building = it.building.copy(transit = it.building.transit?.toList()),
@@ -124,6 +130,12 @@ internal object CivsSettlementPlans {
             p.building.level in 1..p.building.type.maxLevel && p.building.rotation in listOf(0, 90, 180, 270) &&
             box(p.building.bounds) && box(p.envelope) && civsContainsBox(p.envelope, p.building.bounds) })
         plan.plots.forEach(::validateFortification)
+        plan.deferredPerimeter?.let { deferred ->
+            require(deferred.stage in deferredPerimeterStages && plan.plots.any {
+                it.building.id == deferred.plotId && it.building.anchor == deferred.plotAnchor && it.fortification == null
+            })
+            require(deferred.crossing?.let { city.contains(it.x, it.z) } != false)
+        }
         require(plan.plots.withIndex().all { (i, a) -> plan.plots.drop(i + 1).none {
             CivsAutonomousGeometry.overlaps(a.envelope, it.envelope)
         } })
@@ -167,16 +179,36 @@ internal object CivsSettlementPlans {
             it.plan == null && it.layoutHalfWidth == CivsSettlementGrowth.initialHalfWidth(city)
         } == true
         var deferredInfrastructure: CivsRejection? = null
+        val prior = current(city)
+        val actual = city.buildings.filter { !it.type.isInfrastructure && it.type != BuildingType.DECORATION }.map { it.type }
+        val paidInfrastructure = city.buildings.filter { it.type.isInfrastructure }.mapTo(hashSetOf()) { it.id }
+        val civicTarget = profile.lastOrNull()?.takeIf {
+            profile.dropLast(1) == actual && !it.isInfrastructure && it !in CivsSettlementLayout.exteriorTypes && it != BuildingType.DECORATION &&
+                city.buildings.all { building -> building.phase == BuildingPhase.ACTIVE } &&
+                paidInfrastructure == retained.infrastructure.mapTo(hashSetOf()) { piece -> piece.id } &&
+                (paidInfrastructure.isEmpty() || prior?.deferredPerimeter != null) &&
+                prior?.plots?.all { plot -> plot.fortification == null } == true
+        }
+        var ordinaryWithoutNewPerimeter: CivSettlementPlan? = null
         var alternatives = 0
         for (width in CivsSettlementGrowth.halfWidths(city)) {
             var routeBudget = false
             val inspectRoute: (CivRouteSearchStats) -> Unit = { if (it.outcome == "route-budget") routeBudget = true }
-            try { return prepare(city, templates, surface, retained, fortification, profile, width, inspectRoute) }
+            var forecast: CivSettlementPlan? = null
+            val inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? =
+                if (civicTarget == null || ordinaryWithoutNewPerimeter != null) null else { plan, _ -> forecast = plan }
+            try { return prepare(city, templates, surface, retained, fortification, profile, width, inspectRoute, inspect) }
             catch (failure: CivsRejection) {
                 if (failure.reason !in setOf("autonomy-no-site", "autonomy-layout-obstructed", "autonomy-no-path")) throw failure
                 if (compactFounding && deferredInfrastructure == null && failure.reason == "autonomy-layout-obstructed" &&
                     failure.values["stage"] == "infrastructure") deferredInfrastructure = failure
                 last = failure
+                if (ordinaryWithoutNewPerimeter == null && !routeBudget && civicTarget != null && forecast != null &&
+                    failure.reason == "autonomy-layout-obstructed" && failure.values["stage"] in deferredPerimeterStages &&
+                    CivsRetainedGrowthPerimeter.geometric(failure) &&
+                    failure.values.keys.none { it in setOf("chunks-unloaded", "world-unloaded", "lands-denied") }) {
+                    ordinaryWithoutNewPerimeter = ordinaryGrowth(city, requireNotNull(forecast), retained, civicTarget, failure)
+                }
                 if (alternatives < 3 && !routeBudget && CivsRetainedGrowthPerimeter.geometric(failure)) {
                     val adopted = current(city)
                     val envelopes = city.buildings.filterNot { it.type.isInfrastructure }.associate { building ->
@@ -199,7 +231,33 @@ internal object CivsSettlementPlans {
                 }
             }
         }
-        throw requireNotNull(deferredInfrastructure ?: last)
+        return ordinaryWithoutNewPerimeter ?: throw requireNotNull(deferredInfrastructure ?: last)
+    }
+
+    private fun ordinaryGrowth(city: Settlement, forecast: CivSettlementPlan, retained: CivAutonomousAccess,
+        target: BuildingType, failure: CivsRejection): CivSettlementPlan? {
+        if (retained.infrastructure.isNotEmpty()) {
+            val prior = current(city) ?: return null
+            if (prior.deferredPerimeter == null || forecast.halfWidth != prior.halfWidth || forecast.walls != prior.walls ||
+                forecast.gates != prior.gates || forecast.gateSides != prior.gateSides) return null
+        }
+        val next = forecast.plots.filter { city.building(it.building.id) == null }.singleOrNull()
+            ?.takeIf { it.building.type == target && it.building.level == 1 && it.fortification == null } ?: return null
+        if (!city.buildings.filterNot { it.type.isInfrastructure }.all { actual ->
+                civsSameBuildingGeometry(forecast.plots.singleOrNull { it.building.id == actual.id }?.building,
+                    actual.copy(phase = BuildingPhase.SITE))
+            } || retained.routes.any { (id, route) ->
+                city.building(id)?.type?.isInfrastructure == false && forecast.routes[id.toString()] != route
+            }) return null
+        val approach = forecast.routes[next.building.id.toString()] ?: return null
+        if (approach.lastOrNull() != next.building.entrance ||
+            city.buildings.none { CivsRules.isDepot(it) && it.entrance == approach.firstOrNull() } ||
+            approach.any { p -> forecast.walls.any { CivsAutonomousGeometry.horizontalContains(it, p) } }) return null
+        val crossing = failure.values["first"]?.split(',')?.takeIf { it.size == 2 }?.mapNotNull(String::toIntOrNull)
+            ?.takeIf { it.size == 2 }?.let { CivPosition(it[0], city.center.y, it[1]) }
+        val pending = forecast.copy(deferredPerimeter = CivDeferredPerimeter(requireNotNull(failure.values["stage"]),
+            next.building.id, next.building.anchor, crossing))
+        return runCatching { validate(city, pending); pending }.getOrNull()
     }
 
     private fun prepareOnce(city: Settlement, templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>,
@@ -469,7 +527,9 @@ internal object CivsSettlementPlans {
         }
         // A legacy accepted frame keeps its gate approaches. New gates already lie on real exterior routes.
         val connectionFrame = if (candidateFrame == null) frame else adoptedFrame
-        for (gate in if (retained.infrastructure.isEmpty()) emptyList() else connectionFrame.gates) {
+        // An incomplete outline may have paid wall pieces but no safe gate approach yet.
+        val retainingDeferred = adopted?.deferredPerimeter != null && !expanding && candidateFrame == null
+        for (gate in if (retained.infrastructure.isEmpty() || retainingDeferred) emptyList() else connectionFrame.gates) {
             val id = UUID.nameUUIDFromBytes("arccivs-plan/${city.id}/gate/${gate.side}/${gate.center.x}/${gate.center.z}".toByteArray(Charsets.UTF_8))
             val existing = retained.infrastructure.filter { it.type == BuildingType.GATE }.flatMap { it.transit }
                 .firstOrNull { it.x == gate.center.x && it.z == gate.center.z }

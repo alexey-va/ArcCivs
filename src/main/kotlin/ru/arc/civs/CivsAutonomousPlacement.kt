@@ -120,7 +120,8 @@ internal class CivsAutonomousPlacement(
                 throw CivsRejection("stale-development")
             val oldPlan = if (seed == null) null else requireNotNull(CivsSettlementPlans.current(city))
             val oldSlot = oldPlan?.plots?.singleOrNull { it.building.id == seed?.id }?.building
-            val sameSlotPlan = oldPlan?.takeIf { seed != null && oldSlot != null && sameHorizontalSlot(seed, oldSlot) }?.let { intent ->
+            val sameSlotPlan = oldPlan?.takeIf { seed != null && oldSlot != null && it.deferredPerimeter?.plotId != seed.id &&
+                sameHorizontalSlot(seed, oldSlot) }?.let { intent ->
                 val seedId = requireNotNull(seed).id
                 intent.copy(plots = intent.plots.filter { it.building.id != seedId }, routes = intent.routes - seedId.toString())
             }
@@ -151,10 +152,17 @@ internal class CivsAutonomousPlacement(
             CompletableFuture.allOf(*templates.values.toTypedArray()).thenCombineAsync(inputs, { _, input ->
                 if (result.isDone || closed) throw CivsRejection("world-closed")
                 val loaded = templates.mapValues { it.value.join() }
+                val envelope = seed?.let { candidate ->
+                    CivsAutonomousGeometry.union(CivsAutonomousGeometry.futureBounds(city, candidate),
+                        CivsSettlementPlans.at(loaded.getValue(candidate.type).second, candidate.anchor, candidate.rotation, candidate.id).bounds)
+                }
+                if (seed != null && oldPlan?.deferredPerimeter?.plotId == seed.id) {
+                    return@thenCombineAsync replaceDeferredParcel(city, oldPlan, seed, requireNotNull(envelope),
+                        requireNotNull(unpaidSite.terrain), input.first)
+                }
                 val kept = sameSlotPlan ?: oldPlan?.takeIf { intent ->
-                    seed != null && compatibleExteriorSlot(city, seed, unpaidSite.terrain, intent,
-                        CivsAutonomousGeometry.union(CivsAutonomousGeometry.futureBounds(city, seed),
-                            CivsSettlementPlans.at(loaded.getValue(seed.type).second, seed.anchor, seed.rotation, seed.id).bounds))
+                    seed != null && seed.type in CivsSettlementLayout.exteriorTypes &&
+                        compatibleSlot(city, seed, unpaidSite.terrain, intent, requireNotNull(envelope))
                 }?.let { intent -> intent.copy(plots = intent.plots.filter { it.building.id != seed?.id },
                     routes = intent.routes - requireNotNull(seed).id.toString()) }
                 val projected = if (seed == null) city else surveyCity.copy(autonomy = requireNotNull(surveyCity.autonomy).copy(plan = kept))
@@ -199,11 +207,32 @@ internal class CivsAutonomousPlacement(
         a.bounds.min.x == b.bounds.min.x && a.bounds.max.x == b.bounds.max.x &&
         a.bounds.min.z == b.bounds.min.z && a.bounds.max.z == b.bounds.max.z
 
-    /** Native proof owns actual access; compatible exterior intent need not reselect an already accepted perimeter. */
-    private fun compatibleExteriorSlot(city: Settlement, seed: CivBuilding, terrain: CivTerraformPlan?, plan: CivSettlementPlan,
+    /** A fresh native replacement changes one unpaid civic parcel, never the reason or status of the perimeter. */
+    private fun replaceDeferredParcel(city: Settlement, plan: CivSettlementPlan, seed: CivBuilding, envelope: CivBox,
+        terrain: CivTerraformPlan, access: CivAutonomousAccess): CivSettlementPlan {
+        val deferred = requireNotNull(plan.deferredPerimeter)
+        val inside = CivsSettlementGrowth.interior(CivsSettlementLayout.frame(city))
+        val standing = access.standing(city, seed.id)
+        val paid = access.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
+        val fits = compatibleSlot(city, seed, terrain, plan, envelope) &&
+            (envelope.min.x..envelope.max.x).all { x ->
+                (envelope.min.z..envelope.max.z).all { z -> civsTerrainKey(x, z) in inside }
+            } && city.buildings.any { CivsRules.isDepot(it) && it.entrance == terrain.route.firstOrNull() } &&
+            paid.all { (id, route) -> plan.routes[id.toString()] == route } &&
+            terrain.route.all { point -> standing[civsTerrainKey(point.x, point.z)]?.y?.let { it == point.y } != false }
+        if (!fits) throw CivsRejection("autonomy-no-site", mapOf("stage" to "deferred-perimeter-parcel"))
+        val updated = plan.copy(revision = Math.addExact(plan.revision, 1L),
+            plots = plan.plots.map { if (it.building.id == seed.id) CivSettlementPlot(seed, envelope) else it },
+            routes = plan.routes + (seed.id.toString() to terrain.route.toList()),
+            deferredPerimeter = deferred.copy(plotAnchor = seed.anchor))
+        CivsSettlementPlans.validate(city, updated)
+        return updated
+    }
+
+    /** Native proof owns actual access; a compatible parcel need not reselect its perimeter. */
+    private fun compatibleSlot(city: Settlement, seed: CivBuilding, terrain: CivTerraformPlan?, plan: CivSettlementPlan,
         envelope: CivBox): Boolean {
-        if (seed.type !in CivsSettlementLayout.exteriorTypes || terrain == null ||
-            !civsContainsBox(envelope, seed.bounds)) return false
+        if (terrain == null || !civsContainsBox(envelope, seed.bounds)) return false
         val otherPlots = plan.plots.filter { it.building.id != seed.id }.map { it.envelope }
         val obstacles = otherPlots + plan.walls
         if ((obstacles + plan.gates).any { CivsAutonomousGeometry.overlaps(envelope, it) } ||
@@ -217,7 +246,8 @@ internal class CivsAutonomousPlacement(
     }
 
     fun reserved(city: Settlement, plot: CivSettlementPlot): CompletableFuture<CivAutonomousDesign> =
-        admit(Search(city, plot.building.type, 1, plot.building.id, reservation = plot))
+        admit(Search(city, plot.building.type, 1, plot.building.id, reservation = plot,
+            captureVolume = CivsSettlementPlans.current(city)?.deferredPerimeter?.plotId == plot.building.id))
 
     /** Reuse the immutable founding capture and choose the least earthwork at this same horizontal site. */
     fun captureHallSite(city: Settlement, blueprint: CivBlueprint): CompletableFuture<CivPlacementPlan> {
@@ -418,15 +448,16 @@ internal class CivsAutonomousPlacement(
                         acceptedFortifications = access.acceptedFortifications)
                     rejections.putAll(plan.rejected)
                     blockers = plan.blockers
-                    if (blockers.isNotEmpty()) CivsDiagnostics.record(java.util.logging.Level.WARNING, city.id,
+                    if (blockers.isNotEmpty() || !plan.perimeterClosed) CivsDiagnostics.record(java.util.logging.Level.WARNING, city.id,
                         CivsDiagnostics.line("autonomous_layout_obstructed", "city" to city.id,
-                            "perimeter_closed" to plan.perimeterClosed, "blockers" to blockers.take(4), "count" to blockers.size))
+                            "perimeter_closed" to plan.perimeterClosed, "blockers" to blockers.take(4), "count" to blockers.size,
+                            "rejected" to plan.rejected, "samples" to plan.rejectionSamples.mapValues { it.value.take(1) }))
                     val missing = plan.pieces.filter { city.building(it.id) == null }
                         .sortedWith(compareBy<CivSettlementPiece> { when (it.type) {
                             BuildingType.GATE -> 0; BuildingType.WALL -> 1; else -> 2
                         } }.thenBy { it.bounds.min.x }.thenBy { it.bounds.min.z })
                     if (missing.isEmpty()) {
-                        fail(if (plan.rejected.isEmpty()) "autonomy-layout-complete" else "autonomy-no-site")
+                        fail(if (plan.perimeterClosed && plan.rejected.isEmpty()) "autonomy-layout-complete" else "autonomy-no-site")
                         return@await
                     }
                     pieces = missing.associateBy { it.id }

@@ -186,6 +186,7 @@ internal class CivsLayoutDebug(
             before.id == after.id && before.worldId == after.worldId && before.center == after.center &&
                 before.radius == after.radius && before.style == after.style && before.buildings == after.buildings &&
                 before.autonomy?.layoutHalfWidth == after.autonomy?.layoutHalfWidth &&
+                before.autonomy?.plan == after.autonomy?.plan &&
                 before.construction?.plannedBuilding == after.construction?.plannedBuilding &&
                 before.constructionQueue.orEmpty() == after.constructionQueue.orEmpty()
 

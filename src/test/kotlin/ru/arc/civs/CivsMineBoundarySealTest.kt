@@ -221,7 +221,9 @@ class CivsMineBoundarySealTest : FunSpec({
         }
     }
 
-    test("a completed V7 spine rung keeps the shallow frontier repair available") {
+    for (occluded in listOf(false, true)) test(if (occluded)
+        "a completed V7 spine rung repairs the lower row before returning to the occluded upper wall"
+    else "a completed V7 spine rung keeps the shallow frontier repair available") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
                 val world = CivsWorksiteWorldFixture("mine-spine-rung").also(paper.server::addWorld)
@@ -245,10 +247,11 @@ class CivsMineBoundarySealTest : FunSpec({
                     val rung = CivPosition(8, -8, -12)
                     val wall = CivPosition(10, -8, -12)
                     val wallPoint = CivsWorksiteLayouts.point(mine, wall)
-                    spine.slice(9..10) shouldBe listOf(332, 333)
+                    spine.slice(9..11) shouldBe listOf(332, 333, 334)
                     geometry.steps[332].point shouldBe rung
                     geometry.steps[333].point shouldBe CivPosition(8, -9, -13)
                     geometry.steps[333].shaftSupport shouldBe true
+                    geometry.steps[334].point shouldBe rung.copy(y = rung.y - 1)
                     val rungData = geometry.expectedAfter(332, mine.rotation)
                     rungData shouldBe "minecraft:ladder[facing=west,waterlogged=false]"
                     val state = CivMinePlanState(7, 4, sectionSteps = mapOf("spine" to 10L), excavation = rung)
@@ -270,15 +273,23 @@ class CivsMineBoundarySealTest : FunSpec({
                         put(geometry.bottom.copy(y = geometry.bottom.y + dy), rungData)
                         put(geometry.backing.copy(y = geometry.backing.y + dy), "minecraft:cobblestone")
                     }
-                    for (y in -8..-7) {
+                    for (y in if (occluded) -9..-8 else -8..-7) {
                         put(wall.copy(x = 9, y = y), "minecraft:air")
                         put(wall.copy(y = y), "minecraft:air")
+                    }
+                    if (occluded) {
+                        put(wall.copy(x = 9, y = -7), "minecraft:stone")
+                        for (y in -9..-7) put(geometry.backing.copy(y = y), "minecraft:stone")
                     }
                     put(wall.copy(y = -3), "minecraft:cobblestone")
                     put(wall.copy(y = 0), "minecraft:spruce_slab[type=top,waterlogged=false]")
 
                     LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
-                        CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        CivsWorld(plugin, tasks) { listOf(city) }.use accessScope@{ access ->
+                            if (occluded) {
+                                assertSpineRungRepair(world, mine, city, access, plugin, rung, wall)
+                                return@accessScope
+                            }
                             val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                             repeat(256) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
                             val seal = withClue(runtime.debug(setOf(worker.id))) { requireNotNull(runtime.plan(city, worker)) }
@@ -469,6 +480,107 @@ private fun assertBoundaryStanding(world: CivsWorksiteWorldFixture, mine: CivBui
     citizenPacketBodyClear(world, CitizenPoint(work.standing.x + .5, work.standing.y.toDouble(), work.standing.z + .5), false) shouldBe true
     citizenCanReachBlock(world, Location(world, work.standing.x + .5, work.standing.y + 1.62,
         work.standing.z + .5), requireNotNull(work.focus), CITIZEN_MINE_REACH) shouldBe true
+}
+
+private fun assertSpineRungRepair(world: CivsWorksiteWorldFixture, mine: CivBuilding, initial: Settlement,
+    access: CivsWorld, plugin: Plugin, rung: CivPosition, wall: CivPosition) {
+    val upper = CivsWorksiteLayouts.point(mine, wall)
+    val lower = upper.copy(y = upper.y - 1)
+    val upperRung = CivsWorksiteLayouts.point(mine, rung)
+    val lowerRung = upperRung.copy(y = upperRung.y - 1)
+    val upperEye = Location(world, upperRung.x + .5, upperRung.y + 1.62, upperRung.z + .5)
+    citizenCanReachBlock(world, upperEye, upper, CITIZEN_MINE_REACH) shouldBe false
+    citizenCanReachBlock(world, upperEye, lower, CITIZEN_MINE_REACH) shouldBe true
+    val key = mine.id.toString()
+    val directory = Files.createTempDirectory("mine-spine-two-row-")
+    try {
+        CivsStore(directory, Executor(Runnable::run)).use { store ->
+            var city = store.save(initial).join()
+            fun runtime() = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+            var worksites = runtime()
+            fun next() = nextBoundaryWork(worksites, city, world)
+            fun progress() = city.minePlans!!.getValue(key)
+            fun count(material: String) = CivsEquipment.plainCount(city.workers.single(), material)
+            val originalStone = count("COBBLESTONE")
+            val originalLadders = count("LADDER")
+            CivsStorage(plugin) { emptyArray() }.use { storage ->
+                storage.validateMineNative = { transaction ->
+                    val receipt = requireNotNull(transaction.mine)
+                    worksites.validateMineReceiptNative(receipt.before(transaction.after), receipt.work)
+                    null
+                }
+                fun commit(work: CivWorldWork, spine: Long) {
+                    assertBoundaryStanding(world, mine, work)
+                    worksites.validate(city, work)
+                    val id = UUID.randomUUID()
+                    storage.reserve(city, id)
+                    val prepared = storage.prepareWork(city, mine.id, work.storageInputs(city.workers.single()),
+                        emptyMap(), work.changes, work)
+                    val after = CivsRules.finishWorldWork(city, work, 100_000 + work.cycle * 5_000)
+                        .copy(inventory = prepared.inventoryAfter)
+                    val transaction = CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes,
+                        worldChanges = prepared.worldChanges, mine = prepared.mine).validated()
+                    store.saveInventoryTransaction(transaction).join()
+                    val durable = store.loadInventoryTransactions().join().single()
+                    requireNotNull(durable.mine).work shouldBe work
+                    storage.seal(durable, keepViewersOpen = true)
+                    storage.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
+                    storage.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
+                    storage.unlock(id)
+                    city = store.save(durable.after).join()
+                    store.deleteInventoryTransaction(id).join() shouldBe true
+                    city.workers.single().completedCycles shouldBe work.cycle + 1
+                    progress().nextStep shouldBe 4L
+                    progress().sectionSteps shouldBe mapOf("spine" to spine)
+                    progress().excavation shouldBe rung
+                    worksites.invalidate(work.workerId, work)
+                }
+
+                val lowerSeal = next()
+                lowerSeal.status shouldBe "securing-mine"
+                lowerSeal.miningOrdinal shouldBe 333
+                lowerSeal.changes shouldBe listOf(CivPlanBlock(lower, "minecraft:air", "minecraft:cobblestone"))
+                lowerSeal.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                lowerSeal.outputs shouldBe emptyMap()
+                commit(lowerSeal, 10)
+                count("COBBLESTONE") shouldBe originalStone - 1
+                progress().seals?.get(CivsMineProgress.key(wall.copy(y = wall.y - 1))) shouldBe "minecraft:cobblestone"
+
+                val cut = next()
+                cut.status shouldBe "digging-mine"
+                cut.miningOrdinal shouldBe 334
+                cut.changes shouldBe listOf(CivPlanBlock(lowerRung, "minecraft:stone", "minecraft:air"))
+                cut.outputs shouldBe mapOf("COBBLESTONE" to 1L)
+                commit(cut, 11)
+                count("COBBLESTONE") shouldBe originalStone
+                city = store.load().join().single()
+                worksites = runtime()
+
+                val ladder = next()
+                ladder.status shouldBe "digging-mine"
+                ladder.miningOrdinal shouldBe 334
+                ladder.changes shouldBe listOf(CivPlanBlock(lowerRung, "minecraft:air", "minecraft:ladder[facing=west,waterlogged=false]"))
+                ladder.inputs shouldBe mapOf("LADDER" to 1L)
+                ladder.outputs shouldBe emptyMap()
+                commit(ladder, 12)
+                count("LADDER") shouldBe originalLadders - 1
+                city = store.load().join().single()
+                worksites = runtime()
+
+                val upperSeal = next()
+                upperSeal.status shouldBe "securing-mine"
+                upperSeal.standing shouldBe lowerRung
+                upperSeal.changes shouldBe listOf(CivPlanBlock(upper, "minecraft:air", "minecraft:cobblestone"))
+                upperSeal.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                upperSeal.outputs shouldBe emptyMap()
+                commit(upperSeal, 12)
+                count("COBBLESTONE") shouldBe originalStone - 1
+                progress().seals?.get(CivsMineProgress.key(wall)) shouldBe "minecraft:cobblestone"
+                world.getBlockAt(upper.x, upper.y, upper.z).type shouldBe Material.COBBLESTONE
+                world.getBlockAt(lower.x, lower.y, lower.z).type shouldBe Material.COBBLESTONE
+            }
+        }
+    } finally { directory.toFile().deleteRecursively() }
 }
 
 private fun withMineBoundary(action: (CivsWorksiteWorldFixture, CivBuilding, Settlement, CivsWorld, Plugin) -> Unit) {

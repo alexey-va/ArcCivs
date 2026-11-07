@@ -4,6 +4,10 @@ import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.every
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import java.util.UUID
 
 class CivsSettlementPlanGrowthTest : FunSpec({
     val legacy by lazy { legacyGrowthCity() }
@@ -86,6 +90,49 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         upgradeable.autonomy!!.plan shouldBe old
     }
 
+    test("an obstructed new gate defers the perimeter without losing the warehouse or paid approaches") {
+        val (city, forecast, access) = deferredWarehouseFixture()
+        val warehouse = forecast.plots.single { it.building.type == BuildingType.WAREHOUSE }.building
+        val old = Gson().toJson(city)
+        val after = forecastWithRejectedGate(city, forecast, access)
+        after.deferredPerimeter shouldBe CivDeferredPerimeter("gate-junction", warehouse.id, warehouse.anchor, city.center)
+        after.routes shouldBe forecast.routes
+        after.plots shouldBe forecast.plots
+        after.walls shouldBe forecast.walls
+        after.gates shouldBe forecast.gates
+        Gson().toJson(city) shouldBe old
+        val saved = city.copy(autonomy = requireNotNull(city.autonomy).copy(plan = after, layoutHalfWidth = after.halfWidth))
+        val loaded = Gson().fromJson(Gson().toJson(saved), Settlement::class.java)
+        CivsSettlementPlans.current(loaded) shouldBe after
+        CivsSettlementPlans.next(loaded, BuildingType.WAREHOUSE)?.building shouldBe warehouse
+        loaded.construction shouldBe null
+        loaded.stock shouldBe city.stock
+
+        val paidRoutes = access.routes.values
+        val roads = paidRoutes.flatMapTo(hashSetOf()) { CivsAutonomousTerraform.roadProfile(it).keys }
+        val safe = CivsSettlementLayout.infrastructure(loaded, CivsSettlementLayout.frame(loaded),
+            settlementPlanSurface(loaded), after.routes.values.toList(), retainedRoutes = paidRoutes)
+        safe.perimeterClosed shouldBe false
+        safe.rejected["deferred-gate"] shouldBe after.gates.size
+        safe.pieces.none { it.type == BuildingType.GATE } shouldBe true
+        val walls = safe.pieces.filter { it.type == BuildingType.WALL }
+        walls.isNotEmpty() shouldBe true
+        walls.flatMap { it.blocks }.none { civsTerrainKey(it.position.x, it.position.z) in roads } shouldBe true
+    }
+
+    test("a fully closed later forecast wins, and a deferred plan never replaces a paid approach") {
+        val (city, forecast, access) = deferredWarehouseFixture()
+        val complete = forecastWithRejectedGate(city, forecast, access, laterClosed = true)
+        complete.deferredPerimeter shouldBe null
+        complete.halfWidth shouldBe 64
+
+        val (id, route) = access.routes.entries.first()
+        val altered = forecast.copy(routes = forecast.routes + (id.toString() to route.map { it.copy(y = it.y + 1) }))
+        val failure = shouldThrow<CivsRejection> { forecastWithRejectedGate(city, altered, access) }
+        failure.values["stage"] shouldBe "gate-junction"
+        CivsSettlementPlans.next(city, BuildingType.WAREHOUSE) shouldBe null
+    }
+
     test("accepted orders and FIFO entries defer extension and a failed search keeps all old intent") {
         val before = legacy
         val plot = requireNotNull(CivsSettlementPlans.next(before, BuildingType.HOUSE))
@@ -106,6 +153,46 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         CivsSettlementPlans.current(before) shouldBe before.autonomy!!.plan
     }
 })
+
+/** Build a real valid parcel and approach first; only the new perimeter forecast outcome is stubbed. */
+private fun deferredWarehouseFixture(): Triple<Settlement, CivSettlementPlan, CivAutonomousAccess> {
+    val base = legacyGrowthCity().copy(radius = 96)
+    val source = requireNotNull(CivsSettlementPlans.current(base))
+    val types = setOf(BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT, BuildingType.FORESTER,
+        BuildingType.QUARRY, BuildingType.FARM, BuildingType.WAREHOUSE)
+    val plots = source.plots.filter { it.building.type in types }.distinctBy { it.building.type }
+    check(plots.size == types.size)
+    val kept = plots.filterNot { it.building.type == BuildingType.WAREHOUSE }
+    val ids = kept.map { it.building.id.toString() }.toSet()
+    val paid = source.routes.filterKeys { it in ids }
+    val city = base.copy(buildings = kept.map { it.building.copy(phase = BuildingPhase.ACTIVE) },
+        autonomy = requireNotNull(base.autonomy).copy(plan = source.copy(plots = kept, routes = paid)))
+    val forecast = source.copy(plots = plots, routes = source.routes.filterKeys { id ->
+        plots.any { it.building.id.toString() == id }
+    })
+    return Triple(city, forecast, CivAutonomousAccess(paid.mapKeys { UUID.fromString(it.key) }))
+}
+
+private fun forecastWithRejectedGate(city: Settlement, forecast: CivSettlementPlan, access: CivAutonomousAccess,
+    laterClosed: Boolean = false): CivSettlementPlan {
+    mockkObject(CivsSettlementPlans)
+    return try {
+        every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+            val width = arg<Int>(6)
+            val candidate = forecast.copy(halfWidth = width)
+            if (laterClosed && width > forecast.halfWidth) candidate else {
+                arg<((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)?>(8)
+                    ?.invoke(candidate, CivSettlementInfrastructure(emptyList(), mapOf("perimeter-failed" to 1), false))
+                throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "gate-junction",
+                    "first" to "${city.center.x},${city.center.z}"))
+            }
+        }
+        CivsSettlementPlans.prepareGrowth(city, emptyMap(), CivTerrainSurface(-64, 320, emptyMap()), access,
+            CivsSettlementGrowth.profile(city))
+    } finally {
+        unmockkObject(CivsSettlementPlans)
+    }
+}
 
 /** A saved V1 profile: the old three houses and all other ordinary plots keep their original identities. */
 internal fun legacyGrowthCity(roomy: Boolean = true): Settlement {

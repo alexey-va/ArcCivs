@@ -319,7 +319,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
     private fun mineMutationAllowed(city: Settlement, building: CivBuilding, world: World, cell: CivPlanBlock,
         ordinal: Int, worker: CivWorker? = null, budgeted: Boolean = false, generator: Boolean = false,
         sealing: Boolean = false, planVersion: Int = CivsMinePlan.VERSION, clearingLava: Boolean = false,
-        sealingOrigin: CivPosition? = null): Boolean? {
+        sealingOrigin: CivPosition? = null, sealingExcavation: CivPosition? = null): Boolean? {
         fun denied(reason: String): Boolean {
             if (worker == null) throw CivsRejection(reason)
             context.blocked(worker, "worksite-protected", point = cell.position, reason = reason,
@@ -352,11 +352,11 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         } == cell.after
         // Removing an exact paid block reuses its existing mine opening instead of requiring untouched ground above it.
         if (generatorFace || restoredSolid || ownedBefore && after.isAir) return true
-        // Only the saved current excavation owns this cover-free AIR repair; ready body cuts retain their own frontier.
+        // Tie cover-free AIR repair to the saved excavation or its adjoining rung; ready body cuts keep their cover.
         val previous = plan.steps.getOrNull(ordinal - 1)
         val currentSeal = plan.version == 7 && sealing && before.isAir && cell.after == "minecraft:cobblestone" &&
-            saved != null && saved.version == plan.version && sealingOrigin != null && sealingOrigin == saved.excavation &&
-            (sealingOrigin == plan.steps[ordinal].point || previous?.let { step ->
+            saved != null && saved.version == plan.version && sealingOrigin != null &&
+            (sealingOrigin == saved.excavation && (sealingOrigin == plan.steps[ordinal].point || previous?.let { step ->
                 val sections = saved.sectionSteps.orEmpty()
                 step.point == sealingOrigin && plan.completed(ordinal - 1, saved.nextStep, sections) &&
                     (step.after == null || step.after.startsWith("minecraft:ladder[") &&
@@ -364,7 +364,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                         plan.sections.getValue("spine").getOrNull(plan.sectionCount("spine", saved.nextStep, sections).toInt()) == ordinal &&
                         observeMineHazard(world, CivsWorksiteLayouts.point(building, sealingOrigin))?.blockData?.asString ==
                             plan.expectedAfter(ordinal - 1, building.rotation))
-            } == true) && pendingLandingClearance(plan, local, saved.nextStep, saved.sectionSteps.orEmpty()) == null
+            } == true) || adjoiningSpineSeal(building, world, plan, saved, ordinal, sealingOrigin, sealingExcavation, local)) &&
+            pendingLandingClearance(plan, local, saved.nextStep, saved.sectionSteps.orEmpty()) == null
         if (currentSeal) return true
         // A safety repair carries the active frontier ordinal; cover belongs to its exact authored action.
         val coverOrdinal = if (sealing && plan.version == 7) sequenceOf("0/shaft/entrance", "0/shaft/opening")
@@ -398,6 +399,35 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             local.copy(y = CivsMineSafety.ceiling(plan, ordinal, local))).y
         if (probe.ground?.let { it - ceiling >= required } != true) return denied("mine-thin-cover")
         return true
+    }
+
+    /** A paid rung fences one authored row below; the next paid rung can expose the old deferred wall. */
+    private fun adjoiningSpineSeal(building: CivBuilding, world: World, plan: CivsMinePlan, saved: CivMinePlanState,
+        ordinal: Int, origin: CivPosition, excavation: CivPosition?, target: CivPosition): Boolean {
+        val upper = saved.excavation ?: return false
+        val spine = plan.sections.getValue("spine")
+        val count = plan.sectionCount("spine", saved.nextStep, saved.sectionSteps.orEmpty()).toInt()
+        if (count !in 1..spine.size) return false
+        val offset = (count - 1 downTo maxOf(0, count - 3)).firstOrNull {
+            val rung = plan.steps[spine[it]]
+            rung.point == upper && rung.after?.startsWith("minecraft:ladder[") == true
+        } ?: return false
+        val backing = spine.getOrNull(offset + 1) ?: return false
+        val rung = spine.getOrNull(offset + 2) ?: return false
+        val lower = plan.steps[rung].point
+        val support = plan.steps[backing]
+        if (lower != upper.copy(y = upper.y - 1) || !support.shaftSupport || plan.ladderForBacking(support.point) != lower ||
+            plan.steps[rung].after?.startsWith("minecraft:ladder[") != true) return false
+        fun exactRung(index: Int) = observeMineHazard(world, CivsWorksiteLayouts.point(building, plan.steps[index].point))
+            ?.blockData?.asString == plan.expectedAfter(index, building.rotation)
+        val oldFrontier = origin == upper && excavation == null && target.y in upper.y..upper.y + 1
+        if (count == offset + 3) return oldFrontier && exactRung(spine[offset]) && exactRung(rung)
+        if (ordinal != rung && (ordinal != backing || count != offset + 1)) return false
+        val lowerFrontier = origin == plan.steps[ordinal].point && (excavation == null || ordinal == rung && excavation == lower) &&
+            target.y in lower.y..upper.y
+        if ((!oldFrontier && !lowerFrontier) || !exactRung(spine[offset])) return false
+        val wall = observeMineHazard(world, CivsWorksiteLayouts.point(building, support.point)) ?: return false
+        return wall.type.isOccluding && !wall.type.hasGravity() && wall.type !in UNBREAKABLE
     }
 
     /** No transient cache or actor is authority for a durable mine write. */
@@ -494,7 +524,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             }
             requireCivs(mineMutationAllowed(city, building, world, cell, ordinal, generator = work.miningGenerator,
                 sealing = sealing, planVersion = plan.version, clearingLava = clearingLava,
-                sealingOrigin = work.miningFrontier) == true, "protected-area")
+                sealingOrigin = work.miningFrontier, sealingExcavation = work.miningExcavation) == true, "protected-area")
         }
         val oldFrontier = validateLandingClearanceFrontier(city, building, world, plan, work, ordinal)
         // Removing liquid opens no new rock face; adjacent flows may drain after this exact source is removed.
@@ -1161,7 +1191,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 return prepareQuarry(city, worker, building, world)
             if (mineMutationAllowed(city, building, world, change(block, task.material.createBlockData().asString),
                     execution?.ordinal ?: progress.toInt(), worker, budgeted = true, sealing = true,
-                    sealingOrigin = scan.target) != true) return null
+                    sealingOrigin = scan.target, sealingExcavation = scan.excavation) != true) return null
             val miningStep = city.minePlans?.get(building.id.toString())?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0L
             val standing = beside(city, worker, building, world, point, ladder = true, miningStep = miningStep,
                 miningAccessStep = effectiveProgress,
