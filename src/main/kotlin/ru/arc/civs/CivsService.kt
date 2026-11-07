@@ -375,6 +375,11 @@ class CivsService(
                 it.isChunkLoaded(position.x shr 4, position.z shr 4) }
                 ?.getBlockAt(position.x, position.y, position.z)?.let { world.canModify(city.owner, it) } == true
         }
+        storage.farmWaterCanModify = { city, position ->
+            plugin.server.getWorld(city.worldId)?.takeIf { position.y in it.minHeight until it.maxHeight &&
+                it.isChunkLoaded(position.x shr 4, position.z shr 4) }
+                ?.getBlockAt(position.x, position.y, position.z)?.let { world.canModify(city.owner, it, Material.WATER) } == true
+        }
         worksites.forestrySurplus = residentSupplies::forestrySurplus
         worksites.mutationBlocked = citizens::growthBlocked
         worksites.residentFeet = citizens::residentFeet

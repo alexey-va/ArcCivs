@@ -35,6 +35,30 @@ internal class CivsFarmWorksites(context: CivsWorksiteContext, approaches: CivsW
     override fun selected(workerId: UUID, work: CivWorldWork) { scans[workerId]?.selected(work.focus) }
     override fun validatePlan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World, work: CivWorldWork) {
         super.validatePlan(city, worker, building, world, work)
+        if (building.farmFieldVersion == CivsFarmFields.VERSION) {
+            val irrigation = CivsFarmFields.water(building).toSet()
+            work.changes.filter { it.position in irrigation }.forEach { cell ->
+                requireCivs(cell.after == "minecraft:water[level=0]" &&
+                    CivsFarmExpansion.waterSafe(building, cell.position, { context.read(city, building, world, it) }), "stale-worksite")
+            }
+            val weedGround = irrigation.firstOrNull { point -> work.changes.any { cell ->
+                cell.position.x == point.x && cell.position.z == point.z && cell.position.y in point.y + 1..point.y + 2 &&
+                    Bukkit.createBlockData(cell.before).material in CivsFarmWorksite.WEEDS
+            } }
+            if (weedGround != null) {
+                val expected = CivsFarmWorksite.irrigationWeeds(weedGround) { context.read(city, building, world, it) }
+                requireCivs(!expected.isNullOrEmpty() && work.changes == expected && work.inputs.isEmpty() &&
+                    work.outputs.isEmpty() && work.status == "working-field", "stale-worksite")
+            } else {
+                val draining = CivsFarmFields.draining(building)
+                work.changes.filter { it.position.copy(y = it.position.y - 1) in draining }.forEach { cell ->
+                    val top = context.read(city, building, world, cell.position) ?: throw CivsRejection("protected-area")
+                    val age = top.blockData as? Ageable
+                    requireCivs(top.type == CivsFarmWorksite.cropAndSeed(building).first && age != null && age.age == age.maximumAge &&
+                        cell.after == "minecraft:air" && work.inputs.isEmpty(), "stale-worksite")
+                }
+            }
+        }
         if (work.cropCare) {
             val focus = work.focus ?: throw CivsRejection("stale-worksite")
             val crop = context.read(city, building, world, focus) ?: throw CivsRejection("protected-area")

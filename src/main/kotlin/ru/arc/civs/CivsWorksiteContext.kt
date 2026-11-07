@@ -186,7 +186,10 @@ internal class CivsWorksiteContext(
 
 internal fun worksiteProtectedByBuilding(workplace: CivBuilding, other: CivBuilding, point: CivPosition, headroom: Int = 0): Boolean =
     if (workplace.type == BuildingType.FORESTER) other.bounds.contains(point.x, point.y, point.z) ||
-        CivsWorksiteLayouts.field(other).any { it.x == point.x && it.z == point.z && point.y in it.y..it.y + 1 }
+        (CivsWorksiteLayouts.field(other) + if (other.farmFieldVersion == CivsFarmFields.VERSION)
+            CivsWorksiteLayouts.irrigation(other) else emptyList()).any {
+                it.x == point.x && it.z == point.z && point.y in it.y..it.y + 1
+            }
     else (point.x in other.bounds.min.x..other.bounds.max.x && point.z in other.bounds.min.z..other.bounds.max.z ||
         CivsWorksiteLayouts.isField(other, point.x, point.z)) &&
         (workplace.type != BuildingType.QUARRY || !CivsMinePlan.belowFoundation(other, point.y, headroom))

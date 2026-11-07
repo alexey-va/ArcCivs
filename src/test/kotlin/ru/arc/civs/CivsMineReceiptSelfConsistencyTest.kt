@@ -7,14 +7,24 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.every
+import io.mockk.mockk
 import org.bukkit.Bukkit
+import org.bukkit.Material
+import org.bukkit.block.Barrel
+import org.bukkit.inventory.ItemStack
+import org.bukkit.plugin.Plugin
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
+import java.nio.file.Files
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
 
 class CivsMineReceiptSelfConsistencyTest : FunSpec({
-    fun receiptSelfConsistency(diagnosticRefusal: Boolean = false) {
+    fun receiptSelfConsistency(diagnosticRefusal: Boolean = false, authoredWallDependency: Boolean = false,
+        shellDrift: String? = null) {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
                 val world = CivsWorksiteWorldFixture("mine-receipt-self-consistency").also(paper.server::addWorld)
@@ -58,11 +68,13 @@ class CivsMineReceiptSelfConsistencyTest : FunSpec({
                         val p = key.split(',').map(String::toInt)
                         put(CivPosition(p[0], p[1], p[2]), data)
                     }
-                    val exposed = CivPosition(9, -11, -8)
+                    val exposed = if (authoredWallDependency) CivPosition(9, -12, -10) else CivPosition(9, -11, -8)
                     val shell = exposed.copy(x = 10)
-                    val cave = if (diagnosticRefusal) (-12..-8).map { z -> exposed.copy(z = z) } + shell else emptyList()
-                    // Constructed one-high cave, not a native replay. The real selector currently
-                    // defers this AIR shell; the unchanged conservative receipt guard must refuse it.
+                    val cave = if (diagnosticRefusal || authoredWallDependency)
+                        (-12..-8).map { z -> exposed.copy(z = z) } + shell else emptyList()
+                    // Constructed one-high cave, not a private native replay. The head-row case
+                    // remains unsafe. The body-row case pins the 2026-11-06 native rejection:
+                    // its AIR shell is itself exact pending body clearance in this same landing.
                     cave.forEach { put(it, "minecraft:air") }
                     LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
                         CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
@@ -77,6 +89,25 @@ class CivsMineReceiptSelfConsistencyTest : FunSpec({
                             cell.before shouldBe "minecraft:stone"
                             cell.after shouldBe "minecraft:air"
                             val beforeItems = worker.items?.toList()
+                            if (authoredWallDependency) {
+                                work.miningOrdinal shouldBe 771
+                                work.miningExcavation shouldBe state.excavation
+                                geometry.cutOrdinals.getValue(shell).filter { geometry.section(it) == "2/shaft/landing" } shouldBe listOf(834)
+                                geometry.cutOrdinals.getValue(shell.copy(y = shell.y - 1))
+                                    .filter { geometry.section(it) == "2/shaft/landing" } shouldBe listOf(835)
+                                // The selector must not send the actor to a task its own unchanged native guard refuses.
+                                runtime.validate(city, work)
+                                if (shellDrift != null) {
+                                    // A refusal invalidates the scan. Each drift has its own fresh runtime;
+                                    // never reuse that refused task or count a missing scan as guard coverage.
+                                    put(shell, shellDrift)
+                                    val failure = shouldThrow<CivsRejection> { runtime.validate(city, work) }
+                                    failure.reason shouldBe "stale-worksite"
+                                    val source = requireNotNull(CivsDiagnostics.rejectionSource(failure))
+                                    source.startsWith("CivsMineWorksite.kt:") shouldBe true
+                                    source.endsWith(":validateLandingClearanceFrontier") shouldBe true
+                                }
+                            }
                             if (diagnosticRefusal) {
                                 work.miningExcavation shouldBe state.excavation
                                 val failure = shouldThrow<CivsRejection> { runtime.validate(city, work) }
@@ -89,14 +120,15 @@ class CivsMineReceiptSelfConsistencyTest : FunSpec({
                                 val source = requireNotNull(CivsDiagnostics.rejectionSource(failure))
                                 source.startsWith("CivsMineWorksite.kt:") shouldBe true
                                 source.endsWith(":validateLandingClearanceFrontier") shouldBe true
-                            } else {
+                            } else if (shellDrift == null) {
                                 // The original sound native fixture still admits its selected receipt.
                                 runtime.validate(city, work)
                             }
                             world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
                             cave.forEach { local ->
                                 val p = CivsWorksiteLayouts.point(mine, local)
-                                world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe "minecraft:air"
+                                world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe
+                                    if (local == shell && shellDrift != null) shellDrift else "minecraft:air"
                             }
                             state.seals.orEmpty().forEach { (key, data) ->
                                 val xyz = key.split(',').map(String::toInt)
@@ -107,6 +139,8 @@ class CivsMineReceiptSelfConsistencyTest : FunSpec({
                             city.workers.single().items shouldBe beforeItems
                             city.workers.single().completedCycles shouldBe 73L
                             city.minePlans?.get(mine.id.toString()) shouldBe state
+                            if (authoredWallDependency && shellDrift == null)
+                                landingDependencyReceipts(paper, plugin, tasks, world, city, mine, geometry, shell)
                         }
                     }
                 } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
@@ -121,7 +155,244 @@ class CivsMineReceiptSelfConsistencyTest : FunSpec({
     test("a refused old landing frontier reports only bounded context without receipt side effects") {
         receiptSelfConsistency(diagnosticRefusal = true)
     }
+
+    test("a real selected landing cut validates when its old AIR wall is exact pending body clearance") {
+        receiptSelfConsistency(authoredWallDependency = true)
+    }
+
+    test("liquid drift in the pending landing body wall rejects the original selected cut") {
+        receiptSelfConsistency(authoredWallDependency = true, shellDrift = "minecraft:water[level=0]")
+    }
+
+    test("a foreign block in the pending landing body wall rejects the original selected cut") {
+        receiptSelfConsistency(authoredWallDependency = true, shellDrift = "minecraft:stone_bricks")
+    }
 })
+
+/** Internal service receipt boundary, not an NPC-arrival test. No future work or mining receipt is fabricated. */
+private fun landingDependencyReceipts(paper: MockBukkitTestRuntime, plugin: Plugin, tasks: LifecycleTaskScope,
+    world: CivsWorksiteWorldFixture, initial: Settlement, mine: CivBuilding, plan: CivsMinePlan, wall: CivPosition) {
+    val directory = Files.createTempDirectory("mine-landing-dependency-")
+    val direct = Executor(Runnable::run)
+    var service: CivsService? = null
+    try {
+        CivsStore(directory, direct).use { store ->
+            // Control membership comes from the saved building record. Setting type also
+            // installs MockBukkit's real Barrel state; BlockData alone leaves its old state.
+            val controls = initial.buildings.mapNotNull(CivBuilding::control).associateWith { point ->
+                world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
+            }
+            val control = requireNotNull(mine.control)
+            val source = (controls.getValue(control).state as Barrel).inventory
+            // A supported ordinary collection stance, separate from the retained underground bank.
+            world.getBlockAt(control.x + 1, control.y - 1, control.z).type = Material.COBBLESTONE
+            world.getBlockAt(control.x + 1, control.y, control.z).type = Material.AIR
+            world.getBlockAt(control.x + 1, control.y + 1, control.z).type = Material.AIR
+            val initialSupply = mapOf("COBBLESTONE" to 512L, "LADDER" to 128L, "TORCH" to 128L)
+            var slot = 0
+            initialSupply.forEach { (material, count) ->
+                var remaining = count
+                while (remaining > 0) {
+                    val amount = minOf(64L, remaining).toInt()
+                    source.setItem(slot++, ItemStack(Material.valueOf(material), amount))
+                    remaining -= amount
+                }
+            }
+            store.save(initial).join() shouldBe initial
+            val storage = CivsStorage(plugin) { chunk ->
+                controls.values.filter { it.x shr 4 == chunk.x && it.z shr 4 == chunk.z }
+                    .map { it.state }.toTypedArray()
+            }
+            val access = CivsWorld(plugin, tasks) { service?.settlements() ?: listOf(initial) }
+            val citizens = mockk<CivsCitizens>(relaxed = true)
+            every { citizens.closeAsync() } returns CompletableFuture.completedFuture(null)
+            val renderer = mockk<CivsPreviewRenderer>(relaxed = true)
+            every { renderer.drained() } returns CompletableFuture.completedFuture(null)
+            val boundary = mockk<CivsBoundaryRenderer>(relaxed = true)
+            every { boundary.drained() } returns CompletableFuture.completedFuture(null)
+            var at = 1_000_000L
+            val authority = CivsService(plugin, tasks, CivsSettings(directory, setOf(world.name), 96,
+                500, 50_000, 4, 120, 48, 96), store, mockk(relaxed = true), direct,
+                worldAdapter = access, previewRenderer = renderer, citizenRuntime = citizens,
+                boundaryRenderer = boundary, storageAdapter = storage, supplyExecutor = direct, clock = { at })
+            service = authority
+            fun <T> await(future: CompletableFuture<T>): T {
+                repeat(160) { if (future.isDone) return future.join(); paper.performTicks(1) }
+                error("landing dependency service future did not finish")
+            }
+            await(authority.start())
+            val runtime = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
+                .get(authority) as CivsWorksites
+            fun current() = authority.settlements().single()
+            fun proof() = current().minePlans!!.getValue(mine.id.toString())
+            fun completed(ordinal: Int) = proof().let { plan.completed(ordinal, it.nextStep, it.sectionSteps.orEmpty()) }
+            fun progressClue(): String {
+                val worker = current().workers.single()
+                val state = proof()
+                val carried = CivsLogistics.QUARRY_SUPPLIES.keys.associateWith { CivsEquipment.plainCount(worker, it) }
+                return "cycle=${worker.completedCycles} carried=$carried step=${state.nextStep} " +
+                    "sections=${state.sectionSteps.orEmpty().entries.take(8)} seals=${state.seals.orEmpty().size}"
+            }
+            fun nextWork(): CivWorldWork {
+                try {
+                    repeat(512) {
+                        val city = current()
+                        runtime.pulse(listOf(city))
+                        runtime.plan(city, city.workers.single())?.let { return it }
+                    }
+                } catch (failure: CivsRejection) {
+                    throw IllegalStateException("landing dependency selection rejected: ${failure.reason} " +
+                        "values=${failure.values.entries.take(8)} ${progressClue()}", failure)
+                }
+                error("no valid landing dependency work: ${progressClue()} ${runtime.debug(setOf(initial.workers.single().id))}")
+            }
+            fun native(local: CivPosition): String = CivsWorksiteLayouts.point(mine, local).let { point ->
+                world.getBlockAt(point.x, point.y, point.z).blockData.asString
+            }
+            fun pendingLandingClue(): String {
+                val state = proof()
+                val count = plan.sectionCount("2/shaft/landing", state.nextStep, state.sectionSteps.orEmpty())
+                val ordinal = plan.sections.getValue("2/shaft/landing").getOrNull(count.toInt())
+                    ?: return "landing2=$count complete"
+                val point = plan.steps[ordinal].point
+                val neighbours = listOf(point, point.copy(x = point.x - 1), point.copy(x = point.x + 1),
+                    point.copy(y = point.y - 1), point.copy(y = point.y + 1),
+                    point.copy(z = point.z - 1), point.copy(z = point.z + 1))
+                return "landing2=$count ordinal=$ordinal point=$point expected=${plan.expectedAfter(ordinal, mine.rotation)} " +
+                    "native=${neighbours.associateWith(::native)}"
+            }
+            storage.buildingAvailable(current(), mine.id) shouldBe initialSupply
+            val originalCycles = current().workers.single().completedCycles
+            val supplyDebits = mutableMapOf<String, Long>()
+            var supplyReceipts = 0
+            var receipts = 0
+            var actualLowerBodyCut = false
+            var continuedAfterClearance = false
+            val shellKey = CivsMineProgress.key(wall)
+            var temporaryShellSeals = 0
+            var temporaryShellCuts = 0
+            var pendingTemporaryShell = false
+            var lastLandingCount = 0L
+            var landingChangedAt = 0
+            var landingPlateau: String? = null
+            var lastWorkerDebug = emptyMap<String, Any?>()
+            while (!continuedAfterClearance && receipts < 128) {
+                val clearedBeforeReceipt = completed(834) && completed(835)
+                val work = nextWork()
+                // Capture before invalidation: the explicit worker has a real cached task here.
+                lastWorkerDebug = runtime.debug(setOf(initial.workers.single().id), setOf(mine.id))
+                val landingCount = proof().let { plan.sectionCount("2/shaft/landing", it.nextStep, it.sectionSteps.orEmpty()) }
+                if (landingCount != lastLandingCount) {
+                    lastLandingCount = landingCount
+                    landingChangedAt = receipts
+                    landingPlateau = null
+                } else if (landingPlateau == null && receipts - landingChangedAt >= 16) {
+                    landingPlateau = "receipts=$receipts ${pendingLandingClue()} worker=$lastWorkerDebug"
+                }
+                if (receipts == 0) work.miningOrdinal shouldBe 771
+                runtime.validate(current(), work)
+                val before = current()
+                val shellChange = work.changes.singleOrNull { CivsMinePlan.localPoint(mine, it.position) == wall }
+                val sealingShell = shellChange?.let { it.before == "minecraft:air" && it.after == "minecraft:cobblestone" } == true
+                val cuttingShell = shellChange?.let { it.before == "minecraft:cobblestone" && it.after == "minecraft:air" } == true
+                withClue("receipts=$receipts ordinal=${work.miningOrdinal} section=${work.miningOrdinal?.let(plan::section)} proof=${proof()} changes=${work.changes}") {
+                    if (clearedBeforeReceipt) {
+                        // A completed body passage must stay open through every later receipt.
+                        native(wall) shouldBe "minecraft:air"
+                        native(wall.copy(y = wall.y - 1)) shouldBe "minecraft:air"
+                        work.changes.none { CivsMinePlan.localPoint(mine, it.position) == wall.copy(y = wall.y - 1) &&
+                            it.after == "minecraft:cobblestone" } shouldBe true
+                        sealingShell shouldBe false
+                    } else if (native(wall) == "minecraft:cobblestone") {
+                        pendingTemporaryShell shouldBe true
+                        proof().seals?.get(shellKey) shouldBe "minecraft:cobblestone"
+                    } else native(wall) shouldBe "minecraft:air"
+                    if (sealingShell) {
+                        work.status shouldBe "securing-mine"
+                        work.inputs["COBBLESTONE"] shouldBe 1L
+                        pendingTemporaryShell shouldBe false
+                    }
+                    if (cuttingShell) {
+                        work.status shouldBe "digging-mine"
+                        work.miningOrdinal shouldBe 834
+                        pendingTemporaryShell shouldBe true
+                        proof().seals?.get(shellKey) shouldBe "minecraft:cobblestone"
+                    }
+                }
+                at += 5_000
+                var finished: Settlement? = null
+                val saved = await(authority.inventoryMutation(initial.id, { fresh ->
+                    runtime.validate(fresh, work)
+                    finished = CivsRules.finishWorldWork(fresh, work, at)
+                    storage.prepareWork(fresh, mine.id, work.storageInputs(fresh.workers.single()), emptyMap(), work.changes, work)
+                        .also { if (work.miningStep != null) requireNotNull(it.mine) else it.mine shouldBe null }
+                }) { _, inventory -> requireNotNull(finished).copy(inventory = inventory) })
+                saved.workers.single().completedCycles shouldBe before.workers.single().completedCycles + 1
+                saved.workers.single().items shouldBe requireNotNull(finished).workers.single().items
+                if (sealingShell) {
+                    // A temporary safety wall is paid and owned by this actual durable receipt.
+                    CivsEquipment.plainCount(saved.workers.single(), "COBBLESTONE") shouldBe
+                        CivsEquipment.plainCount(before.workers.single(), "COBBLESTONE") - 1
+                    proof().seals?.get(shellKey) shouldBe "minecraft:cobblestone"
+                    temporaryShellSeals++
+                    pendingTemporaryShell = true
+                }
+                if (cuttingShell) {
+                    proof().seals?.get(shellKey) shouldBe null
+                    temporaryShellCuts++
+                    pendingTemporaryShell = false
+                }
+                if (work.status == "collecting-supplies") {
+                    supplyReceipts++
+                    work.storageInputs(before.workers.single()).forEach { (material, amount) ->
+                        supplyDebits[material] = supplyDebits.getOrDefault(material, 0L) + amount
+                    }
+                }
+                work.changes.forEach { cell ->
+                    world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.after
+                }
+                if (work.miningOrdinal == 835 && work.changes.any {
+                        CivsMinePlan.localPoint(mine, it.position) == wall.copy(y = wall.y - 1) &&
+                            it.before == "minecraft:stone" && it.after == "minecraft:air" }) actualLowerBodyCut = true
+                store.loadInventoryTransactions().join() shouldBe emptyList()
+                native(wall) shouldBe if (pendingTemporaryShell) "minecraft:cobblestone" else "minecraft:air"
+                if (completed(834) && completed(835)) {
+                    pendingTemporaryShell shouldBe false
+                    native(wall) shouldBe "minecraft:air"
+                    native(wall.copy(y = wall.y - 1)) shouldBe "minecraft:air"
+                }
+                runtime.invalidate(initial.workers.single().id, completedWork = work)
+                receipts++
+                if (clearedBeforeReceipt) continuedAfterClearance = true
+            }
+            withClue("receipts=$receipts shellSeals=$temporaryShellSeals shellCuts=$temporaryShellCuts " +
+                "proof=${proof()} ${pendingLandingClue()} plateau=$landingPlateau lastWorker=$lastWorkerDebug") {
+                completed(834) shouldBe true
+                completed(835) shouldBe true
+                actualLowerBodyCut shouldBe true
+                continuedAfterClearance shouldBe true
+                temporaryShellCuts shouldBe temporaryShellSeals
+                pendingTemporaryShell shouldBe false
+                storage.buildingAvailable(current(), mine.id) shouldBe initialSupply.mapValues { (material, count) ->
+                    count - supplyDebits.getOrDefault(material, 0L)
+                }.filterValues { it > 0 }
+                plan.builtStanding(wall.copy(y = wall.y - 1), proof().nextStep, proof().sectionSteps.orEmpty()) shouldBe true
+                native(wall) shouldBe "minecraft:air"
+                native(wall.copy(y = wall.y - 1)) shouldBe "minecraft:air"
+                current().workers.single().completedCycles shouldBe originalCycles + receipts
+                plan.sectionCount("0/shaft/entrance", proof().nextStep, proof().sectionSteps.orEmpty()) shouldBe 0L
+                plan.sectionCount("0/shaft/opening", proof().nextStep, proof().sectionSteps.orEmpty()) shouldBe 0L
+                // Both pending body ordinals are now complete: another valid selection proves the wall no longer needs deferral.
+                runtime.validate(current(), nextWork())
+            }
+            println("mine_landing_dependency_receipts receipts=$receipts temporary_shell_seals=$temporaryShellSeals " +
+                "owned_shell_cuts=$temporaryShellCuts supply_receipts=$supplyReceipts supply_debits=$supplyDebits")
+        }
+    } finally {
+        service?.close()
+        directory.toFile().deleteRecursively()
+    }
+}
 
 /** The shipped public layout matches the curated mine after this verified half-turn and translation. */
 private fun receiptNordicSite(publicMine: CivBuilding) = requireNotNull(CivsWorksiteLayouts.site(publicMine)).deepCopy().apply {

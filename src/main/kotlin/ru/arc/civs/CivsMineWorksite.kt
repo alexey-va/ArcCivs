@@ -539,7 +539,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             val block = observeMineHazard(world, CivsWorksiteLayouts.point(building, task.block))
                 ?: throw CivsRejection("chunks-unloaded")
             val clearance = if (task.material == Material.COBBLESTONE)
-                pendingLandingClearance(plan, task.exposed, access, sections) else null
+                pendingLandingClearance(plan, task.block, access, sections)
+                    ?: pendingLandingClearance(plan, task.exposed, access, sections) else null
             val dependent = task.material == Material.COBBLESTONE && clearance == plan.section(ordinal)
             if (dependent) requireCivs(!block.isLiquid && (block.type.isAir || block.type == Material.COBBLESTONE ||
                 CivsMineSafety.natural(block.type) || mineOwnedBlock(city, building, task.block, block.blockData.asString)), "stale-worksite")

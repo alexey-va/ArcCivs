@@ -730,6 +730,19 @@ object CivsRules {
         validate(city)
     }
 
+    /** Publish field intent only; residents own every subsequent native/item change. */
+    internal fun expandFarmField(city: Settlement, buildingId: UUID): Settlement {
+        val building = city.building(buildingId) ?: reject("building-not-found")
+        check(city.autonomy?.paused == false && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+            city.pendingDeletion == null && city.pendingControls.orEmpty().isEmpty() && city.construction == null &&
+            city.constructionQueue.orEmpty().isEmpty() && building.phase == BuildingPhase.ACTIVE &&
+            building.farmFieldVersion == null && CivsFarmFields.originalMetadata(building) &&
+            city.workers.any { it.assignment == buildingId && !CivsResidents.isChild(it) }, "stale-development")
+        return changed(city, city.copy(buildings = city.buildings.map {
+            if (it.id == buildingId) it.copy(farmFieldVersion = CivsFarmFields.VERSION) else it
+        }))
+    }
+
     internal fun changed(before: Settlement, after: Settlement): Settlement =
         if (before == after) before else validate(after.copy(revision = add(before.revision, 1)))
 

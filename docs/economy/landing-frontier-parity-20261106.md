@@ -1,0 +1,11 @@
+# Retained mine landing parity: before-source assessment
+
+The live224 miner repeatedly selects an authored landing action that its unchanged receipt frontier rejects. The proposed fix shares the exact pending wall-body dependency between selection and validation; the world cells, ordinary native debits/drops, tool wear, arrival, claims and journal remain authoritative. The baseline mine owner SHA-256 is `91b7cc18b5ba8470a88c2fc7892fbbdf074869b017c3e8ce06ee1c940d45ac26`.
+
+The canonical envelope in `mine-opening-fast-handoff-20261106.json` is unchanged and reproduced in the accompanying assessment. No extra fast-cadence improvement, price, output rate, grant, progress credit or daily cap is introduced. The observed nine cap blocks remain one finite world stock, counted once across releases. Direct new Vault/token/physical-EMERALD/player-XP mint is zero in separate units. Existing AutoSupply is nonzero and actual item production, supply draws, food/tool use and eventual trade availability can change when the blocked worker resumes. No revenue or throughput increase is forecast.
+
+Current SELL/AutoSell and the future contract transition remain separate. Native repair, connected descent and mouth completion remain unaccepted until post-deployment observation. Farm expansion has its own before-source assessment and is not a result of this mine change.
+
+## Verification refinement on 2026-11-07
+
+Authoritative receipt comparisons distinguished legitimate temporary safety work from a blocked final passage. The accepted change is limited to the old-frontier receipt fence: it recognizes the exact pending wall-body dependency before the exposed-column fallback. Existing native selection and section ordering remain unchanged. Temporary COBBLESTONE safety seals are still paid normally, stored with exact ownership and later removed by their authored cuts. The regression requires both body cuts, continued work and a finally open passage; it does not prohibit necessary temporary protection. Broader experimental planner changes were discarded after a legacy-layout regression. No rates, rewards, grants, free materials or paid progress are added. Native mouth/descent acceptance moves to the five replacement villages under the owner's new explicit LAB reset request; recovery of archived towns is superseded, not claimed.

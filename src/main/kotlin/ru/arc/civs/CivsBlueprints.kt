@@ -129,7 +129,9 @@ class CivsBlueprints(
             catalog.upgrade(building.schematicId, targetLevel)?.id ?: throw CivsRejection("blueprint-unavailable")
         } else schematicId(styleOf(building) ?: throw CivsRejection("invalid-style"), building.type, targetLevel)
         prepareSource(sourceId, building.type, targetLevel, building.id, worldId, building.anchor,
-            building.rotation / 90, building.rotation, building.entrance)
+            building.rotation / 90, building.rotation, building.entrance).thenApply { blueprint ->
+            blueprint.copy(building = blueprint.building.copy(farmFieldVersion = building.farmFieldVersion))
+        }
     }
 
     /** Encoded generated source only; decoded snapshots stay with the expiring caller and Core cache. */

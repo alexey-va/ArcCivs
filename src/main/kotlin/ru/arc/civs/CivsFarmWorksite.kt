@@ -72,12 +72,41 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
         // A paid Auto field owns its seeds; this planning allowance never creates a carried item.
         val supplies by lazy(available)
         fun need(value: CivWorkNeed): Selection { blocked(value); return Selection.Unavailable }
+        val expanded = building.farmFieldVersion == CivsFarmFields.VERSION
+        val draining = if (expanded) CivsFarmFields.draining(building) else emptySet()
+        var irrigationReady = true
         for (point in CivsWorksiteLayouts.irrigation(building)) {
             val block = read(point, true) ?: return Selection.Unavailable
             if (block.type == Material.WATER) continue
-            if (harvestOnly) return Selection.Unavailable
+            irrigationReady = false
+            if (expanded && claimed(point)) continue
+            if (expanded && point in draining) {
+                val top = read(point.copy(y = point.y + 1), true) ?: return Selection.Unavailable
+                if (top.type == crop) {
+                    val age = top.blockData as? Ageable ?: return Selection.Unavailable
+                    // Retiring a live plot is an ordinary mature harvest, never a forced clear or a replant.
+                    if (age.age != age.maximumAge || claimed(point)) continue
+                    val attempt = admit(position(top))
+                    val finish = attempt.finish ?: return if (attempt.pending) Selection.Pending else Selection.Unavailable
+                    return Selection.Ready(finish(CivWorkAction(listOf(change(top, "minecraft:air")), outputs = drops(top, worker))))
+                }
+                if (!top.type.isAir) return need(CivWorkNeed("worksite-obstacle", point = position(top), reason = "irrigation-crop"))
+            }
+            if (harvestOnly) { if (expanded) continue else return Selection.Unavailable }
             if (block.type !in SOILS) return need(CivWorkNeed("worksite-soil", point = point,
                 reason = "irrigation-ground", blockMaterial = block.type.name))
+            if (expanded) {
+                val weeds = irrigationWeeds(point) { read(it, true) }
+                    ?: return need(CivWorkNeed("worksite-obstacle", point = point, reason = "irrigation-crop"))
+                if (weeds.isNotEmpty()) {
+                    val focus = weeds.last().position
+                    val attempt = admit(focus)
+                    val finish = attempt.finish ?: return if (attempt.pending) Selection.Pending else Selection.Unavailable
+                    return Selection.Ready(finish(CivWorkAction(weeds, focus = focus)))
+                }
+            }
+            if (expanded && !CivsFarmExpansion.waterSafe(building, point, { read(it, true) }))
+                return need(CivWorkNeed("worksite-no-access", point = point, reason = "irrigation-bank"))
             val attempt = admit(point)
             val finish = attempt.finish ?: return if (attempt.pending) Selection.Pending else Selection.Unavailable
             return Selection.Ready(finish(CivWorkAction(listOf(change(block, Material.WATER.createBlockData().asString)))))
@@ -87,7 +116,7 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
             .thenBy { val dx = from.x.toDouble() - it.x; val dz = from.z.toDouble() - it.z; dx * dx + dz * dz }
             .thenBy { it.x }.thenBy { it.z }
         val candidates = ripe.sortedWith(nearest).asSequence() + sequence {
-            if (harvestOnly || examined != plots.size) return@sequence
+            if (harvestOnly || !irrigationReady || examined != plots.size) return@sequence
             // Visit the next authored plot instead of repeatedly boosting the plant we just left.
             val after = plots.indexOfFirst { it == lastFocus || it.copy(y = it.y + 1) == lastFocus } + 1
             val care = plots.indices.map { plots[(after + it) % plots.size] }
@@ -175,6 +204,13 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
             else -> Material.WHEAT to "WHEAT_SEEDS"
         }
 
+        /** Clear only the admitted body cells, upper first, without leaving half of a tall weed. */
+        fun irrigationWeeds(ground: CivPosition, read: (CivPosition) -> Block?): List<CivPlanBlock>? {
+            val body = (2 downTo 1).map { read(ground.copy(y = ground.y + it)) ?: return null }
+            if (body.any { !it.type.isAir && it.type !in WEEDS }) return null
+            return body.filter { it.type in WEEDS }.map { change(it, "minecraft:air") }
+        }
+
         private fun cropCareChanges(world: World, crop: Block, soil: Block, age: Ageable, fertilizing: Boolean): List<CivPlanBlock> = buildList {
             val rainExposed = world.hasStorm() && world.getHighestBlockYAt(crop.x, crop.z) <= crop.y
             if (!rainExposed && soil.blockData.asString != "minecraft:farmland[moisture=7]")
@@ -191,6 +227,6 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
         private fun position(block: Block) = CivPosition(block.x, block.y, block.z)
         private fun put(map: MutableMap<String, Long>, key: String, value: Long) { if (value > 0) map[key] = value else map.remove(key) }
         private val SOILS = setOf(Material.DIRT, Material.GRASS_BLOCK, Material.COARSE_DIRT, Material.ROOTED_DIRT, Material.FARMLAND)
-        private val WEEDS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN, Material.LARGE_FERN)
+        val WEEDS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN, Material.LARGE_FERN)
     }
 }

@@ -54,6 +54,8 @@ data class CivBuilding(
     val transit: List<CivPosition>? = null,
     /** Exact enclosure capture for a reviewed rack annex; the authored source family remains unchanged. */
     val warehouseCaptureId: UUID? = null,
+    /** Null preserves the exact original farm; a retained profile changes only its working field. */
+    val farmFieldVersion: Int? = null,
 )
 
 data class CivWorker(

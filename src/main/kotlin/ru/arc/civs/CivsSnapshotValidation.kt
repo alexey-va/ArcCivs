@@ -55,7 +55,8 @@ internal object CivsSnapshotValidation {
                         (current.type == target.type || CivsInfrastructureRebuild.refit(city, current, target)) &&
                         (current.level + 1 == target.level || CivsPlanBoardBlueprint.refit(current, target) ||
                             CivsInfrastructureRebuild.refit(current, target)) &&
-                        current.entrance == target.entrance && current.rotation == target.rotation)
+                        current.entrance == target.entrance && current.rotation == target.rotation &&
+                        current.farmFieldVersion == target.farmFieldVersion)
                 snapshot(target.type == BuildingType.TOWN_HALL || target.level <= city.level())
                 snapshot(founding || target.type != BuildingType.TOWN_HALL || target.level > 1 || order.batches != null)
                 snapshot(validConstructionPrice(city, order, target))
@@ -225,7 +226,7 @@ internal object CivsSnapshotValidation {
             building.bounds.min.x <= building.bounds.max.x && building.bounds.min.y <= building.bounds.max.y && building.bounds.min.z <= building.bounds.max.z &&
             city.contains(building.bounds.min.x, building.bounds.min.z) && city.contains(building.bounds.max.x, building.bounds.max.z) &&
             city.contains(building.anchor.x, building.anchor.z) && city.contains(building.entrance.x, building.entrance.z) &&
-            CivsWarehouseRefit.validReference(building) &&
+            CivsWarehouseRefit.validReference(building) && CivsFarmFields.validReference(city, building) &&
             (building.phase != BuildingPhase.SITE || building.level == 1) &&
             (building.control?.let { city.contains(it.x, it.z) } != false) &&
             (!(building.type.isInfrastructure || building.type == BuildingType.DECORATION) || building.control == null) &&

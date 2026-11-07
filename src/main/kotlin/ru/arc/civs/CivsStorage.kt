@@ -81,6 +81,7 @@ class CivsStorage(private val plugin: Plugin,
     private val retiringControls = hashSetOf<Key>()
     internal var residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY
     internal var foodCanModify: (Settlement, CivPosition) -> Boolean = { _, _ -> false }
+    internal var farmWaterCanModify: (Settlement, CivPosition) -> Boolean = { _, _ -> false }
     internal var forestryLeafCurrentCity: (UUID) -> Settlement? = { null }
     internal var relocationCurrentCity: (UUID) -> Settlement? = { null }
     internal var terrainChanged: (UUID, Collection<CivPosition>) -> Unit = { _, _ -> }
@@ -815,6 +816,29 @@ class CivsStorage(private val plugin: Plugin,
         }
         val worldState = classifyWorld(transaction, worldCells)
         if (worldState is CivInventoryApplyResult.Conflict) return worldState
+        for (cell in transaction.worldChanges.orEmpty()) {
+            val (block, after) = worldCells.getValue(cell.position)
+            if (after.material != Material.WATER || worldAfterMatches(transaction, block.blockData, after, cell)) continue
+            val farm = transaction.after.buildings.firstOrNull { it.farmFieldVersion == CivsFarmFields.VERSION &&
+                CivsFarmFields.supported(it) && cell.position in CivsFarmFields.water(it) } ?: continue
+            if (!farmWaterCanModify(transaction.after, cell.position))
+                return CivInventoryApplyResult.Conflict(worldDetails(transaction, cell, "lands-denied"))
+            var unloaded = false
+            fun bank(point: CivPosition): Block? {
+                val world = block.world
+                if (point.y !in world.minHeight until world.maxHeight || !world.isChunkLoaded(point.x shr 4, point.z shr 4)) {
+                    unloaded = true
+                    return null
+                }
+                val native = world.getBlockAt(point.x, point.y, point.z)
+                return native.takeIf { it.getState(false) !is TileState &&
+                    world.worldBorder.isInside(it.location) && foodCanModify(transaction.after, point) }
+            }
+            if (!CivsFarmExpansion.waterSafe(farm, cell.position, ::bank)) {
+                val details = worldDetails(transaction, cell, "farm-irrigation-bank-changed")
+                return if (unloaded) CivInventoryApplyResult.Retry(details) else CivInventoryApplyResult.Conflict(details)
+            }
+        }
         val collectedState = classifyCollected(transaction)
         if (collectedState is CivInventoryApplyResult.Conflict || collectedState is CivInventoryApplyResult.Retry) return collectedState
         val relocationState = classifyRelocation(transaction)

@@ -1,0 +1,409 @@
+{
+  "version": 1,
+  "title": "ArcCivs retained Auto1 field80to120soil and1to15water; BEFORE next-iteration assessment",
+  "recorded_at_utc": "2026-11-06T08:45:32.290381+00:00",
+  "assumptions": [
+    "BEFORE farm implementation, NEXT ITERATION ONLY. This assessment is separate from candidate0.1.224 and grants no source, activation or native acceptance authority. Participants1/1/1 denote the one retained Auto1 farm; no additional worker or building-level upgrade.",
+    "Parent model readback2026-11-06T08:32:01.257896Z: modelSHA38643b7f6d9b861182b0fdbb48b59847aaa0285c995d6acf466d816c66a17c05; farm32c439ce-87aa-38ca-80f4-f18a9269ef41 ACTIVE level1, one assigned worker, production=null, sourcecivs/v2/nordic/agriculture-horticulture-farmer/c0ad265fc22f522f22f9/level1, anchor12314,73,9683, rotation90. This worker did not recapture the model.",
+    "Source-derived crop: CivsProduction.material chooses the first FARM option WHEAT for production=null; CivsFarmWorksite.cropAndSeed therefore selects native WHEAT and WHEAT_SEEDS. CARROT/POTATO are explicit alternatives, not the observed current selection.",
+    "Geometry80soil+1water to120soil+15water: retain72oldsoil, normally harvest8oldcrop columns before separate water work, add48newsoil and6newwater columns. There are54new flank columns,14additional authored water work cells and40net additional crop plots. Nullable retainedbuilding.farmFieldVersion is proposed; null must preserve exact original metadata.",
+    "The PHYSICAL path is required by the proposal and must be confirmed at admission. Its48initial new plantings consume48real WHEAT_SEEDS. The8channel crops must mature, yield exact native Block.getDrops with the actual tool into the real bag, becomeAIR without replant or seed subtraction, then admit separate safe water work. Their unknown drops are not assigned a fixed yield or money price.",
+    "Worker seed reserve follows field size80to120, delta40WHEAT_SEEDS. This is retained inventory policy, not an immediate debit, grant or extra planting charge. Do not add40reserve and48planting into an88-item burn. Existing store desired-stock buffers and trade quote reserves are separate owners.",
+    "Existing ordinary working-field action1.5s; accepted crop care4s and nativeage+1 even without BoneMeal; physical fertilizing consumes1real BoneMeal when selected. Exposed rain may skip watering. Hunger<=6 doubles durations. One farmer, discovery/arrival/claims, actual drops/tool wear, supply, growth and journal waits remain; no1.5x hourly-output claim follows from50percent more crop capacity.",
+    "Action-only initial transition model:48till+48plant+8matureharvest+14water=118ordinary actions,177s at1.5s or354s hungry. This excludes growth waits, walking, care, tools/supplies, busy admission, five-second city rotation and journal time; it is a conditional lower bound, not a completion forecast.",
+    "Existing AutoSupply envelope remains<=8material kinds x64units/receipt, shared backend<=1acceptedreceipt/s. Sensitivity0.25/1/4activehours/day allows900/3600/14400receipt opportunities and460800/1843200/7372800unlike service item units/day; actual grants are demand/storage/freshness bounded. Extra seed/tool/food demand may increase realized draws. The envelope is not per-farm entitlement, predicted wheat output or monetary value.",
+    "One-off WHEAT_SEEDS burn and authored irrigation work counts use finite network_weekly_cap48/14 only to avoid repeating this one retained-farm transition in seven-day arithmetic. These are assessment caps, not new runtime limits or daily rewards.",
+    "Direct feature mint is separately0Vault,0premium tokens,0physicalEMERALD,0playerXP. Existing native crop goods, internal resident skill opportunities, AutoSupply grants and possible wheat-to-bread/trade availability can change. Existing bread recipe3WHEATto1BREAD and emerald trade prices/reserves are unchanged; no treasury seed or conversion rate is assumed.",
+    "Current EconomyShopGUI SELL/AutoSell and future SELL-to-contract remain separate scenarios. No observed seven-day revenue or item-to-money conversion is claimed. This bounded assessment does not infer current network income from source prices.",
+    "Historical geometry preflights separately found27available supported natural-soil/clear-body columns on each flank, zero reported problem columns. TileState absence, Lands/modify permission, end banks, routes/reservations and automatic admission remain unproven. Partial geometry evidence is not farm-expansion acceptance.",
+    "Future admission must reuse existing AutonomousDevelopment five-second city selection and existing inventory journal; profile intent alone may not place blocks or grant items. Retained source/frame, worker count, crop, hut bounds/control and accepted plans remain authoritative. Persisted profile downgrade/recovery needs matched state/native receipts; no profile flag reset after partial work.",
+    "Subsequent parent read-only mode confirmation2026-11-06T08:52:17.524to651Z, RPCa564585ae95657c71def84baab2f1e3e0a4c34f9061b4b18046d6d6967faf053: pinned08:47:38.352Z modelSHAf424db4e971f2f441db00f50e0d9c95621d8a111439d1f82a688ae1096fc40eb has inventory_present=true, modePHYSICAL, autonomy_present=true, paused=false. This verifies the selected economy path at that frame; it is not a grant or activation. Rates, amounts and BEFORE source hashes are unchanged.",
+    "2026-11-07 irrigation weed correction: each occupied admitted new irrigation column adds one ordinary working-field action before separate WATER. SHORT_GRASS/FERN clear one block; paired TALL_GRASS/LARGE_FERN clear both body blocks in one receipt, upper first. No inputs or item outputs, unchanged ordinary duration/tool-wear/skill rules. Up to6new flank irrigation columns add0..9s normal or0..18s hungry to the existing clear-body lower bound; path/growth/journal delays remain unquantified."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_feature_vault",
+          "kind": "mint",
+          "source": "Proposed retained farm profile and existing journalled world work; no currency/player-XP API change",
+          "basis": "Direct feature mint only; native goods, seed debits, supply and skill/trade opportunities remain separate",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_feature_tokens",
+          "kind": "mint",
+          "source": "Proposed retained farm profile and existing journalled world work; no currency/player-XP API change",
+          "basis": "Direct feature mint only; native goods, seed debits, supply and skill/trade opportunities remain separate",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "physical_emerald": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_feature_physical_emerald",
+          "kind": "mint",
+          "source": "Proposed retained farm profile and existing journalled world work; no currency/player-XP API change",
+          "basis": "Direct feature mint only; native goods, seed debits, supply and skill/trade opportunities remain separate",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_feature_player_xp",
+          "kind": "mint",
+          "source": "Proposed retained farm profile and existing journalled world work; no currency/player-XP API change",
+          "basis": "Direct feature mint only; native goods, seed debits, supply and skill/trade opportunities remain separate",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "wheat_seeds": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "one_off_48_new_plot_plantings",
+          "kind": "burn",
+          "source": "CivsFarmWorksite.select real seed input; proposed48new crop plots on this retained PHYSICAL farm",
+          "basis": "One real WHEAT_SEEDS per initial new planting; finite48 total. Reserve increase is not included as consumption; exact native harvest seed recovery is unquantified.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ],
+            "network_weekly_cap": {
+              "value": "0",
+              "unit": "major"
+            }
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "48",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ],
+            "network_weekly_cap": {
+              "value": "48",
+              "unit": "major"
+            }
+          }
+        }
+      ]
+    },
+    "authored_irrigation_work_cells": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "one_off_14_additional_water_work_cells",
+          "kind": "item",
+          "source": "CivsFarmWorksite irrigation world action; proposed6new flank plus8drained old crop columns",
+          "basis": "Counts accepted authored world actions, not WATER_BUCKET items or a guarantee that unsafe water cannot spread. Native banks/admission are still unproven.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ],
+            "network_weekly_cap": {
+              "value": "0",
+              "unit": "major"
+            }
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "14",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ],
+            "network_weekly_cap": {
+              "value": "14",
+              "unit": "major"
+            }
+          }
+        }
+      ]
+    },
+    "native_item_service_units": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "unchanged_shared_backend_autosupply_envelope",
+          "kind": "item",
+          "source": "CivsAutoSupplies MATERIALS_PER_RECEIPT=8 BUFFER_PER_MATERIAL=64; CivsResidentSupplies.pulseAutoSupplies shared1000ms guard",
+          "basis": "Gross sensitivity envelope of unlike material units; not actual grants, farm yield, net new economic output or an amount to add to wheat/seed flows",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "512",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              900,
+              3600,
+              14400
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "512",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              900,
+              3600,
+              14400
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "target_evidence": {
+    "source": "parent model readback",
+    "observed_at_utc": "2026-11-06T08:32:01.257896Z",
+    "model_sha256": "38643b7f6d9b861182b0fdbb48b59847aaa0285c995d6acf466d816c66a17c05",
+    "city_id": "8b86f3c5-6f07-3409-9a62-2aba1b51bdc9",
+    "building_id": "32c439ce-87aa-38ca-80f4-f18a9269ef41",
+    "phase": "ACTIVE",
+    "level": 1,
+    "assigned_workers": 1,
+    "production": null,
+    "resolved_crop_block": "WHEAT",
+    "resolved_planting_item": "WHEAT_SEEDS",
+    "schematic_id": "civs/v2/nordic/agriculture-horticulture-farmer/c0ad265fc22f522f22f9/level1",
+    "anchor": [
+      12314,
+      73,
+      9683
+    ],
+    "rotation": 90
+  },
+  "geometry": {
+    "before_soil": 80,
+    "before_water": 1,
+    "after_soil": 120,
+    "after_water": 15,
+    "retained_soil": 72,
+    "old_crop_to_water": 8,
+    "new_soil": 48,
+    "new_flank_water": 6,
+    "new_flank_columns": 54,
+    "additional_water_work_cells": 14
+  },
+  "retained_worker_reserve": {
+    "material": "WHEAT_SEEDS",
+    "before": 80,
+    "after": 120,
+    "delta": 40,
+    "classification": "holding target; neither grant nor burn; affects worker excess calculation"
+  },
+  "conditional_action_budget": {
+    "till": 48,
+    "plant": 48,
+    "mature_harvest_without_replant": 8,
+    "water": 14,
+    "total_actions": 118,
+    "normal_action_millis": 1500,
+    "normal_total_millis": 177000,
+    "hungry_total_millis": 354000,
+    "ordinary_action_only_per_hour_ceiling": 2400,
+    "care_action_only_per_hour_ceiling": 900,
+    "meaning": "No walking/growth/supply/care/journal/admission delay; not farm completion or crop output forecast",
+    "irrigation_weed_clearance": {
+      "new_flank_irrigation_columns": 6,
+      "actions_per_occupied_column": 1,
+      "additional_actions_min": 0,
+      "additional_actions_max": 6,
+      "blocks_cleared_per_action_min": 1,
+      "blocks_cleared_per_action_max": 2,
+      "normal_additional_millis_min": 0,
+      "normal_additional_millis_max": 9000,
+      "hungry_additional_millis_min": 0,
+      "hungry_additional_millis_max": 18000,
+      "item_inputs": {},
+      "item_outputs": {},
+      "tool_wear": "Existing real hoe wear per changed non-AIR weed block; one or two uses, no grant or new multiplier",
+      "scope": "Conditional natural weeds above the six new flank WATER cells. Existing118action clear-body lower bound is unchanged; late weeds on other pending authored channels need the same ordinary work, not forced crop removal."
+    }
+  },
+  "unquantified_flows": [
+    "Exact WHEAT/WHEAT_SEEDS drops from8mature channel crops with current native tool",
+    "Actual recurring mature harvests, crop age distribution, tool wear, care/BoneMeal and food demand",
+    "Realized additional AutoSupply grants and goods available for existing bread production/trade/SELL",
+    "Internal resident skill opportunities; no new skill payout rate or playerXP reward"
+  ],
+  "source_head_before_farm_implementation": "2e7a581dae938ecf53ff4b8b8e6aa2c95bbff28b",
+  "source_state": "Historical snapshot at BEFORE recording: frozen0.1.224 source before any farm implementation. The embedded hashes are not current-source assertions after the separate implementation GO.",
+  "affected_and_economic_source_before_sha256": {
+    "src/main/kotlin/ru/arc/civs/CivsModel.kt": "4749a1b4759dd2efc40fd3f828f401663421228f4a098e3c1a079c2ad6b80d30",
+    "src/main/kotlin/ru/arc/civs/CivsWorksiteLayouts.kt": "5ffc9f3d886238962aa8e8862f939ab9b02b3ab3a80e399f95143303a8c6ebe4",
+    "src/main/kotlin/ru/arc/civs/CivsSnapshotValidation.kt": "d89d4e35bb59772015ef0c09aa643b33940b36d618f08efc6df75be37004e47f",
+    "src/main/kotlin/ru/arc/civs/CivsFarmWorksite.kt": "77366e83a67a340b8dbbee765746dffef9ede497d58f4e564cd64076231d1226",
+    "src/main/kotlin/ru/arc/civs/CivsFarmWorksites.kt": "295935e0665ebe5eca650a5b7f3001a120312c852c4e3960c5003ab5c001d0b2",
+    "src/main/kotlin/ru/arc/civs/CivsProtection.kt": "388b758e2072ac8f1c2b1d590f27f526bb18d8bd53d08a22002d9eb86e68d1d2",
+    "src/main/kotlin/ru/arc/civs/CivsBlueprints.kt": "905605bb981d60df4d0ef25b418e8a379ba0360ac8f8c59cc1c26aa21c88b3c4",
+    "src/main/kotlin/ru/arc/civs/CivsService.kt": "ece5945fbca13e58dd9d3dffc0232c5c91bbbfb0635bc87358b27bd71b3a54ed",
+    "src/main/kotlin/ru/arc/civs/CivsAutonomousDevelopment.kt": "ae4ca9d55c194dc05e189eb242565f59b239aa97554e8419aeebe4d3dad6ca09",
+    "src/main/kotlin/ru/arc/civs/CivsLogistics.kt": "f042d52d3ade98ce8d7bd7af3c318d0d377f2ed77233f70dc0a6a05c5846c765",
+    "src/main/kotlin/ru/arc/civs/CivsAutoSupplies.kt": "bbce864c935d88c41b7f1800eec442509e31ebb3e143b14ae0517c6d25f6125e",
+    "src/main/kotlin/ru/arc/civs/CivsWorksiteContext.kt": "474bcca73c92d2fd696a552365099d5fc7c39e10ccc6df3f8c9f40167947f3f6",
+    "src/main/kotlin/ru/arc/civs/CivsMaterials.kt": "197fa5e6e525dad69f647b7335f434a25ea3aee9eab09263377788cd5689afcb",
+    "src/main/kotlin/ru/arc/civs/CivsResidents.kt": "32d71657527624efcf1715a671994ac10afa3e083441ac2053aa7fd0b11e14cd",
+    "src/main/kotlin/ru/arc/civs/CivsTrade.kt": "3e19e1589477bcc8b21046fe441f1a53a76e92b7c47e22163774131fcef8a171",
+    "src/main/kotlin/ru/arc/civs/CivsResidentSupplies.kt": "6cb5f19559cf718015a359eb2e5b6985f7d52a4b9f862aab1add2fb4170c3f78",
+    "src/main/kotlin/ru/arc/civs/CivsRules.kt": "c15a74d812e8079bc3df1bed8dc1393cfd2a9952fc4b436147d0d641a74fe3ba",
+    "src/main/kotlin/ru/arc/civs/CivsWorkerCommits.kt": "925b9e4bed5453928f676e2d4045b15940e953691ca41ad23c89cfb53a46f55e"
+  },
+  "evidence_paths": [
+    "artifacts/proposals/farm-expansion-20261106.md",
+    "artifacts/lab-223-farm-left-preflight-native-20261106.json",
+    "artifacts/lab-223-farm-right-preflight-native-20261106.json"
+  ],
+  "evaluation_artifact": "artifacts/farm-field-expansion-20261106-economy-result.json",
+  "subsequent_mode_evidence": {
+    "source": "parent read-only velocity exec.run",
+    "rpc_id": "a564585ae95657c71def84baab2f1e3e0a4c34f9061b4b18046d6d6967faf053",
+    "observed_from_utc": "2026-11-06T08:52:17.524Z",
+    "observed_to_utc": "2026-11-06T08:52:17.651Z",
+    "pinned_model_mtime_ms": 1793954858352,
+    "pinned_model_mtime_utc": "2026-11-06T08:47:38.352Z",
+    "model_sha256": "f424db4e971f2f441db00f50e0d9c95621d8a111439d1f82a688ae1096fc40eb",
+    "inventory_present": true,
+    "inventory_mode": "PHYSICAL",
+    "autonomy_present": true,
+    "autonomy_paused": false,
+    "artifact": "artifacts/lab-224-auto1-physical-mode-native-20261106.json",
+    "authority": "readback only; not an item grant, expansion intent, mutation or activation"
+  }
+}

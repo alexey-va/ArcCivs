@@ -135,6 +135,7 @@ internal class CivsAutonomousDevelopment(
     private val autonomousAccessChecked = mutableMapOf<UUID, List<CivBuilding>>()
     private val autonomousAccessRetryAt = mutableMapOf<UUID, Long>()
     private val infrastructureRebuildRetryAt = mutableMapOf<UUID, Long>()
+    private val farmExpansionRetryAt = mutableMapOf<UUID, Long>()
     private var autonomyCursor = 0
     private var nextAutonomyAt = 0L
 
@@ -169,6 +170,7 @@ internal class CivsAutonomousDevelopment(
         autonomousAccessChecked.clear()
         autonomousAccessRetryAt.clear()
         infrastructureRebuildRetryAt.clear()
+        farmExpansionRetryAt.clear()
     }
 
     fun cancel() {
@@ -257,6 +259,7 @@ internal class CivsAutonomousDevelopment(
         if (candidates.isEmpty()) return
         val city = candidates[Math.floorMod(autonomyCursor++, candidates.size)]
         if (pulseInfrastructureRebuild(city)) return
+        if (pulseFarmExpansion(city)) return
         val capacity = if (storageCapacityPressure(city)) CivsAutonomy.capacityGoal(city, blueprints::maximumLevel) else null
         val ordinary = capacity ?: CivsAutonomy.nextGoal(city, blueprints::maximumLevel)
         val growthYield = failedGrowthYields[city.id]?.takeIf { capacity == null && it.matches(ordinary) }
@@ -571,6 +574,60 @@ internal class CivsAutonomousDevelopment(
                 }
             }
         }
+    }
+
+    /** One optional retained-field intent uses the existing five-second city selection and commit owner. */
+    private fun pulseFarmExpansion(city: Settlement): Boolean {
+        farmExpansionRetryAt.keys.retainAll(cities.values.flatMap { it.buildings }.mapTo(hashSetOf()) { it.id })
+        val building = city.buildings.firstOrNull { it.phase == BuildingPhase.ACTIVE && it.farmFieldVersion == null &&
+            CivsFarmFields.originalMetadata(it) && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+            city.workers.any { worker -> worker.assignment == it.id && !CivsResidents.isChild(worker) } &&
+            now() >= (farmExpansionRetryAt[it.id] ?: 0L) } ?: return false
+        if (!developmentAdmission(city)) return false
+        val request = UUID.randomUUID()
+        val layout = civsPlanBoardLayoutKey(city)
+        autonomyRequests[city.id] = request
+        runCatching { loadAutonomousPlans(city) }.getOrElse { CompletableFuture.failedFuture(it) }
+            .whenCompleteSync(tasks) prepared@ { plans, failure ->
+                if (autonomyRequests[city.id] != request) return@prepared
+                fun finished(error: Throwable?) {
+                    autonomyRequests.remove(city.id, request)
+                    developmentFinished(city.id)
+                    if (closed) return
+                    if (error == null) {
+                        farmExpansionRetryAt.remove(building.id)
+                        CivsDiagnostics.event("autonomous_farm_expansion_admitted", "city" to city.id,
+                            "building" to building.id, "version" to CivsFarmFields.VERSION, "soil" to 120, "water" to 15)
+                    } else {
+                        // A refused optional field never applies the ordinary-development city backoff.
+                        farmExpansionRetryAt[building.id] = now() + 300_000L
+                        val refusal = CivsDiagnostics.rejection(error)
+                        CivsDiagnostics.event("autonomous_farm_expansion_refused", "city" to city.id,
+                            "building" to building.id, "reason" to refusal?.reason, "details" to refusal?.values)
+                    }
+                }
+                if (failure != null) { finished(failure); return@prepared }
+                runCatching { mutateWhenAvailable(city.id) { current ->
+                    rejectIf(!ready() || closed || autonomyRequests[city.id] != request ||
+                        current.owner != city.owner || current.worldId != city.worldId || current.autonomy?.paused != false ||
+                        current.pendingDeletion != null || current.pendingControls.orEmpty().isNotEmpty() ||
+                        current.construction != null || current.constructionQueue.orEmpty().isNotEmpty() ||
+                        current.id in unhealthy || isPlacing(current.id) || !settlementActive(current) ||
+                        civsPlanBoardLayoutKey(current) != layout || current.building(building.id) != building, "stale-development")
+                    val retained = plans.orEmpty().singleOrNull { it.building.id == building.id }
+                    rejectIf(retained == null || retained.cityId != current.id || retained.worldId != current.worldId ||
+                        retained.building.type != building.type || retained.building.level != building.level ||
+                        retained.building.schematicId != building.schematicId || retained.building.anchor != building.anchor ||
+                        retained.building.rotation != building.rotation || retained.building.bounds != building.bounds ||
+                        retained.building.entrance != building.entrance, "stale-development")
+                    val native = plugin.server.getWorld(current.worldId) ?: throw CivsRejection("world-unavailable")
+                    CivsFarmExpansion.validate(current, building, CivAutonomousAccess.from(current, plans.orEmpty()), native,
+                        cities.values) { block, material -> world.canModify(current.owner, block, material) }
+                    CivsRules.expandFarmField(current, building.id)
+                } }.getOrElse { CompletableFuture.failedFuture(it) }
+                    .whenCompleteSync(tasks) { _, error -> finished(error) }
+            }
+        return true
     }
 
     private val decorationCursor = linkedMapOf<UUID, Int>()

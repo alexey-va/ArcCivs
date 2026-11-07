@@ -33,7 +33,9 @@ internal fun civsPlanBoardLayoutKey(city: Settlement): String {
     fun building(value: CivBuilding) {
         field(value.id); field(value.type); field(value.level); field(value.anchor); field(value.rotation)
         field(value.schematicId); field(value.bounds); field(value.entrance); field(value.phase)
-        field(value.control); field(value.transit.orEmpty().size)
+        field(value.control)
+        if (value.farmFieldVersion != null) { field("farm-field"); field(value.farmFieldVersion) }
+        field(value.transit.orEmpty().size)
         value.transit.orEmpty().forEach(::field)
     }
     field(city.id); field(city.name); field(city.worldId); field(city.center); field(city.radius)

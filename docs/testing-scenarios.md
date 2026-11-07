@@ -3,6 +3,24 @@
 Run the commands below from the `ArcCivs` repository root. These commands use
 Gradle's JUnit class filter and do not activate the opt-in private replays.
 
+## One named Kotest case
+
+Select the spec class through Gradle and the case through the lowercase engine
+environment filter. For example:
+
+```sh
+kotest_filter_tests='*medievaloak legacy miner physically migrates V3 step83 and completes its first current level' \
+  ./gradlew test --tests 'ru.arc.civs.CivsSpatialWorkReviewTest'
+```
+
+The environment key is lowercase: the engine replaces dots in
+`kotest.filter.tests` with underscores without changing case. A Gradle selector
+containing the long case name can fail during Kotest descriptor discovery in
+this setup. Require the exact named case to execute and pass in its XML; other
+cases in the spec can be reported as skipped. Remove the environment filter
+for the complete suite. This route was verified against the published mine and
+the corrected candidate on 2026-11-07.
+
 ## Portable navigation and resident suites
 
 ```sh

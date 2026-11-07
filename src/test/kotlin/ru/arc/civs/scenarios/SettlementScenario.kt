@@ -177,6 +177,8 @@ internal class SettlementScenario private constructor(
     }
 
     fun complete(work: CivWorldWork): Settlement = await(observedCompletion(work)).also {
+        // The future schedules owner cleanup; drain that Bukkit callback before manually admitting another work.
+        tick()
         record("committed ${work.status} revision=${it.revision} stock=${it.stock}")
     }
 
