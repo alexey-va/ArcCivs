@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import org.bukkit.Material
 import java.util.UUID
 
 /** An inverse of one retained native earthwork write, never a new construction or resource receipt. */
@@ -42,6 +43,11 @@ internal fun civsAutonomousAccessRepairs(city: Settlement, plans: List<CivPlacem
             older.putIfAbsent(civsTerrainKey(feet.x, feet.z), building.id to feet)
         }
     }
-    if (repairs.size > 512) throw CivsRejection("autonomy-access-repair-budget")
-    return repairs.values.toList()
+    // Keep conflicting inverses ambiguous before excluding targets that cannot restore support.
+    val eligible = repairs.values.filter { repair ->
+        repair.cell.position.y != repair.standing.y - 1 ||
+            Material.matchMaterial(repair.cell.after.substringBefore('[')) in CivsTerrainPolicy.TREE_GROUND
+    }
+    if (eligible.size > 512) throw CivsRejection("autonomy-access-repair-budget")
+    return eligible
 }
