@@ -1550,6 +1550,69 @@ class CivsVillageSitesTest : FunSpec({
 })
 
 class CivsProspectiveVillageSurfaceTest : FunSpec({
+    test("coarse founding surveys retained sample chunks with cold terrain between them") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = CivsWorksiteWorldFixture("village-coarse").also(paper.server::addWorld)
+                val city = villageReference(world.uid).copy(radius = 96)
+                val samples = CivsVillageSiteScoring.samples(city.center)
+                val sampleChunks = samples.mapTo(linkedSetOf()) { PaperChunkKey(city.worldId, it.x shr 4, it.z shr 4) }
+                sampleChunks.size shouldBe 25
+                sampleChunks.forEach { world.loadChunk(it.x, it.z) }
+                val scheduler = TestTaskScheduler()
+                val tasks = LifecycleTaskScope(scheduler)
+                val demands = mutableListOf<CivsChunkDemand>()
+                CivsWorld(paper.createSimplePlugin("VillageCoarseTest"), tasks, nanoTime = { 0 }) { emptyList() }.use { access ->
+                    access.scanChunks = { owner, worldId, keys ->
+                        CivsChunkDemand(owner, worldId, keys, 0) { demand ->
+                            if (demand.keys.any { !world.isChunkLoaded(it.x, it.z) }) throw CivsRejection("chunk-unavailable")
+                            true
+                        }.also(demands::add)
+                    }
+                    val result = access.prospectiveHeightField(city, city.buildings.single(), samples)
+                    scheduler.tick()
+                    result.isDone shouldBe true
+                    val surface = result.join()
+                    surface.columns.keys shouldBe samples.mapTo(linkedSetOf()) { civsTerrainKey(it.x, it.z) }
+                    surface.columns.values.all { it.loaded && it.natural } shouldBe true
+                    demands.single().keys shouldBe sampleChunks
+                    demands.single().closed shouldBe true
+                    world.isChunkLoaded(1, 1) shouldBe false
+                }
+                tasks.close()
+            }
+        }
+    }
+
+    test("full founding surveys wait for the complete retained growth area") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = CivsWorksiteWorldFixture("village-full").also(paper.server::addWorld)
+                val city = villageReference(world.uid).copy(radius = 96)
+                CivsVillageSiteScoring.samples(city.center).forEach { world.loadChunk(it.x shr 4, it.z shr 4) }
+                val scheduler = TestTaskScheduler()
+                val tasks = LifecycleTaskScope(scheduler)
+                val demands = mutableListOf<CivsChunkDemand>()
+                CivsWorld(paper.createSimplePlugin("VillageFullTest"), tasks, nanoTime = { 0 }) { emptyList() }.use { access ->
+                    access.scanChunks = { owner, worldId, keys ->
+                        CivsChunkDemand(owner, worldId, keys, 0) { demand ->
+                            demand.keys.all { world.isChunkLoaded(it.x, it.z) }
+                        }.also(demands::add)
+                    }
+                    val result = access.prospectiveHeightField(city, city.buildings.single())
+                    scheduler.tick(3)
+                    result.isDone shouldBe false
+                    demands.single().keys shouldBe CivsChunkArea.of(city).keys()
+                    demands.single().closed shouldBe false
+                    world.isChunkLoaded(1, 1) shouldBe false
+                    result.cancel(false) shouldBe true
+                    demands.single().closed shouldBe true
+                }
+                tasks.close()
+            }
+        }
+    }
+
     test("an unpublished prospective town shares the scan budget and never loads unavailable terrain") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open().use { paper ->

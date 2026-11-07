@@ -106,16 +106,18 @@ class CivsWorld(
 
     /** Administrative discovery retains the same explicit bounded survey footprint until its result retires. */
     internal fun prospectiveHeightField(city: Settlement, envelope: CivBuilding,
-        columns: List<CivPosition>? = null): CompletableFuture<CivTerrainSurface> =
-        admit(columns.orEmpty(), if (columns == null) surveyArea(city) else null) {
-        requireCivs(city.autonomy != null && city.buildings.singleOrNull()?.id == envelope.id &&
-            envelope.type == BuildingType.TOWN_HALL && envelope.level == 1, "invalid-building")
-        columns?.let { requested ->
-            requireCivs(requested.size in 1..CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS &&
-                requested.map { it.x to it.z }.distinct().size == requested.size &&
-                requested.all { city.contains(it.x, it.z) }, "autonomy-search-budget")
+        columns: List<CivPosition>? = null): CompletableFuture<CivTerrainSurface> {
+        val samples = columns?.toList()
+        return admit(area = if (samples == null) surveyArea(city) else null, sampledColumns = samples) {
+            requireCivs(city.autonomy != null && city.buildings.singleOrNull()?.id == envelope.id &&
+                envelope.type == BuildingType.TOWN_HALL && envelope.level == 1, "invalid-building")
+            samples?.let { requested ->
+                requireCivs(requested.size in 1..CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS &&
+                    requested.map { it.x to it.z }.distinct().size == requested.size &&
+                    requested.all { city.contains(it.x, it.z) }, "autonomy-search-budget")
+            }
+            AutonomousHeightField(city, envelope, null, emptySet(), prospective = true, requested = samples)
         }
-        AutonomousHeightField(city, envelope, null, emptySet(), prospective = true, requested = columns?.toList())
     }
 
     internal fun captureTerraform(city: Settlement, draft: CivTerraformDraft, executor: Executor,
@@ -296,18 +298,23 @@ class CivsWorld(
     private fun surveyArea(city: Settlement): CivsChunkArea = CivsChunkArea.of(city.copy(radius = city.radius.coerceIn(0, 127)))
 
     private fun <T> admit(extra: Iterable<CivPosition> = emptyList(), area: CivsChunkArea? = null,
-        create: () -> CivsWorldScan<T>): CompletableFuture<T> = synchronized(monitor) {
+        sampledColumns: List<CivPosition>? = null, create: () -> CivsWorldScan<T>): CompletableFuture<T> = synchronized(monitor) {
         if (closed || timer == null) return@synchronized CompletableFuture.failedFuture(CivsRejection("world-closed"))
         pending.removeIf { it.future.isDone }
         if (pending.size >= MAX_SCANS) return@synchronized CompletableFuture.failedFuture(CivsRejection("world-busy"))
         try {
             create().also { scan ->
-                val building = scan.building
-                var footprint = requireNotNull(CivsChunkArea.around(scan.worldId,
-                    listOfNotNull(building.bounds.min, building.bounds.max, building.entrance, building.control)))
-                CivsChunkArea.around(scan.worldId, extra)?.let { footprint = footprint.union(it) }
-                area?.let { footprint = footprint.union(it) }
-                scanFootprints[scan] = footprint.keys()
+                // Coarse founding reads only the columns its loader already retained.
+                scanFootprints[scan] = sampledColumns?.mapTo(linkedSetOf()) {
+                    PaperChunkKey(scan.worldId, it.x shr 4, it.z shr 4)
+                } ?: run {
+                    val building = scan.building
+                    var footprint = requireNotNull(CivsChunkArea.around(scan.worldId,
+                        listOfNotNull(building.bounds.min, building.bounds.max, building.entrance, building.control)))
+                    CivsChunkArea.around(scan.worldId, extra)?.let { footprint = footprint.union(it) }
+                    area?.let { footprint = footprint.union(it) }
+                    footprint.keys()
+                }
                 pending += scan
                 // Keep native ownership during detached planning and the final context check.
                 // Cancellation may arrive off-thread; close only marks demand for the loader's next pulse.
