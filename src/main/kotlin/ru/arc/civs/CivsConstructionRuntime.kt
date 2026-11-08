@@ -11,6 +11,7 @@ import ru.arc.paper.api.ArcSchematicFailure
 import ru.arc.paper.api.ArcSchematicOperation
 import ru.arc.paper.api.ArcSchematicSnapshot
 import java.util.UUID
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 import java.util.logging.Level
@@ -54,6 +55,13 @@ internal class CivsConstructionRuntime(
         val capturedCells = plan.blocks.associateBy(CivPlanBlock::position)
         var repairing = false
         var feedbackFailed = false
+        var builderWait: BuilderWait? = null
+        var yieldingForBuilder = false
+    }
+    private data class BuilderWait(val orderId: UUID, val batch: Int, val since: Long) {
+        fun matches(order: CivConstruction?): Boolean =
+            order?.id == orderId && order.workDone == batch &&
+                (order.payment == null || order.payment.reservedBatch == batch)
     }
     private data class ConstructionFocus(val orderId: UUID, val position: CivPosition, val tick: Int)
     private data class ConstructionSupplyNeed(val orderId: UUID, val batch: Int, val materials: Map<String, Long>)
@@ -68,10 +76,12 @@ internal class CivsConstructionRuntime(
     private val constructionSites = mutableMapOf<UUID, CompletableFuture<CivConstructionSite>>()
     private val operations = mutableMapOf<UUID, ArcSchematicOperation>()
     private val terraformOperations = mutableMapOf<UUID, CompletableFuture<Unit>>()
+    private val yieldedBuilderWaits = mutableMapOf<UUID, BuilderWait>()
     private val constructionRetryAfter = mutableMapOf<UUID, Long>()
     private val legacyPlacementRetries = mutableSetOf<UUID>()
     private var nextMaterialCheckAt = 0L
     private var materialCursor = 0
+    private var placementCursor = 0
     private val queueFailures = mutableMapOf<UUID, Pair<UUID, String>>()
     private class QueueAdmission(val buildingId: UUID)
     private val queuedAdmissions = mutableMapOf<UUID, QueueAdmission>()
@@ -105,6 +115,7 @@ internal class CivsConstructionRuntime(
         constructionFocus.entries.removeIf { (cityId, focus) -> cities[cityId]?.construction?.id != focus.orderId }
         constructionSupplyNeeds.entries.removeIf { (cityId, needs) -> cities[cityId]?.construction?.id != needs.orderId }
         constructionSites.keys.retainAll(cities.values.mapNotNull { it.construction?.id }.toSet())
+        yieldedBuilderWaits.entries.removeIf { (cityId, wait) -> !wait.matches(cities[cityId]?.construction) }
     }
 
     fun debug(city: Settlement): Map<String, Any?> {
@@ -112,6 +123,7 @@ internal class CivsConstructionRuntime(
         return mapOf("city" to city.id, "revision" to city.revision, "busy" to (city.id in busy),
             "unhealthy" to (city.id in unhealthy), "placing" to (city.id in placing),
             "operation_pending" to (city.id in operations || city.id in terraformOperations),
+            "yielded_for_builder" to (city.id !in placing && yieldedBuilderWaits[city.id]?.matches(order) == true),
             "terrain_batch" to (placementAccess[city.id]?.batch?.terrainStart != null),
             "native_run" to placementRuns[city.id],
             "focus" to constructionFocus[city.id]?.position,
@@ -153,6 +165,7 @@ internal class CivsConstructionRuntime(
 
     fun stop(cityId: UUID): CompletableFuture<Unit> {
         val operation = operations[cityId]
+        yieldedBuilderWaits.remove(cityId)
         releasePlacement(cityId) // Fence every outstanding prepare/revalidate/paste callback before cancelling native work.
         if (operation == null) return CompletableFuture.completedFuture(Unit)
         operation.cancel()
@@ -206,6 +219,7 @@ internal class CivsConstructionRuntime(
 
     fun pulse() {
         if (!ready()) return
+        yieldBuilderWaits()
         if (placing.size < 2 && now() >= nextMaterialCheckAt) {
             nextMaterialCheckAt = now() + 5_000L
             val waiting = cities.values.filter { city ->
@@ -223,8 +237,12 @@ internal class CivsConstructionRuntime(
                 startPlacement(city, order)
             }
         }
-        for (city in cities.values.toList()) {
+        val candidates = cities.values.toList()
+        val start = placementCursor
+        for (offset in candidates.indices) {
             if (placing.size >= 2) break
+            val index = (start + offset).mod(candidates.size)
+            val city = candidates[index]
             val order = city.construction ?: continue
             if (city.autonomy?.paused == true) continue
             if (!autonomousAccessReady(city)) continue
@@ -243,8 +261,56 @@ internal class CivsConstructionRuntime(
                 continue
             }
             if (order.phase !in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING)) continue
+            if (yieldedBuilderWaits[city.id]?.matches(order) == true && !citizens.constructionReady(city.id, order.id)) {
+                constructionRetryAfter[city.id] = now() + 5_000L
+                continue
+            }
+            placementCursor = (index + 1).mod(candidates.size)
             startPlacement(city, order)
         }
+    }
+
+    /** Observe absence through the same native gate that authorizes work. */
+    private fun builderReady(cityId: UUID, order: CivConstruction, access: PlacementAccess): Boolean {
+        if (access.yieldingForBuilder) return false
+        val arrived = citizens.constructionReady(cityId, order.id)
+        if (arrived) access.builderWait = null
+        else if (access.builderWait == null) access.builderWait = BuilderWait(order.id, order.workDone, now())
+        return arrived
+    }
+
+    private fun yieldBuilderWaits() {
+        val time = now()
+        for ((cityId, access) in placementAccess.toList()) {
+            val wait = access.builderWait ?: continue
+            if (access.yieldingForBuilder || time - wait.since < BUILDER_WAIT_MILLIS) continue
+            val order = cities[cityId]?.construction
+            if (order?.phase != ConstructionPhase.PLACING || !wait.matches(order)) continue
+            if (citizens.constructionReady(cityId, wait.orderId)) {
+                access.builderWait = null
+                continue
+            }
+            val operation = operations[cityId]
+            val terrain = terraformOperations[cityId]
+            if (operation?.completion?.isDone == true || terrain?.isDone == true) continue
+            // The exact operation retains its slot and access until its native completion callback.
+            access.yieldingForBuilder = true
+            val requested = runCatching { operation?.cancel() ?: terrain?.cancel(false) ?: false }
+                .onFailure { log("yield construction ${wait.orderId}", it, cityId) }.getOrDefault(false)
+            if (!requested) {
+                access.yieldingForBuilder = false
+                access.builderWait = null
+            }
+        }
+    }
+
+    private fun releaseForBuilder(cityId: UUID, access: PlacementAccess) {
+        val wait = requireNotNull(access.builderWait)
+        yieldedBuilderWaits[cityId] = wait
+        releasePlacement(cityId)
+        CivsDiagnostics.event("construction_yielded_for_builder", "city" to cityId, "order" to wait.orderId,
+            "batch" to wait.batch, "terrain" to (access.batch?.terrainStart != null))
+        tasks.runLater(1) { pulse() }
     }
 
     /** Read once per order off-thread; retain only geometry needed to keep a builder outside future writes. */
@@ -462,16 +528,21 @@ internal class CivsConstructionRuntime(
                         constructionFocus[cityId]?.let {
                             it.orderId != orderId || Bukkit.getCurrentTick() - it.tick >= liveTicks
                         } != false &&
-                        citizens.constructionReady(cityId, orderId)
+                        builderReady(cityId, order, access)
                 }, intervalTicks)
             operations[cityId] = operation
             operation.completion.whenCompleteSync(tasks) { mutation, failure ->
-                if (placementAccess[cityId] !== access) return@whenCompleteSync
-                operations.remove(cityId)
+                if (placementAccess[cityId] !== access || !operations.remove(cityId, operation)) return@whenCompleteSync
                 CivsDiagnostics.event("construction_part_finished", "city" to cityId, "order" to orderId,
                     "batch" to order.workDone, "part" to partIndex + 1, "changed" to mutation?.changed,
                     "skipped" to mutation?.skipped, "cancelled" to mutation?.cancelled,
                     "reason" to CivsDiagnostics.rejection(failure)?.reason)
+                if (failure == null && mutation?.cancelled == true && access.yieldingForBuilder) {
+                    releaseForBuilder(cityId, access)
+                    return@whenCompleteSync
+                }
+                access.yieldingForBuilder = false
+                access.builderWait = null
                 if (failure != null || mutation?.cancelled != false) {
                     placementFailed(cityId, orderId, failure ?: CivsRejection("placement-cancelled"))
                 } else if (partIndex + 1 < parts.size) {
@@ -495,7 +566,7 @@ internal class CivsConstructionRuntime(
                 cities[city.id]?.autonomy?.paused != true &&
                 cities[city.id]?.construction?.let { it.id == order.id && it.workDone == order.workDone } == true &&
                 (lastPlacedTick == Int.MIN_VALUE || Bukkit.getCurrentTick() - lastPlacedTick >= 1) &&
-                (automaticPreparation || citizens.constructionReady(city.id, order.id))
+                (automaticPreparation || builderReady(city.id, order, access))
         }, { cell ->
             lastPlacedTick = Bukkit.getCurrentTick()
             if (cell.position in access.roadSurfaces) footTraffic.registerSurface(city.id, cell.position)
@@ -507,8 +578,12 @@ internal class CivsConstructionRuntime(
         })
         terraformOperations[city.id] = operation
         operation.whenCompleteSync(tasks) { _, failure ->
-            if (placementRuns[city.id] != run || placementAccess[city.id] !== access) return@whenCompleteSync
-            terraformOperations.remove(city.id)
+            if (placementRuns[city.id] != run || placementAccess[city.id] !== access ||
+                !terraformOperations.remove(city.id, operation)) return@whenCompleteSync
+            if (failure is CancellationException && operation.isCancelled && access.yieldingForBuilder) {
+                releaseForBuilder(city.id, access)
+                return@whenCompleteSync
+            }
             if (failure != null) placementFailed(city.id, order.id, failure)
             else {
                 CivsDiagnostics.event("terraform_batch_applied", "city" to city.id, "order" to order.id,
@@ -652,6 +727,7 @@ internal class CivsConstructionRuntime(
         constructionFocus.clear()
         constructionSupplyNeeds.clear()
         constructionSites.clear()
+        yieldedBuilderWaits.clear()
         placementRuns.clear()
         placing.clear()
         operations.values.toList().forEach { it.cancel() }
@@ -664,4 +740,8 @@ internal class CivsConstructionRuntime(
     private fun now() = clock()
     private fun log(context: String, error: Throwable, cityId: UUID) =
         CivsDiagnostics.record(Level.WARNING, cityId, "ArcCivs could not $context", plugin.logger, error)
+
+    private companion object {
+        const val BUILDER_WAIT_MILLIS = 30_000L
+    }
 }
