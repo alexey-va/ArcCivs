@@ -450,6 +450,38 @@ class CivsAutonomousTerraformTest : FunSpec({
         withClue(searches.single()) { (searches.single().expanded <= 4_096) shouldBe true }
     }
 
+    test("housing can borrow a paid road at its grade without raising its shoulder or building over it") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val option = CivTerraformOption(building, 0)
+        val surface = terraceSurface { _, _ -> 64 }
+        val baseline = CivsAutonomousTerraform.draft(city, option, surface)
+        val lane = baseline.route[4]
+        val shoulder = CivsAutonomousGeometry.approach(building).first {
+            it !in baseline.route && !CivsAutonomousGeometry.horizontalContains(building.bounds, it)
+        }
+        val road = setOf(civsTerrainKey(lane.x, lane.z), civsTerrainKey(shoulder.x, shoulder.z))
+        val lower = surface.copy(columns = surface.columns + (civsTerrainKey(shoulder.x, shoulder.z) to
+            CivTerrainSurfaceColumn(62, natural = true)))
+        val draft = CivsAutonomousTerraform.draft(city, option, lower, reservedRoute = baseline.route, protectedRoadColumns = road)
+        draft.route shouldBe baseline.route
+        draft.columns.single { it.x == lane.x && it.z == lane.z }.preserve shouldBe true
+        draft.columns.any { it.x == shoulder.x && it.z == shoulder.z } shouldBe false
+        val capture = terraceCapture(draft, lower)
+        CivsAutonomousTerraform.materialize(draft, capture).blocks.any {
+            civsTerrainKey(it.position.x, it.position.z) in road
+        } shouldBe false
+        val obstruction = lane.copy(y = lane.y + 1)
+        shouldThrow<CivsRejection> {
+            CivsAutonomousTerraform.materialize(draft, capture + (obstruction to
+                CivTerraformCell(obstruction, "minecraft:stone", safe = false, solid = true, passable = false)))
+        }.reason shouldBe "autonomy-no-path"
+        shouldThrow<CivsRejection> {
+            CivsAutonomousTerraform.draft(city, option, lower, reservedRoute = baseline.route,
+                protectedRoadColumns = road + civsTerrainKey(building.bounds.min.x, building.bounds.min.z))
+        }.reason shouldBe "building-overlap"
+    }
+
     test("collision heavy translated height fields preserve the exact route and search counters including zero floors") {
         val fixture = mildBarrierFixture()
         val baselineSearches = mutableListOf<CivRouteSearchStats>()

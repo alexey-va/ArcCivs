@@ -10,6 +10,20 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     val reservedFortificationPorts: List<CivBox> = emptyList(),
     val paidHallLeadOut: List<CivPosition> = emptyList(),
     val wallApproachWrites: Map<UUID, Set<Long>> = emptyMap()) {
+    /** Preserve the full public surface when a civic parcel must borrow an existing street. */
+    fun roadColumns(city: Settlement): Set<Long> = buildSet {
+        routes.values.forEach { addAll(CivsAutonomousTerraform.roadProfile(it).keys) }
+        // A missing older journal cannot license writing over the approach still in the
+        // adopted plan. This reserves columns only; it supplies no grade or collision proof.
+        val plan = CivsSettlementPlans.current(city)
+        city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.id !in routes }.forEach { building ->
+            plan?.routes?.get(building.id.toString())?.let { addAll(CivsAutonomousTerraform.roadProfile(it).keys) }
+        }
+        infrastructure.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }.forEach { piece ->
+            piece.transit.forEach { add(civsTerrainKey(it.x, it.z)) }
+        }
+    }
+
     /** Earlier roads win when an older release recorded incompatible heights at the same column. */
     fun standing(city: Settlement, exceptBuildingId: UUID): Map<Long, CivPosition> = buildMap {
         require(city.buildings.size <= CivsRules.MAX_SITES)

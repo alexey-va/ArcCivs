@@ -94,6 +94,8 @@ object CivsAutonomy {
         if (physical && hallReady) city.buildings.firstOrNull {
             it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.SITE
         }?.let { return goal(it) }
+        val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
+        var hallUpgrade: CivAutonomyGoal? = null
         for (type in baseProfile) {
             val existing = city.buildings.firstOrNull { it.type == type }
             if (existing == null) {
@@ -102,11 +104,20 @@ object CivsAutonomy {
                 return goal(city, type, 1, null)
             }
             if (existing.phase == BuildingPhase.SITE) return goal(existing)
+            if (type == BuildingType.HOUSE && existing.phase == BuildingPhase.ACTIVE) {
+                if (hall.phase == BuildingPhase.ACTIVE && hall.level == 1 && maximumLevel(hall) >= 2) {
+                    val upgrade = goal(hall)
+                    if (upgrade.ready) return upgrade
+                    hallUpgrade = upgrade
+                }
+                if (hall.level >= 2) city.buildings.asSequence()
+                    .filter { needsFamilyHomeUpgrade(city, it) && maximumLevel(it) > it.level }
+                    .map { goal(it) }.firstOrNull { it.ready }?.let { return it }
+            }
         }
         if (city.buildings.count { it.type == BuildingType.HOUSE } < 3 && CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
             return goal(city, BuildingType.HOUSE, 1, null)
-        val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
-        if (hall.level < 2 && maximumLevel(hall) >= 2) return goal(city, BuildingType.TOWN_HALL, 2, hall.id)
+        hallUpgrade?.let { return it }
         for (type in upgrades) {
             val building = city.buildings.firstOrNull { it.type == type && it.level < 2 && maximumLevel(it) >= 2 } ?: continue
             return goal(city, type, 2, building.id)
@@ -199,7 +210,32 @@ object CivsAutonomy {
         return CivAutonomyGoal(type, level, id, price, missing)
     }
 
+    private fun needsFamilyHomeUpgrade(city: Settlement, home: CivBuilding): Boolean {
+        val population = city.workers.size
+        if (home.type != BuildingType.HOUSE || home.phase != BuildingPhase.ACTIVE || home.level >= city.level() ||
+            population !in CivsPopulation.IMMIGRANT_POPULATION until CivsRules.residentLimit(city) ||
+            city.workers.count(CivsResidents::isChild) >= CivsPopulation.NURSERY_PLACES ||
+            city.families.orEmpty().none { it.homeId == home.id }) return false
+        val beds = CivsPopulation.houseBeds(home)
+        val upgradedBeds = CivsPopulation.houseBeds(home.copy(level = home.level + 1))
+        return city.workers.count { it.homeId == home.id } in beds until upgradedBeds &&
+            population < CivsRules.beds(city) + upgradedBeds - beds
+    }
+
     internal fun infrastructureDue(city: Settlement, ordinary: CivAutonomyGoal?): Boolean {
+        if (ordinary?.ready == true) {
+            val housingPriority = when (ordinary.type) {
+                BuildingType.HOUSE -> if (ordinary.targetLevel == 1)
+                    city.buildings.none { it.type == BuildingType.HOUSE && it.phase == BuildingPhase.ACTIVE }
+                else ordinary.buildingId?.let(city::building)?.let {
+                    ordinary.targetLevel == it.level + 1 && needsFamilyHomeUpgrade(city, it)
+                } == true
+                BuildingType.TOWN_HALL -> ordinary.targetLevel == 2 && city.level() == 1 &&
+                    city.buildings.any { it.type == BuildingType.HOUSE && it.phase == BuildingPhase.ACTIVE }
+                else -> false
+            }
+            if (housingPriority) return false
+        }
         val adopted = CivsSettlementPlans.current(city)
         return pendingFortifications(city).isEmpty() && city.buildings.count { it.type.isInfrastructure } < CivsRules.MAX_INFRASTRUCTURE &&
             (ordinary == null || ordinary.targetLevel > 1 || adopted != null &&

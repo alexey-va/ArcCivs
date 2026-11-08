@@ -133,15 +133,16 @@ class CivsAutonomyTest : FunSpec({
     }
     test("the infrastructure cap leaves ordinary village upgrades eligible") {
         val base = autonomyCity().copy(buildings = (CivsAutonomy.baseProfile + listOf(BuildingType.HOUSE, BuildingType.HOUSE))
-            .map { autonomyBuilding(it).copy(phase = BuildingPhase.ACTIVE) })
+            .map { autonomyBuilding(it).copy(phase = BuildingPhase.ACTIVE) }, stock = CivsAutonomy.cost(BuildingType.TOWN_HALL, 2))
         val upgrade = requireNotNull(CivsAutonomy.nextGoal(base))
         upgrade.type shouldBe BuildingType.TOWN_HALL
         upgrade.targetLevel shouldBe 2
-        CivsAutonomy.infrastructureDue(base, upgrade) shouldBe true
+        CivsAutonomy.infrastructureDue(base, upgrade) shouldBe false
+        CivsAutonomy.infrastructureDue(base, upgrade.copy(missing = Stock(1))) shouldBe true
         val capped = base.copy(buildings = base.buildings + List(CivsRules.MAX_INFRASTRUCTURE) {
             autonomyBuilding(BuildingType.ROAD).copy(phase = BuildingPhase.ACTIVE)
         })
-        CivsAutonomy.infrastructureDue(capped, CivsAutonomy.nextGoal(capped)) shouldBe false
+        CivsAutonomy.infrastructureDue(capped, null) shouldBe false
         CivsAutonomy.nextGoal(capped) shouldBe upgrade
     }
 
@@ -178,16 +179,65 @@ class CivsAutonomyTest : FunSpec({
         queued.constructionQueue shouldBe listOf(gate.id)
     }
 
-    test("the plan board follows the first house and existing boards are never duplicated") {
+    test("the first finished house unlocks hall two before amenities and preserves accepted orders") {
         val beforeBoard = CivsAutonomy.baseProfile.takeWhile { it != BuildingType.PLAN_BOARD }
             .map { autonomyBuilding(it, phase = BuildingPhase.ACTIVE) }
-        val city = autonomyCity().copy(buildings = beforeBoard, stock = Stock(4, 20))
-        CivsAutonomy.nextGoal(city) shouldBe CivAutonomyGoal(BuildingType.PLAN_BOARD, 1, null, Stock(12, 8), Stock(8))
+        val hall = beforeBoard.single { it.type == BuildingType.TOWN_HALL }
+        val house = beforeBoard.single { it.type == BuildingType.HOUSE }
+        val city = autonomyCity().copy(buildings = beforeBoard, stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+        CivsAutonomy.nextGoal(city) shouldBe CivAutonomyGoal(BuildingType.TOWN_HALL, 2, hall.id, Stock(), Stock())
+        CivsAutonomy.nextGoal(city.copy(buildings = beforeBoard.filterNot { it.type == BuildingType.FARM }))?.type shouldBe BuildingType.FARM
+        val houseSite = city.copy(buildings = beforeBoard.map { if (it.id == house.id) it.copy(phase = BuildingPhase.SITE) else it })
+        CivsAutonomy.nextGoal(houseSite)?.buildingId shouldBe house.id
+        CivsAutonomy.nextGoal(city) { if (it.id == hall.id) 1 else it.type.maxLevel }?.type shouldBe BuildingType.PLAN_BOARD
+        val legacy = city.copy(inventory = null, stock = Stock(4, 20))
+        CivsAutonomy.nextGoal(legacy) shouldBe CivAutonomyGoal(BuildingType.PLAN_BOARD, 1, null, Stock(12, 8), Stock(8))
         val board = autonomyBuilding(BuildingType.PLAN_BOARD)
         val queued = city.copy(buildings = city.buildings + board, constructionQueue = listOf(board.id))
         CivsAutonomy.nextGoal(queued)?.buildingId shouldBe board.id
-        val complete = city.copy(buildings = city.buildings + board.copy(phase = BuildingPhase.ACTIVE))
+        val hallTwo = city.copy(buildings = city.buildings.map { if (it.id == hall.id) it.copy(level = 2) else it })
+        CivsAutonomy.nextGoal(hallTwo)?.type shouldBe BuildingType.PLAN_BOARD
+        val complete = hallTwo.copy(buildings = hallTwo.buildings + board.copy(phase = BuildingPhase.ACTIVE))
         CivsAutonomy.nextGoal(complete)?.type shouldBe BuildingType.TAVERN
+    }
+
+    test("a full family home can grow before the next parcel when a child can use the added bed") {
+        val core = CivsAutonomy.baseProfile.map { type ->
+            autonomyBuilding(type, if (type == BuildingType.TOWN_HALL) 2 else 1, BuildingPhase.ACTIVE)
+        }
+        val first = core.single { it.type == BuildingType.HOUSE }
+        val second = autonomyBuilding(BuildingType.HOUSE, phase = BuildingPhase.ACTIVE, occurrence = 1)
+        val city = autonomyImmigrants(autonomyCity()).let { founding ->
+            val homes = listOf(first, second)
+            val families = homes.mapIndexed { index, home ->
+                CivFamily(founding.workers[index * 2].id, founding.workers[index * 2 + 1].id, home.id, 0)
+            }
+            val parents = founding.workers.mapIndexed { index, worker ->
+                if (index < 4) worker.copy(homeId = homes[index / 2].id) else worker
+            }
+            val children = families.mapIndexed { index, family ->
+                CivWorker(UUID(3, index.toLong()), "Child $index", null, homeId = family.homeId, childMinutes = 0,
+                    parentIds = setOf(family.firstParentId, family.secondParentId))
+            }
+            CivsRules.validate(founding.copy(buildings = core + second, workers = parents + children, families = families,
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+        }
+        val upgrade = CivAutonomyGoal(BuildingType.HOUSE, 2, first.id, Stock(), Stock())
+        CivsAutonomy.nextGoal(city) shouldBe upgrade
+        CivsAutonomy.infrastructureDue(city, upgrade) shouldBe false
+        CivsAutonomy.infrastructureDue(city, upgrade.copy(missing = Stock(1))) shouldBe true
+        CivsAutonomy.nextGoal(city) { if (it.id == first.id) 1 else it.type.maxLevel } shouldBe upgrade.copy(buildingId = second.id)
+        val third = CivAutonomyGoal(BuildingType.HOUSE, 1, null, Stock(), Stock())
+        CivsAutonomy.nextGoal(city) { if (it.type == BuildingType.HOUSE) 1 else it.type.maxLevel } shouldBe third
+        CivsAutonomy.nextGoal(city.copy(families = null)) shouldBe third
+        val nurseryFull = city.copy(workers = city.workers + List(2) { index ->
+            CivWorker(UUID(4, index.toLong()), "Nursery $index", null, childMinutes = 0)
+        })
+        CivsAutonomy.nextGoal(nurseryFull) shouldBe third
+        val townFull = city.copy(workers = city.workers + List(5) { index ->
+            CivWorker(UUID(5, index.toLong()), "Resident $index", null)
+        })
+        CivsAutonomy.nextGoal(townFull) shouldBe third
     }
 
     test("a full established village without a board still advances upgrades and infrastructure") {
@@ -201,19 +251,21 @@ class CivsAutonomyTest : FunSpec({
         val goal = requireNotNull(CivsAutonomy.nextGoal(city))
         goal.type shouldBe BuildingType.TOWN_HALL
         goal.targetLevel shouldBe 2
-        CivsAutonomy.infrastructureDue(city, goal) shouldBe true
+        CivsAutonomy.infrastructureDue(city, null) shouldBe true
     }
 
     test("the next-plan view projects only the accepted current construction without spending or mutating") {
         val beforeHouse = CivsAutonomy.baseProfile.takeWhile { it != BuildingType.HOUSE }
             .map { autonomyBuilding(it, phase = BuildingPhase.ACTIVE) }
+        val hall = beforeHouse.single { it.type == BuildingType.TOWN_HALL }
+        val upgradeCost = CivsAutonomy.cost(BuildingType.TOWN_HALL, 2)
         val house = autonomyBuilding(BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING)
-        val city = autonomyCity().copy(buildings = beforeHouse + house, stock = Stock(4, 20),
+        val city = autonomyCity().copy(buildings = beforeHouse + house, stock = upgradeCost,
             construction = autonomyOrder(house, 65), autonomy = CivAutonomy(paused = true))
         val unchanged = autonomyRoundtrip(city)
         CivsAutonomy.nextGoal(city) shouldBe null
         CivsAutonomy.nextGoalAfterCurrent(city) shouldBe
-            CivAutonomyGoal(BuildingType.PLAN_BOARD, 1, null, Stock(12, 8), Stock(8))
+            CivAutonomyGoal(BuildingType.TOWN_HALL, 2, hall.id, upgradeCost, Stock())
         city shouldBe unchanged
         CivsAutonomy.nextGoalAfterCurrent(city.copy(autonomy = null)) shouldBe null
         CivsAutonomy.nextGoalAfterCurrent(city.copy(pendingDeletion = CivDeletion(null))) shouldBe null
@@ -588,7 +640,7 @@ class CivsAutonomyTest : FunSpec({
             city = CivsAutonomy.activeMinute(city)
         }
         (minutes < 1_000) shouldBe true
-        completed.take(CivsAutonomy.baseProfile.size).map { it.first } shouldBe CivsAutonomy.baseProfile
+        completed.filter { it.second == 1 }.take(CivsAutonomy.baseProfile.size).map { it.first } shouldBe CivsAutonomy.baseProfile
         completed.size shouldBe 23
         CivsAutonomy.nextGoal(city)!!.type shouldBe BuildingType.UNIVERSITY
         CivsAutonomy.nextGoal(city)!!.targetLevel shouldBe 1

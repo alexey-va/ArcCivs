@@ -374,6 +374,11 @@ internal class CivsAutonomousPlacement(
         @Volatile var selected: CivBuilding? = null
         private lateinit var surface: CivTerrainSurface
         private var access = CivAutonomousAccess()
+        private val protectedRoadColumns by lazy {
+            val deferred = (adopted ?: initialPlan)?.deferredPerimeter
+            if (deferred?.stage == CivsSettlementPlans.HOUSING_PERIMETER && deferred.plotId == buildingId)
+                access.roadColumns(nativeCity) else emptySet()
+        }
         private var pieces = emptyMap<UUID, CivSettlementPiece>()
         private var templates: Pair<CivBuilding, CivBuilding>? = null
         private var fortificationTemplate: CivFortificationTemplate? = null
@@ -704,7 +709,8 @@ internal class CivsAutonomousPlacement(
                     else frame().wallObstacles) + futureObstacles,
                 infrastructureFloors, waterFoundations = piece?.waterFoundations.orEmpty(),
                 reservedRoute = paidApproach?.route ?: reservedRoute,
-                preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) })
+                preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) },
+                protectedRoadColumns = protectedRoadColumns)
                     .copy(requiredGrass = piece?.requiredGrass.orEmpty()) }
             catch (failure: RuntimeException) { retryApproach(failure); return }
             phase = "earthworks"
@@ -772,7 +778,7 @@ internal class CivsAutonomousPlacement(
             val standing = hinted.standing(virtual, buildingId)
             val actual = CivsAutonomousTerraform.draft(city, option, surface, access,
                 intent.walls + otherPlots.map { it.envelope }, reservedRoute = planned.route, preferredRoads = roads,
-                reservedShoulders = standing.keys)
+                reservedShoulders = standing.keys, protectedRoadColumns = protectedRoadColumns)
             if (actual.columns.any { column -> standing[civsTerrainKey(column.x, column.z)]?.let {
                     column.groundY != it.y - 1
                 } == true }) throw CivsRejection("autonomy-no-path", mapOf("stage" to "retained-grade"))

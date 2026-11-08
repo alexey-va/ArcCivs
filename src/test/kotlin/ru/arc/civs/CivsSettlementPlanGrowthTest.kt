@@ -133,6 +133,45 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         CivsSettlementPlans.next(city, BuildingType.WAREHOUSE) shouldBe null
     }
 
+    test("a blocked perimeter can defer after a paid gate and still admit the next house") {
+        val (base, warehousePlan, _) = deferredWarehouseFixture()
+        val plan = warehousePlan.copy(halfWidth = 72)
+        val warehouse = plan.plots.single { it.building.type == BuildingType.WAREHOUSE }.building
+        val gateBounds = plan.gates.first()
+        val gateId = UUID(94, 900)
+        val gate = CivSettlementPiece(gateId, BuildingType.GATE, gateBounds, gateBounds.min, emptyList())
+        val city = base.copy(buildings = base.buildings + warehouse.copy(phase = BuildingPhase.ACTIVE) +
+            CivsInfrastructure.building(gate).copy(phase = BuildingPhase.ACTIVE),
+            inventory = CivInventory(CivStorageMode.PHYSICAL),
+            autonomy = requireNotNull(base.autonomy).copy(layoutHalfWidth = 72, plan = plan))
+        val access = CivAutonomousAccess(plan.routes.mapKeys { UUID.fromString(it.key) }, listOf(gate))
+        val withoutJournal = access.copy(routes = access.routes - warehouse.id)
+        withoutJournal.roadColumns(city) shouldBe access.roadColumns(city)
+        val surface = settlementPlanSurface(city)
+        val templates = settlementPlanTemplates()
+        val profile = CivsSettlementGrowth.profile(city)
+        profile.last() shouldBe BuildingType.HOUSE
+        mockkObject(CivsSettlementPlans)
+        try {
+            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } throws
+                CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure", "infrastructure-slope" to "1"))
+            val grown = CivsSettlementPlans.prepareGrowth(city, templates, surface, access, profile)
+            val house = grown.plots.single { it.building.type == BuildingType.HOUSE }
+            grown.deferredPerimeter?.plotId shouldBe house.building.id
+            grown.deferredPerimeter?.stage shouldBe CivsSettlementPlans.HOUSING_PERIMETER
+            access.routes.forEach { (id, route) -> grown.routes[id.toString()] shouldBe route }
+            CivsAutonomousGeometry.overlaps(house.envelope, gate.bounds) shouldBe false
+            val route = grown.routes.getValue(house.building.id.toString())
+            route.last() shouldBe house.building.entrance
+            val unavailable = surface.copy(columns = surface.columns - surface.columns.keys.first())
+            shouldThrow<CivsRejection> {
+                CivsSettlementPlans.prepareGrowth(city, templates, unavailable, access, profile)
+            }.reason shouldBe "autonomy-layout-obstructed"
+        } finally {
+            unmockkObject(CivsSettlementPlans)
+        }
+    }
+
     test("accepted orders and FIFO entries defer extension and a failed search keeps all old intent") {
         val before = legacy
         val plot = requireNotNull(CivsSettlementPlans.next(before, BuildingType.HOUSE))

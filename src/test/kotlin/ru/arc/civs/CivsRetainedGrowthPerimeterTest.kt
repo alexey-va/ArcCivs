@@ -95,10 +95,10 @@ class CivsRetainedGrowthPerimeterTest : FunSpec({
         grown.gates shouldBe fixture.plan.gates
     }
 
-    test("a retained farm requiring more than eight extra columns does not enlarge the territory") {
+    test("a retained farm requiring more than eight extra columns leaves the boundary unproved") {
         val fixture = retainedGrowthFixture(farmOnNextAxis = true, farmDepth = 9)
         fixture.assertCurrentQuarterFull()
-        fixture.refusesGrowth()
+        fixture.defersHousing()
         fixture.city.radius shouldBe 56
         fixture.city.autonomy!!.layoutHalfWidth shouldBe 24
     }
@@ -106,10 +106,11 @@ class CivsRetainedGrowthPerimeterTest : FunSpec({
     for (unloaded in listOf(true, false))
     test("the required outer wall refuses ${if (unloaded) "unloaded" else "unowned non-natural"} terrain") {
         val fixture = retainedGrowthFixture(farmOnNextAxis = true)
-        fixture.copy(surface = fixture.surface.copy(columns = fixture.surface.columns.toMutableMap().apply {
+        val blocked = fixture.copy(surface = fixture.surface.copy(columns = fixture.surface.columns.toMutableMap().apply {
             for (x in -33..33) put(civsTerrainKey(x, 38),
                 CivTerrainSurfaceColumn(64, natural = unloaded, loaded = !unloaded))
-        })).refusesGrowth()
+        }))
+        if (unloaded) blocked.refusesGrowth() else blocked.defersHousing()
     }
 
     test("an unavailable straight apron at both remaining exits cannot leave a gate hole") {
@@ -135,7 +136,7 @@ class CivsRetainedGrowthPerimeterTest : FunSpec({
         access.infrastructure.single { it.id == piece.id } shouldBe piece
         CivsRules.validate(city) shouldBe city
         fixture.copy(city = city, journals = journals, access = access,
-            surface = retainedGrowthSurface(city, access)).refusesGrowth()
+            surface = retainedGrowthSurface(city, access)).defersHousing()
     }
 
     test("a paid infrastructure approach cannot be ignored to squeeze two crossings through one gate") {
@@ -152,7 +153,7 @@ class CivsRetainedGrowthPerimeterTest : FunSpec({
         access.routes.size shouldBe fixture.access.routes.size + 1
         access.infrastructure shouldBe fixture.access.infrastructure
         fixture.copy(journals = journals, access = access,
-            surface = retainedGrowthSurface(fixture.city, access)).refusesGrowth()
+            surface = retainedGrowthSurface(fixture.city, access)).defersHousing()
     }
 
     test("growth retains an existing paid rising and falling route without flattening its grades") {
@@ -221,7 +222,7 @@ class CivsRetainedGrowthPerimeterTest : FunSpec({
         }
         failure.reason shouldBe "autonomy-layout-obstructed"
         failure.values["stage"] shouldBe "retained-growth-result"
-        fixture.refusesGrowth()
+        fixture.defersHousing()
     }
 })
 
@@ -233,6 +234,28 @@ private data class RetainedGrowthFixture(
     val journals: List<CivPlacementPlan>,
     val access: CivAutonomousAccess,
 ) {
+    fun defersHousing() {
+        val before = Gson().toJson(listOf(city, access, journals, surface))
+        val plan = CivsSettlementPlans.prepareGrowth(city, templates, surface, access, CivsSettlementGrowth.profile(city))
+        val house = plan.plots.single { it.building.type == BuildingType.HOUSE }
+        plan.deferredPerimeter?.stage shouldBe CivsSettlementPlans.HOUSING_PERIMETER
+        plan.deferredPerimeter?.plotId shouldBe house.building.id
+        val reserved = city.copy(buildings = city.buildings + house.building.copy(bounds = house.envelope),
+            autonomy = city.autonomy!!.copy(plan = plan, layoutHalfWidth = plan.halfWidth))
+        val routes = (access.routes.values + plan.routes.values).distinct()
+        val infrastructure = CivsSettlementLayout.infrastructure(reserved, CivsSettlementLayout.frame(reserved),
+            surface, routes, access.infrastructure, plan.routes.values.toList(), access.routes.values,
+            retainedAccess = access)
+        infrastructure.perimeterClosed shouldBe false
+        access.infrastructure.forEach { old -> infrastructure.pieces.single { it.id == old.id } shouldBe old }
+        val protected = access.roadColumns(city)
+        val approach = CivsAutonomousTerraform.draft(city, CivTerraformOption(house.building.copy(bounds = house.envelope), 0),
+            surface, access, plan.walls, reservedRoute = plan.routes.getValue(house.building.id.toString()),
+            protectedRoadColumns = protected)
+        approach.columns.none { !it.preserve && civsTerrainKey(it.x, it.z) in protected } shouldBe true
+        Gson().toJson(listOf(city, access, journals, surface)) shouldBe before
+    }
+
     fun refusesGrowth(): CivsRejection {
         val before = Gson().toJson(listOf(city, access, journals, surface))
         val failure = shouldThrow<CivsRejection> {

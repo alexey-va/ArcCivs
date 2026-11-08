@@ -235,6 +235,7 @@ internal object CivsAutonomousTerraform {
         infrastructureFloors: Map<Long, Int> = emptyMap(), reservedRoute: List<CivPosition>? = null,
         preferredRoads: Set<Long> = emptySet(), waterFoundations: List<CivWaterFoundation> = emptyList(),
         reservedShoulders: Set<Long> = emptySet(),
+        protectedRoadColumns: Set<Long> = emptySet(),
         inspectRoute: (CivRouteSearchStats) -> Unit = {}): CivTerraformDraft {
         val building = option.building
         if (!building.type.isInfrastructure && access.reservedFortificationPorts.any {
@@ -247,6 +248,9 @@ internal object CivsAutonomousTerraform {
                 infrastructureFloors[civsTerrainKey(f.x, f.z)] != f.floorY) throw CivsRejection("autonomy-terrain")
         }
         val standing = access.standing(city, building.id)
+        if (protectedRoadColumns.isNotEmpty() && (building.bounds.min.x..building.bounds.max.x).any { x ->
+                (building.bounds.min.z..building.bounds.max.z).any { z -> civsTerrainKey(x, z) in protectedRoadColumns }
+            }) throw CivsRejection("building-overlap")
         val preservedDirtPaths = buildMap<Long, Int> {
             access.routes.values.flatten().forEach { feet -> for (dx in -1..1) for (dz in -1..1) {
                 val x = feet.x + dx; val z = feet.z + dz
@@ -305,7 +309,10 @@ internal object CivsAutonomousTerraform {
             val pathFloor = preservedDirtPaths[key]?.takeIf {
                 if (building.type == BuildingType.GATE) abs(it.toLong() - ground) <= 1 else it == ground
             }
-            val retained = preserve || protected != null || pathFloor != null
+            val publicRoad = key in protectedRoadColumns
+            if (publicRoad && protected == null && (native.groundY != ground || native.topY != ground)) throw CivsRejection("autonomy-no-path",
+                mapOf("stage" to "retained-road-grade", "x" to "$x", "z" to "$z"))
+            val retained = preserve || protected != null || pathFloor != null || publicRoad
             val targetGround = if (protected == null && pathFloor != null) pathFloor else ground
             val targetFloor = if (pathFloor != null) targetGround else floor
             val control = building.control?.let { it.x == x && it.z == z } == true && city.building(building.id) != null
@@ -335,7 +342,7 @@ internal object CivsAutonomousTerraform {
                 if (dx == 0 && dz == 0) continue
                 val x = point.x + dx; val z = point.z + dz
                 val key = civsTerrainKey(x, z)
-                if (key in centerline || key in columns || key in standing || key in reservedShoulders ||
+                if (key in centerline || key in columns || key in standing || key in reservedShoulders || key in protectedRoadColumns ||
                     CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, ground, z)) ||
                     routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, ground, z)) }) continue
                 // Unavailable shoulder terrain does not invalidate a safe centre corridor. It is
@@ -366,7 +373,7 @@ internal object CivsAutonomousTerraform {
                     val x = route[index].x + dx; val z = route[index].z + dz
                     val key = civsTerrainKey(x, z)
                     val shoulder = ground + (maxOf(abs(dx), abs(dz)) - 2).coerceAtLeast(0)
-                    if (key in profile || key in standing || key in reservedShoulders || !city.contains(x, z) ||
+                    if (key in profile || key in standing || key in reservedShoulders || key in protectedRoadColumns || !city.contains(x, z) ||
                         CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, shoulder, z)) ||
                         routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, shoulder, z)) }) continue
                     val native = surface.at(x, z)
@@ -379,6 +386,9 @@ internal object CivsAutonomousTerraform {
         }
         val apronFillLimit = LARGE_FILL_DEPTH.takeIf { unpaidTerrace(city, building) && !compactTerrace(building) }
         CivsAutonomousGeometry.approach(building).forEach { point ->
+            // The route already validates and preserves any shared lane. Its other columns are
+            // outside the mandatory footprint and must not be raised to the new doorstep.
+            if (civsTerrainKey(point.x, point.z) in protectedRoadColumns) return@forEach
             add(point.x, point.z, building.entrance.y - 1, building.entrance.y - 1,
                 point.x == route.first().x && point.z == route.first().z, visibleFillLimit = apronFillLimit)
         }

@@ -88,7 +88,7 @@ class CivsAutonomousInfrastructureStarvationTest : FunSpec({
                 "goal" -> {
                     h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.dropLast(1) +
                         h.house.copy(phase = BuildingPhase.ACTIVE) + h.city.buildings.last()))
-                    CivsAutonomy.nextGoal(h.city)?.type shouldBe BuildingType.PLAN_BOARD
+                    CivsAutonomy.nextGoal(h.city)?.type shouldBe BuildingType.TOWN_HALL
                 }
                 "accepted order" -> h.city = CivsRules.enqueue(CivsRules.placeSite(h.city, h.city.owner, h.house),
                     h.city.owner, h.house.id)
@@ -178,8 +178,13 @@ class CivsAutonomousInfrastructureStarvationTest : FunSpec({
         }
     }
 
-    test("successful house growth retains gate then ordinary building then infrastructure interleaving") {
+    test("ready first house and hall upgrade take priority over new infrastructure") {
         InfrastructureStarvationHarness().use { h ->
+            val openTurn = h.city.copy(buildings = h.city.buildings.sortedBy { !it.type.isInfrastructure })
+            val house = requireNotNull(CivsAutonomy.nextGoal(openTurn))
+            house.type shouldBe BuildingType.HOUSE
+            CivsAutonomy.infrastructureDue(openTurn, house) shouldBe false
+            CivsAutonomy.infrastructureDue(openTurn, house.copy(missing = Stock(1))) shouldBe true
             h.start()
             h.infrastructure.size shouldBe 0
             h.growth.single().complete(h.grownPlan)
@@ -196,7 +201,9 @@ class CivsAutonomousInfrastructureStarvationTest : FunSpec({
                 buildings = h.city.buildings.map { if (it.id == h.house.id) it.copy(phase = BuildingPhase.ACTIVE) else it }))
             h.development.pulseAccessRepair(); h.drain()
             h.advance(10_002)
-            h.infrastructure.size shouldBe 1
+            val hall = h.city.buildings.single { it.type == BuildingType.TOWN_HALL }
+            h.upgrades shouldBe listOf(hall.id to 2)
+            h.infrastructure.size shouldBe 0
             h.growth.size shouldBe 1
             h.committed shouldBe listOf(h.house.id)
         }
