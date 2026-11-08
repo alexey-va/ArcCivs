@@ -5045,6 +5045,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     val pendingSupplies = CompletableFuture<Settlement>()
     var courier: CivCourierPlan? = null
     var courierProvider: ((Settlement, CivWorker) -> CivCourierPlan?)? = null
+    var labCourierRecoveryAllowed: (List<CivPosition>) -> Boolean = { false }
     var pickups = 0
     var pickupProvider: ((UUID, UUID, CivCargo) -> CompletableFuture<Settlement>)? = null
     var dropoffProvider: ((UUID, UUID, CivCargo, UUID) -> CompletableFuture<Settlement>)? = null
@@ -5219,6 +5220,9 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
                 data is Gate || data is Stairs },
             navigationClock = { navigationNow ?: System.currentTimeMillis() },
             recoveryClock = { recoveryMillis },
+            labCourierRecoveryAllowed = { city, worker, trip, points ->
+                (courierProvider?.invoke(city, worker) ?: courier) == trip && labCourierRecoveryAllowed(points)
+            },
             workPositionFailed = { city, worker, failed ->
                 failedWorkPositions += failed
                 onWorkPositionFailed(city, worker, failed)

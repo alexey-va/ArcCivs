@@ -166,7 +166,19 @@ class CivsService(
         collectionAvailable = ::collectionAvailable, collectionHome = ::collectedHome,
         pickupGround = ::pickupGround, depositCollected = ::depositCollected,
         immortalResidents = { id -> cities[id]?.let(::immortalResidents) == true },
-        acceleratedWork = ::labGrowthActive)).also(onCitizensCreated)
+        acceleratedWork = ::labGrowthActive,
+        labCourierRecoveryAllowed = { city, worker, trip, points ->
+            labBackend && ready() && city.id !in unhealthy && courierPlan(city, worker) == trip &&
+                plugin.server.getWorld(city.worldId)?.takeIf { it.name == "arccivs_lab" && it.name in settings.worlds }?.let { native ->
+                    points.all { point ->
+                        point.y in native.minHeight until native.maxHeight && city.contains(point.x, point.z) &&
+                            !storage.isWorldLocked(city.worldId, point) && citizenChunkReady(native, point.x shr 4, point.z shr 4) &&
+                            native.getBlockAt(point.x, point.y, point.z).let { block ->
+                                native.worldBorder.isInside(block.location) && world.canModify(city.owner, block)
+                            }
+                    }
+                } == true
+        })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
     private val supply = CivsSupplyDispatcher(tasks, nativeWork,
         { cityId, retained -> cargoRequests.captureSupply(cityId, retained) },

@@ -492,4 +492,4 @@ internal class CitizenRoute(val from: CitizenPoint, val target: Location, val ch
     fun timedOut(now: Long): Boolean = timing.timedOut(now, motion.searching)
 }
 internal data class CitizenArrivalWait(val token: CitizenToken, val target: CivPosition, val cargoId: UUID?,
-                               val carrying: Boolean?, val progressAt: Long)
+                               val carrying: Boolean?, val progressAt: Long, var firstLabChunkFailureAt: Long? = null)

@@ -29,6 +29,7 @@ internal class CivsCitizenRoutes(
     private val recoveryClock: () -> Long,
     private val courierFailed: (UUID, UUID, CivCargo) -> Unit,
     private val remove: (CitizenActor, String) -> Unit,
+    private val labCourierRecoveryAllowed: (Settlement, CivWorker, CivCourierPlan, List<CivPosition>) -> Boolean = { _, _, _, _ -> false },
 ) {
     private val collisions get() = collisionsOwner()
     private val shelter get() = shelterOwner()
@@ -349,7 +350,45 @@ internal class CivsCitizenRoutes(
             pause(actor, status, now)
             return
         }
+        val failed = actor.route
+        if (failed?.motion?.failure == "chunk-unloaded" && retryLabCourierRoute(actor, failed, now)) return
         if (!recoverNavigation(actor, target, now)) pause(actor, status, now)
+    }
+
+    private fun retryLabCourierRoute(actor: CitizenActor, failed: CitizenRoute, now: Long): Boolean {
+        val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
+        val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
+        if (labCourierStorage(actor, city, worker, failed) == null) return false
+        val timedOut = observeArrivalWait(actor, failed)
+        val wait = actor.arrivalWait ?: return false
+        val first = wait.firstLabChunkFailureAt ?: failed.startedAt.also { wait.firstLabChunkFailureAt = it }
+        if (!timedOut || first == failed.startedAt) return retryPreparation(actor, failed, now)
+        if (recoverNavigation(actor, failed.target, now)) return true
+        CivsDiagnostics.event("citizen_route_recovery_deferred", "city" to city.id, "worker" to worker.id,
+            "shipment" to actor.plan.courier?.cargo?.id, "phase" to actor.cycle.phase, "target" to failed.authored,
+            "cause" to "chunk-unloaded", "reason" to "courier-landing-not-admitted")
+        actor.arrivalWait = null
+        return false
+    }
+
+    /** A LAB exception belongs only to a current physical trip and its exact fixed barrel. */
+    private fun labCourierStorage(actor: CitizenActor, city: Settlement, worker: CivWorker, route: CitizenRoute): CivBuilding? {
+        val trip = actor.plan.courier?.takeIf { it.cargo.inventoryBacked && it.cargo.sourceWorkerId == null } ?: return null
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL || worker.assignment != trip.cargo.warehouseId ||
+            worker.completedCycles != actor.plan.token.completedCycles || actor.plan.token.shipmentId != trip.cargo.id ||
+            route.idleAnchor != null || route.intermediate || actor.returningToWarehouse || actor.sheltering ||
+            actor.attacker != null || actor.combatDestination != null || actor.foodSource != null || actor.mealVisit != null ||
+            navigationHeld(actor)) return null
+        val phase = actor.cycle.phase
+        val storage = when (phase) {
+            CitizenPhase.TO_WORK -> city.building(trip.cargo.sourceBuildingId).takeIf { !trip.carrying && worker.cargo == null }
+            CitizenPhase.RETURNING -> CivsLogistics.destination(city, trip.cargo)?.takeIf {
+                trip.carrying && worker.cargo == trip.cargo && it.id == trip.destinationBuildingId
+            }
+            else -> null
+        }
+        return storage?.takeIf { it.control == route.authored && actor.plan.travelTarget(phase) == route.authored &&
+            labCourierRecoveryAllowed(city, worker, trip, emptyList()) }
     }
 
     /** A failed final approach rejects this stance, leaving the same physical action to its planner. */
@@ -645,6 +684,11 @@ internal class CivsCitizenRoutes(
         if (actor.mineVisit != null) return false
         val recoveryAnchor = failed.idleAnchor ?: idleAnchor
         val timedOut = observeArrivalWait(actor, failed)
+        val chunkFailure = failed.motion.failure == "chunk-unloaded"
+        val labFailure = actor.arrivalWait?.firstLabChunkFailureAt
+        // A retained failed trip still gets a genuine walking search on each retry.
+        if (chunkFailure && (labFailure == null || labFailure == failed.startedAt)) return false
+        if (!chunkFailure && labFailure != null) return false
         // Keep body contact authoritative across retries until the resident actually walks clear.
         if (!actor.sheltering && actor.bodyContact?.token == actor.plan.token) return false
         if (timedOnly && !timedOut) return false
@@ -656,7 +700,7 @@ internal class CivsCitizenRoutes(
         if (failed.motion.searching && !timedOut || failed.motion.waitingForCollision || failed.nativeCollisionTicks > 0 ||
             actor.nextRecoveryAt?.let { recoveryClock() < it } == true || actor.attacker != null ||
             actor.workerId in runtime.pendingHarm || life.residentLifePending(actor) || actor.supplyPickup != null || logistics.collectedPending(actor)) return false
-        if (failed.motion.failure in PREPARATION_FAILURES && (!timedOut || failed.motion.failure in setOf("chunk-unloaded", "cancelled"))) return false
+        if (failed.motion.failure in PREPARATION_FAILURES && (!timedOut || failed.motion.failure == "cancelled")) return false
         if (failed.motion.failure == null && failed.completion == null && !failed.timedOut(now) && !timedOut) return false
         if (runtime.recoveryBudget == 0 || recoveryAnchor == null && !actor.sheltering && !actor.returningToWarehouse &&
             actor.plan.idleReason !in listOf(null, "placing") && !timedOut ||
@@ -665,6 +709,8 @@ internal class CivsCitizenRoutes(
         val entity = actor.npc
         if (!entity.isValid || entity.world.uid != city.worldId || target.world?.uid != city.worldId) return false
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
+        val labStorage = if (chunkFailure) labCourierStorage(actor, city, worker, failed) ?: return false else null
+        val recoveryTrip = labStorage?.let { requireNotNull(actor.plan.courier) }
         val home = if (actor.sheltering) citizenHomeBuilding(city, worker) ?: return false else null
         val waitingMine = waitingMine(actor, city, recoveryAnchor)
         val authored = when {
@@ -681,13 +727,20 @@ internal class CivsCitizenRoutes(
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
         val previous = entity.location
         if (!collisions.residentMoveAllowed(actor, previous, previous)) return false
+        if (recoveryTrip != null && (!city.contains(previous.blockX, previous.blockZ) ||
+                !citizenRouteWithinReach(previous.point(), authored.point(), CivsLogistics.maximumTransferDistance(city)) ||
+                !citizenChunkReady(entity.world, previous.blockX shr 4, previous.blockZ shr 4) ||
+                !labCourierRecoveryAllowed(city, worker, recoveryTrip, listOf(authored)))) return false
         val safe: (CivPosition) -> Boolean = { candidate ->
             collisions.recoveryPointSafe(actor, city, candidate, failed.allowedBuildings, routeMine(actor, city).takeIf { recoveryAnchor == null }) &&
                 (waitingMine == null || outside(waitingMine, candidate.x, candidate.z)) &&
                 (home == null || home.bounds.contains(candidate.x, candidate.y, candidate.z)) &&
-                (recoveryAnchor == null || citizenWithinIdleArea(recoveryAnchor, candidate.point()) && citizenIdleTerrain(entity.world, candidate, city.buildings))
+                (recoveryAnchor == null || citizenWithinIdleArea(recoveryAnchor, candidate.point()) && citizenIdleTerrain(entity.world, candidate, city.buildings)) &&
+                (recoveryTrip == null || citizenAtStorage(entity.world, candidate.point(), authored) &&
+                    citizenCanReachBlock(entity.world, candidate.location(entity.world).add(0.0, entity.eyeHeight, 0.0), authored) &&
+                    labCourierRecoveryAllowed(city, worker, recoveryTrip, listOf(candidate, candidate.copy(y = candidate.y - 1))))
         }
-        val storage = if (waitingMine == null) storageForTarget(actor, city, authored) else null
+        val storage = labStorage ?: if (waitingMine == null) storageForTarget(actor, city, authored) else null
         val point = (when {
             actor.sheltering -> authored.takeIf(safe)?.takeIf { point ->
                 shelter.shelterPose(actor, city, worker, point.location(entity.world), collisions.shelterOccupied(actor))
@@ -715,11 +768,13 @@ internal class CivsCitizenRoutes(
         }
         CivsDiagnostics.event("citizen_route_recovered", "city" to city.id, "worker" to actor.workerId,
             "mode" to "safe-teleport", "cause" to (failed.motion.failure ?: failed.completion?.cancelReason ?: "timeout"),
-            "distance" to previous.distance(destination), "phase" to actor.cycle.phase, "requested" to authored, "destination" to point)
+            "distance" to previous.distance(destination), "phase" to actor.cycle.phase, "requested" to authored, "destination" to point,
+            "shipment" to recoveryTrip?.cargo?.id)
         return true
     }
 
     fun pause(actor: CitizenActor, reason: String, now: Long) {
+        if (actor.arrivalWait?.firstLabChunkFailureAt != null) actor.arrivalWait = null
         actor.plan.courier?.takeIf { !it.carrying && reason in setOf("route-unreachable", "delivery-failed") }?.let {
             courierFailed(actor.cityId, actor.workerId, it.cargo)
         }
