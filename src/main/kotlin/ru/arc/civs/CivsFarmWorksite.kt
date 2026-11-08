@@ -9,6 +9,8 @@ import org.bukkit.block.data.Ageable
 internal class CivsFarmWorksite(val building: CivBuilding) {
     val plots = CivsWorksiteLayouts.field(building)
     private val columns = plots.associateBy { it.x to it.z }
+    private val addedColumns = if (building.farmFieldVersion == CivsFarmFields.VERSION)
+        CivsFarmFields.added(building).toHashSet() else emptySet()
     val chunks = plots.mapTo(hashSetOf()) { (it.x shr 4) to (it.z shr 4) }
     var next = 0
         private set
@@ -17,11 +19,12 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
     var lastFocus: CivPosition? = null
         private set
     private val ripe = linkedSetOf<CivPosition>()
-    private val unplanted = linkedSetOf<CivPosition>()
+    // The value records whether this unplanted plot is already farmland.
+    private val unplanted = linkedMapOf<CivPosition, Boolean>()
     private val immature = linkedSetOf<CivPosition>()
     private val dirty = linkedSetOf<CivPosition>()
     val harvest: Set<CivPosition> get() = ripe
-    val field: Set<CivPosition> get() = unplanted
+    val field: Set<CivPosition> get() = unplanted.keys
     val care: Set<CivPosition> get() = immature
 
     data class Attempt(val finish: ((CivWorkAction) -> CivWorldWork)?, val pending: Boolean)
@@ -35,6 +38,11 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
     fun selected(focus: CivPosition?) { lastFocus = focus }
     fun changed(point: CivPosition) { columns[point.x to point.z]?.let { dirty += it } }
     fun protectionChanged(affected: (CivPosition) -> Boolean) { plots.filterTo(dirty, affected) }
+
+    private fun establishmentTurn(worker: CivWorker) = addedColumns.isNotEmpty() && worker.completedCycles % 2L == 1L
+
+    fun needsExpansionRefresh(): Boolean = addedColumns.isNotEmpty() &&
+        (examined < plots.size || dirty.any { it in addedColumns })
 
     /** The caller admits every column against the pulse shared with the other worksite types. */
     fun refresh(world: World, autonomous: Boolean, available: () -> Map<String, Long>, maximumColumns: Int,
@@ -58,7 +66,7 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
                 if (age.age == age.maximumAge) ripe += point
                 else if (cropCareChanges(world, top, soil, age,
                         autonomous || (supplies["BONE_MEAL"] ?: 0) > 0).isNotEmpty()) immature += point
-            } else if (top.type != crop) unplanted += point
+            } else if (top.type != crop) unplanted[point] = soil.type == Material.FARMLAND
         }
     }
 
@@ -93,7 +101,8 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
                 if (!top.type.isAir) return need(CivWorkNeed("worksite-obstacle", point = position(top), reason = "irrigation-crop"))
             }
             if (harvestOnly) { if (expanded) continue else return Selection.Unavailable }
-            if (block.type !in SOILS) return need(CivWorkNeed("worksite-soil", point = point,
+            val frozenSource = !autonomous && !expanded && block.type == Material.ICE
+            if (block.type !in SOILS && !frozenSource) return need(CivWorkNeed("worksite-soil", point = point,
                 reason = "irrigation-ground", blockMaterial = block.type.name))
             if (expanded) {
                 val weeds = irrigationWeeds(point) { read(it, true) }
@@ -115,14 +124,23 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
         val nearest = compareBy<CivPosition> { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
             .thenBy { val dx = from.x.toDouble() - it.x; val dz = from.z.toDouble() - it.z; dx * dx + dz * dz }
             .thenBy { it.x }.thenBy { it.z }
-        val candidates = ripe.sortedWith(nearest).asSequence() + sequence {
-            if (harvestOnly || !irrigationReady || examined != plots.size) return@sequence
+        val canPlant = !harvestOnly && irrigationReady && examined == plots.size
+        val ground by lazy { unplanted.keys.sortedWith(nearest) }
+        // Try one new plot on alternating completed cycles, leaving room for harvest if it cannot be worked.
+        val firstAdded = if (canPlant && establishmentTurn(worker)) {
+            val added = ground.asSequence().filter { it in addedColumns }
+            added.firstOrNull { unplanted[it] == true && !claimed(it) } ?: added.firstOrNull { !claimed(it) }
+        } else null
+        val candidates = sequence {
+            if (firstAdded != null) yield(firstAdded)
+            yieldAll(ripe.sortedWith(nearest))
+            if (!canPlant) return@sequence
             // Visit the next authored plot instead of repeatedly boosting the plant we just left.
             val after = plots.indexOfFirst { it == lastFocus || it.copy(y = it.y + 1) == lastFocus } + 1
             val care = plots.indices.map { plots[(after + it) % plots.size] }
                 .filter { it in immature }
                 .sortedBy { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
-            yieldAll(unplanted.sortedWith(nearest))
+            yieldAll(ground.asSequence().filter { it != firstAdded })
             yieldAll(care)
         }
         var checked = 0
@@ -148,7 +166,7 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
                 ripe += soilPoint
             } else {
                 if (harvestOnly || wasHarvest) continue
-                unplanted += soilPoint
+                unplanted[soilPoint] = soil.type == Material.FARMLAND
             }
             val focus = if (soil.type == Material.FARMLAND) position(top) else soilPoint
             val attempt = admit(focus)

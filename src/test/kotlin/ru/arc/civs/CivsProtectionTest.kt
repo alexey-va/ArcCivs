@@ -25,6 +25,7 @@ import org.bukkit.event.block.Action
 import org.bukkit.event.block.BlockBreakEvent
 import org.bukkit.event.block.BlockDropItemEvent
 import org.bukkit.event.block.BlockExplodeEvent
+import org.bukkit.event.block.BlockFormEvent
 import org.bukkit.event.block.BlockFromToEvent
 import org.bukkit.event.block.BlockGrowEvent
 import org.bukkit.event.block.BlockSpreadEvent
@@ -483,6 +484,26 @@ class CivsProtectionTest : FunSpec({
             listener.refresh()
             paper.callEvent(BlockPhysicsEvent(currentDoor, currentDoor.blockData)).isCancelled shouldBe false
             paper.callEvent(BlockPhysicsEvent(control, control.blockData)).isCancelled shouldBe true
+        }
+    }
+
+    test("an active unexpanded field protects its authored irrigation outside the building from freezing") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("farm-irrigation-protection")
+            val farm = protectionBuilding(0, 1).copy(type = BuildingType.FARM, anchor = CivPosition(0, 63, 0),
+                schematicId = "civs/minecolonies/medievaloak/agriculture/horticulture/farmer1")
+            val water = CivsWorksiteLayouts.irrigation(farm).first { !farm.bounds.contains(it.x, it.y, it.z) }
+            farm.farmFieldVersion shouldBe null
+            val city = protectionCity(world.uid, UUID.randomUUID(), farm)
+            val listener = CivsProtection({ listOf(city) })
+            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("FarmIrrigationProtection"))
+
+            fun freeze(point: CivPosition): BlockFormEvent {
+                val block = world.getBlockAt(point.x, point.y, point.z).apply { type = Material.WATER }
+                return paper.callEvent(BlockFormEvent(block, block.state.apply { type = Material.ICE }))
+            }
+            freeze(water).isCancelled shouldBe true
+            freeze(water.copy(x = water.x + 24)).isCancelled shouldBe false
         }
     }
 

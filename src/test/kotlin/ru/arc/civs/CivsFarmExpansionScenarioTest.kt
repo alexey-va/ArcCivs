@@ -9,6 +9,86 @@ class CivsFarmExpansionScenarioTest : FunSpec({
     beforeEach { installExpandedFarmCatalog() }
     afterEach { CivsWorksiteLayouts.installCatalog(emptyMap()) }
 
+    test("expanded farmer tills and plants new soil while old beds keep yielding ripe crops") {
+        SettlementScenario.run("expanded-farm-harvest-fairness", CivPosition(0, 64, 0), setup = { world ->
+            val f = farmExpansionFixture(world)
+            sourceCity = CivsRules.expandFarmField(f.city, f.farm.id).copy(revision = 0)
+            val farm = sourceCity!!.building(f.farm.id)!!
+            buildings["farm"] = farm
+            buildings["hall"] = sourceCity!!.buildings.single { it.type == BuildingType.TOWN_HALL }
+            workers["Farmer"] = f.worker
+            CivsFarmFields.water(farm).forEach {
+                world.getBlockAt(it.x, it.y + 1, it.z).type = Material.AIR
+                world.getBlockAt(it.x, it.y, it.z).type = Material.WATER
+            }
+            (CivsFarmFields.soil(farm) - CivsFarmFields.added(farm).toSet()).forEach {
+                world.getBlockAt(it.x, it.y + 1, it.z).blockData = org.bukkit.Bukkit.createBlockData("minecraft:wheat[age=7]")
+            }
+        }) {
+            val farm = city.buildings.single { it.type == BuildingType.FARM }
+            val added = CivsFarmFields.added(farm).toSet() - CivsFarmFields.water(farm).toSet()
+            val retained = CivsFarmFields.soil(farm) - added
+            val tilled = mutableSetOf<CivPosition>()
+            val planted = mutableSetOf<CivPosition>()
+            var harvests = 0
+            var previousOnAdded = false
+            repeat(16) {
+                val work = nextWork("Farmer")
+                val cell = work.changes.single()
+                val ground = cell.position.copy(y = cell.position.y - 1)
+                val onAdded = cell.position in added || ground in added
+                (previousOnAdded && onAdded) shouldBe false
+                previousOnAdded = onAdded
+                when {
+                    cell.position in added -> {
+                        cell.after shouldBe "minecraft:farmland[moisture=7]"
+                        work.inputs shouldBe emptyMap()
+                        tilled.add(cell.position) shouldBe true
+                    }
+                    ground in added -> {
+                        (ground in tilled) shouldBe true
+                        cell.after shouldBe "minecraft:wheat[age=0]"
+                        work.inputs shouldBe mapOf("WHEAT_SEEDS" to 1L)
+                        planted.add(ground) shouldBe true
+                    }
+                    else -> {
+                        (ground in retained) shouldBe true
+                        work.outputs["WHEAT"] shouldBe 1L
+                        harvests++
+                    }
+                }
+                complete(work)
+                state(cell.position) shouldBe cell.after
+            }
+            (planted.size >= 2) shouldBe true
+            (harvests >= 4) shouldBe true
+            retained.any { state(it.copy(y = it.y + 1)) == "minecraft:wheat[age=7]" } shouldBe true
+            receipts() shouldBe emptyList()
+        }
+    }
+
+    test("an unexpanded farmer restores one frozen authored source through a native receipt") {
+        lateinit var irrigation: CivPosition
+        SettlementScenario.run("frozen-authored-irrigation", CivPosition(0, 64, 0), setup = { world ->
+            val f = farmExpansionFixture(world)
+            sourceCity = f.city.copy(revision = 0)
+            buildings["farm"] = f.farm
+            buildings["hall"] = sourceCity!!.buildings.single { it.type == BuildingType.TOWN_HALL }
+            workers["Farmer"] = f.worker
+            irrigation = CivsWorksiteLayouts.irrigation(f.farm).single()
+            world.getBlockAt(irrigation.x, irrigation.y, irrigation.z).type = Material.ICE
+        }) {
+            val thaw = nextWork("Farmer")
+            thaw.changes shouldBe listOf(CivPlanBlock(irrigation, "minecraft:ice", "minecraft:water[level=0]"))
+            thaw.inputs shouldBe emptyMap()
+            thaw.outputs shouldBe emptyMap()
+            state(irrigation) shouldBe "minecraft:ice"
+            complete(thaw)
+            state(irrigation) shouldBe "minecraft:water[level=0]"
+            receipts() shouldBe emptyList()
+        }
+    }
+
     test("admitted irrigation weeds clear through ordinary receipts before separate water and real seed-paid planting") {
         val weeds = listOf(listOf("minecraft:short_grass"), listOf("minecraft:fern"),
             listOf("minecraft:tall_grass[half=lower]", "minecraft:tall_grass[half=upper]"),

@@ -25,7 +25,8 @@ internal class CivsFarmWorksites(context: CivsWorksiteContext, approaches: CivsW
     override fun propose(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         current: CivWorldWork?): CivWorksiteDiscovery {
         val known = scans[worker.id]?.takeIf { it.building == building }
-        val scan = if (current == null && known?.harvest?.any { !farmClaimed(city, worker, building, it) } == true) known
+        val scan = if (current == null && known != null && !known.needsExpansionRefresh() &&
+            known.harvest.any { !farmClaimed(city, worker, building, it) }) known
             else scanFarm(city, worker, building, world)
         if (current != null && (!current.cropCare || scan.harvest.none { !farmClaimed(city, worker, building, it) }))
             return CivWorksiteDiscovery.Retained

@@ -110,8 +110,7 @@ class CivsProtection(
                                 add(Footprint(city.worldId, it, emptySet(), adminEditable = !locked))
                             }
                         if (building.type == BuildingType.FARM && building.phase == BuildingPhase.ACTIVE && city.pendingDeletion == null) {
-                            (CivsWorksiteLayouts.field(building) + if (building.farmFieldVersion != null)
-                                CivsWorksiteLayouts.irrigation(building) else emptyList()).forEach { soil ->
+                            (CivsWorksiteLayouts.field(building) + CivsWorksiteLayouts.irrigation(building)).forEach { soil ->
                                 val crop = soil.copy(y = soil.y + 1)
                                 crops += city.worldId to crop
                                 add(Footprint(city.worldId, CivBox(soil, crop), editors, adminEditable = true))
