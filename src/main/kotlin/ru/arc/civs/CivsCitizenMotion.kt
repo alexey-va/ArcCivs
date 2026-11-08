@@ -66,7 +66,10 @@ internal class CivsCitizenMotion(
                     }
                     val blocked = actor.route
                     if (separated == false && blocked != null && collisions.recoverFoodOverlap(actor, blocked, now)) continue
-                    if (blocked?.bodyBlockedSince != null && routes.handleBodyContact(actor, blocked, now)) continue
+                    if (blocked?.bodyBlockedSince != null) {
+                        if (collisions.retryOccupiedDeliveryArrival(actor, blocked, now)) continue
+                        if (routes.handleBodyContact(actor, blocked, now)) continue
+                    }
                 }
             }
             if (actor.residentYield != null) {

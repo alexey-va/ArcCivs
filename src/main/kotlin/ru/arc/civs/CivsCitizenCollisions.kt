@@ -340,6 +340,26 @@ internal class CivsCitizenCollisions(
         return moved
     }
 
+    /** An exhausted delivery leg cannot walk its remaining overlap clear. Recheck the same barrel from another side. */
+    fun retryOccupiedDeliveryArrival(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
+        val since = route.bodyBlockedSince ?: return false
+        val courier = actor.plan.courier ?: return false
+        if (!courier.carrying || !courier.cargo.inventoryBacked || actor.cycle.phase != CitizenPhase.RETURNING ||
+            route.authored != actor.plan.storage || route.completion != null || route.intermediate || route.idleAnchor != null ||
+            !route.motion.finished || route.motion.failure != null || route.motion.continuation ||
+            runtime.navigationTick - maxOf(since, route.progressTick) < 80L || now < actor.courierTargetAfter ||
+            actor.sheltering || actor.attacker != null || actor.combatDestination != null || actor.mineVisit != null ||
+            actor.foodSource != null || actor.mealVisit != null || actor.tavernService != null || actor.workDetour != null ||
+            actor.collectionSeek != null || actor.collectionHome != null || actor.returningToWarehouse) return false
+        // Separate from the contact tick, which is refreshed every frame at an occupied endpoint.
+        actor.courierTargetAfter = now + 5_000L
+        val from = actor.npc.location
+        val blocker = blockingResident(actor, from, from)?.let(runtime.actors::get)?.takeIf { it.cityId == actor.cityId }
+            ?: return false
+        if (!yieldPlayerClear(actor, from, from)) return false
+        return routes.retryDeliveryStanding(actor, route, courier, blocker.workerId, now)
+    }
+
     /** A finished food route can have no normal body-separation step even though its terrain is passable. */
     fun recoverFoodOverlap(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
         val since = route.bodyBlockedSince ?: return false

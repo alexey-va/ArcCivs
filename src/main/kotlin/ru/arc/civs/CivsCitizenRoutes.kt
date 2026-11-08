@@ -52,7 +52,8 @@ internal class CivsCitizenRoutes(
         return true
     }
 
-    fun startRoute(actor: CitizenActor, world: World, target: CivPosition, now: Long, idleAnchor: CivPosition? = null): Boolean {
+    fun startRoute(actor: CitizenActor, world: World, target: CivPosition, now: Long, idleAnchor: CivPosition? = null,
+                   storageStandingOverride: CivPosition? = null): Boolean {
         actor.pendingChunkTarget = null
         if (!shelter.wake(actor)) return false
         val from = actor.npc.location
@@ -83,15 +84,19 @@ internal class CivsCitizenRoutes(
         // The return must physically reach its original standing before the reserve session resumes.
         val storage = if (visit != null) null else storageForTarget(actor, city, target)
         if (storage != null) {
-            val standing = storageStanding(actor, city, world, target, storage, idleAnchor == null)
+            val standing = storageStandingOverride ?: storageStanding(actor, city, world, target, storage, idleAnchor == null)
             if (standing == null) {
                 actor.targets.remove(target)
                 pause(actor, "storage-unavailable", now)
                 return false
             }
-            actor.targets[target] = standing
+            if (storageStandingOverride == null) actor.targets[target] = standing
         }
-        val resolved = if (visit != null || idleAnchor != null && storage == null) target else resolvedTarget(actor, target)
+        val resolved = when {
+            visit != null || idleAnchor != null && storage == null -> target
+            storage != null && storageStandingOverride != null -> storageStandingOverride
+            else -> resolvedTarget(actor, target)
+        }
         val mine = routeMine(actor, city).takeIf { idleAnchor == null }
         val workMine = mine?.takeIf { visit != null || actor.cycle.phase == CitizenPhase.TO_WORK && actor.plan.worldWork?.miningStep != null }
         val minePassage = visit?.passage ?: workMine?.let { building ->
@@ -220,6 +225,31 @@ internal class CivsCitizenRoutes(
         return cached ?: citizenStorageTarget(city, storage, world, safe)
             ?: storage.takeIf { !citizenStorageReady(world, control) && it.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == it.id }
                 ?.entrance?.takeIf { citizenStandable(world, it) }
+    }
+
+    fun retryDeliveryStanding(actor: CitizenActor, route: CitizenRoute, courier: CivCourierPlan, blocker: UUID, now: Long): Boolean {
+        val world = actor.npc.world
+        val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.worldId == world.uid &&
+            it.pendingDeletion == null && it.inventory?.mode == CivStorageMode.PHYSICAL } ?: return false
+        if (city.workers.firstOrNull { it.id == actor.workerId }?.cargo != courier.cargo) return false
+        val control = route.authored
+        val storage = CivsLogistics.destination(city, courier.cargo)?.takeIf {
+            it.id == courier.destinationBuildingId && it.control == control
+        } ?: return false
+        val oldStanding = route.target.point()
+        val standing = citizenStorageTarget(city, storage, world) { point ->
+            point.point() != oldStanding && citizenRoutePointAllowed(city, route.allowedBuildings, point) &&
+                storagePointClear(actor, city, world, point) &&
+                citizenCanReachBlock(world, point.location(world).add(0.0, actor.npc.eyeHeight, 0.0), control)
+        } ?: return false
+        cancelRoute(actor)
+        // A failed path to this side must not replace the usual cached storage approach.
+        if (!startRoute(actor, world, control, now, storageStandingOverride = standing)) return false
+        CivsDiagnostics.event("citizen_route_progress", "city" to city.id, "worker" to actor.workerId,
+            "action" to "retarget", "reason" to "occupied-storage-arrival", "phase" to actor.cycle.phase,
+            "shipment" to courier.cargo.id, "blocking_resident" to blocker, "storage" to storage.id,
+            "from" to oldStanding.coordinates(), "target" to standing, "actual" to actor.npc.location.point().coordinates())
+        return true
     }
 
     private fun storagePointClear(actor: CitizenActor, city: Settlement, world: World, point: CivPosition): Boolean =
