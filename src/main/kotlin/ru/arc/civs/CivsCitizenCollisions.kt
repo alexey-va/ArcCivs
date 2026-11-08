@@ -69,7 +69,7 @@ internal class CivsCitizenCollisions(
             val route = requireNotNull(actor.route)
             // Escaping an overlap is a permitted sweep, but is still contact until the endpoint body is clear.
             if (!citizenResidentStepClear(actor.npc, to, to, occupied) || !yieldPlayerClear(actor, to, to))
-                route.bodyContactTick = runtime.navigationTick
+                markBodyContact(actor, blocked = false)
             else if (runtime.navigationTick - route.bodyContactTick >= 4) route.bodyPassUntil = 0
             return residentStepAllowed(actor.npc, from, to)
         }
@@ -98,12 +98,20 @@ internal class CivsCitizenCollisions(
             other.worldId == actor.worldId && other.npc.isValid &&
             !citizenResidentStepClear(actor.npc, from, to, residentOccupied(other)) }?.workerId
 
-    private fun markBodyContact(actor: CitizenActor) {
-        actor.bodyContactToken = actor.plan.token
+    private fun markBodyContact(actor: CitizenActor, blocked: Boolean = true) {
+        actor.bodyContact = CitizenBodyContact(actor.plan.token, actor.npc.location.point())
         actor.route?.let { route ->
-            if (route.bodyBlockedSince == null) route.bodyBlockedSince = runtime.navigationTick
+            if (blocked && route.bodyBlockedSince == null) route.bodyBlockedSince = runtime.navigationTick
             route.bodyContactTick = runtime.navigationTick
         }
+    }
+
+    /** Retrying, turning in place or being pushed never clears contact. Require verified travel away. */
+    fun observeWalkAfterContact(actor: CitizenActor, from: CitizenPoint, to: CitizenPoint) {
+        val contact = actor.bodyContact ?: return
+        contact.walked += kotlin.math.hypot(to.x - from.x, to.z - from.z)
+        if (contact.walked >= 2.0 && kotlin.math.hypot(to.x - contact.at.x, to.z - contact.at.z) >= 2.0)
+            actor.bodyContact = null
     }
 
     fun passingBodies(actor: CitizenActor): Boolean = actor.route?.let {

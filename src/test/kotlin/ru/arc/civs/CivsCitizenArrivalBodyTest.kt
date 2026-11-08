@@ -16,7 +16,7 @@ class CivsCitizenArrivalBodyTest : FunSpec({
             val actor = arrivalActor(h)
             h.phase() shouldBe CitizenPhase.TO_WORK
             actor.plan.worldWork shouldBe work
-            actor.bodyContactToken shouldBe null
+            actor.bodyContact shouldBe null
             requireNotNull(h.routeIdentity())
 
             // The actor is already at a valid authored stance when a player enters before any collision sweep.
@@ -30,7 +30,7 @@ class CivsCitizenArrivalBodyTest : FunSpec({
                 h.owner.residentStepAllowed = collisions::canResidentMove
                 for (now in listOf(2_500L, 3_000L, 4_000L)) {
                     h.owner.pulse(now)
-                    actor.bodyContactToken shouldBe null
+                    actor.bodyContact shouldBe null
                     h.phase() shouldBe CitizenPhase.TO_WORK
                     h.observedWork() shouldBe 0L
                     h.deliveries shouldBe 0
@@ -75,7 +75,7 @@ class CivsCitizenArrivalBodyTest : FunSpec({
             npc.teleport(Location(h.world, 21.5, 64.0, .5))
             civsCanReachContainer(npc.location, food.container) shouldBe true
             val actor = arrivalActor(h)
-            actor.bodyContactToken shouldBe null
+            actor.bodyContact shouldBe null
             val player = h.playerAt(npc.location)
             val canonical = h.city
             val receipt = CompletableFuture<Settlement>()
@@ -92,7 +92,7 @@ class CivsCitizenArrivalBodyTest : FunSpec({
                 h.holdNavigation = true
                 h.navigationNow = 2_000
                 h.owner.pulse(2_000)
-                actor.bodyContactToken shouldBe null
+                actor.bodyContact shouldBe null
                 actor.foodPickupSource?.copy(standing = food.standing) shouldBe food
                 actor.supplyPickup shouldBe null
                 pickups shouldBe 0

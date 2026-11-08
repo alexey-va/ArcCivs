@@ -7,6 +7,7 @@ import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 
 internal data class CitizenOutputFullPause(val buildingId: UUID, val retryAt: Long)
+internal data class CitizenBodyContact(val token: CitizenToken, val at: CitizenPoint, var walked: Double = 0.0)
 
 /** Mutable runtime identity and in-flight activity state for one admitted resident. */
 internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: UUID, val npc: PacketPlayerNpc, var plan: CitizenPlan) {
@@ -22,7 +23,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var courierReturnHint: CitizenCourierReturnHint? = null
     var courierInboundPrefix: CitizenCourierInboundPrefix? = null
     var collisionResident: UUID? = null
-    var bodyContactToken: CitizenToken? = null
+    var bodyContact: CitizenBodyContact? = null
     var residentYield: CitizenResidentYield? = null
     var yieldRetryAfter = 0L
     // Physical yielding grants no progress; only subsequent accepted route travel replenishes this allowance.

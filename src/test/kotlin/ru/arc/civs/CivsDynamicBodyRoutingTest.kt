@@ -10,26 +10,27 @@ import ru.arc.paper.npc.PacketNpcPose
 import java.util.UUID
 
 class CivsDynamicBodyRoutingTest : FunSpec({
-    test("body contact recovery provenance survives route replacement and clears only with a new accepted plan token") {
+    test("body contact recovery provenance survives route replacement without observed walking") {
         residentRuntime { h ->
             val actor = h.owner.javaClass.getDeclaredField("actors").run {
                 isAccessible = true
                 requireNotNull((get(h.owner) as Map<*, *>)[h.workerId]) as CitizenActor
             }
             val token = actor.plan.token
-            actor.bodyContactToken = token
+            val contact = CitizenBodyContact(token, actor.npc.location.point())
+            actor.bodyContact = contact
             h.owner.pulse(2_000)
-            actor.bodyContactToken shouldBe token
+            actor.bodyContact shouldBe contact
             actor.route?.motion?.cancel()
             actor.route = null
             h.owner.pulse(2_500)
-            actor.bodyContactToken shouldBe token
+            actor.bodyContact shouldBe contact
             h.city = CivsRules.validate(h.city.copy(workers = h.city.workers.map {
                 it.copy(completedCycles = it.completedCycles + 1)
             }))
             h.owner.pulse(3_000)
             (actor.plan.token != token) shouldBe true
-            actor.bodyContactToken shouldBe null
+            actor.bodyContact shouldBe null
             h.deliveries shouldBe 0
             h.unloads shouldBe 0
         }

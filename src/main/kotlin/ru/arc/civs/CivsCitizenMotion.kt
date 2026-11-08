@@ -211,13 +211,16 @@ internal class CivsCitizenMotion(
             }
             if (next != null) {
                 npc.teleport(next)
-                motion.observeAcceptedMove(before.point(), npc.location.point())
+                val actual = npc.location.point()
+                motion.observeAcceptedMove(before.point(), actual)
                 npc.bodyYaw = next.yaw
                 npc.headYaw = next.yaw
                 npc.pitch = next.pitch
                 val forward = (motion.forwardProgress - route.observedProgress).coerceAtLeast(0.0)
                 if (forward > .000001) {
                     actor.arrivalWait = null
+                    if (!motion.bodyContactAllowed && route.bodyContactTick != runtime.navigationTick)
+                        collisions.observeWalkAfterContact(actor, before.point(), actual)
                     route.bodyBlockedSince = null
                     route.bodyDetourStarted = false
                     route.bodyDetourFailed = false

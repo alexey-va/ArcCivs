@@ -615,8 +615,8 @@ internal class CivsCitizenRoutes(
         if (actor.mineVisit != null) return false
         val recoveryAnchor = failed.idleAnchor ?: idleAnchor
         val timedOut = observeArrivalWait(actor, failed)
-        // A contact detour never licenses relocating the same accepted work/cargo cycle through later native walls.
-        if (!actor.sheltering && actor.bodyContactToken == actor.plan.token) return false
+        // Keep body contact authoritative across retries until the resident actually walks clear.
+        if (!actor.sheltering && actor.bodyContact?.token == actor.plan.token) return false
         if (timedOnly && !timedOut) return false
         if (actor.plan.worldWork?.upkeep != null && !timedOut) return false
         if (actor.plan.token.constructionId != null && recoveryAnchor == null && !actor.sheltering &&
@@ -649,6 +649,8 @@ internal class CivsCitizenRoutes(
         }
         runtime.recoveryBudget--
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+        val previous = entity.location
+        if (!collisions.residentMoveAllowed(actor, previous, previous)) return false
         val safe: (CivPosition) -> Boolean = { candidate ->
             collisions.recoveryPointSafe(actor, city, candidate, failed.allowedBuildings, routeMine(actor, city).takeIf { recoveryAnchor == null }) &&
                 (waitingMine == null || outside(waitingMine, candidate.x, candidate.z)) &&
@@ -666,7 +668,6 @@ internal class CivsCitizenRoutes(
         }) ?: return false
         val destination = point.location(entity.world)
         if (!collisions.residentMoveAllowed(actor, destination, destination)) return false
-        val previous = entity.location
         destination.yaw = previous.yaw
         cancelRoute(actor, destination)
         if (actor.sheltering) actor.shelter = point

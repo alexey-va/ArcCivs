@@ -50,7 +50,7 @@ internal class CivsCitizenPlanning(
     }
 
     fun reconcilePlan(actor: CitizenActor, nextPlan: CitizenPlan, city: Settlement): Boolean {
-        if (actor.bodyContactToken != null && actor.bodyContactToken != nextPlan.token) actor.bodyContactToken = null
+        if (actor.bodyContact?.let { it.token != nextPlan.token } == true) actor.bodyContact = null
         val mineEpisode = actor.mineRouteEpisode.key
         val mineActive = nextPlan.type == BuildingType.QUARRY && nextPlan.courier == null &&
             !actor.sheltering && !actor.returningToWarehouse && actor.attacker == null && actor.foodSource == null &&

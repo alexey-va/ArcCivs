@@ -170,6 +170,45 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
         }
     }
 
+    test("a courier that has walked away from a body contact can recover from a separate stalled passage") {
+        residentRuntime { h ->
+            val cargo = carryingCourier(h)
+            val npc = h.owner.collisionActors().single()
+            val player = h.playerAt(Location(h.world, 3.5, 64.0, .5))
+            h.nativeCollisions().use { collisions ->
+                var denials = 0
+                h.owner.residentStepAllowed = { actor, from, to ->
+                    collisions.canResidentMove(actor, from, to).also { if (!it && from != to) denials++ }
+                }
+                h.owner.pulse(2_000)
+                for (tick in 1..250) {
+                    h.navigate()
+                    if (denials > 0) break
+                }
+                (denials > 0) shouldBe true
+                val contact = npc.location
+                h.unloads shouldBe 0
+                player.teleport(Location(h.world, 3.5, 64.0, 3.5))
+                for (tick in 1..2_000) {
+                    h.navigate()
+                    if (tick % 20 == 0) {
+                        h.owner.pulse(requireNotNull(h.navigationNow))
+                        h.clearRecordedCalls()
+                    }
+                    if (h.unloads > 0) break
+                    if (tick <= 800) (npc.location.x < 11.0) shouldBe true
+                }
+                withClue("contact=$contact feet=${npc.location} ${h.navigationState()}") {
+                    h.unloads shouldBe 1
+                }
+                h.pendingUnload.isDone shouldBe false
+                h.city.workers.single().cargo shouldBe cargo
+                h.deliveries shouldBe 0
+                h.world.getBlockAt(10, 64, 0).type shouldBe Material.OAK_FENCE_GATE
+            }
+        }
+    }
+
     test("a courier making real physical progress is not teleported after sixty monotonic seconds") {
         residentRuntime { h ->
             carryingCourier(h)
@@ -222,6 +261,33 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
             h.owner.pulse(requireNotNull(h.navigationNow) + 2_000)
             h.unloads shouldBe 1
             h.city.workers.single().cargo shouldBe cargo
+        }
+    }
+
+    test("a player who enters the origin during route preparation prevents timed recovery while overlapping") {
+        residentRuntime { h ->
+            val cargo = carryingCourier(h)
+            val npc = h.owner.collisionActors().single()
+            val at = npc.location
+            h.holdNavigation = true
+            h.owner.pulse(2_000)
+            for (tick in 1..100) { h.navigate(0); if (h.pendingNavigationWorkers > 0) break }
+            h.pendingNavigationWorkers shouldBe 1
+            val player = h.playerAt(at)
+            h.nativeCollisions().use { collisions ->
+                h.owner.residentStepAllowed = collisions::canResidentMove
+                h.navigate(60_000)
+                npc.location shouldBe at
+                player.location shouldBe at
+                h.city.workers.single().cargo shouldBe cargo
+                h.unloads shouldBe 0
+                player.teleport(at.clone().add(0.0, 0.0, 3.0))
+                h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
+                h.navigate(0)
+                (npc.location.distance(at) > 8.0) shouldBe true
+                h.unloads shouldBe 0
+                h.city.workers.single().cargo shouldBe cargo
+            }
         }
     }
 
