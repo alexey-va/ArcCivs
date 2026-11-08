@@ -527,9 +527,9 @@ internal class CivsBuildingRequests(
                                         sitePlan.terrain?.requiredGrass.orEmpty())
                                 else -> CompletableFuture.completedFuture(CivAutonomousDesign(blueprint, sitePlan.terrain))
                             }
-                            design.thenCompose { prepared -> world.capture(city.id, city.owner, city.worldId,
-                                prepared.blueprint.building, prepared.blueprint.cells, building, prepared.terrain,
-                                adminPlacement = sitePlan.adminPlacement).thenApply { it to prepared.paidApproach } }
+                            design.thenCompose { prepared ->
+                                captureQueuedDesign(city, building, sitePlan, prepared).thenApply { it to prepared.paidApproach }
+                            }
                         }
                     capturedDesign.whenCompleteSync(tasks) capturedReady@ { prepared, captureFailure ->
                             if (captureFailure != null) return@capturedReady completeActivation(captureFailure)
@@ -561,6 +561,34 @@ internal class CivsBuildingRequests(
             }.onFailure { completeActivation(it) }
         }
         return result
+    }
+
+    private fun captureQueuedDesign(city: Settlement, previous: CivBuilding, queued: CivPlacementPlan,
+        design: CivAutonomousDesign): CompletableFuture<CivPlacementPlan> {
+        val target = design.blueprint.building
+        val cells = design.blueprint.cells
+        val terrain = design.terrain
+        fun capture() = world.capture(city.id, city.owner, city.worldId, target, cells, previous, terrain,
+            adminPlacement = queued.adminPlacement)
+        if (queued.adminPlacement || previous.type != BuildingType.WALL || target.type != BuildingType.WALL ||
+            !CivsInfrastructureRebuild.refit(previous, target) || terrain == null || terrain.route.size < 3) return capture()
+
+        val sourceId = CivsGateRefit.retainedPlanId(previous)
+        return store.loadPlan(sourceId).thenCompose { saved ->
+            val source = saved ?: throw CivsRejection("gate-refit-source-missing")
+            rejectIf(source.id != sourceId || source.cityId != city.id || source.worldId != city.worldId ||
+                source.building.copy(phase = BuildingPhase.ACTIVE) != previous || source.adminPlacement ||
+                source.capturedSha256 == null, "gate-refit-source-missing")
+            if (terrain.route == source.terrain?.route) return@thenCompose capture()
+            val captures = city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.id != previous.id }
+                .map { store.loadPlan(CivsWarehouseRefit.retainedPlanId(it)) }
+            CompletableFuture.allOf(*captures.toTypedArray()).thenApplyAsync({
+                CivsAutonomousPlacement.wallRefitApproach(city, source, listOf(source) + captures.mapNotNull { it.join() })
+                    ?: throw CivsRejection("autonomy-no-path")
+            }, executor).thenCompose { approach ->
+                world.captureWallRefit(target, cells, previous, terrain, approach, proposal = false)
+            }
+        }
     }
 
     /** The route and the order become visible together in the existing city save. */
@@ -687,7 +715,10 @@ internal class CivsBuildingRequests(
         val result = authority.tracked<Unit>()
         authority.reserveCity(city.id)
         val capture = runCatching {
+            val wallApproach = design.wallApproach
             if (previous == null) world.captureAutonomousSite(city.id, city.owner, city.worldId, blueprint.building, blueprint.cells, design.terrain)
+            else if (wallApproach != null) world.captureWallRefit(blueprint.building, blueprint.cells, previous,
+                requireNotNull(design.terrain), wallApproach, proposal = true)
             else world.captureSite(city.id, city.owner, city.worldId, blueprint.building, blueprint.cells, previous,
                 design.terrain.takeIf { design.infrastructureSource != null })
         }

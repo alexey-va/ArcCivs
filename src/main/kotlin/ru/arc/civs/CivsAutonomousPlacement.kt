@@ -10,7 +10,10 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 internal data class CivAutonomousDesign(val blueprint: CivBlueprint, val terrain: CivTerraformPlan? = null,
-    val infrastructureSource: CivPlacementPlan? = null, val paidApproach: CivPaidApproachReuse? = null)
+    val infrastructureSource: CivPlacementPlan? = null, val paidApproach: CivPaidApproachReuse? = null,
+    val wallApproach: CivWallRefitApproach? = null)
+
+internal data class CivWallRefitApproach(val city: Settlement, val original: List<CivPosition>, val paidFloors: Set<CivPosition>)
 
 /** The planner and its diagnostic export capture the same water-foundation domain. */
 internal fun civsAutonomousWaterColumns(frame: CivSettlementFrame, retainedGates: List<CivBox>): Set<Long> =
@@ -65,7 +68,7 @@ internal class CivsAutonomousPlacement(
     /** Refit geometry is captured by the same admission and queue as a new resident-built site. */
     fun rebuildInfrastructure(city: Settlement, source: CivPlacementPlan, plans: List<CivPlacementPlan>,
         survivor: CivBuilding? = null): CompletableFuture<CivAutonomousDesign> =
-        blueprints.recover(source).thenApplyAsync({
+        blueprints.recover(source).thenComposeAsync({
             val access = CivAutonomousAccess.from(city, plans)
             val box = source.building.bounds
             val routes = if (survivor != null) CivsInfrastructureRebuild.witnesses(city, plans)
@@ -76,12 +79,15 @@ internal class CivsAutonomousPlacement(
             val piece = CivSettlementPiece(proposal.building.id, proposal.building.type, box, proposal.building.entrance,
                 proposal.blocks.map { CivSettlementBlock(it.position, it.after) }, proposal.building.transit.orEmpty(),
                 profileStage = CivsInfrastructureRebuild.stage(proposal.building))
-            Triple(proposal, piece, CivsInfrastructure.schematic(piece, dataVersion))
-        }, executor).thenCompose { (proposal, piece, bytes) ->
+            val approach = if (proposal.building.type == BuildingType.WALL && source.building.type == BuildingType.WALL)
+                wallRefitApproach(city, source, plans) else null
+            val bytes = CivsInfrastructure.schematic(piece, dataVersion)
             writeCapture(proposal.id, bytes).thenCompose {
                 blueprints.prepareInfrastructure(piece, city.worldId, bytes, proposal.id)
-            }.thenApply { CivAutonomousDesign(it.copy(building = proposal.building), proposal.terrain, source) }
-        }
+            }.thenApply {
+                CivAutonomousDesign(it.copy(building = proposal.building), proposal.terrain, source, wallApproach = approach)
+            }
+        }, executor)
 
     fun wallInfill(city: Settlement, gateId: UUID, wallId: UUID,
         acceptedWork: List<CivPlacementPlan>): CompletableFuture<CivAutonomousDesign> {
@@ -826,6 +832,32 @@ internal class CivsAutonomousPlacement(
     }
 
     companion object {
+        /** A paid road can support a read-only step even where upkeep is barred from changing its grade. */
+        internal fun wallRefitApproach(city: Settlement, source: CivPlacementPlan,
+            plans: List<CivPlacementPlan>): CivWallRefitApproach? {
+            val route = source.terrain?.route.orEmpty()
+            if (route.size < 3 || source.building.id.toString() in city.roadRouteOverrides.orEmpty()) return null
+            val candidates = route.subList(1, route.lastIndex).mapTo(hashSetOf()) { it.copy(y = it.y - 2) }
+            val retained = plans.filter { plan ->
+                val active = city.building(plan.building.id)
+                active?.phase == BuildingPhase.ACTIVE && plan.id == CivsWarehouseRefit.retainedPlanId(active) &&
+                    plan.capturedSha256 != null && !plan.adminPlacement
+            }
+            val access = CivAutonomousAccess.from(city, retained)
+            val civic = access.routes.asSequence().filter { (id, _) -> city.building(id)?.type?.isInfrastructure == false }
+                .flatMap { (_, paid) -> CivsAutonomousTerraform.roadProfile(paid).values.asSequence() }
+            val authored = access.infrastructure.asSequence().filter { it.type == BuildingType.ROAD }.flatMap { road ->
+                val surfaces = road.blocks.filter { CivsRoadMaintenance.surface(it.after) }.mapTo(hashSetOf()) { it.position }
+                road.transit.asSequence().map { it.copy(y = it.y - 1) }.filter { it in surfaces }
+            }
+            val columns = candidates.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            val floors = (civic + authored).filter { civsTerrainKey(it.x, it.z) in columns }
+                .groupBy { civsTerrainKey(it.x, it.z) }.values.mapNotNullTo(hashSetOf()) { claims ->
+                    claims.distinct().singleOrNull()?.takeIf { it in candidates }
+                }
+            return if (floors.isEmpty()) null else CivWallRefitApproach(city, route.toList(), floors)
+        }
+
         const val MAXIMUM_SURFACE_COLUMNS = CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS
         const val MAXIMUM_OPTIONS = 64
         private val CANDIDATE_REJECTIONS = setOf("autonomy-terrain", "autonomy-slope", "autonomy-no-path", "autonomy-foundation",

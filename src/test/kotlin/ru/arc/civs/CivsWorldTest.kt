@@ -195,6 +195,76 @@ class CivsOwnControlTreeSupportTest : FunSpec({
 })
 
 class CivsWorldTest : FunSpec({
+    test("active wall refit captures the existing paid lower road as its approach") {
+        worldScenario(collisionWorld = true) { s ->
+            val wallCell = CivPosition(2, 64, 0)
+            val entrance = CivPosition(1, 65, 0)
+            val previous = worldBuilding(CivBox(wallCell, wallCell)).copy(type = BuildingType.WALL,
+                entrance = entrance, phase = BuildingPhase.ACTIVE).let {
+                it.copy(schematicId = "civs/infrastructure/v1/wall/${it.id}")
+            }
+            val target = previous.copy(phase = BuildingPhase.CONSTRUCTING,
+                schematicId = CivsInfrastructureRebuild.schematicId(BuildingType.WALL, 1, UUID.randomUUID()))
+            val paidRoute = (-2..3).map { CivPosition(it, 64, 1) }
+            val roadOwner = worldBuilding(worldBox(8, 8)).copy(type = BuildingType.QUARRY,
+                phase = BuildingPhase.ACTIVE, entrance = paidRoute.last())
+            val city = worldCity(s.world.uid, previous).copy(autonomy = CivAutonomy(), buildings = listOf(previous, roadOwner))
+            s.cities += city
+            val original = listOf(CivPosition(-1, 64, 0), CivPosition(0, 65, 0), entrance)
+            val lower = CivPosition(0, 64, 0)
+            val terrain = CivTerraformPlan(CivBox(CivPosition(-2, 63, 0), CivPosition(3, 66, 1)),
+                emptyList(), original, 64, 0, 0)
+            val source = CivPlacementPlan(previous.id, city.id, city.worldId, previous,
+                listOf(CivPlanBlock(wallCell, "minecraft:air", "minecraft:cobblestone")), "a".repeat(64), terrain)
+            val paid = CivPlacementPlan(roadOwner.id, city.id, city.worldId, roadOwner,
+                emptyList(), "b".repeat(64), terrain.copy(route = paidRoute))
+            val floor = s.world.getBlockAt(0, 63, 0).also { it.type = Material.DIRT_PATH }
+            s.world.getBlockAt(1, 64, 0).type = Material.COARSE_DIRT
+            s.world.getBlockAt(2, 64, 0).type = Material.COBBLESTONE
+            val cells = listOf(worldCell(2, 64, "minecraft:spruce_planks"))
+
+            CivsAutonomousPlacement.wallRefitApproach(city, source, listOf(source, paid.copy(capturedSha256 = null))) shouldBe null
+            val transit = lower.copy(y = 63)
+            val road = roadOwner.copy(type = BuildingType.ROAD, bounds = CivBox(transit, transit),
+                anchor = transit, entrance = lower, transit = listOf(lower))
+            val roadCity = city.copy(buildings = listOf(previous, road))
+            val authored = paid.copy(building = road, blocks = listOf(CivPlanBlock(transit, "minecraft:air", "minecraft:dirt_path")))
+            CivsAutonomousPlacement.wallRefitApproach(roadCity, source, listOf(source, authored))?.paidFloors shouldBe setOf(transit)
+            val historical = s.subject.captureSite(city.id, city.owner, city.worldId, target, cells, previous, terrain)
+            s.scheduler.tick(4)
+            rejection(historical).let { failure ->
+                failure.reason shouldBe "autonomy-no-path"
+                failure.values["block"] shouldBe "AIR"
+            }
+
+            val approach = requireNotNull(CivsAutonomousPlacement.wallRefitApproach(city, source, listOf(source, paid)))
+            approach.paidFloors shouldBe setOf(lower.copy(y = 63))
+            val proposal = s.subject.captureWallRefit(target, cells, previous, terrain, approach, proposal = true)
+            s.scheduler.tick(4)
+            val queued = completed(proposal)
+            val adjusted = requireNotNull(queued.terrain)
+            adjusted shouldBe terrain.copy(route = listOf(original.first(), lower, entrance))
+            CivsInfrastructureRebuild.matchesSource(source, queued) shouldBe true
+
+            fun activate() = s.subject.captureWallRefit(target, cells, previous, adjusted, approach, proposal = false)
+                .also { s.scheduler.tick(4) }
+            completed(activate()).terrain shouldBe adjusted
+
+            // A ceiling can leave both standing points clear while obstructing the upward sweep.
+            s.world.getBlockAt(0, 66, 0).type = Material.STONE
+            rejection(activate()).let { failure ->
+                failure.reason shouldBe "autonomy-no-path"
+                failure.values["stage"] shouldBe "wall-refit-approach"
+            }
+            s.world.getBlockAt(0, 66, 0).type = Material.AIR
+            floor.type = Material.DIRT
+            failureReason(activate()) shouldBe "autonomy-no-path"
+            floor.type shouldBe Material.DIRT
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+            s.world.getBlockAt(2, 64, 0).type shouldBe Material.COBBLESTONE
+        }
+    }
+
     for (source in listOf(CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID, CivsPlanBoardBlueprint.SMALL_SCHEMATIC_ID))
         for (rotation in listOf(0, 90, 180, 270))
     test("$source refit at $rotation preserves the filled control and captures the actual rotated before images") {

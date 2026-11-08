@@ -86,6 +86,15 @@ class CivsWorld(
             terrain = terrain, adminPlacement = adminPlacement, upgradeProposal = true)
     }
 
+    internal fun captureWallRefit(building: CivBuilding, cells: List<ArcSchematicBlock>, previous: CivBuilding,
+        terrain: CivTerraformPlan, approach: CivWallRefitApproach, proposal: Boolean): CompletableFuture<CivPlacementPlan> =
+        admit(terrainPoints(terrain)) {
+            val city = approach.city
+            requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
+            Capture(city.id, city.owner, city.worldId, building, cells.toList(), previous,
+                allowControlPlacement = proposal, terrain = terrain, upgradeProposal = proposal, wallApproach = approach)
+        }
+
     /** Automatic admission never treats the creator's edit permission as permission to clear buildings. */
     fun captureAutonomousSite(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         cells: List<ArcSchematicBlock>, terrain: CivTerraformPlan? = null,
@@ -942,9 +951,10 @@ class CivsWorld(
         terrain: CivTerraformPlan? = null,
         private val adminPlacement: Boolean = false,
         private val upgradeProposal: Boolean = false,
+        private val wallApproach: CivWallRefitApproach? = null,
     ) : CivsWorldScan<CivPlacementPlan>(this@CivsWorld, cityId, owner, worldId, building) {
         private val blocks = ArrayList<CivPlanBlock>()
-        private val terraform = terrain?.copy(blocks = terrain.blocks.toList(), route = terrain.route.toList(),
+        private var terraform = terrain?.copy(blocks = terrain.blocks.toList(), route = terrain.route.toList(),
             waterFoundations = terrain.waterFoundations?.toList(), requiredGrass = terrain.requiredGrass?.toList())
         private val terrainOverlay = terraform?.blocks.orEmpty().associateBy { it.position }
         private val requiredGrass = terraform?.requiredGrass.orEmpty().toSet()
@@ -960,6 +970,7 @@ class CivsWorld(
         private var waterY: Int? = null
         private var terrainIndex = 0
         private var routeIndex = 0
+        private var loweredWallStep: Int? = null
         private var gateReadiness: GateReadiness? = null
         private var gateReady = false
 
@@ -975,6 +986,23 @@ class CivsWorld(
                 requireCivs(requiredGrass.isEmpty() || building.type == BuildingType.WALL && it.route.isNotEmpty() &&
                     requiredGrass.all { p -> infrastructureGround[civsTerrainKey(p.x, p.z)] == p.y }, "invalid-plan")
                 if (it.route.isNotEmpty()) strictAutonomous = true
+            }
+            wallApproach?.let { approach ->
+                val plan = requireNotNull(terraform)
+                requireCivs(previous?.type == BuildingType.WALL && building.type == BuildingType.WALL &&
+                    CivsInfrastructureRebuild.refit(previous, building) && !adminPlacement && plan.blocks.isEmpty() &&
+                    plan.waterFoundations.isNullOrEmpty() && plan.requiredGrass.isNullOrEmpty() &&
+                    plan.cutCount == 0 && plan.fillCount == 0 && plan.route.size == approach.original.size, "invalid-plan")
+                requireTerrainRoute(approach.original, building)
+                if (upgradeProposal) requireCivs(plan.route == approach.original, "invalid-plan")
+                else {
+                    val at = plan.route.indices.singleOrNull { plan.route[it] != approach.original[it] }
+                        ?: throw CivsRejection("invalid-plan")
+                    val original = approach.original[at]
+                    requireCivs(at in 1 until plan.route.lastIndex && plan.route[at] == original.copy(y = original.y - 1),
+                        "invalid-plan")
+                    loweredWallStep = at
+                }
             }
         }
 
@@ -1009,6 +1037,10 @@ class CivsWorld(
         override fun validateIdentity(city: Settlement?) {
             if (city?.autonomy != null && !adminPlacement) strictAutonomous = true
             requireCivs(city?.building(building.id) == previous, "invalid-building")
+            wallApproach?.let { proof ->
+                requireCivs(city != null && city.buildings == proof.city.buildings &&
+                    city.roadRouteOverrides == proof.city.roadRouteOverrides, "stale-building")
+            }
             val retarget = retargetSource != null && !adminPlacement && city?.construction == null
             if (previous != null && !retarget) requireCivs(previous.id == building.id &&
                 (previous.type == building.type || city != null && CivsInfrastructureRebuild.refit(city, previous, building)) &&
@@ -1021,6 +1053,51 @@ class CivsWorld(
                 val survivor = requireNotNull(CivsInfrastructureRebuild.closureSurvivor(requireNotNull(city), previous, building))
                 requireCivs(gateReadiness == null || gateReadiness!!.gate == survivor, "stale-building")
                 if (gateReadiness == null) gateReadiness = includeGateReadiness(this, survivor)
+            }
+        }
+
+        /** At most one existing paid road cell can replace an unsupported interior wall step. */
+        private fun selectWallApproach(plan: CivTerraformPlan, approach: CivWallRefitApproach, at: Int) {
+            if (!upgradeProposal || loweredWallStep != null || at !in 1 until plan.route.lastIndex) return
+            val original = plan.route[at]
+            val lower = original.copy(y = original.y - 1)
+            if (lower.copy(y = lower.y - 1) !in approach.paidFloors ||
+                (at - 1..at + 1).any { kotlin.math.abs(plan.route[it].y - lower.y) > 1 } ||
+                !read(lower).type.isAir) return
+            terraform = plan.copy(route = plan.route.toMutableList().also { it[at] = lower })
+            loweredWallStep = at
+        }
+
+        private fun validateWallApproach(plan: CivTerraformPlan, approach: CivWallRefitApproach, at: Int) {
+            // None of the two proved steps can intersect cells this refit is about to write.
+            requireCivs((at - 1..at + 1).none {
+                CivsAutonomousGeometry.horizontalContains(building.bounds, plan.route[it])
+            }, "autonomy-no-path")
+            val lower = plan.route[at]
+            val lowerFloor = lower.copy(y = lower.y - 1)
+            val removedFloor = read(lower)
+            if (!removedFloor.type.isAir) rejectAt("autonomy-no-path", removedFloor)
+            val road = read(lowerFloor)
+            if (lowerFloor !in approach.paidFloors || !CivsRoadMaintenance.surface(road.blockData.asString))
+                rejectAt("autonomy-no-path", road)
+
+            fun standing(position: CivPosition): CitizenPoint {
+                val floor = read(position.copy(y = position.y - 1))
+                val top = floor.collisionShape.boundingBoxes
+                    .filter { .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ }.maxOfOrNull { it.maxY }
+                if (top == null || !routeTerraformSupport(floor)) rejectAt("autonomy-no-path", floor)
+                return CitizenPoint(position.x + .5, floor.y + top, position.z + .5)
+            }
+            val centre = standing(lower)
+            val collision = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
+            fun shape(x: Int, y: Int, z: Int) = collision.getOrPut(CivPosition(x, y, z)) {
+                citizenCollisionSnapshot(world, x, y, z)
+            }
+            for (neighbour in listOf(plan.route[at - 1], plan.route[at + 1])) {
+                val beside = standing(neighbour)
+                if (!citizenPacketStepClear(world, centre, beside, false, ::shape) ||
+                    !citizenPacketStepClear(world, beside, centre, false, ::shape))
+                    rejectAt("autonomy-no-path", road, mapOf("stage" to "wall-refit-approach"))
             }
         }
 
@@ -1061,12 +1138,14 @@ class CivsWorld(
                     return
                 }
                 if (routeIndex < plan.route.size * 3) {
-                    checkTerrainRouteCell(plan, terrainOverlay, routeIndex++)
+                    if (routeIndex % 3 == 0) wallApproach?.let { selectWallApproach(plan, it, routeIndex / 3) }
+                    checkTerrainRouteCell(requireNotNull(terraform), terrainOverlay, routeIndex++)
                     return
                 }
             }
             if (index == cells.size) {
                 checkPreservedControl()
+                loweredWallStep?.let { validateWallApproach(requireNotNull(terraform), requireNotNull(wallApproach), it) }
                 requireCivs(blocks.isNotEmpty(), "invalid-plan")
                 val captured = CivPlacementPlan(UUID.randomUUID(), cityId, worldId, building, blocks.toList(),
                     terrain = terraform?.copy(blocks = terrainBlocks.toList()), adminPlacement = adminPlacement)
