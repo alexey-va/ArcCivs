@@ -616,13 +616,13 @@ internal class CivsAutonomousDevelopment(
     }
 
     /** One optional retained-field intent uses the existing five-second city selection and commit owner. */
-    private fun pulseFarmExpansion(city: Settlement): Boolean {
+    private fun pulseFarmExpansion(city: Settlement, developmentAdmitted: Boolean = false): Boolean {
         farmExpansionRetryAt.keys.retainAll(cities.values.flatMap { it.buildings }.mapTo(hashSetOf()) { it.id })
         val building = city.buildings.firstOrNull { it.phase == BuildingPhase.ACTIVE && it.farmFieldVersion == null &&
             CivsFarmFields.originalMetadata(it) && city.inventory?.mode == CivStorageMode.PHYSICAL &&
             city.workers.any { worker -> worker.assignment == it.id && !CivsResidents.isChild(worker) } &&
             now() >= (farmExpansionRetryAt[it.id] ?: 0L) } ?: return false
-        if (!developmentAdmission(city)) return false
+        if (!developmentAdmitted && !developmentAdmission(city)) return false
         val request = UUID.randomUUID()
         val layout = civsPlanBoardLayoutKey(city)
         autonomyRequests[city.id] = request
@@ -655,8 +655,8 @@ internal class CivsAutonomousDevelopment(
                         civsPlanBoardLayoutKey(current) != layout || current.building(building.id) != building, "stale-development")
                     val retained = plans.orEmpty().singleOrNull { it.building.id == building.id }
                     rejectIf(retained == null || retained.cityId != current.id || retained.worldId != current.worldId ||
-                        retained.building.type != building.type || retained.building.level != building.level ||
-                        retained.building.schematicId != building.schematicId || retained.building.anchor != building.anchor ||
+                        !CivsFarmFields.matchesRetainedProfile(retained.building, building) ||
+                        retained.building.anchor != building.anchor ||
                         retained.building.rotation != building.rotation || retained.building.bounds != building.bounds ||
                         retained.building.entrance != building.entrance, "stale-development")
                     val native = plugin.server.getWorld(current.worldId) ?: throw CivsRejection("world-unavailable")
@@ -680,6 +680,8 @@ internal class CivsAutonomousDevelopment(
             .minWithOrNull(compareBy<CivBuilding> { if (it.type == BuildingType.GATE) 0 else 1 }
                 .thenBy { it.bounds.min.x }.thenBy { it.bounds.min.z }) ?: return false
         if (!developmentAdmission(city)) return false
+        // A ready field gets one turn before another optional wall. Gate work keeps its priority.
+        if (building.type == BuildingType.WALL && pulseFarmExpansion(city, developmentAdmitted = true)) return true
         val request = UUID.randomUUID()
         val layout = civsPlanBoardLayoutKey(city)
         autonomyRequests[city.id] = request

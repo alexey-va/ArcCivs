@@ -76,7 +76,7 @@ internal object CivsWorksiteLayouts {
     /** Local field query; preserves the complete authored field including its water/hay center. */
     fun isField(building: CivBuilding, x: Int, z: Int): Boolean {
         val cells = (if (building.farmFieldVersion == CivsFarmFields.VERSION && CivsFarmFields.supported(building))
-            CivsFarmFields.columns else catalogFields[building.schematicId] ?: fieldColumns[building.schematicId])
+            CivsFarmFields.columns(building) else catalogFields[building.schematicId] ?: fieldColumns[building.schematicId])
             ?.takeIf { it.isNotEmpty() } ?: return false
         val dx = x - building.anchor.x
         val dz = z - building.anchor.z

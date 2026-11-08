@@ -24,9 +24,7 @@ internal object CivsFarmExpansion {
             building.phase == BuildingPhase.ACTIVE && CivsFarmFields.originalMetadata(building), "original-profile")
         val field = (CivsFarmFields.soil(building) + CivsFarmFields.water(building)).toSet()
         val columns = field.mapTo(hashSetOf()) { it.x to it.z }
-        val border = (10..20).flatMap { x -> listOf(CivPosition(x, 0, -22), CivPosition(x, 0, -6)) } +
-            (-21..-7).flatMap { z -> listOf(CivPosition(10, 0, z), CivPosition(20, 0, z)) }
-        val perimeter = border.map { CivsWorksiteLayouts.point(building, it) }
+        val perimeter = CivsFarmFields.rim(building)
         val operating = (field + perimeter).mapTo(hashSetOf()) { it.x to it.z }
         require(operating.size <= 192 && operating.all { city.contains(it.first, it.second) }, "city-coverage")
         val others = settlements.filter { it.worldId == city.worldId }.flatMap { other ->
@@ -71,14 +69,18 @@ internal object CivsFarmExpansion {
             read(originalWater.copy(y = originalWater.y + 1))?.type?.isAir == true &&
             clear(originalWater.copy(y = originalWater.y + 2)), "original-water")
         require(water.all { waterSafe(building, it, ::read, requireClearTop = false) }, "water-banks")
-        require(walkableRim(perimeter, ::read, ::clear), "perimeter-access")
+        val rimClear: (CivPosition) -> Boolean = { point ->
+            read(point)?.let { block -> block.type.isAir || block.type in CivsTerrainPolicy.AUTONOMOUS_PLANTS &&
+                CivsTerrainPolicy.passableTerraform(block) } == true
+        }
+        require(walkableRim(perimeter, ::read, rimClear), "perimeter-access")
     }
 
     private fun walkableRim(perimeter: List<CivPosition>, read: (CivPosition) -> Block?,
         clear: (CivPosition) -> Boolean): Boolean {
         val floors = perimeter.associate { base ->
             if (read(base)?.let(CivsTerrainPolicy::fullTerraformSupport) != true) return false
-            val floor = (0..2).firstNotNullOfOrNull { rise ->
+            val floor = (0..3).firstNotNullOfOrNull { rise ->
                 val point = base.copy(y = base.y + rise)
                 val supported = (1..rise).all { step ->
                     read(base.copy(y = base.y + step))?.let { it.type in naturalSoils &&

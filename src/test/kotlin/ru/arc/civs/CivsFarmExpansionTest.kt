@@ -2,12 +2,14 @@ package ru.arc.civs
 
 import com.google.gson.Gson
 import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import org.bukkit.Bukkit
 import org.bukkit.Material
 import ru.arc.core.BukkitTaskScheduler
@@ -21,6 +23,36 @@ import java.util.concurrent.Executor
 class CivsFarmExpansionTest : FunSpec({
     beforeEach { installExpandedFarmCatalog() }
     afterEach { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+
+    test("the retained Medieval Oak expansion follows its authored offset in world coordinates") {
+        val anchor = CivPosition(12307, 88, 8402)
+        val farm = CivBuilding(UUID.randomUUID(), BuildingType.FARM, 2, anchor, 90,
+            "civs/v2/medievaloak/agriculture-horticulture-altfarmer/b2847c45d9139927e715/level2",
+            CivBox(CivPosition(12308, 86, 8395), CivPosition(12328, 103, 8411)),
+            CivPosition(12307, 89, 8402), BuildingPhase.ACTIVE)
+        val originalWater = CivPosition(16, 0, -11)
+        fun jsonPoint(point: CivPosition) = JsonArray().apply { add(point.x); add(point.y); add(point.z) }
+        val soil = (12..20).flatMap { x -> (-15..-7).map { z -> CivPosition(x, 0, z) } } - originalWater
+        val metadata = JsonObject().apply {
+            add("soilCells", JsonArray().apply { soil.forEach { add(jsonPoint(it)) } })
+            add("irrigationCells", JsonArray().apply { add(jsonPoint(originalWater)) })
+        }
+        CivsWorksiteLayouts.installCatalog(mapOf(farm.schematicId to JsonObject().apply { add("farm", metadata) }))
+        CivsFarmFields.originalMetadata(farm) shouldBe true
+        CivsWorksiteLayouts.field(farm).size shouldBe 80
+        CivsWorksiteLayouts.irrigation(farm) shouldBe listOf(CivPosition(12318, 88, 8418))
+        CivsWorksiteLayouts.isField(farm, 12325, 8422) shouldBe false
+
+        val expanded = farm.copy(farmFieldVersion = CivsFarmFields.VERSION)
+        CivsWorksiteLayouts.field(expanded).size shouldBe 120
+        CivsWorksiteLayouts.irrigation(expanded).toSet() shouldBe (12311..12325).map { CivPosition(it, 88, 8418) }.toSet()
+        CivsFarmFields.added(expanded).size shouldBe 54
+        CivsFarmFields.draining(expanded).size shouldBe 8
+        CivsFarmFields.rim(expanded).size shouldBe 52
+        CivsFarmFields.rim(expanded).contains(CivPosition(12326, 88, 8423)) shouldBe true
+        CivsWorksiteLayouts.isField(expanded, 12325, 8422) shouldBe true
+        CivsWorksiteLayouts.isField(expanded, 12326, 8422) shouldBe false
+    }
 
     test("retained profile changes only field intent and protects its soil water and draining crops in every rotation") {
         MockBukkitTestRuntime.open().use { paper ->
@@ -117,6 +149,8 @@ class CivsFarmExpansionTest : FunSpec({
             fun set(point: CivPosition, material: Material) { f.world.getBlockAt(point.x, point.y, point.z).type = material }
             set(top, Material.CARROTS)
             shouldThrow<CivsRejection> { admit() }
+            set(top, Material.WILDFLOWERS)
+            shouldThrow<CivsRejection> { admit() }.values["stage"] shouldBe "new-column"
             set(top, Material.AIR)
             set(top, Material.CHEST)
             shouldThrow<CivsRejection> { admit() }
@@ -143,7 +177,7 @@ class CivsFarmExpansionTest : FunSpec({
 
     test("two flat beds may use the natural stepped rim seen at Auto5") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
-            val f = farmExpansionFixture(paper, rotation = 90)
+            val f = farmExpansionFixture(paper, rotation = 270)
             fun set(offset: CivPosition, material: Material) {
                 val p = CivsWorksiteLayouts.point(f.farm, offset)
                 f.world.getBlockAt(p.x, p.y, p.z).type = material
@@ -153,45 +187,63 @@ class CivsFarmExpansionTest : FunSpec({
                 set(CivPosition(20, 1, z), Material.DIRT)
                 if (z >= -8) set(CivPosition(20, 2, z), Material.GRASS_BLOCK)
             }
-            // The two-block corner cannot be used directly; every rim column
-            // still joins the flat approach via the other cardinal direction.
+            val crest = CivPosition(20, 3, -6)
+            val flowers = CivPosition(20, 3, -8)
+            set(crest, Material.GRASS_BLOCK)
+            set(flowers, Material.WILDFLOWERS)
+            // The crest has a supported approach along the rim despite its three-block direct face.
             admit()
             f.farm.farmFieldVersion shouldBe null
-            set(CivPosition(20, 3, -8), Material.STONE)
-            shouldThrow<CivsRejection> { admit() }
-            set(CivPosition(20, 3, -8), Material.AIR)
-            set(CivPosition(20, 1, -9), Material.STONE)
-            shouldThrow<CivsRejection> { admit() }
+            set(flowers, Material.STONE)
+            shouldThrow<CivsRejection> { admit() }.values["stage"] shouldBe "perimeter-access"
+            set(flowers, Material.WILDFLOWERS)
+            set(CivPosition(20, 2, -7), Material.AIR)
+            set(CivPosition(20, 1, -7), Material.AIR)
+            shouldThrow<CivsRejection> { admit() }.values["stage"] shouldBe "perimeter-access"
         }
     }
 
-    test("automatic admission publishes one state-only intent through the existing five-second development owner") {
+    for (farmLevel in listOf(1, 2))
+    test("a ready farm with its original site journal takes a turn before an optional wall refit at level $farmLevel") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val f = farmExpansionFixture(paper)
             val plugin = paper.createSimplePlugin("FarmDevelopment")
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
             val world = mockk<CivsWorld> { every { canModify(any(), any(), any()) } returns true }
             val blueprints = mockk<CivsBlueprints> { every { maximumLevel(any()) } answers { firstArg<CivBuilding>().type.maxLevel } }
-            val placement = mockk<CivsAutonomousPlacement>(relaxed = true)
-            val relocated = f.farm.copy(control = f.farm.control!!.copy(x = f.farm.control!!.x + 1))
+            val refit = CompletableFuture<CivAutonomousDesign>()
+            val placement = mockk<CivsAutonomousPlacement>(relaxed = true) {
+                every { rebuildInfrastructure(any(), any(), any(), any()) } returns refit
+            }
+            val wallId = UUID.randomUUID()
+            val at = CivPosition(-15, 63, 15)
+            val wall = CivBuilding(wallId, BuildingType.WALL, 1, at, 0, "civs/infrastructure/v1/wall/$wallId",
+                CivBox(at, at.copy(x = -11, y = 67)), at.copy(y = 64, z = 16), BuildingPhase.ACTIVE)
+            val relocated = f.farm.copy(level = farmLevel, schematicId = FARM_SOURCE + farmLevel,
+                control = f.farm.control!!.copy(x = f.farm.control!!.x + 1))
             f.world.getBlockAt(relocated.control!!.x, relocated.control!!.y, relocated.control!!.z).type = Material.BARREL
             val before = CivsRules.validate(f.city.copy(buildings = f.city.buildings.map {
                 if (it.id == relocated.id) relocated else it
-            }))
+            } + wall))
+            CivsInfrastructureRebuild.needsRefit(before, wall) shouldBe true
             var city = before
+            var now = 1_000_000L
             var saves = 0
             val mutation: (UUID, (Settlement) -> Settlement) -> CompletableFuture<Settlement> = { _, change ->
                 try { city = change(city); saves++; CompletableFuture.completedFuture(city) }
                 catch (failure: Throwable) { CompletableFuture.failedFuture(failure) }
             }
             val plan = CivPlacementPlan(f.farm.id, city.id, city.worldId, f.farm, emptyList())
+            val wallPlan = CivPlacementPlan(wall.id, city.id, city.worldId, wall, emptyList())
+            val plans = listOf(plan, wallPlan)
             val development = CivsAutonomousDevelopment(plugin, tasks, world, blueprints, placement, Executor(Runnable::run),
                 { mapOf(city.id to city) }, mutableSetOf(), emptySet(), { false }, { true }, { false },
-                { CompletableFuture.completedFuture(listOf(plan)) }, { true }, { _, action -> action() }, mutation, mutation,
-                { _, _ -> error("field intent must not create construction") }, {}, { 1_000_000L })
+                { CompletableFuture.completedFuture(plans) }, { true }, { _, action -> action() }, mutation, mutation,
+                { _, _ -> error("the wall design is still pending") }, {}, { now })
             try {
                 development.pulseAccessRepair(); paper.performTicks(2)
                 development.pulse(); paper.performTicks(2)
+                verify(exactly = 0) { placement.rebuildInfrastructure(any(), any(), any(), any()) }
                 saves shouldBe 1
                 city shouldBe CivsRules.expandFarmField(before, f.farm.id)
                 city.building(f.farm.id)!!.control shouldBe relocated.control
@@ -201,6 +253,12 @@ class CivsFarmExpansionTest : FunSpec({
                 }
                 CivsFarmFields.added(f.farm).all { f.world.getBlockAt(it.x, it.y, it.z).type == Material.DIRT } shouldBe true
                 development.pulse(); paper.performTicks(2)
+                saves shouldBe 1
+                now += 5_001
+                development.pulseAccessRepair(); paper.performTicks(2)
+                development.pulse(); paper.performTicks(2)
+                verify(exactly = 1) { placement.rebuildInfrastructure(city, wallPlan, plans, null) }
+                city shouldBe CivsRules.expandFarmField(before, f.farm.id)
                 saves shouldBe 1
             } finally { development.reset(); tasks.close() }
         }
