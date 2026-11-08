@@ -51,6 +51,51 @@ class CivsAutonomousPlanExtensionTest : FunSpec({
             h.development.progress(before.id)?.reason shouldBe "stale-development"
         }
     }
+
+    test("a rejected perimeter owes the ready quarry upgrade one turn through terrain edits and busy admission") {
+        ExtensionHarness(old).use { h ->
+            val quarry = requireNotNull(old.autonomy?.plan).plots.single { it.building.type == BuildingType.QUARRY }
+                .building.copy(phase = BuildingPhase.ACTIVE)
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map { if (it.id == quarry.id) quarry else it }))
+            val goal = requireNotNull(CivsAutonomy.nextGoal(h.city))
+            goal shouldBe CivsAutonomy.goal(h.city, BuildingType.QUARRY, 2, quarry.id)
+            goal.ready shouldBe true
+            val upgrade = CompletableFuture<CivBlueprint>()
+            every { h.blueprints.prepareUpgrade(quarry, 2, h.city.worldId) } returns upgrade
+            every { h.placement.infrastructure(any()) } returns CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
+            h.development.pulseAccessRepair(); h.drain()
+            h.development.pulse(); h.drain()
+            verify(exactly = 1) { h.placement.infrastructure(any()) }
+            h.development.progress(h.city.id)?.reason shouldBe "autonomy-no-site"
+
+            // A native road/ground edit invalidates the original geometry memo before its five minutes pass.
+            val edit = h.city.center.copy(x = h.city.center.x + h.city.radius - 1)
+            h.development.terrainChanged(h.city.worldId, edit)
+            (h.development.debug(h.city.id)["geometric_refusal"] as Map<*, *>)["cached"] shouldBe false
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
+                if (it.type == BuildingType.FORESTER) it.copy(production = "OAK_LOG") else it
+            }))
+            h.admit = false
+            h.time += 30_001
+            h.development.pulse(); h.drain()
+            h.development.progress(h.city.id)?.reason shouldBe "city-busy"
+            verify(exactly = 0) { h.blueprints.prepareUpgrade(any(), any(), any()) }
+
+            h.admit = true
+            h.time += 5_001
+            h.development.pulse(); h.drain()
+            verify(exactly = 1) { h.blueprints.prepareUpgrade(quarry, 2, h.city.worldId) }
+            verify(exactly = 1) { h.placement.infrastructure(any()) }
+
+            // A real quarry refusal consumes its turn and lets the existing perimeter policy run again.
+            upgrade.completeExceptionally(CivsRejection("autonomy-no-site")); h.drain()
+            h.time += 30_001
+            h.development.pulse(); h.drain()
+            verify(exactly = 2) { h.placement.infrastructure(any()) }
+            verify(exactly = 1) { h.blueprints.prepareUpgrade(quarry, 2, h.city.worldId) }
+            h.saves shouldBe 0
+        }
+    }
 })
 
 private class ExtensionHarness(old: Settlement) : AutoCloseable {
@@ -62,11 +107,12 @@ private class ExtensionHarness(old: Settlement) : AutoCloseable {
         }, research = CivResearchState(CivResearchId.entries.toSet()))
     var time = 0L
     var saves = 0
+    var admit = true
     val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler)
     val placement = mockk<CivsAutonomousPlacement>()
     val planned = CompletableFuture<CivSettlementPlan>()
-    private val blueprints = mockk<CivsBlueprints>()
+    val blueprints = mockk<CivsBlueprints>()
     private val plugin = mockk<Plugin>()
     private val mutation: (UUID, (Settlement) -> Settlement) -> CompletableFuture<Settlement> = { _, transform ->
         runCatching { transform(city) }.fold({ next ->
@@ -83,7 +129,7 @@ private class ExtensionHarness(old: Settlement) : AutoCloseable {
     val development = CivsAutonomousDevelopment(plugin, tasks, mockk(), blueprints, placement, Executor(Runnable::run),
         { mapOf(city.id to city) }, mutableSetOf(), emptySet(), { false }, { true }, { false },
         { CompletableFuture.completedFuture(emptyList()) }, { true }, { _, action -> action() }, mutation, mutation,
-        { _, _ -> error("A detached plan cannot commit a construction design") }, {}, { time })
+        { _, _ -> error("A detached plan cannot commit a construction design") }, {}, { time }, developmentAdmission = { admit })
 
     fun startExtension() {
         CivsRules.validate(city)

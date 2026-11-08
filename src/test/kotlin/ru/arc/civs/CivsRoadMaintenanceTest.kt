@@ -341,6 +341,47 @@ class CivsRoadMaintenanceTest : FunSpec({
         CivsRoadMaintenance.prepare(town, listOf(foreign)).targets shouldBe emptyList()
     }
 
+    test("quarry shoulder upkeep preserves a fortification approach at a different grade") {
+        val floor = CivPosition(12271, 69, 9697)
+        val support = floor.copy(y = 70)
+        val quarryRoute = listOf(CivPosition(12271, 70, 9694), CivPosition(12271, 70, 9695),
+            CivPosition(12272, 70, 9695), CivPosition(12272, 70, 9696)) +
+            (12273..12299).map { CivPosition(it, 70, 9696) }
+        val approach = listOf(quarryRoute[3], CivPosition(12272, 70, 9697), floor.copy(y = 71),
+            CivPosition(12270, 71, 9697), CivPosition(12269, 72, 9697))
+        val base = upkeepCity()
+        val quarry = base.buildings.last().copy(type = BuildingType.QUARRY, transit = null,
+            schematicId = "fixture/quarry", anchor = CivPosition(12300, 69, 9696),
+            bounds = CivBox(CivPosition(12300, 69, 9696), CivPosition(12303, 75, 9699)), entrance = quarryRoute.last())
+        val city = base.copy(center = CivPosition(12258, 69, 9646), style = "nordic",
+            buildings = listOf(quarry), workers = emptyList())
+        val quarryPlan = upkeepApproach(city, quarry, quarryRoute)
+        val baseline = CivsRoadMaintenance.prepare(city, listOf(quarryPlan))
+        baseline.targets.singleOrNull { it.floor == floor }?.after shouldBe "minecraft:dirt_path"
+        CivsRoadMaintenance.covers(floor, listOf("minecraft:coarse_dirt", "minecraft:air")) shouldBe
+            listOf(CivPlanBlock(support, "minecraft:coarse_dirt", "minecraft:air"))
+
+        for (type in listOf(BuildingType.WALL, BuildingType.GATE)) {
+            val fortification = quarry.copy(id = UUID(0, 40), type = type, schematicId = "fixture/fortification",
+                anchor = CivPosition(12269, 70, 9696),
+                bounds = CivBox(CivPosition(12269, 70, 9696), CivPosition(12269, 74, 9696)), entrance = approach.last())
+            val fortified = city.copy(buildings = city.buildings + fortification)
+            val saved = upkeepApproach(fortified, fortification, approach).let { plan ->
+                plan.copy(terrain = requireNotNull(plan.terrain).copy(
+                    blocks = listOf(CivPlanBlock(support, "minecraft:air", "minecraft:coarse_dirt")), fillCount = 1))
+            }
+            val protected = CivsRoadMaintenance.prepare(fortified, listOf(quarryPlan, saved)).targets
+            protected.none { it.floor == floor || it.floor == support } shouldBe true
+            protected.none { floor in it.neighbours || support in it.neighbours } shouldBe true
+            protected.any { it.floor == quarryRoute.first().copy(y = 69) } shouldBe true
+
+            val sameGrade = approach.map { if (it.x == floor.x && it.z == floor.z) it.copy(y = 70) else it }
+            val matched = upkeepApproach(fortified, fortification, sameGrade)
+            CivsRoadMaintenance.prepare(fortified, listOf(quarryPlan, matched)).targets shouldBe baseline.targets
+            CivsRoadMaintenance.prepare(fortified, listOf(saved)).targets shouldBe emptyList()
+        }
+    }
+
     test("a queued gate only defers upkeep whose exact downhill is in its footprint") {
         val route = (10365..10369).map { z -> CivPosition(12562, if (z <= 10366) 69 else 70, z) }
         val base = upkeepCity()

@@ -976,6 +976,15 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     }
                 }
             }
+            // A road shoulder cannot cut the support of a paid fortification approach.
+            for (building in city.buildings) {
+                if (building.type != BuildingType.WALL && building.type != BuildingType.GATE) continue
+                for (standing in access.routes[building.id].orEmpty()) {
+                    val key = civsTerrainKey(standing.x, standing.z)
+                    val floor = floors[key] ?: continue
+                    if (floor.y != standing.y - 1) ambiguous += key
+                }
+            }
             val held = hashSetOf<Long>()
             fun junction(source: CivBuilding, repair: CivRoadRouteOverride, at: Int): CivRoadJunction? {
                 if (!repair.descendingTurn(at..at)) return null
