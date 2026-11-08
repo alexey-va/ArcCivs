@@ -3,6 +3,7 @@ package ru.arc.civs
 import org.bukkit.Bukkit
 import org.bukkit.block.Block
 import org.bukkit.block.data.BlockData
+import org.bukkit.event.block.BlockPhysicsEvent
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import java.util.UUID
@@ -40,26 +41,43 @@ internal class CivsPhysics(private val plugin: Plugin, tasks: LifecycleTaskScope
     private class Binding {
         private val craftBlock = Class.forName("org.bukkit.craftbukkit.block.CraftBlock")
         private val craftData = Class.forName("org.bukkit.craftbukkit.block.data.CraftBlockData")
-        private val level = Class.forName("net.minecraft.world.level.Level")
+        private val level = Class.forName("net.minecraft.server.level.ServerLevel")
+        private val levelAccess = Class.forName("net.minecraft.world.level.LevelAccessor")
         private val position = Class.forName("net.minecraft.core.BlockPos")
         private val state = Class.forName("net.minecraft.world.level.block.state.BlockState")
-        private val chunk = Class.forName("net.minecraft.world.level.chunk.LevelChunk")
+        private val nativeBlock = Class.forName("net.minecraft.world.level.block.Block")
         private val getLevel = craftBlock.getMethod("getHandle")
         private val getPosition = craftBlock.getMethod("getPosition")
         private val getState = craftData.getMethod("getState")
-        private val getChunk = level.getMethod("getChunkAt", position)
-        private val notify = level.getMethod(
-            "notifyAndUpdatePhysics", position, chunk, state, state, state,
-            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
-        )
+        private val getBlock = state.getMethod("getBlock")
+        private val analog = state.getMethod("hasAnalogOutputSignal")
+        private val neighbours = level.getMethod("updateNeighborsAt", position, nativeBlock)
+        private val comparator = level.getMethod("updateNeighbourForOutputSignal", position, nativeBlock)
+        private val indirectShapes = state.getMethod("updateIndirectNeighbourShapes", levelAccess, position,
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+        private val directShapes = state.getMethod("updateNeighbourShapes", levelAccess, position,
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+        private val hasPhysicsEvent = level.getField("hasPhysicsEvent")
 
         fun update(block: Block, before: BlockData) {
             val world = getLevel.invoke(block)
             val pos = getPosition.invoke(block)
-            val current = getState.invoke(block.blockData)
-            // UPDATE_NEIGHBORS | UPDATE_CLIENTS: Paper propagates the client flag to
-            // shape updates too, so removed unsupported plants must reach viewers.
-            notify.invoke(world, pos, getChunk.invoke(world, pos), getState.invoke(before), current, current, 3, 512)
+            val currentData = block.blockData
+            val current = getState.invoke(currentData)
+            val previous = getState.invoke(before)
+            // The original write already published the block and its POI transition. Replay
+            // only the neighbor and shape portion of Paper's post-write processing.
+            neighbours.invoke(world, pos, getBlock.invoke(previous))
+            if (analog.invoke(current) == true) comparator.invoke(world, pos, getBlock.invoke(current))
+            indirectShapes.invoke(previous, world, pos, UPDATE_CLIENTS, SHAPE_DEPTH)
+            if (hasPhysicsEvent.getBoolean(world) && !BlockPhysicsEvent(block, currentData).callEvent()) return
+            directShapes.invoke(current, world, pos, UPDATE_CLIENTS, SHAPE_DEPTH)
+            indirectShapes.invoke(current, world, pos, UPDATE_CLIENTS, SHAPE_DEPTH)
+        }
+
+        private companion object {
+            const val UPDATE_CLIENTS = 2
+            const val SHAPE_DEPTH = 511
         }
     }
 }
