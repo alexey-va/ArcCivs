@@ -13,6 +13,7 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.ScheduledTask
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /** Explicitly detached caller policy. Callbacks may not retain World, Block or mutable actor state. */
 internal data class CitizenSnapshotPolicy(
@@ -41,30 +42,68 @@ internal data class CitizenSnapshotKey(val x: Int, val z: Int)
 internal data class CitizenSnapshotSectionKey(val x: Int, val y: Int, val z: Int)
 internal data class CitizenSnapshotState(val shape: CitizenTerrainShape, val dynamic: Boolean)
 
-/** Paper owns the immutable chunk copy. Palette discovery runs only on the worker. */
-internal class CitizenSnapshotChunk(val snapshot: ChunkSnapshot, val minimumY: Int, val maximumY: Int, val revision: Long = 0) {
-    private val sections = ConcurrentHashMap<Int, Map<BlockData, CivPosition>>()
+/** The chunk copy and compact section palettes are detached; only workers decode sections. */
+internal class CitizenSnapshotChunk(val snapshot: ChunkSnapshot, val minimumY: Int, val maximumY: Int, val revision: Long = 0,
+    previous: CitizenSnapshotChunk? = null, changedSections: Set<Int> = emptySet(), private val sectionDecodes: AtomicLong? = null,
+) {
+    /** All routes using a section share palette state; contextual boxes are still captured per point. */
+    class Passability(val data: BlockData) {
+        @Volatile private var resolved: CitizenSnapshotState? = null
+        fun state(states: Map<BlockData, CitizenSnapshotState>): CitizenSnapshotState =
+            resolved ?: states.getValue(data).also { resolved = it }
+    }
+
+    private class Section(private val cells: ShortArray, private val palette: Array<Passability>,
+        val samples: Map<BlockData, CivPosition>) {
+        fun at(point: CivPosition): Passability =
+            palette[cells[((point.y and 15) * 16 + (point.z and 15)) * 16 + (point.x and 15)].toInt()]
+    }
+
+    private val sections: ConcurrentHashMap<Int, Section> = ConcurrentHashMap<Int, Section>().apply {
+        previous?.sections?.forEach { (y, section) -> if (y !in changedSections) put(y, section) }
+    }
+    val retainedSections = sections.size
     private val palettes = ConcurrentHashMap<Int, ConcurrentHashMap<Int, Map<BlockData, CivPosition>>>()
+
     fun states(minY: Int, maxY: Int): Map<BlockData, CivPosition> {
         val first = maxOf(minY, minimumY) shr 4
         val last = minOf(maxY, maximumY - 1) shr 4
+        if (first == last) return section(first).samples
         return palettes.computeIfAbsent(first) { ConcurrentHashMap() }.computeIfAbsent(last) {
-            buildMap {
-                for (section in first..last) {
-                    putAll(sections.computeIfAbsent(section) {
-                        buildMap {
-                            for (y in maxOf(minimumY, section * 16) until minOf(maximumY, section * 16 + 16))
-                                for (z in 0..15) for (x in 0..15) {
-                                    val data = snapshot.getBlockData(x, y, z)
-                                    putIfAbsent(data, CivPosition(snapshot.x * 16 + x, y, snapshot.z * 16 + z))
-                                }
-                        }
-                    })
+            buildMap { for (y in first..last) putAll(section(y).samples) }
+        }
+    }
+
+    fun passability(point: CivPosition): Passability = sections.getValue(point.y shr 4).at(point)
+
+    // Read already decoded data when present. Owner-thread obstacle readback never decodes a section.
+    fun data(point: CivPosition, copyCached: Boolean = false): BlockData {
+        val cell = sections[point.y shr 4]?.at(point)
+        return if (cell == null) snapshot.getBlockData(point.x and 15, point.y, point.z and 15)
+        else if (copyCached) cell.data.clone() else cell.data
+    }
+
+    private fun section(y: Int): Section = sections.computeIfAbsent(y) {
+        val ids = hashMapOf<BlockData, Int>()
+        val palette = arrayListOf<Passability>()
+        val cells = ShortArray(16 * 16 * 16)
+        val originX = snapshot.x * 16
+        val originZ = snapshot.z * 16
+        val samples = buildMap {
+            for (by in maxOf(minimumY, y * 16) until minOf(maximumY, y * 16 + 16)) {
+                for (z in 0..15) for (x in 0..15) {
+                    val data = snapshot.getBlockData(x, by, z)
+                    val id = ids.getOrPut(data) {
+                        put(data, CivPosition(originX + x, by, originZ + z))
+                        palette += Passability(data)
+                        palette.lastIndex
+                    }
+                    cells[((by and 15) * 16 + z) * 16 + x] = id.toShort()
                 }
             }
         }
+        Section(cells, palette.toTypedArray(), samples).also { sectionDecodes?.incrementAndGet() }
     }
-    fun data(point: CivPosition): BlockData = snapshot.getBlockData(point.x and 15, point.y, point.z and 15)
 }
 
 /** Main-thread acquisition/cache only; workers receive snapshots and immutable palette boxes. */
@@ -80,7 +119,7 @@ internal class CivsNavigationSnapshots(
     },
 ) {
     private data class Key(val world: UUID, val chunk: CitizenSnapshotKey)
-    private data class Cached(val tick: Long, val chunk: CitizenSnapshotChunk)
+    private data class Cached(val geometryTick: Long, val chunk: CitizenSnapshotChunk, val stale: Boolean = false)
     private val owner = Thread.currentThread()
     private val contextFree = contextFree ?: CitizenNativeShapeCache::contextFree
     private val maximumChunks = (maximumBlocks / 4096).coerceIn(1, 256)
@@ -97,6 +136,9 @@ internal class CivsNavigationSnapshots(
     private var refreshBatches = 0L
     private var revisionSerial = 0L
     private var captures = 0L
+    private var deferredRecaptures = 0L
+    private val sectionDecodes = AtomicLong()
+    private var retainedSections = 0L
     private var paletteReads = 0L
     private var dynamicReads = 0L
     private var supportCostReads = 0L
@@ -106,17 +148,26 @@ internal class CivsNavigationSnapshots(
         if (!citizenChunkReady(world, key.x, key.z)) return null
         val id = Key(world.uid, key)
         if (id in dirty) { dirtyRequested += id; throw CitizenSnapshotPending() }
-        chunks[id]?.takeIf { tick - it.tick < refreshTicks }?.let { return it.chunk }
+        val cached = chunks[id]
+        cached?.takeIf { !it.stale && tick - it.geometryTick < refreshTicks }?.let { return it.chunk }
         val snapshot = world.getChunkAt(key.x, key.z).getChunkSnapshot(false, false, false, false)
         val previousTick = revisionTicks[id]
-        val expired = previousTick != null && tick - previousTick >= refreshTicks
+        val geometryTick = cached?.geometryTick
+        val expired = (previousTick != null && tick - previousTick >= refreshTicks) ||
+            (geometryTick != null && tick - geometryTick >= refreshTicks)
         // LRU eviction is not a native terrain change: concurrent routes keep the same generation.
-        val revision = revisions[id]?.takeIf { tick - (revisionTicks[id] ?: Long.MIN_VALUE / 2) < refreshTicks }
+        val revision = revisions[id]?.takeIf { !expired && previousTick != null && tick - previousTick < refreshTicks }
             ?: (++revisionSerial).also { revisions[id] = it; revisionTicks[id] = tick }
         if (expired) minimumRevisions[id] = revision else minimumRevisions.putIfAbsent(id, revision)
-        val captured = CitizenSnapshotChunk(snapshot, world.minHeight, world.maxHeight, revision)
-        chunks[id] = Cached(tick, captured)
+        val retained = cached?.takeIf { it.stale && !expired }?.chunk
+        val invalidated = retained?.let { previous ->
+            sectionChanges[id]?.filterValues { it > previous.revision }?.keys
+        }.orEmpty()
+        val captured = CitizenSnapshotChunk(snapshot, world.minHeight, world.maxHeight, revision, retained, invalidated, sectionDecodes)
+        // Event refreshes cannot indefinitely postpone checking inherited sections against a fresh native snapshot.
+        chunks[id] = Cached(geometryTick?.takeIf { captured.retainedSections > 0 } ?: tick, captured)
         captures++
+        retainedSections += captured.retainedSections
         while (chunks.size > maximumChunks) chunks.remove(chunks.keys.first())
         return captured
     }
@@ -200,11 +251,14 @@ internal class CivsNavigationSnapshots(
         dirty.clear()
         refreshBatches++
         for (key in batch) {
-            val needed = chunks.remove(key) != null || key in dirtyRequested
-            dirtyRequested.remove(key)
-            if (!needed) continue
+            val cached = chunks[key]
+            if (cached != null && !cached.stale) {
+                chunks[key] = cached.copy(stale = true)
+                if (key !in dirtyRequested) deferredRecaptures++
+            }
+            if (!dirtyRequested.remove(key)) continue
             val world = Bukkit.getWorld(key.world) ?: continue
-            if (citizenChunkReady(world, key.chunk.x, key.chunk.z)) capture(world, key.chunk, Bukkit.getCurrentTick().toLong())
+            capture(world, key.chunk, Bukkit.getCurrentTick().toLong())
         }
     }
 
@@ -264,6 +318,8 @@ internal class CivsNavigationSnapshots(
     fun debug(): Map<String, Any> {
         checkOwner()
         return mapOf("chunks" to chunks.size, "maximum_chunks" to maximumChunks, "chunk_captures" to captures,
+            "detached_section_decodes" to sectionDecodes.get(), "retained_sections_on_refresh" to retainedSections,
+            "deferred_native_recaptures" to deferredRecaptures,
             "palette_states" to palette.size, "palette_shape_reads" to paletteReads,
             "dynamic_shape_reads" to dynamicReads, "support_cost_reads" to supportCostReads,
             "tracked_changed_sections" to sectionChanges.values.sumOf { it.size },

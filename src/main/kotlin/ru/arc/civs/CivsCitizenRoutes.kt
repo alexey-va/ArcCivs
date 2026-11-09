@@ -31,6 +31,12 @@ internal class CivsCitizenRoutes(
     private val remove: (CitizenActor, String) -> Unit,
     private val labCourierRecoveryAllowed: (Settlement, CivWorker, CivCourierPlan, List<CivPosition>) -> Boolean = { _, _, _, _ -> false },
     private val foodRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
+    private val workFrame: (UUID) -> CivSettlementWorkFrame? = { id ->
+        runtime.cityProvider().firstOrNull { it.id == id }?.let {
+            CivSettlementWorkFrame(it, CivResidentReadFrame(), CivSettlementSupplyRead.EMPTY, CivsPaths.RetainedRoads.EMPTY,
+                CivRouteTerritory(it))
+        }
+    },
 ) {
     private val collisions get() = collisionsOwner()
     private val shelter get() = shelterOwner()
@@ -59,7 +65,8 @@ internal class CivsCitizenRoutes(
         actor.pendingChunkTarget = null
         if (!shelter.wake(actor)) return false
         val from = actor.npc.location
-        val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
+        val frame = workFrame(actor.cityId) ?: return false
+        val city = frame.city
         // The endpoint must be visible to the chunk owner before arrival/standing reads or
         // route admission. Missing terrain is a loading wait, never an invented arrival.
         if (citizenRouteWithinReach(from.point(), target.point(), CivsLogistics.maximumTransferDistance(city)) &&
@@ -144,7 +151,7 @@ internal class CivsCitizenRoutes(
                 }
             } == true
         val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
-            workRuntime.workingTravel(actor)) paths.begin(city, preferCourierRoads) else null
+            workRuntime.workingTravel(actor)) paths.begin(city, preferCourierRoads, frame.roads, frame.territory) else null
         val inbound = actor.plan.courier?.takeIf { actor.plan.type == BuildingType.WAREHOUSE && !it.carrying &&
             actor.cycle.phase == CitizenPhase.TO_WORK && it.cargo.sourceWorkerId == null && idleAnchor == null &&
             !actor.sheltering && !actor.returningToWarehouse && actor.foodSource == null && actor.mealVisit == null }
@@ -155,7 +162,7 @@ internal class CivsCitizenRoutes(
                 actor.courierInboundPrefix = CitizenCourierInboundPrefix.begin(city, inbound.cargo, inbound.destinationBuildingId, from.point())
         }
         // Even leisure and interrupted work prefer the existing streets; only working trips teach new corridors.
-        val routeCosts = trip ?: paths.begin(city)
+        val routeCosts = trip ?: paths.begin(city, roads = frame.roads, territory = frame.territory)
         // Only the outside leg to the real entrance is ordinary city travel. Internal
         // shaft/gallery waypoints must retain the same completed-prefix restrictions.
         val routeMine = mine.takeIf { entrance == null }
@@ -173,9 +180,11 @@ internal class CivsCitizenRoutes(
         val supportCost = (surfaceSpeed as? CivsFootTraffic)?.detachedSupportCost(routeCosts.weights, logs, leaves)
         fun outsideSnapshot(building: CivBuilding, x: Int, z: Int) =
             x !in building.bounds.min.x..building.bounds.max.x || z !in building.bounds.min.z..building.bounds.max.z
-        val controls = CitizenRouteControls(city)
+        val territory = frame.territory
+        val controls = territory.controls
+        val mineBottom = citizenRouteMineBottom(routeMine)
         val policy = CitizenSnapshotPolicy({ point, material ->
-            citizenRoutePointAllowed(city, allowed, point, routeMine) && controls.clear(point) &&
+            territory.allows(point, allowed, mineBottom) && controls.clear(point) &&
                 (!outsideWaitingMine || outsideSnapshot(requireNotNull(waitingMine), point.x, point.z)) &&
                 (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, origin, point, mealTarget) &&
                     citizenIdleTerrain(point, minimumY, maximumY, city.buildings, material, climbable, leaves, logs))

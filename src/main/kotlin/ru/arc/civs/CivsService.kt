@@ -379,7 +379,7 @@ class CivsService(
             store = store,
             executor = executor,
             roadMaintenance = roadMaintenance)
-        citizens.retainedCourierRoads = cityPlans::courierRoads
+        citizens.settlementFrames = ::settlementWorkFrame
         villageSites = CivsVillageSites(plugin, tasks, settings, blueprints, world, planningExecutor,
             cities = { cities.values.toList() }, ready = ::ready,
             checkSpace = { worldId, center -> buildingRequests.checkSettlementSpace(worldId, center) },
@@ -571,10 +571,14 @@ class CivsService(
     override fun maximumBuildingLevel(building: CivBuilding): Int = blueprints.maximumLevel(building)
     override fun settlements(): List<Settlement> = cities.values.toList()
 
-    /** The work planners share the published settlement and detached resident observations. */
+    private val settlementFrames = CivsSettlementFrames()
+
+    /** Admit one planning view without reading native inventories or blocks. */
     internal fun settlementWorkFrame(cityId: UUID): CivSettlementWorkFrame? =
-        cities[cityId]?.takeIf { ready() && cityId !in unhealthy && it.pendingDeletion == null }
-            ?.let { CivSettlementWorkFrame(it, citizens.residentReadFrame()) }
+        cities[cityId]?.takeIf { ready() && cityId !in unhealthy && it.pendingDeletion == null }?.let { city ->
+            CivSettlementWorkFrame(city, citizens.residentReadFrame(), storage.settlementSupplyRead(city),
+                cityPlans.courierRoads(city), settlementFrames.territory(city))
+        }
 
     internal fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long> =
         storage.planningBuildingStock(city, buildingId).orEmpty()
@@ -1080,6 +1084,7 @@ class CivsService(
         planBoards.pulse(emptyList())
         autonomousDevelopment.reset()
         cityPlans.clear()
+        settlementFrames.clear()
         construction.resetSites()
         roadMaintenance.clear()
         supply.clear()
@@ -1184,7 +1189,12 @@ class CivsService(
                 if (city == null) storage.removeCity(cityId) else storage.updateCity(city)
                 if (city == null) cities.remove(cityId) else cities[cityId] = city
                 if (refreshInitialMines) cityPlans.publishInitialMines(cityId, proofs)
-                if (city == null) { supply.remove(cityId); cargoRequests.forgetObservation(cityId); cityPlans.remove(cityId) }
+                if (city == null) {
+                    supply.remove(cityId)
+                    cargoRequests.forgetObservation(cityId)
+                    cityPlans.remove(cityId)
+                    settlementFrames.remove(cityId)
+                }
                 else if (!CivsAutonomy.legacyStock(city)) supply.request(cityId)
                 protection.publish(prepared)
                 geometryGeneration++
@@ -1444,6 +1454,7 @@ class CivsService(
         vegetation.close()
         roadMaintenance.clear()
         cityPlans.clear()
+        settlementFrames.clear()
         supply.close()
         HandlerList.unregisterAll(this)
         lastInjury.clear()

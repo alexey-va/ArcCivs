@@ -7,6 +7,7 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeSameInstanceAs
 import io.mockk.every
 import io.mockk.mockk
+import org.bukkit.ChunkSnapshot
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.Tag
@@ -306,15 +307,23 @@ class CivsNavigationSnapshotsTest : FunSpec({
             try {
                 val chunkKey = CitizenSnapshotKey(0, 0)
                 val old = requireNotNull(snapshots.capture(world, chunkKey, 0))
+                val surfacePalette = old.states(64, 79)
+                old.states(32, 47).keys.map { it.material } shouldBe listOf(Material.STONE)
                 val surface = mapOf(CitizenSnapshotSectionKey(0, 4, 0) to old.revision)
                 val mine = mapOf(CitizenSnapshotSectionKey(0, 2, 0) to old.revision)
                 world.getBlockAt(8, 37, 8).type = Material.AIR
-                snapshots.changed(world.uid, CivPosition(8, 37, 8))
+                repeat(20) { snapshots.changed(world.uid, CivPosition(8, 37, 8)) }
                 snapshots.current(world.uid, mapOf(chunkKey to old.revision)) shouldBe false
                 snapshots.currentSections(world.uid, surface) shouldBe true
                 snapshots.currentSections(world.uid, mine) shouldBe false
                 paper.performTicks(2)
                 snapshots.currentSections(world.uid, surface) shouldBe true
+                val updated = requireNotNull(snapshots.capture(world, chunkKey, 2))
+                updated.states(64, 79) shouldBeSameInstanceAs surfacePalette
+                updated.states(32, 47).keys.map { it.material } shouldBe listOf(Material.STONE, Material.AIR)
+                snapshots.debug()["chunk_captures"] shouldBe 2L
+                snapshots.debug()["detached_section_decodes"] shouldBe 3L
+                snapshots.debug()["retained_sections_on_refresh"] shouldBe 1L
                 val terrain = CitizenSnapshotTerrain().also { it.chunks[chunkKey] = old }
                 val node = CitizenSearchNode(8, 38.0, 8)
                 val request = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), terrain,
@@ -322,11 +331,40 @@ class CivsNavigationSnapshotsTest : FunSpec({
                     .advance(CitizenSnapshotInput())
                 request.sections[CitizenSnapshotSectionKey(0, 2, 0)] shouldBe old.revision
                 snapshots.currentSections(world.uid, request.sections) shouldBe false
-                snapshots.capture(world, chunkKey, 8)
-                snapshots.currentSections(world.uid, surface) shouldBe false // Native snapshot TTL still retires old proofs.
+                val expired = requireNotNull(snapshots.capture(world, chunkKey, 5))
+                snapshots.currentSections(world.uid, surface) shouldBe false // An unrelated edit cannot extend the geometry TTL.
+                (expired.states(64, 79) === surfacePalette) shouldBe false
                 snapshots.removeChunk(world.uid, 0, 0)
-                snapshots.capture(world, chunkKey, 9)
-                snapshots.currentSections(world.uid, surface) shouldBe false
+                val reloaded = requireNotNull(snapshots.capture(world, chunkKey, 6))
+                (reloaded.states(64, 79) === expired.states(64, 79)) shouldBe false
+                snapshots.currentSections(world.uid, mapOf(CitizenSnapshotSectionKey(0, 4, 0) to expired.revision)) shouldBe false
+            } finally { snapshots.clear(); tasks.close() }
+        }
+    }
+
+    test("obstacle readback invalidates silently changed cells in a retained section") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("snapshot-obstacle-inheritance").also(paper.server::addWorld)
+            world.loadChunk(0, 0)
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("InheritedObstacle")))
+            val snapshots = CivsNavigationSnapshots(131072, 6000, tasks, contextFree = { true })
+            try {
+                val key = CitizenSnapshotKey(0, 0)
+                val point = CivPosition(8, 64, 8)
+                val first = requireNotNull(snapshots.capture(world, key, 0))
+                val palette = first.states(64, 79)
+                world.getBlockAt(8, 64, 8).type = Material.STONE // Simulates a plugin edit without an event.
+                world.getBlockAt(8, 37, 8).type = Material.AIR
+                snapshots.changed(world.uid, CivPosition(8, 37, 8))
+                paper.performTicks(2)
+                val inherited = requireNotNull(snapshots.capture(world, key, 2))
+                inherited.states(64, 79) shouldBeSameInstanceAs palette
+                inherited.data(point).material shouldBe Material.AIR
+                snapshots.refreshObstacles(world.uid, listOf(point))
+                snapshots.currentSections(world.uid, mapOf(CitizenSnapshotSectionKey(0, 4, 0) to inherited.revision)) shouldBe false
+                paper.performTicks(2)
+                val updated = requireNotNull(snapshots.capture(world, key, 4))
+                updated.data(point).material shouldBe Material.STONE
             } finally { snapshots.clear(); tasks.close() }
         }
     }
@@ -625,6 +663,43 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
+    test("independent routes share decoded passability but apply their own cell policy") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val stone = paper.server.createBlockData("minecraft:stone")
+            val native = CivsNavigationChunkSnapshotFixture(0, 0, -64, 320, "shared-passability", 0, stone, emptyMap())
+            var snapshotReads = 0
+            val snapshot = object : ChunkSnapshot by native {
+                override fun getBlockData(x: Int, y: Int, z: Int): BlockData {
+                    snapshotReads++
+                    return native.getBlockData(x, y, z)
+                }
+            }
+            val chunk = CitizenSnapshotChunk(snapshot, -64, 320)
+            val key = CitizenSnapshotKey(0, 0)
+            val full = listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+            val palette = chunk.states(61, 67).mapValues { (data, _) ->
+                CitizenSnapshotState(CitizenTerrainShape(false, false, false, false,
+                    if (data.material.isAir) emptyList() else full), dynamic = false)
+            }
+            snapshotReads shouldBe 8192
+            val node = CitizenSearchNode(2, 64.0, 2)
+            fun route(allowed: Boolean): CitizenSearchCapture {
+                val policy = CitizenSnapshotPolicy({ point, material -> allowed && material(point) == Material.AIR }, { _, _ -> true })
+                val capture = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), CitizenSnapshotTerrain(),
+                    policy, -64, 320, 63, 1, false)
+                val request = capture.advance(CitizenSnapshotInput(chunks = mapOf(key to chunk), states = palette))
+                return requireNotNull(capture.advance(CitizenSnapshotInput(costs = request.costs.associateWith { 1.0 })).captures).single()
+            }
+            val admitted = route(true)
+            val denied = route(false)
+            val feet = CivPosition(2, 64, 2)
+            admitted.blocks.getValue(feet).allowed shouldBe true
+            denied.blocks.getValue(feet).allowed shouldBe false
+            admitted.blocks.getValue(feet.copy(y = 63)).boxes shouldBeSameInstanceAs denied.blocks.getValue(feet.copy(y = 63)).boxes
+            snapshotReads shouldBe 8192
+        }
+    }
+
     test("immutable chunk palette ranges reuse their merged state map and keep later section sample precedence") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
             val terrain = flatSnapshotTerrain(-1, -1)
@@ -657,7 +732,8 @@ class CivsNavigationSnapshotsTest : FunSpec({
             cache()["chunk_captures"] shouldBe captured
             block.type = Material.AIR // Bukkit applies the native edit after the event listeners return.
             h.paper.performTicks(2)
-            cache()["chunk_captures"] shouldBe captured + 1
+            cache()["chunk_captures"] shouldBe captured
+            cache()["deferred_native_recaptures"] shouldBe 1L
             cache()["refresh_batches"] shouldBe 1L
         }
     }
@@ -688,14 +764,16 @@ class CivsNavigationSnapshotsTest : FunSpec({
             cache()["chunk_captures"] shouldBe captured
             base.getRelative(east).type = Material.PISTON_HEAD
             h.paper.performTicks(2)
-            cache()["chunk_captures"] shouldBe captured + 1
+            cache()["chunk_captures"] shouldBe captured
+            cache()["deferred_native_recaptures"] shouldBe 1L
 
             changed.clear()
             h.paper.server.pluginManager.callEvent(org.bukkit.event.block.BlockPistonRetractEvent(base, emptyList(), east))
             changed shouldBe setOf(CivPosition(8, 64, 8), CivPosition(9, 64, 8))
             base.getRelative(east).type = Material.AIR
             h.paper.performTicks(2)
-            cache()["chunk_captures"] shouldBe captured + 2
+            cache()["chunk_captures"] shouldBe captured
+            cache()["deferred_native_recaptures"] shouldBe 1L
 
             changed.clear()
             val edge = h.world.getBlockAt(14, 64, 8)
@@ -757,7 +835,8 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 paper.performTicks(1)
                 snapshots.debug()["chunk_captures"] shouldBe 3L
                 paper.performTicks(1)
-                snapshots.debug()["chunk_captures"] shouldBe 5L
+                snapshots.debug()["chunk_captures"] shouldBe 4L
+                snapshots.debug()["deferred_native_recaptures"] shouldBe 1L
                 snapshots.debug()["refresh_batches"] shouldBe 1L
                 snapshots.debug()["dirty_chunks"] shouldBe 0
                 snapshots.current(world.uid, old) shouldBe false
@@ -765,6 +844,8 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 fresh.data(at).material shouldBe Material.STONE
                 captured.getValue(keys.first()).data(at).material shouldBe Material.AIR
                 snapshots.capture(world, keys.last(), 2) shouldBe captured.getValue(keys.last())
+                (snapshots.capture(world, keys[1], 2) === captured.getValue(keys[1])) shouldBe false
+                snapshots.debug()["chunk_captures"] shouldBe 5L
                 // Re-loading an evicted generation must never make a retired worker snapshot current again.
                 snapshots.removeChunk(world.uid, -1, 0)
                 snapshots.capture(world, keys.first(), 3)

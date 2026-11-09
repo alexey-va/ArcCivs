@@ -27,9 +27,13 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
                 point.z in it.bounds.min.z..it.bounds.max.z || CivsWorksiteLayouts.isField(it, point.x, point.z) }
     }
 
-    internal class Network(val geometry: Geometry, val cells: LinkedHashSet<CivPosition> = linkedSetOf())
+    internal class Network(val geometry: Geometry, val cells: LinkedHashSet<CivPosition> = linkedSetOf()) {
+        var completedTrips = 0L
+        var tripsAlongRoad = 0L
+        var longestRoadRun = 0
+    }
 
-    /** Built from the existing detached receipts, without native terrain reads. */
+    /** Paid approach floors and public transit grades, detached from the existing receipts. */
     internal class RetainedRoads private constructor(private val supports: Set<CivPosition>) {
         private val signature = supports.hashCode()
         operator fun contains(point: CivPosition): Boolean = point in supports
@@ -41,10 +45,14 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
             val EMPTY = RetainedRoads(emptySet())
 
             fun from(city: Settlement, access: CivAutonomousAccess): RetainedRoads {
+                val publicWays = access.infrastructure.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }
+                    .associateBy { it.id }
                 val supports = buildSet {
                     for (building in city.buildings) {
-                        if (building.phase != BuildingPhase.ACTIVE || building.type.isInfrastructure) continue
-                        for (feet in access.routes[building.id].orEmpty()) add(feet.copy(y = feet.y - 1))
+                        if (building.phase != BuildingPhase.ACTIVE) continue
+                        val route = if (building.type.isInfrastructure) publicWays[building.id]?.transit
+                            else access.routes[building.id]
+                        for (feet in route.orEmpty()) add(feet.copy(y = feet.y - 1))
                     }
                 }
                 return if (supports.isEmpty()) EMPTY else RetainedRoads(supports)
@@ -53,19 +61,34 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     }
 
     class Trip internal constructor(internal val cityId: UUID, internal val network: Network,
-        internal val preferCourierRoads: Boolean, internal val retainedRoads: RetainedRoads) {
+        internal val preferCourierRoads: Boolean, internal val retainedRoads: RetainedRoads,
+        territory: CivRouteTerritory?) {
         // Costs cannot change halfway through one A* search as other residents finish their trips.
-        internal val weights = Weights(network.geometry, network.cells.toHashSet(), preferCourierRoads, retainedRoads)
+        internal val weights = Weights(network.geometry, network.cells.toHashSet(), preferCourierRoads, retainedRoads, territory)
         internal val reuseSignature: Set<CivPosition> get() = weights.preferred
         internal val walked = linkedSetOf<CivPosition>()
         internal var complete = false
         private var overflow = false
+        private var lastGround: CivPosition? = null
+        private var roadRun = 0
+        internal var longestRoadRun = 0
+            private set
 
         fun validFor(city: Settlement): Boolean = network.geometry.matches(city)
 
         fun observe(position: CitizenPoint) {
             if (complete || overflow) return
             val ground = CivPosition(floor(position.x).toInt(), citizenSupportY(position.y), floor(position.z).toInt())
+            val previous = lastGround
+            if (ground == previous) return
+            lastGround = ground
+            roadRun = when {
+                ground !in retainedRoads -> 0
+                previous == null || abs(previous.x.toLong() - ground.x) > 1 ||
+                    abs(previous.z.toLong() - ground.z) > 1 || abs(previous.y.toLong() - ground.y) > 1 -> 1
+                else -> roadRun + 1
+            }
+            longestRoadRun = maxOf(longestRoadRun, roadRun)
             if (!network.geometry.outside(ground)) return
             if (walked.size == MAX_TRIP_CELLS && ground !in walked) {
                 overflow = true
@@ -83,6 +106,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         val preferred: Set<CivPosition>,
         private val preferCourierRoads: Boolean,
         private val retainedRoads: RetainedRoads,
+        private val territory: CivRouteTerritory? = null,
     ) {
         fun native(ground: Block, recognizedSurface: (Block) -> Double): Double =
             cost(CivPosition(ground.x, ground.y, ground.z), { ground.type }, { ground.blockData },
@@ -94,7 +118,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         private inline fun cost(point: CivPosition, type: () -> Material, data: () -> BlockData,
             canopy: (Material) -> Boolean, recognizedSurface: () -> Boolean): Double {
             if (!geometry.contains(point)) return 1.0
-            if (geometry.onPlot(point)) {
+            if (territory?.onPlot(point) ?: geometry.onPlot(point)) {
                 if (!preferCourierRoads) return 1.0
                 val material = type()
                 return if (material in CivsTerrainPolicy.AUTONOMOUS_SOIL &&
@@ -121,20 +145,24 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     private val networks = LinkedHashMap<UUID, Network>(MAX_CITIES, .75f, true)
     private val learning = ArrayDeque<Learning>()
 
-    fun begin(city: Settlement, preferCourierRoads: Boolean = false): Trip {
+    fun begin(city: Settlement, preferCourierRoads: Boolean = false, roads: RetainedRoads = courierRoads(city),
+        territory: CivRouteTerritory? = null): Trip {
         val geometry = geometry(city)
         val network = networks[city.id]?.takeIf { it.geometry == geometry }
             ?: Network(geometry).also { networks[city.id] = it }
         while (networks.size > MAX_CITIES) networks.remove(networks.keys.first())
-        return Trip(city.id, network, preferCourierRoads, if (preferCourierRoads) courierRoads(city) else RetainedRoads.EMPTY)
+        return Trip(city.id, network, preferCourierRoads, roads, territory)
     }
 
     fun complete(city: Settlement, trip: Trip) {
         if (trip.complete) return
         trip.complete = true
-        if (trip.walked.size < 2 || city.pendingDeletion != null ||
-            networks[city.id] !== trip.network || !trip.validFor(city) ||
-            learning.size >= MAX_PENDING_TRIPS) return
+        if (city.pendingDeletion != null || networks[city.id] !== trip.network || !trip.validFor(city)) return
+        val network = trip.network
+        network.completedTrips++
+        if (trip.longestRoadRun >= 3) network.tripsAlongRoad++
+        network.longestRoadRun = maxOf(network.longestRoadRun, trip.longestRoadRun)
+        if (trip.walked.size < 2 || learning.size >= MAX_PENDING_TRIPS) return
         learning += Learning(trip, trip.walked.iterator())
     }
 
@@ -181,6 +209,11 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     }
 
     fun clear() { networks.clear(); learning.clear() }
+
+    fun roadTravel(cityId: UUID?): Map<String, Number>? = cityId?.let(networks::get)?.let { network ->
+        mapOf("completed_work_trips" to network.completedTrips, "trips_along_retained_road" to network.tripsAlongRoad,
+            "longest_retained_road_run" to network.longestRoadRun)
+    }
 
     internal fun remembered(cityId: UUID): Set<CivPosition> = networks[cityId]?.cells?.toSet().orEmpty()
 

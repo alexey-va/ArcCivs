@@ -48,6 +48,26 @@ internal data class CivSupplyCapturedContainer(val type: String, val slots: List
     }
 }
 
+private const val HOLDER_TTL_MILLIS = 5_000L
+
+internal data class CivSettlementStoreRead(
+    val store: CivSupplyCapturedStore,
+    val contents: Map<CivPosition, CivSupplyCapturedContainer?>,
+    val observedAt: Long,
+)
+
+/** One detached store changes independently of the rest of the city. */
+internal class CivSettlementStoreSlot {
+    @Volatile var observed: CivSettlementStoreRead? = null
+}
+
+internal class CivSettlementSupplyRead(private val stores: Map<UUID, CivSettlementStoreSlot>) {
+    fun store(buildingId: UUID, now: Long): CivSettlementStoreRead? =
+        stores[buildingId]?.observed?.takeIf { now - it.observedAt in 0 until HOLDER_TTL_MILLIS }
+
+    companion object { val EMPTY = CivSettlementSupplyRead(emptyMap()) }
+}
+
 /** Storage-specific capture/version owner. Native references exist only inside the supplied owner-thread read. */
 internal class CivsSupplyCaptures(
     private val index: CivsContainerIndex,
@@ -76,8 +96,9 @@ internal class CivsSupplyCaptures(
         var contents: Map<CivPosition, CivSupplyCapturedContainer?>? = null
         var capturedGeneration: Long? = null
         var capturedAt: Long? = null
-        var stock: Map<String, Long>? = null
+        val published = CivSettlementStoreSlot()
     }
+    private val publishedCities = mutableMapOf<UUID, CivSettlementSupplyRead>()
     private val cities = mutableMapOf<UUID, MutableMap<UUID, Store>>()
     private val revisions = mutableMapOf<UUID, Long>()
     private val plainRevisions = mutableMapOf<UUID, Long>()
@@ -146,18 +167,24 @@ internal class CivsSupplyCaptures(
             extraPositions = unfinishedControls[city.id].orEmpty().values,
             oldestReadAt = { positions -> positions.mapNotNull(reads::get).minOrNull() },
             publish = { result -> result.stores.forEach { (id, captured) ->
-                cities[city.id]?.get(id)?.takeIf { it.key == captured.key }?.stock =
-                    captured.stock.takeIf { captured.unavailable == 0 }
+                cities[city.id]?.get(id)?.takeIf { it.key == captured.key }?.let { store ->
+                    val observedAt = store.capturedAt
+                    val contents = store.contents
+                    store.published.observed = if (observedAt != null && contents != null && captured.unavailable == 0)
+                        CivSettlementStoreRead(captured, contents, observedAt) else null
+                }
             } },
             clock = clock)
     }
 
+    fun readFrame(city: Settlement): CivSettlementSupplyRead =
+        if (city.pendingDeletion == null && geometries[city.id]?.matches(city) == true)
+            publishedCities[city.id] ?: CivSettlementSupplyRead.EMPTY else CivSettlementSupplyRead.EMPTY
+
     fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long>? {
         if (city.pendingDeletion != null || city.building(buildingId) == null) return null
         city.inventory?.takeIf { it.mode == CivStorageMode.VIRTUAL }?.let { return it.buildingStock(buildingId) }
-        if (geometries[city.id]?.matches(city) != true) return null
-        val store = cities[city.id]?.get(buildingId) ?: return null
-        return store.stock.takeIf { store.capturedGeneration == store.key.generation && fresh(store.capturedAt) }
+        return readFrame(city).store(buildingId, clock())?.store?.stock
     }
 
     fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? {
@@ -240,7 +267,12 @@ internal class CivsSupplyCaptures(
             building.id to store
         }
         if (previous.keys != next.keys && previous.isNotEmpty() || extraChanged) revisions[city.id] = ++generation
-        if (geometryChanged || extraChanged || next.keys != previous.keys || next.any { (id, store) -> previous[id] !== store }) {
+        val storesChanged = next.keys != previous.keys || next.any { (id, store) -> previous[id] !== store }
+        if (storesChanged) {
+            previous.forEach { (id, store) -> if (next[id] !== store) store.published.observed = null }
+            publishStores(city.id, next)
+        }
+        if (geometryChanged || extraChanged || storesChanged) {
             val retained = (registered + extra.values).toMutableSet()
             next.values.forEach { retained += it.key.positions.keys }
             holders[city.id]?.keys?.retainAll(retained)
@@ -265,11 +297,16 @@ internal class CivsSupplyCaptures(
             }
             if (affected.isNotEmpty()) {
                 val stores = cities.getValue(city.id)
+                var replaced = false
                 layout(city, affected, indexed).forEach { (id, positions) ->
                     val old = stores.getValue(id)
-                    if (old.key.positions != positions)
+                    if (old.key.positions != positions) {
+                        old.published.observed = null
                         stores[id] = Store(old.key.copy(positions = positions.toMap())).also { dirty(city.id, it) }
+                        replaced = true
+                    }
                 }
+                if (replaced) publishStores(city.id, stores)
             }
         }
         geometry.indexedPositions = indexed
@@ -326,22 +363,27 @@ internal class CivsSupplyCaptures(
     }
 
     fun remove(cityId: UUID) {
-        cities.remove(cityId); revisions.remove(cityId); plainRevisions.remove(cityId); registrations.remove(cityId)
+        cities.remove(cityId)?.values?.forEach { it.published.observed = null }
+        publishedCities.remove(cityId); revisions.remove(cityId); plainRevisions.remove(cityId); registrations.remove(cityId)
         geometries.remove(cityId); holders.remove(cityId); unfinishedControls.remove(cityId)
     }
     fun clear() {
-        cities.clear(); revisions.clear(); plainRevisions.clear(); registrations.clear()
+        cities.values.forEach { stores -> stores.values.forEach { it.published.observed = null } }
+        publishedCities.clear(); cities.clear(); revisions.clear(); plainRevisions.clear(); registrations.clear()
         geometries.clear(); holders.clear(); unfinishedControls.clear()
+    }
+
+    private fun publishStores(cityId: UUID, stores: Map<UUID, Store>) {
+        publishedCities[cityId] = CivSettlementSupplyRead(stores.mapValues { it.value.published })
     }
 
     private fun dirtyPlain(cityId: UUID) { plainRevisions[cityId] = ++generation }
 
     private fun dirty(cityId: UUID, store: Store) {
+        store.published.observed = null
         store.key = store.key.copy(generation = ++generation)
         revisions[cityId] = generation
     }
-
-    private companion object { const val HOLDER_TTL_MILLIS = 5_000L }
 }
 
 /**

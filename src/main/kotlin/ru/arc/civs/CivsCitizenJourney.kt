@@ -280,16 +280,19 @@ internal fun citizenRouteCellAllowed(city: Settlement, allowed: Set<UUID>, x: In
 
 /** Only an observed mine leg may pass below another building, with headroom below its foundation. */
 internal fun citizenRoutePointAllowed(city: Settlement, allowed: Set<UUID>, point: CivPosition, mine: CivBuilding? = null): Boolean {
-    val bottom = mine?.takeIf { it.type == BuildingType.QUARRY }?.let { building ->
-        CivsMinePlan.forBuilding(building)?.bottom?.let { CivsWorksiteLayouts.point(building, it) }
-    }
+    val bottom = citizenRouteMineBottom(mine)
     return city.contains(point.x, point.z) && civsProtectedBuildings(city).none { building ->
         building.id !in allowed && !civsPublicTransit(building, point.x, point.z) &&
             (point.x in building.bounds.min.x..building.bounds.max.x && point.z in building.bounds.min.z..building.bounds.max.z ||
                 CivsWorksiteLayouts.isField(building, point.x, point.z)) &&
-            (bottom == null || point.y >= bottom.y || !CivsMinePlan.belowFoundation(building, point.y, headroom = 1))
+            (bottom == null || point.y >= bottom || !CivsMinePlan.belowFoundation(building, point.y, headroom = 1))
     }
 }
+
+internal fun citizenRouteMineBottom(mine: CivBuilding?): Int? =
+    mine?.takeIf { it.type == BuildingType.QUARRY }?.let { building ->
+        CivsMinePlan.forBuilding(building)?.bottom?.let { CivsWorksiteLayouts.point(building, it).y }
+    }
 
 internal class CitizenMinePassage(val completed: (CitizenPoint) -> Boolean, val allows: (CitizenPoint) -> Boolean)
 

@@ -117,8 +117,9 @@ class CivsCitizens(
     private val residentTasks = navigationTasks ?: LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val navigation = CivsResidentNavigation(residentTasks, navigationWork, navigationExecutor,
         settings = navigationSettings, snapshotContextFree = navigationContextFree)
-    internal var retainedCourierRoads: (Settlement) -> CivsPaths.RetainedRoads = { CivsPaths.RetainedRoads.EMPTY }
-    private val paths = CivsPaths { city -> retainedCourierRoads(city) }
+    internal var settlementFrames: ((UUID) -> CivSettlementWorkFrame?)? = null
+    private val standaloneFrames = CivsSettlementFrames()
+    private val paths = CivsPaths()
     private val threats: CivsResidentThreats
     private val life: CivsCitizenLife
     private val collisions: CivsCitizenCollisions
@@ -244,7 +245,15 @@ class CivsCitizens(
             courierFailed = courierFailed,
             remove = ::remove,
             labCourierRecoveryAllowed = labCourierRecoveryAllowed,
-            foodRecoveryAllowed = foodRecoveryAllowed)
+            foodRecoveryAllowed = foodRecoveryAllowed,
+            workFrame = { id ->
+                val provider = settlementFrames
+                if (provider != null) provider(id)
+                else cityProvider().firstOrNull { it.id == id }?.let {
+                    CivSettlementWorkFrame(it, residentReadFrame(), CivSettlementSupplyRead.EMPTY, CivsPaths.RetainedRoads.EMPTY,
+                        standaloneFrames.territory(it))
+                }
+            })
         motion = CivsCitizenMotion(runtime,
             collisionsOwner = { collisions },
             routesOwner = { routes },
@@ -984,6 +993,7 @@ class CivsCitizens(
         }
         actors.clear()
         observations.clearReadFrame()
+        standaloneFrames.clear()
         combat.clear()
         life.close()
         logistics.close()
@@ -1037,7 +1047,8 @@ class CivsCitizens(
 
     fun activeCount(): Int = observations.activeCount()
 
-    internal fun debug(cityId: UUID?, workerId: UUID?): Map<String, Any?> = observations.debug(cityId, workerId)
+    internal fun debug(cityId: UUID?, workerId: UUID?): Map<String, Any?> =
+        observations.debug(cityId, workerId) + ("road_travel" to paths.roadTravel(cityId))
 
     internal fun awakeResidentIds(cityId: UUID): Set<UUID> = observations.awakeResidentIds(cityId)
 

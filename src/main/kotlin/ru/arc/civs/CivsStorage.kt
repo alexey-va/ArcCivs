@@ -228,6 +228,9 @@ class CivsStorage(private val plugin: Plugin,
     internal fun startSupplyCapture(city: Settlement, forceNative: Boolean = false): CivsSupplyCapture {
         checkReady(); return containers.startSupplyCapture(city, forceNative)
     }
+    internal fun settlementSupplyRead(city: Settlement): CivSettlementSupplyRead {
+        checkReady(); return containers.settlementSupplyRead(city)
+    }
     internal fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long>? {
         checkReady(); return containers.planningBuildingStock(city, buildingId)
     }

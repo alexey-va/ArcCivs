@@ -37,13 +37,19 @@ class CivsCitizenRouteRetentionTest : FunSpec({
             val otherField = CivsWorksiteLayouts.field(unrelated).first()
             citizenRoutePointAllowed(city, allowed, otherField.copy(y = otherField.y + 1)) shouldBe false
             citizenRoutePointAllowed(city.copy(radius = 1), allowed, from) shouldBe false
+            val frames = CivsSettlementFrames()
+            val territory = frames.territory(city)
+            (frames.territory(city.copy(revision = city.revision + 1)) === territory) shouldBe true
+            frames.territory(city.copy(radius = 1)).allows(from, allowed, null) shouldBe false
+            territory.allows(otherField.copy(y = otherField.y + 1), allowed, null) shouldBe false
+            territory.onPlot(from) shouldBe true
 
             for (x in -114..-112) for (z in -171..-170) world.loadChunk(x, z)
             for (x in -1815..-1800) for (z in -2729..-2720) world.getBlockAt(x, 63, z).type = Material.DIRT_PATH
             val target = Location(world, -1813.5, 63.9375, -2723.5)
             val route = CitizenPacketRoute(world, origin, target,
-                { citizenRoutePointAllowed(city, allowed, it) && citizenControlClear(city, it) },
-                { first, second -> citizenControlStepClear(city, first, second) }, { 1.0 })
+                { territory.allows(it, allowed, null) && territory.controls.clear(it) },
+                territory.controls::stepClear, { 1.0 })
             var operations = 0
             while (route.searching && operations++ < 20_000) route.expand()
             route.searching shouldBe false

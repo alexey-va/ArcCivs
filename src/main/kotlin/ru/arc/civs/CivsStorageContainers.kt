@@ -48,6 +48,7 @@ internal class CivsStorageContainers(
         index.refresh(city, building)
     }
     fun startSupplyCapture(city: Settlement, forceNative: Boolean): CivsSupplyCapture = supplyCaptures.start(city, forceNative)
+    fun settlementSupplyRead(city: Settlement): CivSettlementSupplyRead = supplyCaptures.readFrame(city)
     fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long>? =
         supplyCaptures.planningBuildingStock(city, buildingId)
     fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? =

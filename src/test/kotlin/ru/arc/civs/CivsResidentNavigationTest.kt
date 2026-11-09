@@ -1812,7 +1812,7 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
-    test("a courier prefers a retained coarse dirt road and can detour past an obstruction") {
+    test("ordinary residents and couriers prefer a retained coarse dirt road and can detour around an obstruction") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
             val road = (0..3).map { CivPosition(0, 63, it) } + (1..16).map { CivPosition(it, 63, 3) } +
@@ -1823,16 +1823,20 @@ class CivsResidentNavigationTest : FunSpec({
                 anchor = CivPosition(17, 63, 0), entrance = routeFeet.last(),
                 bounds = CivBox(CivPosition(17, 63, -1), CivPosition(20, 67, 1)))
             val city = base.copy(buildings = base.buildings + destination)
-            fun retained(route: List<CivPosition>): CivsPaths.RetainedRoads {
+            fun retained(route: List<CivPosition>, snapshot: Settlement = city): CivsPaths.RetainedRoads {
                 val journal = CivPlacementPlan(destination.id, city.id, city.worldId, destination, emptyList(),
                     terrain = CivTerraformPlan(CivBox(road.first(), CivPosition(16, 65, 3)),
                         emptyList(), route, 63, 0, 0))
-                return CivsPaths.RetainedRoads.from(city, CivAutonomousAccess.from(city, listOf(journal)))
+                return CivsPaths.RetainedRoads.from(snapshot, CivAutonomousAccess.from(snapshot, listOf(journal)))
             }
             for (x in 0..16) for (z in 0..3) terrain.blocks[CivPosition(x, 63, z)] = Material.GRASS_BLOCK
             road.forEach { terrain.blocks[it] = Material.COARSE_DIRT }
             var published = retained(routeFeet)
             val paths = CivsPaths { published }
+            val shortcut = paths.begin(city)
+            for (x in 0..16) shortcut.observe(CitizenPoint(x + .5, 64.0, .5))
+            paths.complete(city, shortcut)
+            repeat(2) { paths.pulse() }
 
             fun walk(trip: CivsPaths.Trip): Set<CivPosition> {
                 var at = Location(terrain.world, .5, 64.0, .5)
@@ -1857,26 +1861,33 @@ class CivsResidentNavigationTest : FunSpec({
             val courier = paths.begin(city, preferCourierRoads = true)
             walk(courier).count { it.x in 2..14 && it.z == 3 } shouldBe 13
             val ordinary = paths.begin(city)
-            walk(ordinary).none { it.z == 3 } shouldBe true
+            walk(ordinary).count { it.x in 2..14 && it.z == 3 } shouldBe 13
+            val unbuilt = city.copy(buildings = listOf(base.buildings.single(), destination.copy(phase = BuildingPhase.SITE)))
+            val withoutPaidRoad = CivsPaths { retained(routeFeet, unbuilt) }.begin(unbuilt)
+            walk(withoutPaidRoad).none { it.z == 3 } shouldBe true
             val blocked = CivPosition(8, 64, 3)
             terrain.blocks[blocked] = Material.STONE
             terrain.blocks[blocked.copy(y = 65)] = Material.STONE
-            walk(courier).none { it.x == blocked.x && it.z == blocked.z } shouldBe true
+            walk(ordinary).none { it.x == blocked.x && it.z == blocked.z } shouldBe true
 
             fun cost(trip: CivsPaths.Trip, point: CivPosition) =
                 trip.cost(terrain.world.getBlockAt(point.x, point.y, point.z)) { 1.0 }
             val support = CivPosition(5, 63, 3)
             cost(courier, support) shouldBe 1.0
-            cost(ordinary, support) shouldBe CivsPaths.ORDINARY_COST
+            cost(ordinary, support) shouldBe 1.0
+            val detached = ordinary.weights.detached(emptySet(), emptySet())
+            val liveSupport = terrain.world.getBlockAt(support.x, support.y, support.z)
+            detached(support, liveSupport.blockData) shouldBe cost(ordinary, support)
             val unowned = listOf(support.copy(z = 2), support.copy(y = 66))
             unowned.forEach {
                 terrain.blocks[it] = Material.COARSE_DIRT
-                cost(courier, it) shouldBe CivsPaths.ORDINARY_COST
+                cost(ordinary, it) shouldBe CivsPaths.ORDINARY_COST
             }
             terrain.blocks[support] = Material.GRASS_BLOCK
-            cost(courier, support) shouldBe CivsPaths.ORDINARY_COST
+            cost(ordinary, support) shouldBe CivsPaths.ORDINARY_COST
+            detached(support, liveSupport.blockData) shouldBe CivsPaths.ORDINARY_COST
             terrain.blocks[support] = Material.OAK_PLANKS
-            cost(courier, support) shouldBe 1.0
+            cost(ordinary, support) shouldBe 1.0
 
             val key = CitizenRouteReuseKey.of(courier, emptySet())
             (key != CitizenRouteReuseKey.of(ordinary, emptySet())) shouldBe true
@@ -1885,9 +1896,37 @@ class CivsResidentNavigationTest : FunSpec({
             published = retained(routeFeet.map { if (it.x == 5 && it.z == 3) it.copy(y = 65) else it })
             val repaired = paths.begin(city, preferCourierRoads = true)
             (key != CitizenRouteReuseKey.of(repaired, emptySet())) shouldBe true
+            (CitizenRouteReuseKey.of(ordinary, emptySet()) != CitizenRouteReuseKey.of(paths.begin(city), emptySet())) shouldBe true
             cost(repaired, support) shouldBe CivsPaths.ORDINARY_COST
             cost(courier, support) shouldBe 1.0
         }
+    }
+
+    test("retained public road support comes from exact active road and gate journals") {
+        val base = pathsCity()
+        fun way(type: BuildingType, x: Int, phase: BuildingPhase): CivBuilding {
+            val floor = CivPosition(x, 63, 4)
+            val feet = floor.copy(y = 64)
+            return CivBuilding(UUID(0, x.toLong()), type, 1, floor, 0, "fixture/$type",
+                CivBox(floor, feet.copy(y = 65)), feet, phase, transit = listOf(feet))
+        }
+        val road = way(BuildingType.ROAD, 4, BuildingPhase.ACTIVE)
+        val gate = way(BuildingType.GATE, 5, BuildingPhase.ACTIVE)
+        val unfinished = way(BuildingType.ROAD, 6, BuildingPhase.CONSTRUCTING)
+        val missing = way(BuildingType.ROAD, 7, BuildingPhase.ACTIVE)
+        val city = base.copy(buildings = base.buildings + listOf(road, gate, unfinished, missing))
+        val journals = listOf(road, gate, unfinished).map { building ->
+            CivPlacementPlan(building.id, city.id, city.worldId, building,
+                listOf(CivPlanBlock(building.anchor, "minecraft:grass_block", "minecraft:cobblestone")))
+        }
+        val roads = CivsPaths.RetainedRoads.from(city, CivAutonomousAccess.from(city, journals))
+        val framedTrip = CivsPaths { error("The published road view already belongs to this route") }.begin(city, roads = roads)
+        (framedTrip.retainedRoads === roads) shouldBe true
+        (road.anchor in roads) shouldBe true
+        (gate.anchor in roads) shouldBe true
+        (unfinished.anchor in roads) shouldBe false
+        (missing.anchor in roads) shouldBe false
+        (road.entrance in roads) shouldBe false
     }
 
     test("a freight route takes the paved warehouse approach instead of cutting across its yard") {

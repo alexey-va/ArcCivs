@@ -14,13 +14,16 @@ class CivsCitizenCourierHandoffTest : FunSpec({
             val (source, courierId) = h.courierSource(material = "WHEAT", amount = 1)
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = null) })
             h.idleReason = "searching-work"
-            val roadRequests = mutableListOf<UUID>()
-            h.owner.retainedCourierRoads = { city ->
-                roadRequests += city.id
-                CivsPaths.RetainedRoads.EMPTY
+            val frameRequests = mutableListOf<UUID>()
+            val frames = CivsSettlementFrames()
+            h.owner.settlementFrames = { id ->
+                h.city.takeIf { it.id == id }?.let { city ->
+                    frameRequests += id
+                    CivSettlementWorkFrame(city, h.owner.residentReadFrame(), CivSettlementSupplyRead.EMPTY,
+                        CivsPaths.RetainedRoads.EMPTY, frames.territory(city))
+                }
             }
             h.owner.pulse(2_000)
-            roadRequests shouldBe emptyList()
             val offered = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last()) {
                 if (it == source.id) mapOf("WHEAT" to 32L) else emptyMap()
             })
@@ -56,13 +59,13 @@ class CivsCitizenCourierHandoffTest : FunSpec({
             courier.location shouldBe atSource
             h.pickups shouldBe 1
 
-            val requestsBeforeReturn = roadRequests.size
+            val requestsBeforeReturn = frameRequests.size
             h.pendingPickup.complete(published)
             h.owner.pulseFieldWork(5_750)
             h.phase(courierId) shouldBe CitizenPhase.RETURNING
             (h.routeIdentity(courierId) != null) shouldBe true
-            (roadRequests.size > requestsBeforeReturn) shouldBe true
-            roadRequests.toSet() shouldBe setOf(h.city.id)
+            (frameRequests.size > requestsBeforeReturn) shouldBe true
+            frameRequests.toSet() shouldBe setOf(h.city.id)
             h.city shouldBe published
             val carried = h.city.workers.single { it.id == courierId }
             carried.cargo shouldBe offered.cargo.copy(inventoryBacked = true)

@@ -102,6 +102,7 @@ internal class CitizenSnapshotCapture(
     private val completed = mutableListOf<CapturedProbe>()
     private val requiredCosts = hashSetOf<CivPosition>()
     private val newSections = linkedMapOf<CitizenSnapshotSectionKey, Long>()
+    private val probeStates = arrayOfNulls<CitizenSnapshotState>(3 * 3 * 7)
     private val cancelled = AtomicBoolean()
     private var next = 0
 
@@ -151,11 +152,14 @@ internal class CitizenSnapshotCapture(
             val cells = Array<CitizenTerrainBlock?>(positions.size) { terrain.blocks[positions[it]] }
             val dynamic = linkedMapOf<CivPosition, BlockData>()
             for (index in positions.indices) {
+                if (cells[index] != null) continue
                 val point = positions[index]
-                if (cells[index] != null || point.y !in minimumY until maximumY) continue
-                val chunk = terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)] ?: continue
-                val data = chunk.data(point)
-                if (terrain.states.getValue(data).dynamic && point !in terrain.dynamics) dynamic[point] = data
+                val chunk = if (point.y in minimumY until maximumY)
+                    terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)] else null
+                val cell = chunk?.passability(point)
+                val state = cell?.state(terrain.states)
+                probeStates[index] = state
+                if (cell != null && state?.dynamic == true && point !in terrain.dynamics) dynamic[point] = cell.data
             }
             if (dynamic.isNotEmpty()) return request(dynamics = dynamic)
             for (index in positions.indices) {
@@ -166,9 +170,8 @@ internal class CitizenSnapshotCapture(
                     next = probes.size
                     return finish()
                 }
-                val chunk = terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)]
-                val block = if (point.y !in minimumY until maximumY || chunk == null) CitizenTerrainBlock.UNAVAILABLE else {
-                    val state = terrain.states.getValue(chunk.data(point))
+                val state = probeStates[index]
+                val block = if (state == null) CitizenTerrainBlock.UNAVAILABLE else {
                     val shape = state.shape
                     CitizenTerrainBlock(true, shape.liquid, shape.door, shape.climbable, shape.hot,
                         policy.allowed(point, ::material), 1.0,
@@ -200,7 +203,7 @@ internal class CitizenSnapshotCapture(
         val supportCost = policy.supportCost
         for (point in requiredCosts) {
             if (point in terrain.costs) continue
-            val cost = supportCost?.let { resolve -> blockData(point)?.let { resolve(point, it) } }
+            val cost = supportCost?.let { resolve -> blockData(point, copyCached = true)?.let { resolve(point, it) } }
             if (cost == null) missing += point else terrain.costs[point] = cost
         }
         if (missing.isNotEmpty()) return request(costs = missing.take(512).toSet())
@@ -218,8 +221,9 @@ internal class CitizenSnapshotCapture(
 
     private fun material(point: CivPosition): Material? = blockData(point)?.material
 
-    private fun blockData(point: CivPosition): BlockData? = if (point.y !in minimumY until maximumY) null
-        else terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)]?.data(point)
+    private fun blockData(point: CivPosition, copyCached: Boolean = false): BlockData? =
+        if (point.y !in minimumY until maximumY) null
+        else terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)]?.data(point, copyCached)
 
     private fun request(chunks: Set<CitizenSnapshotKey> = emptySet(), states: Map<BlockData, CivPosition> = emptyMap(),
         dynamics: Map<CivPosition, BlockData> = emptyMap(), costs: Set<CivPosition> = emptySet(),

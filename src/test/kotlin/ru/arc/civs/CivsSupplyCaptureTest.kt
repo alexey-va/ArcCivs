@@ -119,6 +119,11 @@ class CivsSupplyCaptureTest : FunSpec({
             h.nodes.getValue(barrel).contents[0] = ItemStack(Material.BREAD, 4)
             h.nodes.getValue(chest).contents[0] = ItemStack(Material.OAK_LOG, 8)
             val first = h.capture()
+            val frame = h.storage.settlementSupplyRead(h.city)
+            val producer = requireNotNull(frame.store(h.producer.id, h.now))
+            java.util.concurrent.CompletableFuture.supplyAsync {
+                frame.store(h.warehouse.id, h.now)?.contents?.get(chest)?.stock
+            }.join() shouldBe mapOf("OAK_LOG" to 8L)
             h.reads shouldBe 4
             h.capture().stores.getValue(h.warehouse.id).stock shouldBe mapOf("BREAD" to 4L, "OAK_LOG" to 8L)
             h.reads shouldBe 4
@@ -127,6 +132,8 @@ class CivsSupplyCaptureTest : FunSpec({
             h.storage.supplyPickup(h.pickup(barrel))
             h.reads shouldBe 4
             h.storage.planningBuildingStock(h.city, h.warehouse.id) shouldBe null
+            frame.store(h.warehouse.id, h.now) shouldBe null
+            frame.store(h.producer.id, h.now)?.store shouldBe producer.store
             h.storage.planningContainer(h.city, h.warehouse.id, barrel) shouldBe null
             h.storage.planningContainer(h.city, h.warehouse.id, chest)?.slots?.first()?.amount shouldBe 8
             h.storage.planningBuildingStock(h.city, h.producer.id) shouldBe emptyMap()
@@ -137,6 +144,9 @@ class CivsSupplyCaptureTest : FunSpec({
             h.reads shouldBe 5
             h.nodes.getValue(chest).reads shouldBe 1
             h.storage.planningBuildingStock(h.city, h.warehouse.id) shouldBe mapOf("BREAD" to 3L, "OAK_LOG" to 8L)
+            (h.storage.settlementSupplyRead(h.city) === frame) shouldBe true
+            frame.store(h.warehouse.id, h.now)?.store?.stock shouldBe mapOf("BREAD" to 3L, "OAK_LOG" to 8L)
+            frame.store(h.warehouse.id, h.now + 5_000) shouldBe null
             h.reads shouldBe 5
         }
     }
