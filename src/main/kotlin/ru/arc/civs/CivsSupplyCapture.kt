@@ -51,17 +51,24 @@ internal data class CivSupplyCapturedContainer(val type: String, val slots: List
 /** Storage-specific capture/version owner. Native references exist only inside the supplied owner-thread read. */
 internal class CivsSupplyCaptures(
     private val index: CivsContainerIndex,
-    private val layout: (Settlement) -> Map<UUID, Map<CivPosition, String?>>,
+    private val layout: (Settlement, List<CivBuilding>, Map<CivPosition, String?>) -> Map<UUID, Map<CivPosition, String?>>,
     private val read: (Settlement, CivPosition, String?) -> CivSupplyCapturedContainer?,
     private val canReuse: (Settlement, CivPosition, CivSupplyCapturedContainer) -> Boolean,
     private val clock: () -> Long,
 ) {
-    private data class Geometry(val world: UUID, val owner: UUID, val center: CivPosition, val radius: Int,
+    private class Geometry(val world: UUID, val owner: UUID, val center: CivPosition, val radius: Int,
         val buildings: List<CivBuilding>, val registered: List<CivPosition>, val mode: CivStorageMode?, val autonomous: Boolean,
-        val upgrade: UUID?) {
-        fun matches(city: Settlement): Boolean = world == city.worldId && owner == city.owner && center == city.center &&
-            radius == city.radius && buildings == city.buildings && registered == city.inventory?.containers.orEmpty() &&
-            mode == city.inventory?.mode && autonomous == (city.autonomy != null) && upgrade == civsStorageUpgrade(city)?.id
+        val upgradeId: UUID?, val upgradingBuilding: UUID?) {
+        var indexedPositions: Map<CivPosition, String?> = emptyMap()
+        var virtualMaterials: Map<String, Map<String, Long>> = emptyMap()
+
+        fun matches(city: Settlement): Boolean {
+            if (world != city.worldId || owner != city.owner || center != city.center || radius != city.radius ||
+                buildings != city.buildings || registered != city.inventory?.containers.orEmpty() ||
+                mode != city.inventory?.mode || autonomous != (city.autonomy != null)) return false
+            val upgrade = civsStorageUpgrade(city)
+            return upgradeId == upgrade?.id && upgradingBuilding == upgrade?.buildingId
+        }
     }
     private data class Holder(val type: String?, val value: CivSupplyCapturedContainer, val readAt: Long)
 
@@ -71,7 +78,7 @@ internal class CivsSupplyCaptures(
         var capturedAt: Long? = null
         var stock: Map<String, Long>? = null
     }
-    private val cities = mutableMapOf<UUID, Map<UUID, Store>>()
+    private val cities = mutableMapOf<UUID, MutableMap<UUID, Store>>()
     private val revisions = mutableMapOf<UUID, Long>()
     private val plainRevisions = mutableMapOf<UUID, Long>()
     private val registrations = mutableMapOf<UUID, List<CivPosition>>()
@@ -101,7 +108,8 @@ internal class CivsSupplyCaptures(
     }
 
     fun start(city: Settlement, forceNative: Boolean = false): CivsSupplyCapture {
-        val keys = update(city)
+        update(city)
+        val keys = cities[city.id].orEmpty().mapValues { it.value.key }
         val geometry = geometries[city.id]
         val cache = holders.getOrPut(city.id, ::mutableMapOf)
         val reads = hashMapOf<CivPosition, Long>()
@@ -172,52 +180,62 @@ internal class CivsSupplyCaptures(
     fun current(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>?,
         requireComplete: Boolean = false): Boolean {
         if (city.id != result.cityId) return false
-        val keys = update(city)
+        update(city)
         if (requireComplete && (!result.complete || result.coverageRevision != plainRevisions[city.id] || !index.covered(city) ||
                 result.startedAtMillis?.let { !fresh(it) } == true)) return false
         return (buildingIds ?: result.stores.keys).all { id ->
             val captured = result.stores[id]?.key ?: return@all false
             val live = cities[city.id]?.get(id) ?: return@all false
-            captured == keys[id] && (captured.mode == CivStorageMode.VIRTUAL ||
+            captured == live.key && (captured.mode == CivStorageMode.VIRTUAL ||
                 live.capturedGeneration == captured.generation && fresh(live.capturedAt))
         }
     }
 
     /** Metadata/index reads only; no inventory scans are added to city publication. */
-    fun update(city: Settlement): Map<UUID, CivSupplyStorageKey> {
+    fun update(city: Settlement) {
         val inventory = city.inventory?.validated()
         val mode = inventory?.mode ?: if (city.autonomy != null) CivStorageMode.PHYSICAL else
-            run { if (city.id in cities) remove(city.id); return emptyMap() }
+            run { if (city.id in cities) remove(city.id); return }
+        val indexed = if (mode == CivStorageMode.PHYSICAL) index.positions(city) else emptyMap()
+        val oldGeometry = geometries[city.id]
+        val geometryChanged = oldGeometry?.matches(city) != true
+        val virtualMaterials = inventory?.buildingMaterials.orEmpty()
+        if (!geometryChanged) {
+            val geometry = requireNotNull(oldGeometry)
+            if (mode == CivStorageMode.PHYSICAL) {
+                if (geometry.indexedPositions !== indexed) updateMembership(city, geometry, indexed)
+                return
+            }
+            if (geometry.virtualMaterials == virtualMaterials) return
+        }
         val registered = city.inventory?.containers.orEmpty()
         if (registrations[city.id] != registered) {
             registrations[city.id] = registered.toList()
             dirtyPlain(city.id)
         }
-        val oldGeometry = geometries[city.id]
-        val geometryChanged = oldGeometry?.matches(city) != true
-        if (geometryChanged) {
+        val upgrade = civsStorageUpgrade(city)
+        val geometry = if (geometryChanged) {
             if (oldGeometry != null && (oldGeometry.world != city.worldId || oldGeometry.owner != city.owner ||
                     oldGeometry.autonomous != (city.autonomy != null) || oldGeometry.mode != city.inventory?.mode)) holders.remove(city.id)
-            geometries[city.id] = Geometry(city.worldId, city.owner, city.center, city.radius, city.buildings,
-                registered, city.inventory?.mode, city.autonomy != null, civsStorageUpgrade(city)?.id)
-        }
-        val positions = if (mode == CivStorageMode.PHYSICAL) layout(city) else emptyMap()
+            Geometry(city.worldId, city.owner, city.center, city.radius, city.buildings,
+                registered, city.inventory?.mode, city.autonomy != null, upgrade?.id, upgrade?.buildingId)
+        } else requireNotNull(oldGeometry)
+        val positions = if (mode == CivStorageMode.PHYSICAL) layout(city, city.buildings, indexed) else emptyMap()
         val extra = if (city.autonomy != null && mode == CivStorageMode.PHYSICAL) city.buildings.mapNotNull { building ->
             building.control?.takeIf { building.phase != BuildingPhase.ACTIVE && it in positions[building.id].orEmpty() }
                 ?.let { building.id to it }
         }.toMap() else emptyMap()
         val extraChanged = unfinishedControls[city.id].orEmpty() != extra
         unfinishedControls[city.id] = extra
-        val upgrade = if (mode == CivStorageMode.PHYSICAL) civsStorageUpgrade(city) else null
         val previous = cities[city.id].orEmpty()
         val buildings = if (city.autonomy != null) city.buildings.filter { it.phase == BuildingPhase.ACTIVE } else city.buildings
-        val next = buildings.associate { building ->
+        val next = buildings.associateTo(linkedMapOf()) { building ->
             val old = previous[building.id]
             val key = CivSupplyStorageKey(city.id, city.worldId, city.owner, mode,
                 building.id, building.type, building.phase, building.level, building.bounds, building.control,
                 positions[building.id].orEmpty().toMap(),
                 if (mode == CivStorageMode.VIRTUAL) requireNotNull(inventory).buildingStock(building.id).toMap() else emptyMap(),
-                old?.key?.generation ?: 0L, upgrade?.takeIf { it.buildingId == building.id }?.id)
+                old?.key?.generation ?: 0L, upgrade?.takeIf { mode == CivStorageMode.PHYSICAL && it.buildingId == building.id }?.id)
             val store = if (old != null && old.key == key) old else Store(key).also { dirty(city.id, it) }
             building.id to store
         }
@@ -228,7 +246,33 @@ internal class CivsSupplyCaptures(
             holders[city.id]?.keys?.retainAll(retained)
         }
         cities[city.id] = next
-        return next.mapValues { it.value.key }
+        geometry.indexedPositions = indexed
+        geometry.virtualMaterials = virtualMaterials
+        geometries[city.id] = geometry
+    }
+
+    /** Authored controls stay indexed across chunk changes; only active stores can gain or lose native holders. */
+    private fun updateMembership(city: Settlement, geometry: Geometry, indexed: Map<CivPosition, String?>) {
+        val previous = geometry.indexedPositions
+        val changed = buildSet {
+            previous.forEach { (point, type) -> if (point !in indexed || indexed[point] != type) add(point) }
+            indexed.keys.forEach { if (it !in previous) add(it) }
+        }
+        if (changed.isNotEmpty()) {
+            holders[city.id]?.keys?.removeAll(changed)
+            val affected = city.buildings.filter { building ->
+                building.phase == BuildingPhase.ACTIVE && changed.any { building.bounds.contains(it.x, it.y, it.z) }
+            }
+            if (affected.isNotEmpty()) {
+                val stores = cities.getValue(city.id)
+                layout(city, affected, indexed).forEach { (id, positions) ->
+                    val old = stores.getValue(id)
+                    if (old.key.positions != positions)
+                        stores[id] = Store(old.key.copy(positions = positions.toMap())).also { dirty(city.id, it) }
+                }
+            }
+        }
+        geometry.indexedPositions = indexed
     }
 
     fun revision(cityId: UUID): Long = revisions[cityId] ?: 0L

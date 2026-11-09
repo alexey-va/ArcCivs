@@ -131,7 +131,7 @@ class CivsService(
             if (cities[cityId]?.autonomy != null && player.hasPermission("arccivs.admin")) ui.openWorker(player, cityId, workerId)
             else if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
         }, settings.maximumNpcs, settings.viewerRange, hurt = ::hurtResident, footstep = footTraffic::record,
-        surfaceSpeed = footTraffic::speed, workPlan = { city, worker -> roadMaintenance.plan(city, worker) ?: worksites.plan(city, worker) },
+        surfaceSpeed = footTraffic, workPlan = { city, worker -> roadMaintenance.plan(city, worker) ?: worksites.plan(city, worker) },
         workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
         productionReady = ::productionReady, workInputsReady = ::workInputsReady, workStatusInputs = ::workStatusInputs,

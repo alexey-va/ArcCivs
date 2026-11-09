@@ -14,11 +14,12 @@ import ru.arc.core.ScheduledTask
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-/** Explicitly detached caller policy. Neither function may retain World, Block or mutable actor state. */
+/** Explicitly detached caller policy. Callbacks may not retain World, Block or mutable actor state. */
 internal data class CitizenSnapshotPolicy(
     val allowed: (CivPosition, (CivPosition) -> Material?) -> Boolean,
     val stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
     val reuseKey: CitizenRouteReuseKey? = null,
+    val supportCost: ((CivPosition, BlockData) -> Double)? = null,
 )
 
 /** Explicit trip cost identity; arbitrary caller closures never become cache keys. */

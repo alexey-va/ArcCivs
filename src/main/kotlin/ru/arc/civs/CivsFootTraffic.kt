@@ -1,6 +1,9 @@
 package ru.arc.civs
 
 import org.bukkit.Location
+import org.bukkit.Material
+import org.bukkit.block.Block
+import org.bukkit.block.data.BlockData
 import org.bukkit.entity.Player
 import org.bukkit.plugin.Plugin
 import ru.arc.paper.npc.PacketPlayerNpc
@@ -10,9 +13,13 @@ import java.util.UUID
 import java.util.concurrent.CompletionStage
 
 /** Optional integration; Trails alone owns counters, terrain changes and protection probes. */
-internal class CivsFootTraffic(private val plugin: Plugin, private val cities: () -> Collection<Settlement>) {
+internal class CivsFootTraffic(private val plugin: Plugin, private val cities: () -> Collection<Settlement>) : (Block) -> Double {
     private var incompatible: Plugin? = null
     private var nextFailureLog = 0L
+
+    fun detachedSupportCost(weights: CivsPaths.Weights, logs: Set<Material>, leaves: Set<Material>):
+        ((CivPosition, BlockData) -> Double)? =
+        if (plugin.server.pluginManager.isPluginEnabled("Trails")) null else weights.detached(logs, leaves)
 
     fun record(cityId: UUID, workerId: UUID, entity: PacketPlayerNpc, from: Location, to: Location) {
         val provider = plugin.server.pluginManager.getPlugin("Trails")?.takeIf { it.isEnabled } ?: return
@@ -39,7 +46,7 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
         }
     }
 
-    fun speed(ground: org.bukkit.block.Block): Double {
+    override fun invoke(ground: Block): Double {
         val provider = plugin.server.pluginManager.getPlugin("Trails")?.takeIf { it.isEnabled } ?: return 1.0
         if (incompatible === provider) return 1.0
         return try { CivsTrailsAdapter.speed(plugin, ground).coerceIn(0.2, 5.0) }

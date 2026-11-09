@@ -18,9 +18,12 @@ internal class CivsContainerIndex(
         } || (controls + registered).any { (it.x shr 4) == chunk.x && (it.z shr 4) == chunk.z })
         fun contains(position: CivPosition): Boolean = bounds.any { it.contains(position.x, position.y, position.z) }
     }
-    private class Entry(val geometry: Geometry) {
+    private class Entry(val geometry: Geometry, var buildings: List<CivBuilding>) {
         val chunks = linkedSetOf<ChunkKey>()
         var positions: Map<CivPosition, String?> = emptyMap()
+
+        fun sameInput(city: Settlement): Boolean = geometry.world == city.worldId && buildings == city.buildings &&
+            geometry.registered == city.inventory?.containers.orEmpty()
     }
     private val entries = linkedMapOf<UUID, Entry>()
     private val chunks = mutableMapOf<ChunkKey, MutableMap<CivPosition, String>>()
@@ -46,12 +49,13 @@ internal class CivsContainerIndex(
     }
 
     fun update(city: Settlement) {
-        val geometry = Geometry(city.worldId, city.buildings.map(CivBuilding::bounds),
-            city.buildings.mapNotNull(CivBuilding::control), city.inventory?.containers.orEmpty())
-        if (entries[city.id]?.geometry == geometry) return
-        val cause = if (city.id in entries) "geometry" else "register"
+        val previous = entries[city.id]
+        if (previous?.sameInput(city) == true) return
+        val geometry = geometry(city)
+        if (previous?.geometry == geometry) { previous.buildings = city.buildings; return }
+        val cause = if (previous != null) "geometry" else "register"
         detach(city.id)
-        val entry = Entry(geometry)
+        val entry = Entry(geometry, city.buildings)
         entries[city.id] = entry
         server.getWorld(city.worldId)?.loadedChunks?.forEach { chunk ->
             val key = key(chunk)
@@ -73,8 +77,7 @@ internal class CivsContainerIndex(
     /** Bounded coverage proof for city-wide stock policies; never loads or rescans a chunk. */
     fun covered(city: Settlement, maximumChunks: Int = 256): Boolean {
         val entry = entries[city.id] ?: return false
-        if (entry.geometry != Geometry(city.worldId, city.buildings.map(CivBuilding::bounds),
-                city.buildings.mapNotNull(CivBuilding::control), city.inventory?.containers.orEmpty())) return false
+        if (!entry.sameInput(city) && entry.geometry != geometry(city)) return false
         val world = server.getWorld(city.worldId) ?: return false
         val checked = hashSetOf<ChunkKey>()
         fun covered(x: Int, z: Int): Boolean {
@@ -193,8 +196,11 @@ internal class CivsContainerIndex(
             .filter { entry.geometry.contains(it.key) }.sortedWith(compareBy({ it.key.x }, { it.key.y }, { it.key.z }))
             .forEach { positions.putIfAbsent(it.key, it.value) }
         entry.geometry.registered.forEach { if (it !in positions) positions[it] = null }
-        entry.positions = positions.toMap()
+        if (entry.positions != positions) entry.positions = positions.toMap()
     }
+
+    private fun geometry(city: Settlement) = Geometry(city.worldId, city.buildings.map(CivBuilding::bounds),
+        city.buildings.mapNotNull(CivBuilding::control), city.inventory?.containers.orEmpty())
 
     private fun key(chunk: Chunk) = ChunkKey(chunk.world.uid, chunk.x, chunk.z)
 

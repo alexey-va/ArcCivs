@@ -82,7 +82,7 @@ private class CitizenSnapshotBlocks(
     }
 }
 
-/** Whole chunks are processed on the worker. Main resolves only palette exceptions and support costs. */
+/** Whole chunks are processed on the worker. Main resolves palette exceptions and caller-native costs. */
 internal class CitizenSnapshotCapture(
     probes: List<CitizenSearchProbe>,
     private val terrain: CitizenSnapshotTerrain,
@@ -196,7 +196,13 @@ internal class CitizenSnapshotCapture(
     }
 
     private fun finish(): CitizenSnapshotRequest {
-        val missing = requiredCosts.filterTo(linkedSetOf()) { it !in terrain.costs }
+        val missing = linkedSetOf<CivPosition>()
+        val supportCost = policy.supportCost
+        for (point in requiredCosts) {
+            if (point in terrain.costs) continue
+            val cost = supportCost?.let { resolve -> blockData(point)?.let { resolve(point, it) } }
+            if (cost == null) missing += point else terrain.costs[point] = cost
+        }
         if (missing.isNotEmpty()) return request(costs = missing.take(512).toSet())
         val resolved = hashMapOf<CivPosition, CitizenTerrainBlock>()
         return request(captures = completed.map { capture ->
@@ -210,8 +216,10 @@ internal class CitizenSnapshotCapture(
         })
     }
 
-    private fun material(point: CivPosition): Material? = if (point.y !in minimumY until maximumY) null
-        else terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)]?.data(point)?.material
+    private fun material(point: CivPosition): Material? = blockData(point)?.material
+
+    private fun blockData(point: CivPosition): BlockData? = if (point.y !in minimumY until maximumY) null
+        else terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)]?.data(point)
 
     private fun request(chunks: Set<CitizenSnapshotKey> = emptySet(), states: Map<BlockData, CivPosition> = emptyMap(),
         dynamics: Map<CivPosition, BlockData> = emptyMap(), costs: Set<CivPosition> = emptySet(),

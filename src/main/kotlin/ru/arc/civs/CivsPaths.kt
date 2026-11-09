@@ -3,6 +3,7 @@ package ru.arc.civs
 import org.bukkit.Material
 import org.bukkit.Tag
 import org.bukkit.block.Block
+import org.bukkit.block.data.BlockData
 import java.util.ArrayDeque
 import java.util.UUID
 import kotlin.math.abs
@@ -54,8 +55,8 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     class Trip internal constructor(internal val cityId: UUID, internal val network: Network,
         internal val preferCourierRoads: Boolean, internal val retainedRoads: RetainedRoads) {
         // Costs cannot change halfway through one A* search as other residents finish their trips.
-        private val preferred = network.cells.toHashSet()
-        internal val reuseSignature: Set<CivPosition> get() = preferred
+        internal val weights = Weights(network.geometry, network.cells.toHashSet(), preferCourierRoads, retainedRoads)
+        internal val reuseSignature: Set<CivPosition> get() = weights.preferred
         internal val walked = linkedSetOf<CivPosition>()
         internal var complete = false
         private var overflow = false
@@ -72,24 +73,42 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
             } else walked += ground
         }
 
-        fun cost(ground: Block, recognizedSurface: (Block) -> Double): Double {
-            val point = CivPosition(ground.x, ground.y, ground.z)
-            if (!network.geometry.contains(point)) return 1.0
-            if (network.geometry.onPlot(point)) {
+        fun cost(ground: Block, recognizedSurface: (Block) -> Double): Double =
+            weights.native(ground, recognizedSurface)
+    }
+
+    /** The detached cost callback retains only these admitted weights and a copy of the material tags. */
+    internal class Weights(
+        private val geometry: Geometry,
+        val preferred: Set<CivPosition>,
+        private val preferCourierRoads: Boolean,
+        private val retainedRoads: RetainedRoads,
+    ) {
+        fun native(ground: Block, recognizedSurface: (Block) -> Double): Double =
+            cost(CivPosition(ground.x, ground.y, ground.z), { ground.type }, { ground.blockData },
+                { Tag.LOGS.isTagged(it) || Tag.LEAVES.isTagged(it) }, { recognizedSurface(ground) > 1.0 })
+
+        fun detached(logs: Set<Material>, leaves: Set<Material>): (CivPosition, BlockData) -> Double =
+            { point, data -> cost(point, { data.material }, { data }, { it in logs || it in leaves }, { false }) }
+
+        private inline fun cost(point: CivPosition, type: () -> Material, data: () -> BlockData,
+            canopy: (Material) -> Boolean, recognizedSurface: () -> Boolean): Double {
+            if (!geometry.contains(point)) return 1.0
+            if (geometry.onPlot(point)) {
                 if (!preferCourierRoads) return 1.0
-                val material = ground.type
+                val material = type()
                 return if (material in CivsTerrainPolicy.AUTONOMOUS_SOIL &&
                     (material != Material.COARSE_DIRT || point !in retainedRoads)) ORDINARY_COST else 1.0
             }
             // A remembered line never licenses climbing an outdoor tree.
-            val material = ground.type
-            if (Tag.LOGS.isTagged(material) || Tag.LEAVES.isTagged(material)) return Double.POSITIVE_INFINITY
+            val material = type()
+            if (canopy(material)) return Double.POSITIVE_INFINITY
             return when {
                 material == Material.DIRT_PATH -> 1.0
                 point in retainedRoads && (material == Material.COARSE_DIRT ||
-                    CivsRoadMaintenance.surface(ground.blockData.asString)) -> 1.0
+                    CivsRoadMaintenance.surface(data().asString)) -> 1.0
                 // The provider may recognize untracked materials when its configuration permits it.
-                recognizedSurface(ground) > 1.0 -> 1.0
+                recognizedSurface() -> 1.0
                 point in preferred -> 1.5
                 else -> ORDINARY_COST
             }

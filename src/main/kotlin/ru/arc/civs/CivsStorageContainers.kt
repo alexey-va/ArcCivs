@@ -29,9 +29,9 @@ internal class CivsStorageContainers(
     clock: () -> Long,
 ) {
     private val index = CivsContainerIndex(plugin.server, tileEntities)
-    private val supplyCaptures = CivsSupplyCaptures(index, { city ->
-        val positions = index.positions(city)
-        city.buildings.associate { it.id to selectBuildingPositions(city, it.id, positions) }
+    private val supplyCaptures = CivsSupplyCaptures(index, { city, buildings, positions ->
+        val controls = city.buildings.mapNotNullTo(hashSetOf(), CivBuilding::control)
+        buildings.associate { it.id to selectBuildingPositions(it, positions, controls) }
     }, ::captureSupplyContainer, { city, position, value ->
         storagePositionAllowed(city, position, value.type) && value.acceptsInsert == civsNativeContainerAcceptsInsert(city, position) &&
             (city.autonomy == null || canModify(city, position))
@@ -89,19 +89,20 @@ internal class CivsStorageContainers(
 
     fun buildingPositions(city: Settlement, buildingId: UUID, controlOnly: Boolean = false): Map<CivPosition, String?> {
         val positions = positions(city)
-        return selectBuildingPositions(city, buildingId, positions, controlOnly)
+        val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
+        val controls = if (controlOnly || building.phase != BuildingPhase.ACTIVE) emptySet()
+            else city.buildings.mapNotNullTo(hashSetOf(), CivBuilding::control)
+        return selectBuildingPositions(building, positions, controls, controlOnly)
     }
 
-    private fun selectBuildingPositions(city: Settlement, buildingId: UUID, positions: Map<CivPosition, String?>,
+    private fun selectBuildingPositions(building: CivBuilding, positions: Map<CivPosition, String?>, controls: Set<CivPosition>,
         controlOnly: Boolean = false): Map<CivPosition, String?> {
-        val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         return linkedMapOf<CivPosition, String?>().also { selected ->
             building.control?.takeIf { it in positions }?.let { selected[it] = positions[it] }
             if (!controlOnly && building.phase == BuildingPhase.ACTIVE) {
-                val foreignControls = city.buildings.filter { it.id != buildingId }.mapNotNull(CivBuilding::control).toSet()
                 positions.forEach { (position, type) ->
-                    if (position !in foreignControls && building.bounds.contains(position.x, position.y, position.z))
-                        selected.putIfAbsent(position, type)
+                    if (position !in controls && building.bounds.contains(position.x, position.y, position.z))
+                        selected[position] = type
                 }
             }
         }

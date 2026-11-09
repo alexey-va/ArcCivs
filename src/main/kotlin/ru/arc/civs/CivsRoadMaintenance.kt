@@ -890,9 +890,12 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         }
 
         fun prepare(city: Settlement, plans: List<CivPlacementPlan>, proposeCuts: Boolean = true,
+            restrictTo: Set<Long>? = null): CivRoadUpkeepNetwork =
+            prepare(city, CivAutonomousAccess.from(city, plans), proposeCuts, restrictTo)
+
+        internal fun prepare(city: Settlement, access: CivAutonomousAccess, proposeCuts: Boolean = true,
             restrictTo: Set<Long>? = null): CivRoadUpkeepNetwork {
             require(restrictTo == null || !proposeCuts && restrictTo.size <= 24)
-            val access = CivAutonomousAccess.from(city, plans)
             val routeProfiles = access.routes.mapValues { CivsAutonomousTerraform.roadProfile(it.value) }
             val floors = linkedMapOf<Long, CivPosition>()
             val ambiguous = hashSetOf<Long>()

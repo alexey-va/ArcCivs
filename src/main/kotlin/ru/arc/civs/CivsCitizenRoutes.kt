@@ -170,6 +170,7 @@ internal class CivsCitizenRoutes(
         val climbable = org.bukkit.Tag.CLIMBABLE.values.toSet()
         val leaves = org.bukkit.Tag.LEAVES.values.toSet()
         val logs = org.bukkit.Tag.LOGS.values.toSet()
+        val supportCost = (surfaceSpeed as? CivsFootTraffic)?.detachedSupportCost(routeCosts.weights, logs, leaves)
         fun outsideSnapshot(building: CivBuilding, x: Int, z: Int) =
             x !in building.bounds.min.x..building.bounds.max.x || z !in building.bounds.min.z..building.bounds.max.z
         val controls = CitizenRouteControls(city)
@@ -186,7 +187,7 @@ internal class CivsCitizenRoutes(
                 !actor.sheltering && actor.attacker == null && actor.combatDestination == null &&
                 actor.foodSource == null && actor.mealVisit == null && actor.workDetour == null &&
                 actor.collectionSeek == null && actor.collectionHome == null && actor.tavernService == null && actor.social.visit == null)
-                CitizenRouteReuseKey.of(routeCosts, allowed) else null)
+                CitizenRouteReuseKey.of(routeCosts, allowed) else null, supportCost = supportCost)
         val motion = navigation.request(world, from, to, { point -> policy.allowed(point) { p ->
             if (p.y in minimumY until maximumY && world.isChunkLoaded(p.x shr 4, p.z shr 4)) world.getBlockAt(p.x, p.y, p.z).type
             else null
@@ -424,17 +425,32 @@ internal class CivsCitizenRoutes(
 
     /** A LAB exception belongs only to a current physical trip and its exact fixed barrel. */
     private fun labCourierStorage(actor: CitizenActor, city: Settlement, worker: CivWorker, route: CitizenRoute): CivBuilding? {
-        val trip = actor.plan.courier?.takeIf { it.cargo.inventoryBacked && it.cargo.sourceWorkerId == null } ?: return null
-        if (city.inventory?.mode != CivStorageMode.PHYSICAL || worker.assignment != trip.cargo.warehouseId ||
-            worker.completedCycles != actor.plan.token.completedCycles || actor.plan.token.shipmentId != trip.cargo.id ||
+        val trip = actor.plan.courier ?: return null
+        val cargo = trip.cargo
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL || cargo.sourceWorkerId != null || cargo.stockResource != null ||
+            worker.assignment != cargo.warehouseId ||
+            worker.completedCycles != actor.plan.token.completedCycles || actor.plan.token.shipmentId != cargo.id ||
             route.idleAnchor != null || route.intermediate || actor.returningToWarehouse || actor.sheltering ||
             actor.attacker != null || actor.combatDestination != null || actor.foodSource != null || actor.mealVisit != null ||
             navigationHeld(actor)) return null
         val phase = actor.cycle.phase
         val storage = when (phase) {
-            CitizenPhase.TO_WORK -> city.building(trip.cargo.sourceBuildingId).takeIf { !trip.carrying && worker.cargo == null }
-            CitizenPhase.RETURNING -> CivsLogistics.destination(city, trip.cargo)?.takeIf {
-                trip.carrying && worker.cargo == trip.cargo && it.id == trip.destinationBuildingId
+            CitizenPhase.TO_WORK -> {
+                // The current reservation is still empty-handed. Only ordinary pickup can back its cargo with items.
+                val warehouse = city.building(cargo.warehouseId)
+                if (trip.carrying || worker.cargo != null || !CivsLogistics.validCargo(city, cargo) ||
+                    warehouse?.type != BuildingType.WAREHOUSE || warehouse.phase != BuildingPhase.ACTIVE ||
+                    warehouse.control == null) return null
+                val source = city.building(cargo.sourceBuildingId)?.takeIf {
+                    it.phase == BuildingPhase.ACTIVE && it.entrance == cargo.sourceEntrance
+                } ?: return null
+                val destination = CivsLogistics.destination(city, cargo)?.takeIf {
+                    it.id == trip.destinationBuildingId && it.entrance == trip.destinationEntrance
+                }?.control ?: return null
+                source.takeIf { CivsLogistics.withinRoute(city, route.authored, destination) }
+            }
+            CitizenPhase.RETURNING -> CivsLogistics.destination(city, cargo)?.takeIf {
+                trip.carrying && cargo.inventoryBacked && worker.cargo == cargo && it.id == trip.destinationBuildingId
             }
             else -> null
         }
@@ -741,7 +757,7 @@ internal class CivsCitizenRoutes(
         val chunkFailure = failed.motion.failure == "chunk-unloaded"
         val labFailure = actor.arrivalWait?.firstLabChunkFailureAt
         // A retained failed trip still gets a genuine walking search on each retry.
-        if (chunkFailure && (labFailure == null || labFailure == failed.startedAt)) return false
+        if (chunkFailure && (!timedOut || labFailure == null || labFailure == failed.startedAt)) return false
         if (!chunkFailure && labFailure != null) return false
         // Keep body contact authoritative across retries until the resident actually walks clear.
         if (!actor.sheltering && actor.bodyContact?.token == actor.plan.token) return false

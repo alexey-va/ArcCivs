@@ -29,6 +29,56 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsSupplyCaptureTest : FunSpec({
+    test("stable city revisions and contents events reuse layout while a holder change projects only its store") {
+        supplyCaptureScenario { h ->
+            val index = CivsContainerIndex(h.server) { h.nodes.values.map { it.state }.toTypedArray() }
+            val projected = mutableListOf<Set<UUID>>()
+            val captures = CivsSupplyCaptures(index, { _, buildings, indexed ->
+                projected += buildings.mapTo(hashSetOf(), CivBuilding::id)
+                buildings.associate { building ->
+                    building.id to indexed.filterKeys { point ->
+                        point == building.control || building.phase == BuildingPhase.ACTIVE &&
+                            building.bounds.contains(point.x, point.y, point.z)
+                    }
+                }
+            }, { _, _, type -> CivSupplyCapturedContainer(requireNotNull(type), emptyList()) }, { _, _, _ -> true }, { h.now })
+            fun capture(): CivSupplyCaptureResult {
+                val cursor = captures.start(h.city)
+                while (!cursor.step()) Unit
+                return requireNotNull(cursor.result)
+            }
+
+            val buildings = h.city.buildings.mapTo(hashSetOf(), CivBuilding::id)
+            val initial = capture()
+            repeat(4) { n ->
+                h.city = h.city.copy(revision = h.city.revision + 1, stock = Stock(food = n.toLong()),
+                    workers = h.city.workers.map { it.copy(hunger = n) })
+                captures.update(h.city)
+                captures.current(h.city, initial, null) shouldBe true
+            }
+            val barrel = requireNotNull(h.warehouse.control)
+            captures.changed(h.city.worldId, barrel)
+            captures.current(h.city, initial, setOf(h.warehouse.id)) shouldBe false
+            capture()
+            index.load(h.chunk)
+            captures.chunkChanged(h.city.worldId, h.chunk.x, h.chunk.z)
+            val beforeRemoval = capture()
+            projected shouldBe listOf(buildings)
+
+            val chest = CivPosition(2, 64, 0)
+            val block = h.nodes.getValue(chest).block
+            index.removed(block)
+            captures.changed(h.city.worldId, chest)
+            val withoutChest = capture()
+            withoutChest.stores.getValue(h.warehouse.id).key.positions shouldBe mapOf(barrel to "BARREL")
+            (withoutChest.stores.getValue(h.producer.id).key === beforeRemoval.stores.getValue(h.producer.id).key) shouldBe true
+            index.changed(block)
+            captures.changed(h.city.worldId, chest)
+            capture().stores.getValue(h.warehouse.id).key.positions shouldBe mapOf(barrel to "BARREL", chest to "CHEST")
+            projected shouldBe listOf(buildings, setOf(h.warehouse.id), setOf(h.warehouse.id))
+        }
+    }
+
     test("reused holder observations aggregate without revisiting detached slots") {
         supplyCaptureScenario { h ->
             val key = h.capture().stores.getValue(h.warehouse.id).key
@@ -347,11 +397,18 @@ class CivsSupplyCaptureTest : FunSpec({
             h.storage.updateCity(h.city)
             h.storage.supplyRevision(h.city.id) shouldBe revision
             h.storage.supplyCaptureCurrent(h.city, result) shouldBe true
+            h.city = h.city.copy(inventory = requireNotNull(h.city.inventory).copy(
+                buildingMaterials = mapOf(h.warehouse.id.toString() to mapOf("BREAD" to 250L))))
+            h.storage.supplyCaptureCurrent(h.city, result, setOf(h.warehouse.id)) shouldBe false
+            h.storage.supplyCaptureCurrent(h.city, result, setOf(h.producer.id)) shouldBe true
+            val updated = h.capture()
+            updated.stores.getValue(h.warehouse.id).stock shouldBe mapOf("BREAD" to 250L)
+            updated.stores.getValue(h.warehouse.id).capacity shouldBe CivSupplyCapacity(0, emptyMap(), 1_478L)
             h.city = h.city.copy(buildings = h.city.buildings.map {
                 if (it.id == h.warehouse.id) it.copy(level = 2) else it
             })
-            h.storage.supplyCaptureCurrent(h.city, result, setOf(h.warehouse.id)) shouldBe false
-            h.storage.supplyCaptureCurrent(h.city, result, setOf(h.producer.id)) shouldBe true
+            h.storage.supplyCaptureCurrent(h.city, updated, setOf(h.warehouse.id)) shouldBe false
+            h.storage.supplyCaptureCurrent(h.city, updated, setOf(h.producer.id)) shouldBe true
             h.reads shouldBe 0
         }
     }
@@ -432,6 +489,7 @@ private class SupplyCaptureFixture(paper: MockBukkitTestRuntime) : AutoCloseable
         CivPosition(0, 64, 0), 32, "nordic", hall, 1_000).copy(buildings = listOf(hall, warehouse, producer),
         inventory = CivInventory(CivStorageMode.PHYSICAL), workers = listOf(CivWorker(UUID.randomUUID(), "Worker", producer.id)))
     val storage: CivsStorage
+    val server: Server
     var now = 1_000L
     var loaded = true
     val chunk: Chunk
@@ -457,11 +515,11 @@ private class SupplyCaptureFixture(paper: MockBukkitTestRuntime) : AutoCloseable
         every { nativeWorld.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } answers {
             nodes.getValue(CivPosition(firstArg(), secondArg(), thirdArg())).block
         }
-        val server = mockk<Server> {
+        server = mockk<Server> {
             every { pluginManager } returns mockk(relaxed = true)
             every { getWorld(worldId) } returns nativeWorld
         }
-        val plugin = mockk<Plugin> { every { this@mockk.server } returns server }
+        val plugin = mockk<Plugin> { every { this@mockk.server } returns this@SupplyCaptureFixture.server }
         storage = CivsStorage(plugin, supplyClock = { now }) { nodes.values.map { it.state }.toTypedArray() }
     }
 
@@ -476,7 +534,7 @@ private class SupplyCaptureFixture(paper: MockBukkitTestRuntime) : AutoCloseable
     override fun close() = storage.close()
 }
 
-private class SupplyCaptureNode(world: World, position: CivPosition, type: Material) {
+private class SupplyCaptureNode(private val world: World, position: CivPosition, type: Material) {
     val contents = arrayOfNulls<ItemStack>(27)
     var reads = 0
     val inventory = mockk<Inventory>()
@@ -486,6 +544,10 @@ private class SupplyCaptureNode(world: World, position: CivPosition, type: Mater
     val block = mockk<Block> {
         every { this@mockk.type } returns type
         every { this@mockk.state } returns this@SupplyCaptureNode.state
+        every { this@mockk.world } returns this@SupplyCaptureNode.world
+        every { x } returns position.x
+        every { y } returns position.y
+        every { z } returns position.z
     }
     init {
         every { state.type } returns type

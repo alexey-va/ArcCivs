@@ -8,7 +8,8 @@ import java.util.UUID
 
 class CivsLabCargoRouteRecoveryTest : FunSpec({
     for ((carrying, outcome) in listOf(false to "pickup", true to "dropoff", false to "outside-lab",
-        false to "protected", true to "occupied", false to "unloaded", false to "obsolete")) {
+        false to "protected", true to "occupied", false to "unloaded", false to "obsolete",
+        false to "virtual", true to "unbacked-return", false to "stale-destination")) {
         test("lab physical courier recovery after a walking retry: $outcome") {
             residentRuntime(server = CivsWorksiteServerFixture()) { h ->
                 h.navigationNow = 2_000
@@ -19,12 +20,16 @@ class CivsLabCargoRouteRecoveryTest : FunSpec({
                 val hut = CivBuilding(UUID(79, 1), BuildingType.BUILDER_HUT, 1, destination, 0, "builder1",
                     CivBox(destination.copy(x = 31, z = -2), destination.copy(x = 36, y = 68, z = 2)),
                     destination.copy(z = -3), BuildingPhase.ACTIVE, destination)
-                val cargo = CivCargo(UUID(79, 2), warehouse.id, warehouse.id, hut.id, warehouse.entrance,
-                    "COBBLESTONE", 4, inventoryBacked = true)
+                val material = if (carrying) "COBBLESTONE" else "GRAVEL"
+                val shipment = CivsLogistics.shipmentId(h.city.id, h.workerId, h.city.workers.single().completedCycles,
+                    warehouse.id, hut.id, material)
+                val cargo = CivCargo(shipment, warehouse.id, warehouse.id, hut.id, warehouse.entrance,
+                    material, if (carrying) 4L else 64L, inventoryBacked = carrying && outcome != "unbacked-return")
                 val worker = h.city.workers.single().copy(hunger = 20).let {
                     if (carrying) CivsEquipment.collectSupplies(it.copy(cargo = cargo), mapOf(cargo.material to cargo.amount)) else it
                 }
-                h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), warehouse, hut),
+                val mode = if (outcome == "virtual") CivStorageMode.VIRTUAL else CivStorageMode.PHYSICAL
+                h.city = CivsRules.validate(h.city.copy(inventory = CivInventory(mode), buildings = listOf(h.city.buildings.first(), warehouse, hut),
                     workers = listOf(worker)))
                 h.courier = CivCourierPlan(cargo, hut.id, hut.entrance, carrying)
                 for (x in -1..3) for (z in -1..1) h.world.loadChunk(x, z)
@@ -70,10 +75,11 @@ class CivsLabCargoRouteRecoveryTest : FunSpec({
                 fail(first)
                 actor.route = first
                 h.owner.pulse(3_000)
-                if (outcome == "outside-lab") {
+                if (outcome in setOf("outside-lab", "virtual", "unbacked-return")) {
                     actor.cycle.phase shouldBe CitizenPhase.PAUSED
                     actor.npc.location.point() shouldBe origin.point()
                     h.pickups shouldBe 0
+                    h.unloads shouldBe 0
                     return@residentRuntime
                 }
                 actor.cycle.phase shouldBe phase
@@ -107,13 +113,17 @@ class CivsLabCargoRouteRecoveryTest : FunSpec({
                         }
                         "unloaded" -> h.world.unloadChunk(control.x shr 4, control.z shr 4) shouldBe true
                         "obsolete" -> h.courier = null
+                        "stale-destination" -> h.city = h.city.copy(buildings = h.city.buildings.map {
+                            if (it.id == hut.id) hut.copy(entrance = hut.entrance.copy(z = -4)) else it
+                        })
                     }
+                    val current = h.city
                     h.owner.pulse(8_004)
                     if (outcome !in setOf("pickup", "dropoff")) {
                         actor.npc.location.point() shouldBe origin.point()
                         h.pickups shouldBe 0
                         h.unloads shouldBe 0
-                        h.city shouldBe before
+                        h.city shouldBe current
                         return@residentRuntime
                     }
                     actor.route shouldBe null

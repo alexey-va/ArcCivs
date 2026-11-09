@@ -5,14 +5,20 @@ import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeSameInstanceAs
+import io.mockk.every
+import io.mockk.mockk
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.Tag
+import org.bukkit.block.Block
 import org.bukkit.block.data.BlockData
+import org.bukkit.plugin.ServicePriority
 import org.bukkit.util.BoundingBox
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.ruscrafting.trails.api.TrailsFootTrafficService
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.CompletableFuture
@@ -21,6 +27,43 @@ import java.util.concurrent.TimeUnit
 import java.util.UUID
 
 class CivsNavigationSnapshotsTest : FunSpec({
+    test("detached support costs keep the weighted route and defer arbitrary or enabled Trails costs to the owner") {
+        sharedRouteRuntime { h ->
+            h.allowedZ = 0..2
+            h.paths.begin(h.city).network.cells += (1..7).map { CivPosition(it, 63, 1) }
+            var customReads = 0
+            val native = h.request(reuseKey = null, surfaceSpeed = {
+                customReads++
+                1.0
+            })
+            h.finish(native)
+            val nativeReads = h.supportCostReads()
+            (nativeReads > 0 && customReads > 0) shouldBe true
+            val first = native.destination
+            h.walkUntil(native) { it.z > 1.0 }
+
+            val detached = h.request(reuseKey = null, surfaceSpeed = h.footTraffic)
+            h.finish(detached)
+            detached.destination shouldBe first
+            detached.endpoint shouldBe h.target
+            detached.nodeCount shouldBe native.nodeCount
+            h.walkUntil(detached) { it.z > 1.0 }
+            h.supportCostReads() shouldBe nativeReads
+
+            val trails = mockk<TrailsFootTrafficService>()
+            var trailsReads = 0
+            every { trails.speedMultiplier(any()) } answers {
+                trailsReads++
+                2.0
+            }
+            h.enableTrails(trails)
+            val recognized = h.request(reuseKey = null, surfaceSpeed = h.footTraffic)
+            h.finish(recognized)
+            h.walk(recognized)
+            (h.supportCostReads() > nativeReads && trailsReads > 0) shouldBe true
+        }
+    }
+
     test("shared route geometry is learned only after observed traversal and replays without another A star") {
         sharedRouteRuntime { h ->
             val merelyReady = h.request()
@@ -879,7 +922,9 @@ private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, setti
     val target = CitizenPoint(8.5, 64.0, .5)
     var allowedY = 64..64
     var allowedZ = 0..0
-    private val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SharedRouteCache")))
+    private val plugin = paper.createSimplePlugin("SharedRouteCache")
+    val footTraffic = CivsFootTraffic(plugin) { listOf(city) }
+    private val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val work = BudgetedTaskQueue(tasks, 10000, nanoTime = { 0L })
     private val workers = ArrayDeque<Runnable>()
     val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) }, settings = settings,
@@ -892,12 +937,14 @@ private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, setti
     fun request(from: CitizenPoint = CitizenPoint(.5, 64.0, .5), target: CitizenPoint = this.target,
         reuseKey: CitizenRouteReuseKey? = key(), corridor: CitizenSearchCorridor? = null,
         permitted: () -> Boolean = { true }, allowedPoint: (CivPosition) -> Boolean = { true },
-        world: org.bukkit.World = this.world): CitizenPacketRoute {
+        world: org.bukkit.World = this.world, surfaceSpeed: (Block) -> Double = { 1.0 }): CitizenPacketRoute {
         val trip = paths.begin(city)
         fun allowed(p: CivPosition) = permitted() && allowedPoint(p) && p.x in 0..8 && p.y in allowedY && p.z in allowedZ
-        val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> permitted() }, reuseKey)
+        val supportCost = (surfaceSpeed as? CivsFootTraffic)?.detachedSupportCost(trip.weights, Tag.LOGS.values.toSet(),
+            Tag.LEAVES.values.toSet())
+        val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> permitted() }, reuseKey, supportCost)
         return owner.request(world, Location(world, from.x, from.y, from.z), Location(world, target.x, target.y, target.z),
-            ::allowed, policy.stepAllowed, { trip.cost(it) { 1.0 } }, corridor, policy)
+            ::allowed, policy.stepAllowed, { trip.cost(it, surfaceSpeed) }, corridor, policy)
     }
 
     fun finish(route: CitizenPacketRoute) {
@@ -949,6 +996,13 @@ private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, setti
 
     @Suppress("UNCHECKED_CAST")
     fun suffixes() = owner.debug()["shared_route_suffixes"] as Map<String, Any>
+
+    fun supportCostReads() = (owner.debug()["snapshot_cache"] as Map<*, *>)["support_cost_reads"] as Long
+
+    fun enableTrails(api: TrailsFootTrafficService) {
+        val trails = paper.createSimplePlugin("Trails")
+        paper.server.servicesManager.register(TrailsFootTrafficService::class.java, api, trails, ServicePriority.Normal)
+    }
 
     fun otherWorld(): org.bukkit.World = CivsWorksiteWorldFixture("other-shared-world").also { other ->
         paper.server.addWorld(other)
