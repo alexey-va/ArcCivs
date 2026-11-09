@@ -130,12 +130,12 @@ internal fun citizenPacketBodyClear(world: World, point: CitizenPoint, allowDoor
     return true
 }
 
-internal fun citizenPacketSupported(world: World, point: CitizenPoint): Boolean {
+internal fun citizenPacketSupported(world: World, point: CitizenPoint, allowClimbable: Boolean = true): Boolean {
     val x = floor(point.x).toInt()
     val z = floor(point.z).toInt()
     val y = floor(point.y + .001).toInt()
     if (!citizenChunkReady(world, x shr 4, z shr 4) || y <= world.minHeight || y >= world.maxHeight) return false
-    if (Tag.CLIMBABLE.isTagged(world.getBlockAt(x, y, z).type)) return true
+    if (allowClimbable && Tag.CLIMBABLE.isTagged(world.getBlockAt(x, y, z).type)) return true
     val by = citizenSupportY(point.y)
     val block = world.getBlockAt(x, by, z)
     if (block.isLiquid || citizenRouteOpenable(block.blockData) != null) return false

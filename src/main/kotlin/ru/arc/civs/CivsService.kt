@@ -178,10 +178,8 @@ class CivsService(
                             }
                     }
                 } == true
-        }, foodRecoveryAllowed = { city, point ->
-            ready() && city.id !in unhealthy && !storage.isWorldLocked(city.worldId, point) &&
-                storage.foodCanModify(city, point)
-        })).also(onCitizensCreated)
+        }, foodRecoveryAllowed = ::residentRecoveryPointAllowed,
+        nightShelterRecoveryAllowed = ::residentRecoveryPointAllowed)).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
     private val supply = CivsSupplyDispatcher(tasks, nativeWork,
         { cityId, retained -> cargoRequests.captureSupply(cityId, retained) },
@@ -582,6 +580,10 @@ class CivsService(
 
     internal fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long> =
         storage.planningBuildingStock(city, buildingId).orEmpty()
+
+    private fun residentRecoveryPointAllowed(city: Settlement, point: CivPosition): Boolean =
+        ready() && city.id !in unhealthy && !storage.isWorldLocked(city.worldId, point) &&
+            storage.foodCanModify(city, point)
 
     internal fun residentSettlements(): List<Settlement> = if (ready()) cities.values.filter {
         it.id !in unhealthy && it.pendingDeletion == null

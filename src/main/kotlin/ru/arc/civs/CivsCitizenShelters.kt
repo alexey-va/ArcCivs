@@ -11,18 +11,40 @@ internal class CitizenNightHomeProgress {
     private var feet: CitizenPoint? = null
     private var progressedAt = 0L
     private var observedAt = 0L
+    private var rotatedAt: Long? = null
+    private var retryAt = 0L
 
     fun stalled(currentHome: CivBuilding, actual: CitizenPoint, now: Long): Boolean {
-        if (home != currentHome || feet?.distanceSquared(actual)?.let { it >= .25 * .25 } != false || now < observedAt) {
+        if (!sameEpisode(currentHome, actual, now)) {
             home = currentHome
             feet = actual
             progressedAt = now
+            rotatedAt = null
+            retryAt = now
         }
         observedAt = now
-        return now - progressedAt >= STALL_MILLIS
+        return now - (rotatedAt ?: progressedAt) >= STALL_MILLIS
     }
 
-    fun clear() { home = null; feet = null; progressedAt = 0; observedAt = 0 }
+    fun rotated(now: Long) { rotatedAt = now }
+
+    fun recoveryDue(currentHome: CivBuilding, actual: CitizenPoint, now: Long): Boolean =
+        sameEpisode(currentHome, actual, now) && rotatedAt != null &&
+            now - progressedAt >= 2 * STALL_MILLIS && now >= retryAt
+
+    fun attemptedRecovery(now: Long) { retryAt = now + STALL_MILLIS }
+
+    private fun sameEpisode(currentHome: CivBuilding, actual: CitizenPoint, now: Long): Boolean =
+        home == currentHome && now >= observedAt && feet?.distanceSquared(actual)?.let { it < .25 * .25 } == true
+
+    fun clear() {
+        home = null
+        feet = null
+        progressedAt = 0
+        observedAt = 0
+        rotatedAt = null
+        retryAt = 0
+    }
 
     companion object { const val STALL_MILLIS = 30_000L }
 }
@@ -50,8 +72,9 @@ internal class CivsCitizenShelters(
             if (sleepStillSafe(actor)) return
             if (!wake(actor)) return
         }
+        val home = citizenHomeBuilding(city, worker)
         if (city.autonomy != null && world.time in 12_000L..23_000L && !actor.alarmSheltering && actor.attacker == null &&
-            citizenHomeBuilding(city, worker)?.phase != BuildingPhase.ACTIVE) {
+            home?.phase != BuildingPhase.ACTIVE) {
             // A future home floor need not be reachable. Admit only actual grounded feet until this resident's selected home is built.
             routes.cancelRoute(actor)
             actor.shelter = null
@@ -75,6 +98,9 @@ internal class CivsCitizenShelters(
             sleep(actor, origin, pose)
             return
         }
+        val nightHome = home?.takeIf { routes.canResetNightShelter(actor) && city.id == actor.cityId &&
+            city.worldId == actor.worldId && world.uid == actor.worldId }
+        if (nightHome == null) actor.nightHomeProgress.clear()
         if (!actor.sleeping && actor.shelter?.let { point ->
                 !citizenStandable(world, point) || actor.shelterPose?.let { !citizenSleepClear(world, it.bounds) } != false ||
                     actor.shelterPose?.let { pose -> collisions.shelterOccupied(actor).any(pose.bounds::overlaps) } == true ||
@@ -84,6 +110,7 @@ internal class CivsCitizenShelters(
             routes.cancelRoute(actor)
             actor.shelter = null
             actor.shelterPose = null
+            actor.nightHomeProgress.clear()
         }
         if (actor.shelter == null && runtime.wanderBudget > 0) {
             runtime.wanderBudget--
@@ -91,7 +118,7 @@ internal class CivsCitizenShelters(
             reserveShelter(actor, city, worker, world)
         }
         runtime.statuses[actor.workerId] = if (actor.sleeping) "sleeping" else "sheltering"
-        val target = actor.shelter ?: run { actor.nightHomeProgress.clear(); return }
+        val target = actor.shelter ?: return
         if (citizenArrived(actor.npc.location, target.location(world))) {
             // Arrival has a tolerance; validate the observed feet, not the target's centre.
             val origin = actor.npc.location
@@ -107,19 +134,25 @@ internal class CivsCitizenShelters(
                 routes.cancelRoute(actor)
                 actor.shelter = null
                 actor.shelterPose = null
+                actor.nightHomeProgress.clear()
                 return
             }
         }
-        val home = citizenHomeBuilding(city, worker)
-        if (!routes.canResetNightShelter(actor) || home == null) actor.nightHomeProgress.clear()
-        else if (actor.nightHomeProgress.stalled(home, actor.npc.location.point(), now) &&
-            routes.resetNightShelter(actor, now)) return
         val route = actor.route
+        if (nightHome != null) {
+            val stalled = actor.nightHomeProgress.stalled(nightHome, actor.npc.location.point(), now)
+            if (route != null) {
+                if (route.motion.failure == "capture-budget" &&
+                    routes.recoverNavigation(actor, route.target, now, nightHome = nightHome)) return
+                if (stalled && routes.resetNightShelter(actor, now)) return
+            }
+        }
         if (route == null) { routes.startRoute(actor, world, target, now); return }
         if (route.completion?.cancelReason == "resident-blocked") {
             routes.cancelRoute(actor)
             actor.shelter = null
             actor.shelterPose = null
+            actor.nightHomeProgress.clear()
             return
         }
         if (route.completion != null || route.timedOut(now)) {
@@ -195,7 +228,7 @@ internal class CivsCitizenShelters(
 
     fun sleepStillSafe(actor: CitizenActor): Boolean {
         val origin = actor.sleepOrigin ?: return false
-        return citizenPacketSupported(actor.npc.world, origin.point()) &&
+        return citizenPacketSupported(actor.npc.world, origin.point(), allowClimbable = false) &&
             citizenPacketBodyClear(actor.npc.world, origin.point(), false) &&
             actor.sleepPose?.let { citizenSleepClear(actor.npc.world, it.bounds) } == true
     }

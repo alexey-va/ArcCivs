@@ -32,7 +32,8 @@ internal fun citizenStandingBounds(feet: Location, scale: Double): BoundingBox =
  * Include outer skin/armour layers and lift the pose above the actual floor. No fake bed metadata. */
 internal fun citizenSleepPose(world: World, feet: Location, scale: Double,
                              available: (BoundingBox) -> Boolean = { true }): CitizenSleepPose? {
-    if (!citizenPacketSupported(world, feet.point()) || !citizenPacketBodyClear(world, feet.point(), false)) return null
+    if (!citizenPacketSupported(world, feet.point(), allowClimbable = false) ||
+        !citizenPacketBodyClear(world, feet.point(), false)) return null
     val origin = feet.clone().add(0.0, .32 * scale + .01, 0.0)
     for (yaw in listOf(0f, 90f, 180f, 270f)) {
         val radians = Math.toRadians(yaw.toDouble())

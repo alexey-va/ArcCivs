@@ -9,6 +9,23 @@ import org.bukkit.util.BoundingBox
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsNavigationSupportAdmissionTest : FunSpec({
+    test("sleep requires floor support even when movement can hold a ladder") {
+        supportAdmissionWorld { world ->
+            val ladder = Bukkit.createBlockData("minecraft:ladder[facing=north,waterlogged=false]")
+            for (y in 63..65) {
+                world.getBlockAt(0, y, 0).blockData = ladder.clone()
+                world.getBlockAt(0, y, 1).type = Material.OAK_PLANKS
+            }
+            val feet = Location(world, .5, 64.0, .5)
+            citizenPacketBodyClear(world, feet.point(), false) shouldBe true
+            citizenPacketSupported(world, feet.point()) shouldBe true
+            (citizenSleepPose(world, feet, 1.0) == null) shouldBe true
+
+            world.getBlockAt(0, 63, 0).type = Material.OAK_PLANKS
+            (citizenSleepPose(world, feet, 1.0) != null) shouldBe true
+        }
+    }
+
     test("a courier walks around a fence and carpet table instead of selecting an unsupported tall foothold") {
         supportAdmissionWorld { world ->
             val slab = "minecraft:acacia_slab[type=bottom,waterlogged=false]"

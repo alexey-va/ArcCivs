@@ -94,6 +94,7 @@ class CivsCitizens(
     acceleratedWork: (Settlement) -> Boolean = { false },
     labCourierRecoveryAllowed: (Settlement, CivWorker, CivCourierPlan, List<CivPosition>) -> Boolean = { _, _, _, _ -> false },
     foodRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
+    nightShelterRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
 ) : Listener, AutoCloseable {
     private val runtime = CitizenRuntime(plugin, cityProvider)
     internal var residentLifeEnabled: Boolean
@@ -246,6 +247,7 @@ class CivsCitizens(
             remove = ::remove,
             labCourierRecoveryAllowed = labCourierRecoveryAllowed,
             foodRecoveryAllowed = foodRecoveryAllowed,
+            nightShelterRecoveryAllowed = nightShelterRecoveryAllowed,
             workFrame = { id ->
                 val provider = settlementFrames
                 if (provider != null) provider(id)

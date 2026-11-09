@@ -4,11 +4,13 @@ import org.bukkit.Bukkit
 import org.bukkit.GameMode
 import org.bukkit.Location
 import org.bukkit.World
+import org.bukkit.util.BoundingBox
 import ru.arc.observability.StructuredDebugLine
 import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 import java.util.logging.Level
 import kotlin.math.abs
+import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -31,6 +33,7 @@ internal class CivsCitizenRoutes(
     private val remove: (CitizenActor, String) -> Unit,
     private val labCourierRecoveryAllowed: (Settlement, CivWorker, CivCourierPlan, List<CivPosition>) -> Boolean = { _, _, _, _ -> false },
     private val foodRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
+    private val nightShelterRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
     private val workFrame: (UUID) -> CivSettlementWorkFrame? = { id ->
         runtime.cityProvider().firstOrNull { it.id == id }?.let {
             CivSettlementWorkFrame(it, CivResidentReadFrame(), CivSettlementSupplyRead.EMPTY, CivsPaths.RetainedRoads.EMPTY,
@@ -762,14 +765,18 @@ internal class CivsCitizenRoutes(
 
     /** A failed or expired arrival may recover to a freshly validated loaded endpoint, never into a wall. */
     fun recoverNavigation(actor: CitizenActor, target: Location, now: Long, idleAnchor: CivPosition? = null,
-                                  timedOnly: Boolean = false, food: CivResidentFoodSource? = null): Boolean {
+                                  timedOnly: Boolean = false, food: CivResidentFoodSource? = null,
+                                  nightHome: CivBuilding? = null): Boolean {
         val failed = actor.route ?: return false
         if (actor.mineVisit != null) return false
+        val nightRecovery = nightHome != null
+        if (nightHome != null && (food != null || !nightCaptureFailed(actor, failed, nightHome, now))) return false
+        if (!nightRecovery && failed.motion.failure == "capture-budget" && canResetNightShelter(actor)) return false
         val foodRoute = actor.foodPickupSource?.takeIf { actor.foodSource == it.buildingId && failed.authored == it.standing }
         // Only the physical food owner can revalidate the exact holder for relocation.
         if (food != foodRoute) return false
         val recoveryAnchor = failed.idleAnchor ?: idleAnchor
-        val timedOut = food != null || observeArrivalWait(actor, failed)
+        val timedOut = food != null || nightRecovery || observeArrivalWait(actor, failed)
         val chunkFailure = failed.motion.failure == "chunk-unloaded"
         val labFailure = actor.arrivalWait?.firstLabChunkFailureAt
         // A retained failed trip still gets a genuine walking search on each retry.
@@ -807,6 +814,8 @@ internal class CivsCitizenRoutes(
         val labStorage = if (chunkFailure) labCourierStorage(actor, city, worker, failed) ?: return false else null
         val recoveryTrip = labStorage?.let { requireNotNull(actor.plan.courier) }
         val home = if (actor.sheltering) citizenHomeBuilding(city, worker) ?: return false else null
+        if (nightHome != null && (home != nightHome || nightHome.phase != BuildingPhase.ACTIVE ||
+                actor.worldId != city.worldId || worker.cargo != null || !failed.chunks.ready(entity.world))) return false
         val waitingMine = waitingMine(actor, city, recoveryAnchor)
         val authored = when {
             timedOut -> failed.authored // A work cycle may currently be visiting food, supplies or leisure.
@@ -821,6 +830,13 @@ internal class CivsCitizenRoutes(
         runtime.recoveryBudget--
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
         val previous = entity.location
+        if (nightRecovery) {
+            actor.nightHomeProgress.attemptedRecovery(now)
+            val standing = citizenStandingBounds(previous, entity.scale)
+            if (!citizenRouteWithinReach(previous.point(), authored.point(), CivsLogistics.maximumTransferDistance(city)) ||
+                !citizenPacketSupported(entity.world, previous.point()) || !citizenSleepClear(entity.world, standing) ||
+                !nightRecoveryVolumeAllowed(city, previous, standing)) return false
+        }
         if (!collisions.residentMoveAllowed(actor, previous, previous)) return false
         if (food != null && !foodRecoveryPointAllowed(city, entity.world,
                 CivPosition(previous.blockX, previous.blockY, previous.blockZ))) return false
@@ -839,10 +855,15 @@ internal class CivsCitizenRoutes(
         }
         val storage = labStorage ?: if (waitingMine == null) storageForTarget(actor, city, authored) else null
         val point = (when {
-            actor.sheltering -> authored.takeIf(safe)?.takeIf { point ->
-                shelter.shelterPose(actor, city, worker, point.location(entity.world), collisions.shelterOccupied(actor))
-                    ?.also { actor.shelterPose = it } != null
-            } ?: shelter.reserveShelter(actor, city, worker, entity.world, safe)
+            actor.sheltering -> {
+                val reserved = authored.takeIf(safe)?.takeIf { point ->
+                    val feet = point.location(entity.world)
+                    shelter.shelterPose(actor, city, worker, feet, collisions.shelterOccupied(actor))?.takeIf { pose ->
+                        !nightRecovery || nightRecoveryVolumeAllowed(city, feet, citizenStandingBounds(feet, entity.scale), pose.bounds)
+                    }?.also { actor.shelterPose = it } != null
+                }
+                reserved ?: if (nightRecovery) null else shelter.reserveShelter(actor, city, worker, entity.world, safe)
+            }
             food != null && foodBuilding != null -> citizenCollectedHomeTarget(city, foodBuilding, entity.world,
                 food.container, food.standing) { candidate ->
                 safe(candidate) && foodRecoveryPointAllowed(city, entity.world, candidate) &&
@@ -869,8 +890,13 @@ internal class CivsCitizenRoutes(
             if (!arrivedAt(actor, city, entity.world, authored)) return false
             workRuntime.arriveForWork(actor, city, worker, now)
         }
+        val mode = when {
+            nightRecovery -> "night-home-safe-teleport"
+            food != null -> "food-safe-teleport"
+            else -> "safe-teleport"
+        }
         CivsDiagnostics.event("citizen_route_recovered", "city" to city.id, "worker" to actor.workerId,
-            "mode" to if (food != null) "food-safe-teleport" else "safe-teleport",
+            "mode" to mode,
             "cause" to (failed.motion.failure ?: failed.completion?.cancelReason ?: "timeout"),
             "distance" to previous.distance(destination), "phase" to actor.cycle.phase, "requested" to authored, "destination" to point,
             "shipment" to recoveryTrip?.cargo?.id, "container" to food?.container)
@@ -878,9 +904,25 @@ internal class CivsCitizenRoutes(
     }
 
     private fun foodRecoveryPointAllowed(city: Settlement, world: World, point: CivPosition): Boolean =
+        recoveryPointAllowed(city, world, point, foodRecoveryAllowed)
+
+    private fun nightRecoveryVolumeAllowed(city: Settlement, feet: Location, vararg bodies: BoundingBox): Boolean {
+        val points = buildSet {
+            add(CivPosition(feet.blockX, citizenSupportY(feet.y), feet.blockZ))
+            for (body in bodies)
+                for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
+                    for (y in floor(body.minY).toInt()..floor(body.maxY).toInt())
+                        for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt()) add(CivPosition(x, y, z))
+        }
+        val world = feet.world ?: return false
+        return points.all { recoveryPointAllowed(city, world, it, nightShelterRecoveryAllowed) }
+    }
+
+    private fun recoveryPointAllowed(city: Settlement, world: World, point: CivPosition,
+                                     allowed: (Settlement, CivPosition) -> Boolean): Boolean =
         point.y in world.minHeight until world.maxHeight && city.contains(point.x, point.z) &&
             citizenChunkReady(world, point.x shr 4, point.z shr 4) && world.worldBorder.isInside(point.location(world)) &&
-            foodRecoveryAllowed(city, point)
+            allowed(city, point)
 
     fun pause(actor: CitizenActor, reason: String, now: Long) {
         if (actor.arrivalWait?.firstLabChunkFailureAt != null) actor.arrivalWait = null
@@ -901,7 +943,20 @@ internal class CivsCitizenRoutes(
 
     fun canResetNightShelter(actor: CitizenActor): Boolean = actor.sheltering && !actor.sleeping &&
         !actor.alarmSheltering && actor.attacker == null && actor.npc.world.time in 12_000L..23_000L &&
-        !navigationHeld(actor)
+        actor.foodSource == null && actor.foodPickupSource == null && actor.mealVisit == null &&
+        actor.tavernService == null && !actor.npc.isSeated && !navigationHeld(actor)
+
+    private fun nightCaptureFailed(actor: CitizenActor, route: CitizenRoute, home: CivBuilding, now: Long): Boolean {
+        val feet = actor.npc.location.point()
+        return home.phase == BuildingPhase.ACTIVE && canResetNightShelter(actor) &&
+            actor.nightHomeProgress.recoveryDue(home, feet, now) && actor.shelterPose != null &&
+            route.authored == actor.shelter && route.target.point() == route.authored.point() &&
+            route.motion.failure == "capture-budget" && !route.motion.searching && !route.motion.continuation &&
+            route.motion.forwardProgress == 0.0 && route.from.distanceSquared(feet) < .25 * .25 &&
+            !route.intermediate && route.idleAnchor == null && route.replanAttempts == 0 && route.previousMotion == null &&
+            route.bodyBlockedSince == null && actor.residentYield == null && actor.collisionResident == null &&
+            actor.bodyContact?.token != actor.plan.token && actor.plan.courier?.carrying != true
+    }
 
     fun resetNightShelter(actor: CitizenActor, now: Long): Boolean {
         if (!canResetNightShelter(actor) || runtime.recoveryBudget <= 0) return false
@@ -915,7 +970,7 @@ internal class CivsCitizenRoutes(
         actor.shelterPose = null
         actor.arrivalWait = null
         actor.cycle.deferWork(now)
-        actor.nightHomeProgress.clear()
+        actor.nightHomeProgress.rotated(now)
         CivsDiagnostics.event("citizen_night_route_reset", "city" to actor.cityId, "worker" to actor.workerId,
             "target" to target, "actual" to actor.npc.location.point().coordinates(),
             "stationary_ms" to CitizenNightHomeProgress.STALL_MILLIS,
