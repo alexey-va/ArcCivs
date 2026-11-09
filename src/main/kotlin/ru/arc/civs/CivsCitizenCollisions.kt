@@ -65,10 +65,30 @@ internal class CivsCitizenCollisions(
     fun routeMoveAllowed(actor: CitizenActor, from: Location, to: Location): Boolean {
         val occupied = shelterOccupied(actor)
         val clear = citizenResidentStepClear(actor.npc, from, to, occupied)
+        val end = actor.route?.motion?.endpoint
+        if (end != null && to.point() == end &&
+            (!citizenResidentStepClear(actor.npc, to, to, occupied) || !residentStepAllowed(actor.npc, to, to))) {
+            actor.collisionResident = blockingResident(actor, to, to)
+            markBodyContact(actor)
+            return false
+        }
         if (passingBodies(actor)) {
             val route = requireNotNull(actor.route)
+            val residentClear = citizenResidentStepClear(actor.npc, to, to, occupied)
+            val playerClear = yieldPlayerClear(actor, to, to)
+            if (end != null && (!clear || !residentClear || !playerClear)) {
+                // Transit may cross a different body, but this segment must never park in its own blocker.
+                val terminal = citizenStandingBounds(Location(actor.npc.world, end.x, end.y, end.z), actor.npc.scale)
+                val terminalBodies = occupied.filter(terminal::overlaps)
+                if (!citizenResidentStepClear(actor.npc, from, to, terminalBodies) ||
+                    !playerClear && !yieldPlayerClear(actor, from, to, terminal)) {
+                    actor.collisionResident = blockingResident(actor, from, to, terminal)
+                    markBodyContact(actor)
+                    return false
+                }
+            }
             // Escaping an overlap is a permitted sweep, but is still contact until the endpoint body is clear.
-            if (!citizenResidentStepClear(actor.npc, to, to, occupied) || !yieldPlayerClear(actor, to, to))
+            if (!residentClear || !playerClear)
                 markBodyContact(actor, blocked = false)
             else if (runtime.navigationTick - route.bodyContactTick >= 4) route.bodyPassUntil = 0
             return residentStepAllowed(actor.npc, from, to)
@@ -93,10 +113,22 @@ internal class CivsCitizenCollisions(
         markBodyContact(actor)
     }
 
-    private fun blockingResident(actor: CitizenActor, from: Location, to: Location): UUID? =
+    private fun blockingResident(actor: CitizenActor, from: Location, to: Location, terminal: BoundingBox? = null): UUID? =
         runtime.actors.values.firstOrNull { other -> other !== actor &&
             other.worldId == actor.worldId && other.npc.isValid &&
-            !citizenResidentStepClear(actor.npc, from, to, residentOccupied(other)) }?.workerId
+            !citizenResidentStepClear(actor.npc, from, to, residentOccupied(other).let {
+                if (terminal == null) it else it.filter(terminal::overlaps)
+            }) }?.workerId
+
+    /** The resident that denied the last move still owns this exact planned endpoint. */
+    fun endpointResident(actor: CitizenActor, route: CitizenRoute): CitizenActor? {
+        if (!route.motion.waitingForCollision) return null
+        val end = route.motion.endpoint ?: return null
+        val other = actor.collisionResident?.let(runtime.actors::get) ?: return null
+        if (!other.npc.isValid || other.worldId != actor.worldId) return null
+        val body = citizenStandingBounds(Location(actor.npc.world, end.x, end.y, end.z), actor.npc.scale)
+        return other.takeIf { residentOccupied(it).any(body::overlaps) }
+    }
 
     private fun markBodyContact(actor: CitizenActor, blocked: Boolean = true) {
         actor.bodyContact = CitizenBodyContact(actor.plan.token, actor.npc.location.point())
@@ -138,12 +170,13 @@ internal class CivsCitizenCollisions(
     }
 
     /** Admission is read-only: a player must never be pushed by a resident's yielding probe. */
-    private fun yieldPlayerClear(actor: CitizenActor, from: Location, to: Location): Boolean {
+    private fun yieldPlayerClear(actor: CitizenActor, from: Location, to: Location, terminal: BoundingBox? = null): Boolean {
         val sweep = citizenStandingBounds(from, actor.npc.scale).union(citizenStandingBounds(to, actor.npc.scale))
         val players = actor.npc.world.getNearbyPlayers(Location(actor.npc.world, sweep.centerX, sweep.centerY, sweep.centerZ),
             sweep.widthX / 2, sweep.height / 2, sweep.widthZ / 2)
             .filter { it.isOnline && it.isValid && !it.isDead && it.gameMode != GameMode.SPECTATOR &&
-                !it.isInsideVehicle && !it.isSleeping && it.isCollidable }.map { it.boundingBox }
+                !it.isInsideVehicle && !it.isSleeping && it.isCollidable }
+            .mapNotNull { player -> player.boundingBox.takeIf { terminal == null || terminal.overlaps(it) } }
         return citizenResidentStepClear(actor.npc, from, to, players)
     }
 
@@ -320,21 +353,38 @@ internal class CivsCitizenCollisions(
         val awaitingArrival = actor.route?.let {
             it.completion == null && it.motion.finished && it.motion.failure == null && it.bodyBlockedSince != null
         } == true
-        if ((!travelling(actor) && !awaitingArrival) || routes.navigationHeld(actor) ||
-            passingBodies(actor) && !awaitingArrival) return null
+        val foodTravel = actor.foodSource != null && actor.route?.completion == null
+        if ((!travelling(actor) && !awaitingArrival && !foodTravel) || routes.navigationHeld(actor)) return null
         // Pair checks use the configured actor cap (at most CivsSettings.MAXIMUM_NPCS); admission is shared by four actors per frame.
         val npc = actor.npc
         val at = npc.location
         val body = citizenStandingBounds(at, npc.scale)
-        val other = runtime.actors.values.firstOrNull { it !== actor && it.worldId == actor.worldId && it.npc.isValid &&
-            !it.sleeping && citizenStandingBounds(it.npc.location, it.npc.scale).overlaps(body) } ?: return null
-        if (passingBodies(other) && !awaitingArrival) return null
-        val away = at.toVector().subtract(other.npc.location.toVector()).setY(0.0)
-        if (away.lengthSquared() < .000001) away.x = if (actor.workerId < other.workerId) -1.0 else 1.0
+        var other: CitizenActor? = null
+        val away = Vector()
+        for (candidate in runtime.actors.values) {
+            if (candidate === actor || candidate.worldId != actor.worldId || !candidate.npc.isValid || candidate.sleeping) continue
+            val feet = candidate.npc.location
+            if (!citizenStandingBounds(feet, candidate.npc.scale).overlaps(body)) continue
+            val dx = at.x - feet.x
+            val dz = at.z - feet.z
+            val sameCentre = dx * dx + dz * dz < .000001
+            if (other == null || sameCentre) {
+                other = candidate
+                away.setX(dx).setZ(dz)
+            }
+            if (sameCentre) break
+        }
+        other ?: return null
+        val coincident = away.lengthSquared() < .000001
+        val passing = passingBodies(actor)
+        if (!coincident && !awaitingArrival && (passing || passingBodies(other))) return null
+        if (coincident) away.x = if (actor.workerId < other.workerId) -1.0 else 1.0
         away.normalize().multiply(.05)
-        val moved = if (nudgeResident(npc, away)) true else {
+        fun nudge(step: Vector): Boolean =
+            (!passing || yieldPlayerClear(actor, at, at.clone().add(step))) && nudgeResident(npc, step)
+        val moved = if (nudge(away)) true else {
             val tangent = Vector(-away.z, 0.0, away.x)
-            nudgeResident(npc, tangent) || nudgeResident(npc, tangent.multiply(-1.0))
+            nudge(tangent) || nudge(tangent.multiply(-1.0)) || coincident && nudge(away.multiply(-1.0))
         }
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
         return moved
@@ -346,18 +396,49 @@ internal class CivsCitizenCollisions(
         val courier = actor.plan.courier ?: return false
         if (!courier.carrying || !courier.cargo.inventoryBacked || actor.cycle.phase != CitizenPhase.RETURNING ||
             route.authored != actor.plan.storage || route.completion != null || route.intermediate || route.idleAnchor != null ||
-            !route.motion.finished || route.motion.failure != null || route.motion.continuation ||
+            route.motion.failure != null || route.motion.continuation ||
             runtime.navigationTick - maxOf(since, route.progressTick) < 80L || now < actor.courierTargetAfter ||
             actor.sheltering || actor.attacker != null || actor.combatDestination != null || actor.mineVisit != null ||
             actor.foodSource != null || actor.mealVisit != null || actor.tavernService != null || actor.workDetour != null ||
             actor.collectionSeek != null || actor.collectionHome != null || actor.returningToWarehouse) return false
+        val from = actor.npc.location
+        val blocker = (if (route.motion.finished) blockingResident(actor, from, from)?.let(runtime.actors::get)
+            else endpointResident(actor, route))?.takeIf { it.cityId == actor.cityId } ?: return false
         // Separate from the contact tick, which is refreshed every frame at an occupied endpoint.
         actor.courierTargetAfter = now + 5_000L
-        val from = actor.npc.location
-        val blocker = blockingResident(actor, from, from)?.let(runtime.actors::get)?.takeIf { it.cityId == actor.cityId }
-            ?: return false
         if (!yieldPlayerClear(actor, from, from)) return false
         return routes.retryDeliveryStanding(actor, route, courier, blocker.workerId, now)
+    }
+
+    /** A saved-stock return still earns its own depot arrival after walking to a clear side of the entrance. */
+    fun stepPendingDepotArrival(actor: CitizenActor, route: CitizenRoute): Boolean {
+        val pending = actor.plan.pendingStockDelivery ?: return false
+        if (actor.cycle.phase != CitizenPhase.RETURNING || route.authored != actor.plan.storage ||
+            route.completion != null || route.intermediate || route.motion.continuation || route.motion.failure != null) return false
+        val npc = actor.npc
+        val world = npc.world
+        val from = npc.location
+        val entrance = route.authored.location(world)
+        if (from.distanceSquared(entrance) > 4.0 || abs(from.y - entrance.y) > .5) return false
+        val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.worldId == world.uid &&
+            it.pendingDeletion == null && it.autonomy?.paused == false && it.inventory == null } ?: return false
+        if (city.workers.firstOrNull { it.id == actor.workerId }?.pendingStock != pending ||
+            city.buildings.none { CivsRules.isDepot(it) && it.entrance == route.authored } ||
+            routes.arrivedAt(actor, city, world, route.authored)) return false
+
+        val occupied = shelterOccupied(actor)
+        for ((dx, dz) in listOf(-.625 to 0.0, .625 to 0.0, 0.0 to -.625, 0.0 to .625)) {
+            val stance = Location(world, entrance.x + dx, from.y, entrance.z + dz)
+            if (!citizenArrived(stance, entrance) || !residentRouteStepAllowed(actor, city, from, stance) ||
+                !citizenResidentStepClear(npc, stance, stance, occupied) || !residentStepAllowed(npc, stance, stance) ||
+                !citizenResidentStepClear(npc, from, stance, occupied) || !yieldPlayerClear(actor, from, stance) ||
+                !citizenFlatSupportClear(from.point(), stance.point()) { citizenPacketSupported(world, it) } ||
+                !citizenPacketStepClear(world, from.point(), stance.point(), false)) continue
+            val step = stance.toVector().subtract(from.toVector())
+            val length = step.length()
+            if (length > .000001 && nudgeResident(npc, step.multiply(minOf(1.0, .05 / length)))) return true
+        }
+        return false
     }
 
     /** A finished food route can have no normal body-separation step even though its terrain is passable. */

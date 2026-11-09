@@ -40,7 +40,7 @@ internal class CivsCitizenRoutes(
     private val logistics get() = logisticsOwner()
     private val life get() = lifeOwner()
 
-    /** Capacity/capture failures and denied passages retry quietly; they never justify teleporting. */
+    /** Ordinary preparation failures retry quietly; food recovery checks its own physical intent and deadline. */
     fun retryPreparation(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
         val reason = route.motion.failure?.takeIf { it in PREPARATION_FAILURES } ?: return false
         val retryAt = route.preparationRetryAt ?: (now + 5_000).also { route.preparationRetryAt = it }
@@ -286,7 +286,10 @@ internal class CivsCitizenRoutes(
     fun recoverFoodRoute(actor: CitizenActor, city: Settlement, worker: CivWorker, route: CitizenRoute,
                          source: CivResidentFoodSource, now: Long, currentSource: () -> CivResidentFoodSource?): Boolean {
         val cause = route.completion?.cancelReason ?: return false
-        if (cause !in FOOD_TERRAIN_FAILURES || route.motion.failure != cause) return false
+        // The solver reports this reason only after a required probe exhausts the capture limit.
+        val exhaustedCapture = cause == "capture-budget" && !route.motion.searching && !route.motion.continuation &&
+            route.replanAttempts == 0 && route.from.distanceSquared(actor.npc.location.point()) <= .25
+        if (route.motion.failure != cause || cause !in FOOD_TERRAIN_FAILURES && !exhaustedCapture) return false
         if (route.authored != source.standing ||
             route.intermediate || route.idleAnchor != null || route.motion.waitingForCollision || route.nativeCollisionTicks > 0 ||
             actor.collisionResident != null || route.replanReason == "player-blocked" || route.replanReason == "resident-blocked" ||
@@ -301,7 +304,11 @@ internal class CivsCitizenRoutes(
             return false
         }
         val clock = recoveryClock()
-        val previous = actor.foodRouteFailure?.takeIf { it.matches(actor, source, clock) }
+        // Count a timely walking retry even when its native capture spends longer than the retry window.
+        val attemptAt = if (exhaustedCapture) {
+            clock - (now - route.startedAt).coerceIn(0L, FOOD_CAPTURE_RETRY_PREPARATION_LIMIT)
+        } else clock
+        val previous = actor.foodRouteFailure?.takeIf { attemptAt >= it.lastFailureAt && it.matches(actor, source, attemptAt) }
         if (previous == null) {
             actor.foodRouteFailure = CitizenFoodRouteFailure(actor.plan.token, source, actor.npc.location.point(), clock)
             return false
@@ -945,6 +952,7 @@ internal class CivsCitizenRoutes(
         val MINE_ROUTE_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_MINE_ROUTE_BLOCKED")
         val MINE_ROUTE_RECOVERED = StructuredDebugLine("ARCCIVS_MINE_ROUTE_RECOVERED")
         val FOOD_TERRAIN_FAILURES = setOf("movement-blocked", "no-path")
+        const val FOOD_CAPTURE_RETRY_PREPARATION_LIMIT = 120_000L
         val PREPARATION_FAILURES = setOf("search-budget", "capture-budget", "preparation-budget", "planner-busy", "planner-error",
             "chunk-unloaded", "cancelled", "broken-path", "passage-blocked")
     }}

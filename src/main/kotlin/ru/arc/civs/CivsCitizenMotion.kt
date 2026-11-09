@@ -68,7 +68,12 @@ internal class CivsCitizenMotion(
                     if (separated == false && blocked != null && collisions.recoverFoodOverlap(actor, blocked, now)) continue
                     if (blocked?.bodyBlockedSince != null) {
                         if (collisions.retryOccupiedDeliveryArrival(actor, blocked, now)) continue
-                        if (routes.handleBodyContact(actor, blocked, now)) continue
+                        if (collisions.endpointResident(actor, blocked) == null) {
+                            if (routes.handleBodyContact(actor, blocked, now)) continue
+                        } else if (collisions.stepPendingDepotArrival(actor, blocked)) {
+                            blocked.progressTick = runtime.navigationTick
+                            continue
+                        }
                     }
                 }
             }

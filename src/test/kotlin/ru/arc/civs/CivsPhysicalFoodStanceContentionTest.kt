@@ -149,9 +149,9 @@ class CivsPhysicalFoodStanceContentionTest : FunSpec({
                 h.navigationNow = requireNotNull(h.navigationNow) + 6_000
                 logistics.supplyFood(actor, h.city, h.city.workers.single { it.id == h.workerId },
                     h.world, requireNotNull(h.navigationNow))
-                actor.foodPickupSource shouldBe source
-                actor.foodSource shouldBe hall.id
                 if (alreadyInReach) {
+                    actor.foodPickupSource shouldBe source
+                    actor.foodSource shouldBe hall.id
                     withClue(mapOf("yield" to actor.residentYield, "phase" to actor.cycle.phase,
                         "retryAt" to actor.supplyRetryAt, "now" to h.navigationNow,
                         "nativeReach" to civsCanReachContainer(actor.npc.location, container),
@@ -165,12 +165,25 @@ class CivsPhysicalFoodStanceContentionTest : FunSpec({
                 } else {
                     pickups shouldBe 0
                     actor.supplyPickup shouldBe null
-                    requireNotNull(actor.route).authored shouldBe source.standing // Keep existing motion separation available.
+                    actor.foodPickupSource shouldBe null
+                    actor.foodSource shouldBe null
+                    actor.route shouldBe null
+                    (actor.supplyRetryAt > requireNotNull(h.navigationNow)) shouldBe true
                     food.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
                     h.city shouldBe before
                 }
                 h.deliveries shouldBe 0
                 h.supplyRequests shouldBe 0
+            }
+            if (!alreadyInReach) {
+                foodStanceActor(h, blockers.first().id).npc.teleport(Location(h.world, 5.5, 64.0, -5.5))
+                h.navigationNow = requireNotNull(h.navigationNow) + 6_000
+                logistics.supplyFood(actor, h.city, h.city.workers.single { it.id == h.workerId },
+                    h.world, requireNotNull(h.navigationNow))
+                requireNotNull(actor.route).authored shouldBe source.standing
+                pickups shouldBe 0
+                food.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
+                h.city shouldBe before
             }
         }
     }

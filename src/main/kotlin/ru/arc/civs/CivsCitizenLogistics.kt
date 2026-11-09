@@ -77,14 +77,15 @@ internal class CivsCitizenLogistics(
                         retryFoodLater(actor, now)
                         return true
                     }
-                    // A shared sole approach keeps its ordinary route so existing body separation can make progress.
-                    val standing = routes.foodStanding(actor, city, candidate) ?: candidate.standing
-                    val physical = candidate.copy(standing = standing)
-                    if (actor.foodPickupSource != physical) {
-                        routes.cancelRoute(actor)
-                        actor.foodPickupSource = physical
+                    if (route != null) return true
+                    val standing = routes.foodStanding(actor, city, candidate)
+                    if (standing == null) {
+                        runtime.statuses[worker.id] = "waiting"
+                        retryFoodLater(actor, now)
+                        return true
                     }
-                    if (actor.route == null && !routes.startRoute(actor, world, physical.standing, now))
+                    actor.foodPickupSource = candidate.copy(standing = standing)
+                    if (!routes.startRoute(actor, world, standing, now))
                         retryFoodLater(actor, now)
                 }
                 return true

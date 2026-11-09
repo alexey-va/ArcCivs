@@ -100,6 +100,81 @@ class CivsCitizenFoodRouteRetentionTest : FunSpec({
         }
     }
 
+    test("a stationary food route may exhaust two captures before one ordinary pickup") {
+        residentRuntime(workerId = UUID(0, 20)) { h ->
+            for (x in -3..2) for (z in -3..2) h.world.loadChunk(x, z)
+            val quarry = h.assignQuarry()
+            h.work = CivWorldWork(h.workerId, 0, quarry.id, CivPosition(21, 64, 0), emptyList(),
+                inputs = mapOf("IRON_PICKAXE" to 1L), durationMillis = 1_000, status = "waiting-tool")
+            val barrel = CivPosition(13, 64, 0)
+            val standing = CivPosition(12, 64, 0)
+            val tavern = CivBuilding(UUID.randomUUID(), BuildingType.TAVERN, 1, barrel, 0, "food-budget-fixture",
+                CivBox(CivPosition(12, 63, -2), CivPosition(16, 68, 2)), standing, BuildingPhase.ACTIVE, control = barrel)
+            h.city = h.city.copy(buildings = h.city.buildings + tavern, workers = h.city.workers.map { it.copy(hunger = 0) })
+            h.world.getBlockAt(barrel.x, barrel.y, barrel.z).type = Material.BARREL
+            for (z in -24..24) for (y in 64..66) h.world.getBlockAt(11, y, z).type = Material.STONE
+            for ((x, z) in listOf(13 to -1, 13 to 1, 14 to 0)) for (y in 64..66)
+                h.world.getBlockAt(x, y, z).type = Material.STONE
+            val source = CivResidentFoodSource(tavern.id, barrel, standing)
+            val npc = h.owner.collisionActors().single()
+            val origin = Location(h.world, 10.5, 64.0, .5)
+            npc.teleport(origin)
+            civsCanReachContainer(origin, barrel) shouldBe false
+            civsCanReachContainer(standing.location(h.world), barrel) shouldBe true
+            h.physicalFoodSource = source
+            h.foodRecoveryAllowed = { true }
+            h.holdNavigation = true
+            val receipt = CompletableFuture<Settlement>()
+            val pickups = mutableListOf<CivResidentFoodSource>()
+            h.physicalFoodPickup = { selected ->
+                h.owner.requireStorageArrival(h.city.id, h.workerId, tavern.id)
+                civsCanReachContainer(npc.location, barrel) shouldBe true
+                pickups += selected
+                receipt
+            }
+            fun pulse(at: Long) {
+                h.navigationNow = at
+                h.recoveryMillis = at
+                h.owner.pulse(at)
+            }
+            fun failCapture(at: Long) {
+                val route = requireNotNull(h.actor().route)
+                route.authored shouldBe standing
+                val settings = CivsNavigationSettings(maximumCapturedBlocks = 256)
+                val motion = CitizenPacketRoute(h.world, npc.location, route.target,
+                    { true }, { _, _ -> true }, { 1.0 }, settings = settings)
+                repeat(4_096) { if (motion.searching) motion.expand() }
+                withClue("phase=${motion.preparationPhase} nodes=${motion.nodeCount} captured=${motion.capturedBlocks}") {
+                    motion.failure shouldBe "capture-budget"
+                    motion.capturedBlocks shouldBe settings.maximumCapturedBlocks
+                    motion.continuation shouldBe false
+                }
+                route.motion.cancel()
+                route.motion = motion
+                h.navigationNow = at
+                h.recoveryMillis = at
+                h.navigate(0)
+                route.completion?.cancelReason shouldBe "capture-budget"
+                pulse(at)
+            }
+            val before = h.city
+            pulse(2_000)
+            failCapture(10_000)
+            npc.location.point() shouldBe origin.point()
+            pickups shouldBe emptyList()
+            pulse(16_000)
+            // The ordinary retry starts promptly but spends over 30 seconds preparing.
+            failCapture(82_000)
+            npc.location.point() shouldBe standing.point()
+            pickups shouldBe emptyList()
+            h.city shouldBe before
+            pulse(83_000)
+            pulse(84_000)
+            pickups shouldBe listOf(source)
+            h.city shouldBe before
+        }
+    }
+
     test("physical food pickup waits for body transit to finish and its accepted receipt survives later player occupancy") {
         residentRuntime(workerId = UUID(0, 20)) { h ->
             for (x in -2..3) for (z in -2..2) h.world.loadChunk(x, z)
