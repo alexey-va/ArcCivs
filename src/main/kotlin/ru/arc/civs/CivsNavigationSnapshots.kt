@@ -123,8 +123,10 @@ internal class CivsNavigationSnapshots(
     fun state(world: World, data: BlockData, sample: CivPosition): CitizenSnapshotState {
         checkOwner()
         return palette.getOrPut(data) {
-            val constant = contextFree(data)
-            val boxes = if (constant) {
+            val passage = citizenRouteOpenable(data)
+            val closedPassage = passage?.isOpen == false
+            val constant = closedPassage || contextFree(data)
+            val boxes = if (constant && !closedPassage) {
                 paletteReads++
                 boxes(data, world, sample)
             } else emptyList()
@@ -133,7 +135,7 @@ internal class CivsNavigationSnapshots(
                 block.isLiquid
             }
             CitizenSnapshotState(CitizenTerrainShape(liquid,
-                citizenRouteOpenable(data) != null, Tag.CLIMBABLE.isTagged(data.material),
+                passage != null, Tag.CLIMBABLE.isTagged(data.material),
                 data.material in setOf(Material.CAMPFIRE, Material.SOUL_CAMPFIRE) && (data as? Lightable)?.isLit == true,
                 boxes), dynamic = !constant)
         }

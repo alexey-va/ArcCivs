@@ -283,11 +283,15 @@ internal class CitizenPacketRoute(
             return CitizenTerrainBlock.UNAVAILABLE
         val block = world.getBlockAt(point.x, point.y, point.z)
         val capture = {
-            nativeShapeReads++
-            CitizenTerrainShape(block.isLiquid, citizenRouteOpenable(block.blockData) != null,
-                Tag.CLIMBABLE.isTagged(block.type), citizenCampfireLit(block), block.collisionShape.boundingBoxes.map {
+            val passage = citizenRouteOpenable(block.blockData)
+            val boxes = if (passage?.isOpen == false) emptyList() else {
+                nativeShapeReads++
+                block.collisionShape.boundingBoxes.map {
                     CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ)
-                })
+                }
+            }
+            CitizenTerrainShape(block.isLiquid, passage != null,
+                Tag.CLIMBABLE.isTagged(block.type), citizenCampfireLit(block), boxes)
         }
         val shape = shapes?.read(world.uid, point, org.bukkit.Bukkit.getCurrentTick().toLong(), capture) ?: capture()
         capturedBlocks++

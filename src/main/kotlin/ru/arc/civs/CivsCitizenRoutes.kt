@@ -30,6 +30,7 @@ internal class CivsCitizenRoutes(
     private val courierFailed: (UUID, UUID, CivCargo) -> Unit,
     private val remove: (CitizenActor, String) -> Unit,
     private val labCourierRecoveryAllowed: (Settlement, CivWorker, CivCourierPlan, List<CivPosition>) -> Boolean = { _, _, _, _ -> false },
+    private val foodRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
 ) {
     private val collisions get() = collisionsOwner()
     private val shelter get() = shelterOwner()
@@ -264,9 +265,58 @@ internal class CivsCitizenRoutes(
     fun foodStanding(actor: CitizenActor, city: Settlement, source: CivResidentFoodSource): CivPosition? {
         val building = city.building(source.buildingId) ?: return null
         val world = actor.npc.world
-        return citizenCollectedHomeTarget(city, building, world, source.container, source.standing) { point ->
+        val safe: (CivPosition) -> Boolean = { point ->
             storagePointClear(actor, city, world, point) && collisions.idleDestinationFree(actor, point.location(world))
         }
+        val blocked = actor.foodRouteFailure?.takeIf { !it.alternateTried && it.matches(actor, source, recoveryClock()) }
+        // Keep a walking alternative once admitted. A different resident's reservation must not restart it each pulse.
+        if (blocked != null && actor.route == null) {
+            citizenCollectedHomeTarget(city, building, world, source.container, source.standing) {
+                it != blocked.source.standing && safe(it)
+            }?.let { alternate ->
+                blocked.alternateTried = true
+                return alternate
+            }
+        }
+        return citizenCollectedHomeTarget(city, building, world, source.container, source.standing, safe)
+    }
+
+    /** Work retries may replace the route's timer, so a blocked food holder keeps its own short-lived witness. */
+    fun recoverFoodRoute(actor: CitizenActor, city: Settlement, worker: CivWorker, route: CitizenRoute,
+                         source: CivResidentFoodSource, now: Long, currentSource: () -> CivResidentFoodSource?): Boolean {
+        val cause = route.completion?.cancelReason ?: return false
+        if (cause !in FOOD_TERRAIN_FAILURES || route.motion.failure != cause) return false
+        if (route.authored != source.standing ||
+            route.intermediate || route.idleAnchor != null || route.motion.waitingForCollision || route.nativeCollisionTicks > 0 ||
+            actor.collisionResident != null || route.replanReason == "player-blocked" || route.replanReason == "resident-blocked" ||
+            actor.foodSource != source.buildingId || actor.foodPickupSource != source || source.servingFor != null ||
+            source.servingTicket != null || worker.cargo != null || actor.plan.courier?.carrying == true ||
+            actor.sheltering || actor.sleeping || actor.alarmSheltering || actor.attacker != null ||
+            actor.combatDestination != null || actor.mineVisit != null || actor.returningToWarehouse ||
+            actor.outputReturn != null || actor.mealVisit != null || actor.tavernService != null ||
+            actor.collectionSeek != null || actor.collectionHome != null || navigationHeld(actor) ||
+            actor.bodyContact?.token == actor.plan.token || city.inventory?.mode == CivStorageMode.VIRTUAL) {
+            actor.foodRouteFailure = null
+            return false
+        }
+        val clock = recoveryClock()
+        val previous = actor.foodRouteFailure?.takeIf { it.matches(actor, source, clock) }
+        if (previous == null) {
+            actor.foodRouteFailure = CitizenFoodRouteFailure(actor.plan.token, source, actor.npc.location.point(), clock)
+            return false
+        }
+        previous.lastFailureAt = clock
+        if (clock - previous.firstFailureAt < 60_000L || runtime.recoveryBudget == 0 ||
+            actor.nextRecoveryAt?.let { clock < it } == true) return false
+        // Bound denied probes too. The ordinary walking retry and its work cooldown continue.
+        if (currentSource()?.copy(standing = source.standing) != source) {
+            actor.foodRouteFailure = null
+            return false
+        }
+        val recovered = recoverNavigation(actor, route.target, now, food = source)
+        actor.nextRecoveryAt = clock + if (recovered) 60_000L else 5_000L
+        if (recovered) actor.foodRouteFailure = null
+        return recovered
     }
 
     /** Called only after the owner's ordinary arrival proof, before cancelling its route. */
@@ -680,11 +730,14 @@ internal class CivsCitizenRoutes(
 
     /** A failed or expired arrival may recover to a freshly validated loaded endpoint, never into a wall. */
     fun recoverNavigation(actor: CitizenActor, target: Location, now: Long, idleAnchor: CivPosition? = null,
-                                  timedOnly: Boolean = false): Boolean {
+                                  timedOnly: Boolean = false, food: CivResidentFoodSource? = null): Boolean {
         val failed = actor.route ?: return false
         if (actor.mineVisit != null) return false
+        val foodRoute = actor.foodPickupSource?.takeIf { actor.foodSource == it.buildingId && failed.authored == it.standing }
+        // Only the physical food owner can revalidate the exact holder for relocation.
+        if (food != foodRoute) return false
         val recoveryAnchor = failed.idleAnchor ?: idleAnchor
-        val timedOut = observeArrivalWait(actor, failed)
+        val timedOut = food != null || observeArrivalWait(actor, failed)
         val chunkFailure = failed.motion.failure == "chunk-unloaded"
         val labFailure = actor.arrivalWait?.firstLabChunkFailureAt
         // A retained failed trip still gets a genuine walking search on each retry.
@@ -710,6 +763,15 @@ internal class CivsCitizenRoutes(
         val entity = actor.npc
         if (!entity.isValid || entity.world.uid != city.worldId || target.world?.uid != city.worldId) return false
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
+        val foodBuilding = food?.let {
+            val building = city.building(it.buildingId) ?: return false
+            if (!CivsResidentFood.eligible(city, worker, building) ||
+                !foodRecoveryPointAllowed(city, entity.world, it.container)) return false
+            val material = entity.world.getBlockAt(it.container.x, it.container.y, it.container.z).type
+            if (material.name !in CIVS_STORAGE_TYPES || building.control == it.container && material != org.bukkit.Material.BARREL)
+                return false
+            building
+        }
         val labStorage = if (chunkFailure) labCourierStorage(actor, city, worker, failed) ?: return false else null
         val recoveryTrip = labStorage?.let { requireNotNull(actor.plan.courier) }
         val home = if (actor.sheltering) citizenHomeBuilding(city, worker) ?: return false else null
@@ -728,6 +790,8 @@ internal class CivsCitizenRoutes(
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
         val previous = entity.location
         if (!collisions.residentMoveAllowed(actor, previous, previous)) return false
+        if (food != null && !foodRecoveryPointAllowed(city, entity.world,
+                CivPosition(previous.blockX, previous.blockY, previous.blockZ))) return false
         if (recoveryTrip != null && (!city.contains(previous.blockX, previous.blockZ) ||
                 !citizenRouteWithinReach(previous.point(), authored.point(), CivsLogistics.maximumTransferDistance(city)) ||
                 !citizenChunkReady(entity.world, previous.blockX shr 4, previous.blockZ shr 4) ||
@@ -747,6 +811,12 @@ internal class CivsCitizenRoutes(
                 shelter.shelterPose(actor, city, worker, point.location(entity.world), collisions.shelterOccupied(actor))
                     ?.also { actor.shelterPose = it } != null
             } ?: shelter.reserveShelter(actor, city, worker, entity.world, safe)
+            food != null && foodBuilding != null -> citizenCollectedHomeTarget(city, foodBuilding, entity.world,
+                food.container, food.standing) { candidate ->
+                safe(candidate) && foodRecoveryPointAllowed(city, entity.world, candidate) &&
+                    foodRecoveryPointAllowed(city, entity.world, candidate.copy(y = candidate.y - 1)) &&
+                    civsCanReachContainer(candidate.location(entity.world), food.container)
+            }
             storage != null -> citizenStorageTarget(city, storage, entity.world, safe)
             else -> citizenRecoveryTarget(city, authored, safe)
         }) ?: return false
@@ -755,7 +825,7 @@ internal class CivsCitizenRoutes(
         destination.yaw = previous.yaw
         cancelRoute(actor, destination)
         if (actor.sheltering) actor.shelter = point
-        else if (recoveryAnchor == null) actor.targets[authored] = point
+        else if (recoveryAnchor == null && food == null) actor.targets[authored] = point
         entity.teleport(destination)
         actor.observedYaw = destination.yaw
         actor.navigationEpisodeProgress = 0.0
@@ -768,11 +838,17 @@ internal class CivsCitizenRoutes(
             workRuntime.arriveForWork(actor, city, worker, now)
         }
         CivsDiagnostics.event("citizen_route_recovered", "city" to city.id, "worker" to actor.workerId,
-            "mode" to "safe-teleport", "cause" to (failed.motion.failure ?: failed.completion?.cancelReason ?: "timeout"),
+            "mode" to if (food != null) "food-safe-teleport" else "safe-teleport",
+            "cause" to (failed.motion.failure ?: failed.completion?.cancelReason ?: "timeout"),
             "distance" to previous.distance(destination), "phase" to actor.cycle.phase, "requested" to authored, "destination" to point,
-            "shipment" to recoveryTrip?.cargo?.id)
+            "shipment" to recoveryTrip?.cargo?.id, "container" to food?.container)
         return true
     }
+
+    private fun foodRecoveryPointAllowed(city: Settlement, world: World, point: CivPosition): Boolean =
+        point.y in world.minHeight until world.maxHeight && city.contains(point.x, point.z) &&
+            citizenChunkReady(world, point.x shr 4, point.z shr 4) && world.worldBorder.isInside(point.location(world)) &&
+            foodRecoveryAllowed(city, point)
 
     fun pause(actor: CitizenActor, reason: String, now: Long) {
         if (actor.arrivalWait?.firstLabChunkFailureAt != null) actor.arrivalWait = null
@@ -852,6 +928,7 @@ internal class CivsCitizenRoutes(
         val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED", maxFields = 48)
         val MINE_ROUTE_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_MINE_ROUTE_BLOCKED")
         val MINE_ROUTE_RECOVERED = StructuredDebugLine("ARCCIVS_MINE_ROUTE_RECOVERED")
+        val FOOD_TERRAIN_FAILURES = setOf("movement-blocked", "no-path")
         val PREPARATION_FAILURES = setOf("search-budget", "capture-budget", "preparation-budget", "planner-busy", "planner-error",
             "chunk-unloaded", "cancelled", "broken-path", "passage-blocked")
     }}

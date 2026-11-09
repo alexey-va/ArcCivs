@@ -3,13 +3,103 @@ package ru.arc.civs
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.util.BoundingBox
+import org.bukkit.util.VoxelShape
+import org.mockbukkit.mockbukkit.block.BlockMock
+import org.mockbukkit.mockbukkit.world.Coordinate
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsCitizenFoodRouteRetentionTest : FunSpec({
+    test("repeated physical food routes recover past a native door leaf before one ordinary pickup") {
+        residentRuntime(workerId = UUID(0, 20), worldFactory = ::FoodDoorWorld) { h ->
+            for (x in -3..2) for (z in -2..2) h.world.loadChunk(x, z)
+            val barrel = CivPosition(8, 64, 0)
+            val standing = CivPosition(9, 64, 0)
+            val tavern = CivBuilding(UUID.randomUUID(), BuildingType.TAVERN, 1, barrel, 0, "food-door-fixture",
+                CivBox(CivPosition(7, 63, -1), CivPosition(13, 68, 3)), standing, BuildingPhase.ACTIVE, control = barrel)
+            val quarry = h.assignQuarry().copy(anchor = CivPosition(-20, 64, 0),
+                entrance = CivPosition(-20, 64, 0), control = CivPosition(-20, 64, 0),
+                bounds = CivBox(CivPosition(-22, 64, -2), CivPosition(-18, 68, 2)))
+            h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == quarry.id) quarry else it } + tavern,
+                workers = h.city.workers.map { it.copy(hunger = 0) })
+            h.world.getBlockAt(-20, 64, 0).type = Material.BARREL
+            h.work = CivWorldWork(h.workerId, 0, quarry.id, CivPosition(-19, 64, 0), emptyList(),
+                durationMillis = 60_000, status = "mining")
+            h.world.getBlockAt(barrel.x, barrel.y, barrel.z).type = Material.BARREL
+            // The 2026-11-09 Auto4 capture translated to the fixture. Keep the open leaf's
+            // real collision plane, the east barrel stance and the neighbouring obstructions.
+            for ((x, z) in listOf(7 to 0, 8 to -1, 8 to 1, 9 to -1, 10 to -1, 11 to -1,
+                11 to 0, 11 to 2, 12 to 1)) for (y in 64..65) h.world.getBlockAt(x, y, z).type = Material.STONE
+            for ((y, half) in listOf(64 to "lower", 65 to "upper")) {
+                h.world.getBlockAt(11, y, 1).blockData =
+                    Bukkit.createBlockData("minecraft:iron_door[facing=north,half=$half,hinge=left,open=true,powered=false]")
+            }
+            val source = CivResidentFoodSource(tavern.id, barrel, standing)
+            val npc = h.owner.collisionActors().single()
+            npc.teleport(requireNotNull(h.work).standing.location(h.world))
+            h.owner.pulse(1_500)
+            h.phase() shouldBe CitizenPhase.WORKING
+            h.physicalFoodSource = source
+            val blockedFeet = Location(h.world, 11.521774978872, 64.0, 1.301188908015)
+            npc.teleport(blockedFeet)
+            citizenPacketBodyClear(h.world, blockedFeet.point(), false) shouldBe true
+            citizenPacketStepClear(h.world, blockedFeet.point(), blockedFeet.clone().add(-.1, 0.0, 0.0).point(), false) shouldBe false
+            civsCanReachContainer(blockedFeet, barrel) shouldBe false
+            civsCanReachContainer(standing.location(h.world), barrel) shouldBe true
+            val receipt = CompletableFuture<Settlement>()
+            val pickups = mutableListOf<CivResidentFoodSource>()
+            h.physicalFoodPickup = { selected ->
+                h.owner.requireStorageArrival(h.city.id, h.workerId, tavern.id)
+                civsCanReachContainer(npc.location, barrel) shouldBe true
+                pickups += selected
+                receipt
+            }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            h.owner.collisionActors().single() shouldBe npc
+            val failures = mutableMapOf<CitizenRoute, String>()
+            val permittedPoints = mutableSetOf<CivPosition>()
+            var holderDenied = true
+            h.foodRecoveryAllowed = { point ->
+                permittedPoints += point
+                !holderDenied || point != barrel
+            }
+            val before = h.city
+            for (tick in 1..2_000) {
+                h.navigate()
+                val route = h.routeIdentity() as? CitizenRoute
+                if (route?.authored == standing) route.completion?.cancelReason?.let { failures[route] = it }
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (tick == 1_500) {
+                    withClue("terminal food failures=${failures.values.groupingBy { it }.eachCount()}") {
+                        (failures.values.count { it == "movement-blocked" || it == "no-path" } >= 2) shouldBe true
+                        (barrel in permittedPoints) shouldBe true
+                    }
+                    npc.location.point() shouldBe blockedFeet.point()
+                    pickups shouldBe emptyList()
+                    holderDenied = false
+                }
+                if (civsCanReachContainer(npc.location, barrel)) break
+            }
+            holderDenied shouldBe false
+            (standing in permittedPoints && standing.copy(y = standing.y - 1) in permittedPoints) shouldBe true
+            withClue("failures=${failures.size} feet=${npc.location} ${h.navigationState()}") {
+                npc.location.point() shouldBe standing.point()
+            }
+            pickups shouldBe emptyList()
+            h.city shouldBe before
+            h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
+            pickups shouldBe listOf(source)
+            h.owner.pulse(requireNotNull(h.navigationNow) + 2_000)
+            pickups shouldBe listOf(source)
+            h.observedWork() shouldBe 0L
+        }
+    }
+
     test("physical food pickup waits for body transit to finish and its accepted receipt survives later player occupancy") {
         residentRuntime(workerId = UUID(0, 20)) { h ->
             for (x in -2..3) for (z in -2..2) h.world.loadChunk(x, z)
@@ -184,3 +274,23 @@ class CivsCitizenFoodRouteRetentionTest : FunSpec({
         }
     }
 })
+
+private class FoodDoorWorld : ResidentRuntimeWorld() {
+    private val openDoors = mutableMapOf<Coordinate, BlockMock>()
+
+    override fun getBlockAt(point: Coordinate): BlockMock {
+        val block = super.getBlockAt(point)
+        if (block.type != Material.IRON_DOOR) return block
+        return openDoors.getOrPut(point) {
+            val panel = BoundingBox(0.0, 0.0, 0.0, .1875, 1.0, 1.0)
+            object : BlockMock(Material.IRON_DOOR, block.location) {
+                override fun isPassable(): Boolean = false
+                override fun getBoundingBox(): BoundingBox = panel.clone().shift(location)
+                override fun getCollisionShape(): VoxelShape = object : VoxelShape {
+                    override fun getBoundingBoxes(): Collection<BoundingBox> = listOf(panel)
+                    override fun overlaps(other: BoundingBox): Boolean = panel.overlaps(other)
+                }
+            }.also { it.blockData = block.blockData.clone() }
+        }
+    }
+}

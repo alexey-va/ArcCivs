@@ -64,9 +64,19 @@ internal class CivsCitizenLogistics(
                 }
                 actor.cycle.deferWork(now)
                 if (civsCanReachContainer(actor.npc.location, candidate.container) && routes.arrivalBodyClear(actor)) {
+                    actor.foodRouteFailure = null
                     routes.cancelRoute(actor)
                     beginSupplies(actor, candidate.buildingId, now, false)
                 } else {
+                    runtime.statuses[worker.id] = "moving-to-storage"
+                    val route = actor.route
+                    if (route != null && (route.completion != null || route.timedOut(now))) {
+                        if (routes.recoverFoodRoute(actor, city, worker, route, candidate, now) {
+                                residentFoodSource(city, worker)
+                            }) return true
+                        retryFoodLater(actor, now)
+                        return true
+                    }
                     // A shared sole approach keeps its ordinary route so existing body separation can make progress.
                     val standing = routes.foodStanding(actor, city, candidate) ?: candidate.standing
                     val physical = candidate.copy(standing = standing)
@@ -74,21 +84,13 @@ internal class CivsCitizenLogistics(
                         routes.cancelRoute(actor)
                         actor.foodPickupSource = physical
                     }
-                    runtime.statuses[worker.id] = "moving-to-storage"
-                    if (actor.route?.let { it.completion != null || it.timedOut(now) } == true) {
-                        routes.cancelRoute(actor)
-                        actor.foodPickupSource = null
-                        actor.foodSource = null
-                        actor.supplyRetryAt = now + 5_000
-                    } else if (actor.route == null && !routes.startRoute(actor, world, physical.standing, now)) {
-                        actor.foodPickupSource = null
-                        actor.foodSource = null
-                        actor.supplyRetryAt = now + 5_000
-                    }
+                    if (actor.route == null && !routes.startRoute(actor, world, physical.standing, now))
+                        retryFoodLater(actor, now)
                 }
                 return true
             }
         } else actor.foodPickupSource = null
+        actor.foodRouteFailure = null
         val source = residentSupplySource(city, worker)
         if (source == null) {
             if (actor.foodSource != null) { routes.cancelRoute(actor); actor.foodSource = null }
@@ -103,6 +105,13 @@ internal class CivsCitizenLogistics(
         }
         travelForSupplies(actor, city, world, control, now, resumeWork = false)
         return true
+    }
+
+    private fun retryFoodLater(actor: CitizenActor, now: Long) {
+        routes.cancelRoute(actor)
+        actor.foodPickupSource = null
+        actor.foodSource = null
+        actor.supplyRetryAt = now + 5_000
     }
 
     fun travelForSupplies(actor: CitizenActor, city: Settlement, world: World, target: CivPosition, now: Long,

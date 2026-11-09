@@ -5046,6 +5046,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     var courier: CivCourierPlan? = null
     var courierProvider: ((Settlement, CivWorker) -> CivCourierPlan?)? = null
     var labCourierRecoveryAllowed: (List<CivPosition>) -> Boolean = { false }
+    var foodRecoveryAllowed: (CivPosition) -> Boolean = { false }
     var pickups = 0
     var pickupProvider: ((UUID, UUID, CivCargo) -> CompletableFuture<Settlement>)? = null
     var dropoffProvider: ((UUID, UUID, CivCargo, UUID) -> CompletableFuture<Settlement>)? = null
@@ -5223,6 +5224,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
             labCourierRecoveryAllowed = { city, worker, trip, points ->
                 (courierProvider?.invoke(city, worker) ?: courier) == trip && labCourierRecoveryAllowed(points)
             },
+            foodRecoveryAllowed = { _, point -> foodRecoveryAllowed(point) },
             workPositionFailed = { city, worker, failed ->
                 failedWorkPositions += failed
                 onWorkPositionFailed(city, worker, failed)

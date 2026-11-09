@@ -8,6 +8,15 @@ import java.util.UUID
 
 internal data class CitizenOutputFullPause(val buildingId: UUID, val retryAt: Long)
 internal data class CitizenBodyContact(val token: CitizenToken, val at: CitizenPoint, var walked: Double = 0.0)
+internal data class CitizenFoodRouteFailure(val token: CitizenToken, val source: CivResidentFoodSource,
+    val feet: CitizenPoint, val firstFailureAt: Long) {
+    var lastFailureAt = firstFailureAt
+    var alternateTried = false
+
+    fun matches(actor: CitizenActor, current: CivResidentFoodSource, clock: Long): Boolean =
+        token == actor.plan.token && current.copy(standing = source.standing) == source &&
+            clock - lastFailureAt <= 30_000L && feet.distanceSquared(actor.npc.location.point()) <= .25
+}
 
 /** Mutable runtime identity and in-flight activity state for one admitted resident. */
 internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: UUID, val npc: PacketPlayerNpc, var plan: CitizenPlan) {
@@ -80,6 +89,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var collectionHome: CivPosition? = null
     var foodSource: UUID? = null
     var foodPickupSource: CivResidentFoodSource? = null
+    var foodRouteFailure: CitizenFoodRouteFailure? = null
     var tavernService: CitizenTavernService? = null
     var tavernServiceFailure: CitizenTavernServiceFailure? = null
     var workDetour: CitizenToken? = null

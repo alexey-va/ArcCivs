@@ -20,6 +20,7 @@ internal data class CitizenTerrainBox(
         maxX + point.x, maxY + point.y, maxZ + point.z)
 }
 
+/** Planning boxes omit the leaf of a closed passage. Open leaves retain their native collision. */
 internal data class CitizenTerrainBlock(
     val loaded: Boolean, val liquid: Boolean, val door: Boolean, val climbable: Boolean,
     val hot: Boolean, val allowed: Boolean, val cost: Double, val boxes: List<CitizenTerrainBox>,
@@ -281,7 +282,7 @@ internal class CitizenNavigationSearch(
     private fun rememberObstacles(blocks: Map<CivPosition, CitizenTerrainBlock>, fromY: Double, toY: Double) {
         for ((point, block) in blocks) {
             if (blockedPositions.size >= 64) return
-            if (!block.loaded || block.door || point.y >= max(fromY, toY) + 1.799) continue
+            if (!block.loaded || point.y >= max(fromY, toY) + 1.799) continue
             if (block.liquid && point.y + 1.0 > min(fromY, toY) + .001 ||
                 block.boxes.any { point.y + it.maxY > min(fromY, toY) + .001 }) blockedPositions += point
         }
@@ -419,7 +420,7 @@ private class CitizenSearchGeometry(
                     val block = blocks[p] ?: return false
                     if (y >= maximumY || !block.loaded) return false
                     if (block.liquid && body.overlaps(BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0))) return false
-                    if (!block.door && block.boxes.any { body.overlaps(it.at(p)) }) return false
+                    if (block.boxes.any { body.overlaps(it.at(p)) }) return false
                 }
         return true
     }
@@ -470,7 +471,7 @@ private class CitizenSearchGeometry(
                     val block = blocks[p] ?: return false
                     if (y !in minimumY until maximumY || !block.loaded) return false
                     if (block.liquid) obstacles += BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
-                    else if (!block.door) block.boxes.forEach { obstacles += it.at(p) }
+                    else block.boxes.forEach { obstacles += it.at(p) }
                 }
         if (citizenSlideBody(Vector(from.x, from.y + .001, from.z), Vector(to.x, to.y + .001, to.z),
                 .299, 1.798, .299, obstacles) != null) return false

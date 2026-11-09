@@ -178,6 +178,9 @@ class CivsService(
                             }
                     }
                 } == true
+        }, foodRecoveryAllowed = { city, point ->
+            ready() && city.id !in unhealthy && !storage.isWorldLocked(city.worldId, point) &&
+                storage.foodCanModify(city, point)
         })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
     private val supply = CivsSupplyDispatcher(tasks, nativeWork,

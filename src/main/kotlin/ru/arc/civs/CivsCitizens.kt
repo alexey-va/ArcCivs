@@ -93,6 +93,7 @@ class CivsCitizens(
     navigationContextFree: ((org.bukkit.block.data.BlockData) -> Boolean)? = null,
     acceleratedWork: (Settlement) -> Boolean = { false },
     labCourierRecoveryAllowed: (Settlement, CivWorker, CivCourierPlan, List<CivPosition>) -> Boolean = { _, _, _, _ -> false },
+    foodRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
 ) : Listener, AutoCloseable {
     private val runtime = CitizenRuntime(plugin, cityProvider)
     internal var residentLifeEnabled: Boolean
@@ -242,7 +243,8 @@ class CivsCitizens(
             recoveryClock = recoveryClock,
             courierFailed = courierFailed,
             remove = ::remove,
-            labCourierRecoveryAllowed = labCourierRecoveryAllowed)
+            labCourierRecoveryAllowed = labCourierRecoveryAllowed,
+            foodRecoveryAllowed = foodRecoveryAllowed)
         motion = CivsCitizenMotion(runtime,
             collisionsOwner = { collisions },
             routesOwner = { routes },
