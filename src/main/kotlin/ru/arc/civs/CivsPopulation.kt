@@ -167,7 +167,7 @@ object CivsPopulation {
             }
         }
         val families = city.families.orEmpty()
-        require(families.size <= CivsRules.MAX_POPULATION / 2)
+        require(families.size <= CivsRules.populationLimit(city) / 2)
         require(families.map { it.homeId }.distinct().size == families.size)
         val parents = families.flatMap { listOf(it.firstParentId, it.secondParentId) }
         require(parents.distinct().size == parents.size)

@@ -94,7 +94,7 @@ internal object CivsSnapshotValidation {
                 }
             }
             snapshot(city.buildings.none { it.phase == BuildingPhase.CONSTRUCTING && it.id != order?.buildingId })
-            snapshot(city.workers.size in 0..CivsRules.MAX_RESIDENTS &&
+            snapshot(city.workers.size in 0..CivsRules.MAX_SNAPSHOT_RESIDENTS &&
                 city.workers.map { it.id }.distinct().size == city.workers.size)
             CivsCorpses.validate(city)
             CivsResearch.validate(city)

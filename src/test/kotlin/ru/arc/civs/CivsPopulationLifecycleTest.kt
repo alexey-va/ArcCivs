@@ -1,16 +1,17 @@
 package ru.arc.civs
 
 import com.google.gson.Gson
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsPopulationLifecycleTest : FunSpec({
     fun id(n: Int) = UUID(0, n.toLong())
+    fun building(n: Int, type: BuildingType, level: Int = 3) = CivBuilding(id(n), type, level,
+        CivPosition(n * 6, 64, 0), 0, "test", CivBox(CivPosition(n * 6 - 1, 63, -1), CivPosition(n * 6 + 1, 69, 1)),
+        CivPosition(n * 6, 64, 2), BuildingPhase.ACTIVE)
     fun city(): Settlement {
-        fun building(n: Int, type: BuildingType) = CivBuilding(id(n), type, 3,
-            CivPosition(n * 6, 64, 0), 0, "test", CivBox(CivPosition(n * 6 - 1, 63, -1), CivPosition(n * 6 + 1, 69, 1)),
-            CivPosition(n * 6, 64, 2), BuildingPhase.ACTIVE)
         return CivsRules.validate(Settlement(id(50), id(51), "Lifecycle", id(52), CivPosition(0, 64, 0),
             128, "test", Stock(), listOf(building(1, BuildingType.TOWN_HALL)) +
                 (2..4).map { building(it, BuildingType.HOUSE) }, (100..111).map {
@@ -124,6 +125,55 @@ class CivsPopulationLifecycleTest : FunSpec({
         val replacement = CivsPopulation.advance(removed, childIds, { _, _, _ -> "Child" }, { id(nextId++) })
         replacement.workers.count { !CivsResidents.isChild(it) } shouldBe 24
         replacement.workers.count { it.id in childIds && !CivsResidents.isChild(it) } shouldBe 1
+    }
+    test("physical autonomous Hall III grows from five settlers to fifty adults through ordinary families") {
+        val base = city()
+        val homes = (2..(CivsAutonomy.HOUSE_COUNT + 1)).map { building(it, BuildingType.HOUSE, level = 1) } +
+            building(CivsAutonomy.HOUSE_COUNT + 2, BuildingType.TAVERN, level = 1)
+        val founders = base.workers.take(CivsPopulation.IMMIGRANT_POPULATION)
+        val initial = base.copy(buildings = listOf(base.buildings.first()) + homes, workers = founders,
+            inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy())
+        val gson = Gson()
+        var current = CivsRules.validate(gson.fromJson(gson.toJson(initial), Settlement::class.java))
+        var nextId = 200
+        repeat(14 * CivsPopulation.ADULT_MINUTES) {
+            val awakeChildren = current.workers.filter(CivsResidents::isChild).mapTo(hashSetOf(), CivWorker::id)
+            current = CivsPopulation.advance(current, awakeChildren, { _, id, _ -> "Resident ${id.leastSignificantBits}" },
+                { id(nextId++) })
+        }
+        current.workers.count { !CivsResidents.isChild(it) } shouldBe 50
+        current.workers.count(CivsResidents::isChild) shouldBe CivsPopulation.NURSERY_PLACES
+        current.workers.take(founders.size).map(CivWorker::id) shouldBe founders.map(CivWorker::id)
+        (current.families.orEmpty().size > 12) shouldBe true
+        current.workers.drop(founders.size).all { it.parentIds?.size == 2 && it.homeId != null } shouldBe true
+        current.inventory shouldBe initial.inventory
+        current.stock shouldBe initial.stock
+
+        val saved = CivsRules.validate(gson.fromJson(gson.toJson(current), Settlement::class.java))
+        saved shouldBe current
+        val child = saved.workers.first(CivsResidents::isChild)
+        val extra = saved.copy(workers = saved.workers + child.copy(id = id(nextId)))
+        shouldThrow<CivsRejection> { CivsRules.validate(extra) }.reason shouldBe "invalid-state"
+        val extraAdult = saved.copy(workers = saved.workers.map {
+            if (it.id == child.id) CivsResidentLife.adult(saved, it) else it
+        })
+        shouldThrow<CivsRejection> { CivsRules.validate(extraAdult) }.reason shouldBe "invalid-state"
+    }
+    test("early autonomous and all manual hall tiers keep their population and nursery limits") {
+        for (autonomous in listOf(false, true)) {
+            for (level in 1..3) {
+                val base = city()
+                val expected = when (level) {
+                    1 -> 5
+                    2 -> 12
+                    else -> if (autonomous) 50 else 24
+                }
+                val tier = base.copy(buildings = listOf(base.buildings.first().copy(level = level)),
+                    workers = base.workers.take(5), autonomy = if (autonomous) CivAutonomy() else null)
+                CivsRules.populationLimit(CivsRules.validate(tier)) shouldBe expected
+                CivsRules.residentLimit(tier) shouldBe expected + if (level == 3) CivsPopulation.NURSERY_PLACES else 0
+            }
+        }
     }
     test("legacy awake history does not become age and dormant residents never age") {
         val legacy = city().workers.first().copy(life = CivResidentLife(awakeMinutes = 100_000))

@@ -13,6 +13,8 @@ object CivsRules {
     const val MAX_SITES = MAX_BUILDINGS + MAX_INFRASTRUCTURE + MAX_DECORATIONS
     const val MAX_POPULATION = 24
     const val MAX_RESIDENTS = MAX_POPULATION + CivsPopulation.NURSERY_PLACES
+    private const val MAX_AUTONOMOUS_POPULATION = 50
+    internal const val MAX_SNAPSHOT_RESIDENTS = MAX_AUTONOMOUS_POPULATION + CivsPopulation.NURSERY_PLACES
     const val MAX_WORK_ROUTE_DISTANCE = 88
     const val RECRUIT_FOOD = 12L
     const val PRODUCTION_INTERVAL = 60_000L
@@ -74,7 +76,10 @@ object CivsRules {
         if (it.phase == BuildingPhase.ACTIVE && it.type.isResidence) CivsPopulation.houseBeds(it) else 0
     }
 
-    fun populationLimit(city: Settlement): Int = populationLimit(city.level())
+    fun populationLimit(city: Settlement): Int {
+        val hallLevel = city.level()
+        return if (city.autonomy != null && hallLevel >= 3) MAX_AUTONOMOUS_POPULATION else populationLimit(hallLevel)
+    }
 
     internal fun populationLimit(hallLevel: Int): Int = when (hallLevel) {
         1 -> CivsPopulation.IMMIGRANT_POPULATION
@@ -83,7 +88,7 @@ object CivsRules {
     }
     /** The extra places are for children only; they never increase the adult workforce. */
     fun residentLimit(city: Settlement): Int = populationLimit(city) +
-        if (populationLimit(city) == MAX_POPULATION) CivsPopulation.NURSERY_PLACES else 0
+        if (city.level() >= 3) CivsPopulation.NURSERY_PLACES else 0
 
     fun slots(building: CivBuilding): Int = if (building.type in setOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER)) {
         if (building.phase == BuildingPhase.ACTIVE) 1 else 0
