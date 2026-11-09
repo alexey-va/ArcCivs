@@ -11,6 +11,7 @@ import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.Waterlogged
 import org.bukkit.block.data.type.Stairs
 import org.bukkit.plugin.Plugin
+import java.util.IdentityHashMap
 import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.floor
@@ -92,6 +93,8 @@ internal class CivsRoadWorld(
             return null
         }
         val assignment = worker.assignment ?: return null
+        // An active building and its planned upgrade can share an ID but have different bounds.
+        val protectedBounds by lazy(LazyThreadSafetyMode.NONE) { IdentityHashMap<CivBuilding, CivBox>() }
         val standingHeights = listOf(1, 0, 2, 3) + if (foundation.isNotEmpty()) listOf(-1, -2, -3) else emptyList()
         for (dy in standingHeights) for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) {
             val standing = CivPosition(p.x + dx, p.y + dy, p.z + dz)
@@ -99,9 +102,12 @@ internal class CivsRoadWorld(
             if (!city.contains(standing.x, standing.z) || !citizenControlClear(city, standing) ||
                 !citizenStandable(world, standing) || !citizenPacketBodyClear(world,
                     CitizenPoint(standing.x + .5, standing.y.toDouble(), standing.z + .5), false)) continue
-            if (civsProtectedBuildings(city).any { it.type != BuildingType.ROAD &&
-                    (CivsAutonomousGeometry.horizontalContains(CivsAutonomousGeometry.futureBounds(city, it), standing) ||
-                        CivsWorksiteLayouts.isField(it, standing.x, standing.z)) }) continue
+            if (civsProtectedBuildings(city).any { building ->
+                    if (building.type == BuildingType.ROAD) return@any false
+                    val bounds = protectedBounds.getOrPut(building) { CivsAutonomousGeometry.futureBounds(city, building) }
+                    CivsAutonomousGeometry.horizontalContains(bounds, standing) ||
+                        CivsWorksiteLayouts.isField(building, standing.x, standing.z)
+                }) continue
             val eye = Location(world, standing.x + .5, standing.y + 1.62, standing.z + .5)
             val focus = changes.asReversed().firstOrNull { citizenCanReachBlock(world, eye, it.position) }?.position ?: continue
             val work = CivWorldWork(worker.id, worker.completedCycles, assignment, standing, changes,

@@ -932,10 +932,9 @@ internal object CivsAutonomousGeometry {
         if (style !in CivsBlueprints.STYLES) return withField(building.bounds, building)
         val target = building.copy(schematicId = CivsBlueprints.schematicId(style, building.type, building.type.maxLevel))
         val bounds = CivsWorksiteLayouts.site(target)?.getAsJsonObject("schematicBounds") ?: return withField(building.bounds, building)
-        val a = CivsWorksiteLayouts.point(target, CivsWorksiteLayouts.vector(bounds["min"]))
-        val b = CivsWorksiteLayouts.point(target, CivsWorksiteLayouts.vector(bounds["max"]))
-        return withField(union(building.bounds, CivBox(CivPosition(minOf(a.x, b.x), minOf(a.y, b.y), minOf(a.z, b.z)),
-            CivPosition(maxOf(a.x, b.x), maxOf(a.y, b.y), maxOf(a.z, b.z)))), target)
+        val projected = CivsWorksiteLayouts.worldBounds(target, CivsWorksiteLayouts.vector(bounds["min"]),
+            CivsWorksiteLayouts.vector(bounds["max"]))
+        return withField(union(building.bounds, projected), target)
     }
 
     fun horizontalContains(box: CivBox, point: CivPosition): Boolean = point.x in box.min.x..box.max.x && point.z in box.min.z..box.max.z
@@ -950,7 +949,5 @@ internal object CivsAutonomousGeometry {
         CivPosition(minOf(a.min.x, b.min.x), minOf(a.min.y, b.min.y), minOf(a.min.z, b.min.z)),
         CivPosition(maxOf(a.max.x, b.max.x), maxOf(a.max.y, b.max.y), maxOf(a.max.z, b.max.z)))
     private fun withField(bounds: CivBox, building: CivBuilding): CivBox =
-        (CivsWorksiteLayouts.field(building) + CivsWorksiteLayouts.irrigation(building)).fold(bounds) { box, point ->
-            union(box, CivBox(point, point))
-        }
+        CivsWorksiteLayouts.fieldBounds(building)?.let { union(bounds, it) } ?: bounds
 }

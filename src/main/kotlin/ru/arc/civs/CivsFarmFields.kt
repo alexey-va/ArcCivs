@@ -13,7 +13,8 @@ internal object CivsFarmFields {
         val columns = (soil + water).mapTo(hashSetOf()) { it.x to it.z }
         val draining = originalSoil.filter { it in water }
         val added = (soil + water).filter { it !in originalSoil && it !in originalWater }
-        val corners = listOf(point(11, -21), point(11, -7), point(19, -21), point(19, -7))
+        val bounds = CivBox(point(11, -21), point(19, -7))
+        val corners = listOf(bounds.min, point(11, -7), point(19, -21), bounds.max)
         val rim = (10..20).flatMap { x -> listOf(point(x, -22), point(x, -6)) } +
             (-21..-7).flatMap { z -> listOf(point(10, z), point(20, z)) }
 
@@ -56,6 +57,9 @@ internal object CivsFarmFields {
     fun draining(building: CivBuilding): Set<CivPosition> = world(building, requireNotNull(profile(building)).draining).toSet()
     fun added(building: CivBuilding): List<CivPosition> = world(building, requireNotNull(profile(building)).added)
     fun corners(building: CivBuilding): List<CivPosition> = world(building, requireNotNull(profile(building)).corners)
+    fun bounds(building: CivBuilding): CivBox? = profile(building)?.bounds?.let {
+        CivsWorksiteLayouts.worldBounds(building, it.min, it.max)
+    }
     fun rim(building: CivBuilding): List<CivPosition> = world(building, requireNotNull(profile(building)).rim)
 
     fun validReference(city: Settlement, building: CivBuilding): Boolean = building.farmFieldVersion == null ||
