@@ -4,6 +4,49 @@ import org.bukkit.Bukkit
 import ru.arc.paper.api.ArcSceneBounds
 import ru.arc.paper.api.ArcSceneEntityInfo
 import java.util.UUID
+import kotlin.math.floor
+
+/** One admitted actor's observations, with no native objects or mutable work state. */
+internal data class CivResidentRead(
+    val cityId: UUID,
+    val worldId: UUID,
+    val workerId: UUID,
+    val actorId: UUID,
+    val actual: CitizenPoint?,
+    val phase: CitizenPhase,
+    val status: String?,
+    val assignmentId: UUID?,
+    val intent: CitizenToken,
+    val workType: BuildingType?,
+    val workplace: CivPosition?,
+    val workFocus: CivPosition?,
+    val routeTarget: CivPosition?,
+    val idleReason: String?,
+    val sleeping: Boolean,
+    val sheltering: Boolean,
+    val carrying: Boolean?,
+    val courierUnavailable: Boolean,
+)
+
+/** Owner-pulse observations for planning. A missing row has no native position and can still receive work. */
+internal data class CivResidentReadFrame(
+    val sequence: Long = 0,
+    val observedAtMillis: Long? = null,
+    val rows: Map<UUID, CivResidentRead> = emptyMap(),
+) {
+    fun courierPosition(cityId: UUID, workerId: UUID): CivPosition? =
+        rows[workerId]?.takeIf { it.cityId == cityId }?.actual?.let(::citizenCourierPosition)
+
+    fun courierUnavailable(cityId: UUID, workerId: UUID): Boolean =
+        rows[workerId]?.takeIf { it.cityId == cityId }?.courierUnavailable == true
+}
+
+internal fun citizenCourierPosition(feet: CitizenPoint): CivPosition =
+    CivPosition(floor(feet.x).toInt(), floor(feet.y + .125).toInt(), floor(feet.z).toInt())
+
+internal fun citizenCourierUnavailable(actor: CitizenActor, valid: Boolean, injuryPending: Boolean): Boolean =
+    !valid || actor.sleeping || actor.sheltering || actor.attacker != null || injuryPending ||
+        actor.foodSource != null || actor.supplyPickup != null
 
 /** Read-only resident status, scene observation and bounded diagnostics. */
 internal class CivsCitizenObservations(
@@ -23,6 +66,38 @@ internal class CivsCitizenObservations(
     private val logistics get() = logisticsOwner()
     private val audience get() = audienceOwner()
     private val life get() = lifeOwner()
+    @Volatile private var latestReadFrame = CivResidentReadFrame()
+
+    /** This runs on the resident pulse, independently of the per-tick movement owner. */
+    fun publishReadFrame(workers: Map<UUID, Pair<Settlement, CivWorker>>, now: Long) {
+        checkCitizenMainThread()
+        val previous = latestReadFrame
+        val rows = buildMap(runtime.actors.size) {
+            for (actor in runtime.actors.values) {
+                val (city, worker) = workers[actor.workerId] ?: continue
+                if (actor.cityId != city.id || actor.worldId != city.worldId) continue
+                val valid = actor.npc.isValid && actor.npc.world.uid == city.worldId
+                val plan = actor.plan
+                val row = CivResidentRead(
+                    cityId = city.id, worldId = city.worldId, workerId = worker.id, actorId = actor.instanceId,
+                    actual = if (valid) actor.npc.location.point() else null,
+                    phase = actor.cycle.phase, status = runtime.statuses[worker.id],
+                    assignmentId = worker.assignment, intent = plan.token, workType = plan.type,
+                    workplace = plan.workplace, workFocus = plan.worldWork?.let(::citizenWorkFocus) ?: plan.workstation?.focus,
+                    routeTarget = actor.route?.authored, idleReason = plan.idleReason,
+                    sleeping = actor.sleeping, sheltering = actor.sheltering, carrying = plan.courier?.carrying,
+                    courierUnavailable = citizenCourierUnavailable(actor, valid, worker.id in runtime.pendingHarm),
+                )
+                put(worker.id, previous.rows[worker.id]?.takeIf { it == row } ?: row)
+            }
+        }
+        latestReadFrame = CivResidentReadFrame(previous.sequence + 1, now,
+            if (rows == previous.rows) previous.rows else java.util.Map.copyOf(rows))
+    }
+
+    fun readFrame(): CivResidentReadFrame = latestReadFrame
+
+    fun clearReadFrame() { latestReadFrame = CivResidentReadFrame() }
 
     /** Stable locale keys; no Bukkit objects or user-controlled text enter the key. */
     fun status(workerId: UUID): String {

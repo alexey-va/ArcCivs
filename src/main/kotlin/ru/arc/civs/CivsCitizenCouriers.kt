@@ -46,15 +46,13 @@ internal class CivsCitizenCouriers(
     internal fun courierPosition(cityId: UUID, workerId: UUID): CivPosition? {
         checkCitizenMainThread()
         val actor = runtime.actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid } ?: return null
-        val feet = actor.npc.location
-        return CivPosition(feet.blockX, kotlin.math.floor(feet.y + .125).toInt(), feet.blockZ)
+        return citizenCourierPosition(actor.npc.location.point())
     }
 
     internal fun courierUnavailable(cityId: UUID, workerId: UUID): Boolean {
         checkCitizenMainThread()
         val actor = runtime.actors[workerId]?.takeIf { it.cityId == cityId } ?: return false
-        return !actor.npc.isValid || actor.sleeping || actor.sheltering || actor.attacker != null ||
-            workerId in runtime.pendingHarm || actor.foodSource != null || actor.supplyPickup != null
+        return citizenCourierUnavailable(actor, actor.npc.isValid, workerId in runtime.pendingHarm)
     }
 
     /** One city-wide observation; the dispatcher reserves an offered producer for one courier. */

@@ -118,7 +118,7 @@ class CivsService(
     lateinit var ui: CivsUi
     internal var corpseLocation: (UUID, UUID, Long) -> org.bukkit.Location? = { _, _, _ -> null }
     private val footTraffic = CivsFootTraffic(plugin) { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() }
-    private val worksites = CivsWorksites(plugin, world, { city, id -> storage.buildingAvailable(city, id) },
+    private val worksites = CivsWorksites(plugin, world, ::planningBuildingStock,
         storage::isWorldLocked, { it in busy || it in unhealthy }, { cityPlans.forestryRoute(it.id) }, settings = settings.worksites,
         initialMineBlock = { city, building, point, before -> cityPlans.initialMineBlock(city, building, point, before) })
     private val chunkLoading = CivsChunkLoading(plugin, settings.maximumLoadedChunks,
@@ -567,6 +567,14 @@ class CivsService(
     override fun blueprintChoices(type: BuildingType, style: String): List<CivBlueprintChoice> = blueprints.choices(type, style)
     override fun maximumBuildingLevel(building: CivBuilding): Int = blueprints.maximumLevel(building)
     override fun settlements(): List<Settlement> = cities.values.toList()
+
+    /** The work planners share the published settlement and detached resident observations. */
+    internal fun settlementWorkFrame(cityId: UUID): CivSettlementWorkFrame? =
+        cities[cityId]?.takeIf { ready() && cityId !in unhealthy && it.pendingDeletion == null }
+            ?.let { CivSettlementWorkFrame(it, citizens.residentReadFrame()) }
+
+    internal fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long> =
+        storage.planningBuildingStock(city, buildingId).orEmpty()
 
     internal fun residentSettlements(): List<Settlement> = if (ready()) cities.values.filter {
         it.id !in unhealthy && it.pendingDeletion == null

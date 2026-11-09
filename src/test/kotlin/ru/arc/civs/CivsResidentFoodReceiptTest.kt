@@ -24,10 +24,21 @@ class CivsResidentFoodReceiptTest : FunSpec({
     beforeEach { h = ResidentFoodFixture() }
     afterEach { h.close() }
 
+    test("food discovery uses the detached holder and a stale observation cannot debit an empty barrel") {
+        h.foodPhase(BuildingPhase.ACTIVE)
+        h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
+        h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+        val source = requireNotNull(h.observedFoodSource(h.worker, h.feet))
+        h.barrel.setItem(0, null)
+        h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe source
+        shouldThrow<CivsRejection> { h.pickup(source) }.reason shouldBe "resident-food-missing"
+        h.barrel.getItem(0) shouldBe null
+    }
+
     for (phase in BuildingPhase.entries) test("existing hall control bread remains usable through $phase without creating food") {
         h.foodPhase(phase)
         h.barrel.setItem(0, ItemStack(Material.BREAD, 24))
-        val source = requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet))
+        val source = requireNotNull(h.observedFoodSource(h.worker, h.feet))
         source.container shouldBe h.point
         val tx = h.pickup(source)
         tx.collected!!.food!!.materialized shouldBe 0
@@ -58,7 +69,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
             other.setItem(0, ItemStack(Material.BREAD, 24))
             h.city = h.city.copy(inventory = h.city.inventory!!.copy(containers = listOf(interior)))
             h.storage.replaceCities(listOf(h.city))
-            h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+            h.observedFoodSource(h.worker, h.feet) shouldBe null
             val id = UUID.randomUUID()
             h.storage.reserve(h.city, id)
             shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id,
@@ -78,7 +89,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
             h.foodPhase(phase)
             h.barrel.setItem(0, ItemStack(Material.BREAD, 24))
             h.foodAllowed = false
-            h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+            h.observedFoodSource(h.worker, h.feet) shouldBe null
             val id = UUID.randomUUID()
             h.storage.reserve(h.city, id)
             shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id, h.source, h.feet) }
@@ -97,8 +108,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         test("unfinished $phase control must still be a native barrel") {
             h.foodPhase(phase)
             h.world.getBlockAt(0, 64, 0).type = Material.CHEST
-            shouldThrow<CivsRejection> { h.storage.residentFoodSource(h.city, h.worker, h.feet) }
-                .reason shouldBe "storage-container-invalid"
+            h.observedFoodSource(h.worker, h.feet) shouldBe null
             val id = UUID.randomUUID()
             h.storage.reserve(h.city, id)
             shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id, h.source, h.feet) }
@@ -114,7 +124,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         h.city = h.city.copy(buildings = h.city.buildings + home)
         h.world.getBlockAt(8, 64, 0).type = Material.BARREL
         (h.world.getBlockAt(8, 64, 0).state as Barrel).inventory.setItem(0, ItemStack(Material.BREAD, 24))
-        h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+        h.observedFoodSource(h.worker, h.feet) shouldBe null
         val id = UUID.randomUUID()
         h.storage.reserve(h.city, id)
         shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id,
@@ -138,8 +148,8 @@ class CivsResidentFoodReceiptTest : FunSpec({
         h.city = h.city.copy(buildings = h.city.buildings + tavern)
         h.world.getBlockAt(8, 64, 0).type = Material.BARREL
         (h.world.getBlockAt(8, 64, 0).state as Barrel).inventory.setItem(0, ItemStack(Material.BREAD, 24))
-        h.storage.residentFoodSource(h.city, h.worker, h.feet, tavernService = true) shouldBe null
-        requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet)).buildingId shouldBe tavern.id
+        h.observedFoodSource(h.worker, h.feet, tavernService = true) shouldBe null
+        requireNotNull(h.observedFoodSource(h.worker, h.feet)).buildingId shouldBe tavern.id
     }
 
     for (automatic in listOf(false, true)) test("an unstaffed native tavern is preferred over a nearer hall and its pickup replays once Auto=$automatic") {
@@ -153,7 +163,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val venue = (h.world.getBlockAt(8, 64, 0).state as Barrel).inventory
         h.barrel.setItem(0, ItemStack(Material.BREAD, 20))
         venue.setItem(0, ItemStack(Material.BREAD, 20))
-        val source = requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet))
+        val source = requireNotNull(h.observedFoodSource(h.worker, h.feet))
         source.buildingId shouldBe tavern.id
         h.feet.x = source.standing.x + .5; h.feet.y = source.standing.y.toDouble(); h.feet.z = source.standing.z + .5
         val tx = h.pickup(source)
@@ -256,11 +266,12 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val tavern = hall.copy(id = UUID.randomUUID(), type = BuildingType.TAVERN, anchor = point, control = point,
             bounds = CivBox(CivPosition(4, 64, -1), CivPosition(15, 68, 5)), entrance = CivPosition(8, 64, -2))
         (extra + point).forEach { h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL }
+        h.indexed += extra
         h.city = h.city.copy(buildings = listOf(hall, tavern), stock = Stock(),
-            inventory = CivInventory(CivStorageMode.PHYSICAL, containers = extra))
+            inventory = CivInventory(CivStorageMode.PHYSICAL))
         h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
-        h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
-        requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet)).buildingId shouldBe hall.id
+        h.observedFoodSource(h.worker, h.feet) shouldBe null
+        requireNotNull(h.observedFoodSource(h.worker, h.feet)).buildingId shouldBe hall.id
         h.barrel.getItem(0)!!.amount shouldBe 4
         h.worker.hunger shouldBe 14
     }
@@ -289,7 +300,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val foods = CivsResidentFoods(mapOf("BREAD" to CivResidentFoodDefinition(6), "APPLE" to CivResidentFoodDefinition(4)))
         h.storage.residentFoods = foods
         h.barrel.setItem(0, ItemStack(Material.APPLE, 4))
-        val selected = requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet))
+        val selected = requireNotNull(h.observedFoodSource(h.worker, h.feet))
         selected.material shouldBe "APPLE"
         val before = h.city
         val tx = h.pickup(selected)
@@ -322,7 +333,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         h.storage.residentFoods = foods
         val named = ItemStack(Material.APPLE, 4).apply { editMeta { it.displayName(net.kyori.adventure.text.Component.text("Keepsake")) } }
         h.barrel.setItem(0, named)
-        h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+        h.observedFoodSource(h.worker, h.feet) shouldBe null
         val namedWorker = h.worker.copy(items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem.of(named) else null })
         CivsResidentLife.mealPlan(h.city.copy(workers = listOf(namedWorker)), namedWorker, foods = foods) shouldBe null
         val farm = h.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FARM, production = "CARROT")
@@ -390,11 +401,11 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val home = (h.world.getBlockAt(8, 64, 0).state as Barrel).inventory
         home.setItem(0, ItemStack(Material.BREAD, 3))
         h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
-        h.storage.residentFoodSource(h.city, resident, Location(h.world, 7.5, 64.0, .5))!!.buildingId shouldBe house.id
+        h.observedFoodSource(resident, Location(h.world, 7.5, 64.0, .5))!!.buildingId shouldBe house.id
         home.setItem(0, null)
-        h.storage.residentFoodSource(h.city, resident, Location(h.world, 7.5, 64.0, .5))!!.buildingId shouldBe hall.id
+        h.observedFoodSource(resident, Location(h.world, 7.5, 64.0, .5))!!.buildingId shouldBe hall.id
         h.barrel.setItem(0, null)
-        h.storage.residentFoodSource(h.city, resident, h.feet) shouldBe null
+        h.observedFoodSource(resident, h.feet) shouldBe null
         val tx = h.materialize()
         tx.collected!!.food!!.buildingId shouldBe hall.id
         h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
@@ -480,7 +491,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
     test("a blocked native food source cannot be discovered prepared or sealed") {
         h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
         h.foodAllowed = false
-        h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+        h.observedFoodSource(h.worker, h.feet) shouldBe null
         val id = UUID.randomUUID()
         h.storage.reserve(h.city, id)
         shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id, h.source, h.feet) }.reason shouldBe "lands-denied"
@@ -1474,7 +1485,11 @@ private class ResidentFoodFixture : AutoCloseable {
     val world = CivsWorksiteWorldFixture("food-receipt").also(paper.server::addWorld)
     val plugin = paper.createSimplePlugin("ResidentFoodTest")
     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-    val storage = CivsStorage(plugin) { emptyArray() }
+    val indexed = mutableListOf<CivPosition>()
+    val storage = CivsStorage(plugin) { chunk ->
+        indexed.filter { (it.x shr 4) == chunk.x && (it.z shr 4) == chunk.z }
+            .map { world.getBlockAt(it.x, it.y, it.z).state }.toTypedArray()
+    }
     val point = CivPosition(0, 64, 0)
     private val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 1, point, 0, "test",
         CivBox(CivPosition(-2, 64, -2), CivPosition(2, 68, 2)), CivPosition(0, 64, -2), BuildingPhase.ACTIVE, control = point)
@@ -1520,6 +1535,10 @@ private class ResidentFoodFixture : AutoCloseable {
                 batches = CivConstructionBatches(1, 16), materials = emptyMap(), payment = CivConstructionPayment()) else null))
         storage.replaceCities(listOf(city))
     }
+    fun observedFoodSource(worker: CivWorker, feet: Location, tavernService: Boolean = false): CivResidentFoodSource? {
+        storage.capturePlanningStorage(city)
+        return storage.residentFoodSource(city, worker, feet, tavernService)
+    }
     fun materialize(): CivInventoryTransaction = prepare { storage.prepareFoodMaterialization(city, worker.id, feet) }
     fun pickup(target: CivResidentFoodSource = source): CivInventoryTransaction = prepare { storage.prepareFoodPickup(city, worker.id, target, feet) }
     private fun prepare(plan: () -> CivCollectedPlan): CivInventoryTransaction {
@@ -1534,4 +1553,11 @@ private class ResidentFoodFixture : AutoCloseable {
     }
     fun ticks() { paper.performTicks(8) }
     override fun close() { tasks.close(); storage.close(); paper.close() }
+}
+
+
+internal fun CivsStorage.capturePlanningStorage(city: Settlement) {
+    updateCity(city)
+    val capture = startSupplyCapture(city, forceNative = true)
+    while (!capture.step()) Unit
 }

@@ -23,29 +23,67 @@ internal data class CivSupplyCaptureResult(val cityId: UUID, val stores: Map<UUI
 /** Detached slot values also detect native writers which do not emit inventory events. */
 internal data class CivSupplyCapturedSlot(val material: String?, val amount: Int, val plain: Boolean, val stackSize: Int)
 internal data class CivSupplyCapturedContainer(val type: String, val slots: List<CivSupplyCapturedSlot>,
-    val acceptsInsert: Boolean = true)
+    val acceptsInsert: Boolean = true) {
+    val stock: Map<String, Long>
+    val partialRoom: Map<String, Long>
+    val emptySlots: Int
+
+    init {
+        val stock = linkedMapOf<String, Long>()
+        val room = linkedMapOf<String, Long>()
+        var empty = 0
+        for (slot in slots) {
+            val material = slot.material
+            if (material == null) {
+                if (acceptsInsert) empty++
+            } else if (slot.plain) {
+                stock.merge(material, slot.amount.toLong(), Math::addExact)
+                val remaining = (slot.stackSize - slot.amount).coerceAtLeast(0).toLong()
+                if (acceptsInsert && remaining > 0) room.merge(material, remaining, Math::addExact)
+            }
+        }
+        this.stock = stock.toMap()
+        partialRoom = room.toMap()
+        emptySlots = empty
+    }
+}
 
 /** Storage-specific capture/version owner. Native references exist only inside the supplied owner-thread read. */
 internal class CivsSupplyCaptures(
     private val index: CivsContainerIndex,
     private val layout: (Settlement) -> Map<UUID, Map<CivPosition, String?>>,
     private val read: (Settlement, CivPosition, String?) -> CivSupplyCapturedContainer?,
+    private val canReuse: (Settlement, CivPosition, CivSupplyCapturedContainer) -> Boolean,
+    private val clock: () -> Long,
 ) {
+    private data class Geometry(val world: UUID, val owner: UUID, val center: CivPosition, val radius: Int,
+        val buildings: List<CivBuilding>, val registered: List<CivPosition>, val mode: CivStorageMode?, val autonomous: Boolean,
+        val upgrade: UUID?) {
+        fun matches(city: Settlement): Boolean = world == city.worldId && owner == city.owner && center == city.center &&
+            radius == city.radius && buildings == city.buildings && registered == city.inventory?.containers.orEmpty() &&
+            mode == city.inventory?.mode && autonomous == (city.autonomy != null) && upgrade == civsStorageUpgrade(city)?.id
+    }
+    private data class Holder(val type: String?, val value: CivSupplyCapturedContainer, val readAt: Long)
+
     private class Store(var key: CivSupplyStorageKey) {
         var contents: Map<CivPosition, CivSupplyCapturedContainer?>? = null
         var capturedGeneration: Long? = null
         var capturedAt: Long? = null
+        var stock: Map<String, Long>? = null
     }
     private val cities = mutableMapOf<UUID, Map<UUID, Store>>()
     private val revisions = mutableMapOf<UUID, Long>()
     private val plainRevisions = mutableMapOf<UUID, Long>()
     private val registrations = mutableMapOf<UUID, List<CivPosition>>()
+    private val geometries = mutableMapOf<UUID, Geometry>()
+    private val holders = mutableMapOf<UUID, MutableMap<CivPosition, Holder>>()
+    private val unfinishedControls = mutableMapOf<UUID, Map<UUID, CivPosition>>()
     private var generation = 0L
 
     /** Captured metadata only; a dirty generation is reported rather than recaptured. */
     internal fun debug(cityId: UUID?): Map<String, Any?> {
         check(org.bukkit.Bukkit.isPrimaryThread())
-        val now = System.currentTimeMillis()
+        val now = clock()
         fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
             "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
         val selected = cities.entries.filter { cityId == null || it.key == cityId }
@@ -62,27 +100,86 @@ internal class CivsSupplyCaptures(
             "storeCount" to selected.sumOf { it.value.size }, "freshNativeRead" to false)
     }
 
-    fun start(city: Settlement): CivsSupplyCapture {
+    fun start(city: Settlement, forceNative: Boolean = false): CivsSupplyCapture {
         val keys = update(city)
-        return CivsSupplyCapture(city, keys, read, { key, contents ->
+        val geometry = geometries[city.id]
+        val cache = holders.getOrPut(city.id, ::mutableMapOf)
+        val reads = hashMapOf<CivPosition, Long>()
+        fun sameGeometry() = geometry != null && geometries[city.id] === geometry
+        return CivsSupplyCapture(city, keys, { current, position, type ->
+            val now = clock()
+            val retained = if (!forceNative && sameGeometry()) cache[position]?.takeIf {
+                it.type == type && fresh(it.readAt, now) && canReuse(current, position, it.value)
+            } else null
+            if (retained != null) {
+                reads[position] = retained.readAt
+                retained.value
+            } else {
+                val revision = plainRevisions[city.id]
+                val value = read(current, position, type)
+                val readAt = clock()
+                reads[position] = readAt
+                if (sameGeometry() && plainRevisions[city.id] == revision) {
+                    if (value == null) cache.remove(position)
+                    else cache[position] = Holder(type, value, readAt)
+                }
+                value
+            }
+        }, { key, contents ->
             val current = cities[city.id]?.get(key.buildingId)
             if (current == null || current.key != key) key else {
                 if (current.contents?.let { it != contents } == true) dirty(city.id, current)
                 current.contents = contents.toMap()
                 current.capturedGeneration = current.key.generation
-                current.capturedAt = System.currentTimeMillis()
+                current.capturedAt = contents.keys.minOfOrNull { reads.getValue(it) } ?: clock()
                 current.key
             }
-        }, { index.covered(city) }, { plainRevisions[city.id] })
+        }, { index.covered(city) }, { plainRevisions[city.id] },
+            extraPositions = unfinishedControls[city.id].orEmpty().values,
+            oldestReadAt = { positions -> positions.mapNotNull(reads::get).minOrNull() },
+            publish = { result -> result.stores.forEach { (id, captured) ->
+                cities[city.id]?.get(id)?.takeIf { it.key == captured.key }?.stock =
+                    captured.stock.takeIf { captured.unavailable == 0 }
+            } },
+            clock = clock)
     }
+
+    fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long>? {
+        if (city.pendingDeletion != null || city.building(buildingId) == null) return null
+        city.inventory?.takeIf { it.mode == CivStorageMode.VIRTUAL }?.let { return it.buildingStock(buildingId) }
+        if (geometries[city.id]?.matches(city) != true) return null
+        val store = cities[city.id]?.get(buildingId) ?: return null
+        return store.stock.takeIf { store.capturedGeneration == store.key.generation && fresh(store.capturedAt) }
+    }
+
+    fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? {
+        if (city.pendingDeletion != null || geometries[city.id]?.matches(city) != true) return null
+        val indexed = cities[city.id]?.get(buildingId)?.key?.positions
+        val expectedType = when {
+            indexed?.containsKey(position) == true -> indexed[position]
+            unfinishedControls[city.id]?.get(buildingId) == position -> "BARREL"
+            else -> return null
+        }
+        val holder = holders[city.id]?.get(position)?.takeIf { fresh(it.readAt) } ?: return null
+        return holder.value.takeIf { (expectedType == null || it.type == expectedType) &&
+            storagePositionAllowed(city, position, it.type) &&
+            it.acceptsInsert == civsNativeContainerAcceptsInsert(city, position) }
+    }
+
+    private fun fresh(readAt: Long?, now: Long = clock()): Boolean =
+        readAt != null && now - readAt in 0 until HOLDER_TTL_MILLIS
 
     fun current(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>?,
         requireComplete: Boolean = false): Boolean {
         if (city.id != result.cityId) return false
         val keys = update(city)
-        if (requireComplete && (!result.complete || result.coverageRevision != plainRevisions[city.id] || !index.covered(city))) return false
+        if (requireComplete && (!result.complete || result.coverageRevision != plainRevisions[city.id] || !index.covered(city) ||
+                result.startedAtMillis?.let { !fresh(it) } == true)) return false
         return (buildingIds ?: result.stores.keys).all { id ->
-            result.stores[id]?.key?.let { it == keys[id] } == true
+            val captured = result.stores[id]?.key ?: return@all false
+            val live = cities[city.id]?.get(id) ?: return@all false
+            captured == keys[id] && (captured.mode == CivStorageMode.VIRTUAL ||
+                live.capturedGeneration == captured.generation && fresh(live.capturedAt))
         }
     }
 
@@ -96,7 +193,21 @@ internal class CivsSupplyCaptures(
             registrations[city.id] = registered.toList()
             dirtyPlain(city.id)
         }
+        val oldGeometry = geometries[city.id]
+        val geometryChanged = oldGeometry?.matches(city) != true
+        if (geometryChanged) {
+            if (oldGeometry != null && (oldGeometry.world != city.worldId || oldGeometry.owner != city.owner ||
+                    oldGeometry.autonomous != (city.autonomy != null) || oldGeometry.mode != city.inventory?.mode)) holders.remove(city.id)
+            geometries[city.id] = Geometry(city.worldId, city.owner, city.center, city.radius, city.buildings,
+                registered, city.inventory?.mode, city.autonomy != null, civsStorageUpgrade(city)?.id)
+        }
         val positions = if (mode == CivStorageMode.PHYSICAL) layout(city) else emptyMap()
+        val extra = if (city.autonomy != null && mode == CivStorageMode.PHYSICAL) city.buildings.mapNotNull { building ->
+            building.control?.takeIf { building.phase != BuildingPhase.ACTIVE && it in positions[building.id].orEmpty() }
+                ?.let { building.id to it }
+        }.toMap() else emptyMap()
+        val extraChanged = unfinishedControls[city.id].orEmpty() != extra
+        unfinishedControls[city.id] = extra
         val upgrade = if (mode == CivStorageMode.PHYSICAL) civsStorageUpgrade(city) else null
         val previous = cities[city.id].orEmpty()
         val buildings = if (city.autonomy != null) city.buildings.filter { it.phase == BuildingPhase.ACTIVE } else city.buildings
@@ -110,7 +221,12 @@ internal class CivsSupplyCaptures(
             val store = if (old != null && old.key == key) old else Store(key).also { dirty(city.id, it) }
             building.id to store
         }
-        if (previous.keys != next.keys && previous.isNotEmpty()) revisions[city.id] = ++generation
+        if (previous.keys != next.keys && previous.isNotEmpty() || extraChanged) revisions[city.id] = ++generation
+        if (geometryChanged || extraChanged || next.keys != previous.keys || next.any { (id, store) -> previous[id] !== store }) {
+            val retained = (registered + extra.values).toMutableSet()
+            next.values.forEach { retained += it.key.positions.keys }
+            holders[city.id]?.keys?.retainAll(retained)
+        }
         cities[city.id] = next
         return next.mapValues { it.value.key }
     }
@@ -120,12 +236,24 @@ internal class CivsSupplyCaptures(
     fun invalidate(cityId: UUID, buildingIds: Set<UUID>? = null) {
         val stores = cities[cityId] ?: return
         dirtyPlain(cityId)
-        (buildingIds ?: stores.keys).forEach { stores[it]?.let { store -> dirty(cityId, store) } }
+        if (buildingIds == null) {
+            holders[cityId]?.clear()
+            stores.values.forEach { dirty(cityId, it) }
+        } else {
+            val positions = buildingIds.flatMapTo(hashSetOf()) { stores[it]?.key?.positions?.keys.orEmpty() }
+            buildingIds.mapNotNullTo(positions) { unfinishedControls[cityId]?.get(it) }
+            holders[cityId]?.keys?.removeAll(positions)
+            stores.values.filter { store -> store.key.buildingId in buildingIds || store.key.positions.keys.any { it in positions } }
+                .forEach { dirty(cityId, it) }
+        }
     }
 
     fun changed(worldId: UUID, position: CivPosition) {
         index.citiesAt(worldId, position).forEach { cityId ->
             dirtyPlain(cityId)
+            val invalidated = holders[cityId]?.remove(position) != null
+            if (invalidated || position in unfinishedControls[cityId].orEmpty().values ||
+                position in registrations[cityId].orEmpty()) revisions[cityId] = ++generation
             val stores = cities[cityId].orEmpty()
             val controls = stores.values.mapNotNullTo(mutableSetOf()) { it.key.control }
             stores.values.filter { store ->
@@ -140,6 +268,9 @@ internal class CivsSupplyCaptures(
     fun chunkChanged(worldId: UUID, x: Int, z: Int) {
         index.citiesInChunk(worldId, x, z).forEach { cityId ->
             dirtyPlain(cityId)
+            if (holders[cityId]?.keys?.removeIf { (it.x shr 4) == x && (it.z shr 4) == z } == true ||
+                unfinishedControls[cityId].orEmpty().values.any { (it.x shr 4) == x && (it.z shr 4) == z } ||
+                registrations[cityId].orEmpty().any { (it.x shr 4) == x && (it.z shr 4) == z }) revisions[cityId] = ++generation
             cities[cityId].orEmpty().values.filter { store ->
                 val key = store.key
                 key.mode == CivStorageMode.PHYSICAL && (key.control?.let { (it.x shr 4) == x && (it.z shr 4) == z } == true ||
@@ -152,8 +283,12 @@ internal class CivsSupplyCaptures(
 
     fun remove(cityId: UUID) {
         cities.remove(cityId); revisions.remove(cityId); plainRevisions.remove(cityId); registrations.remove(cityId)
+        geometries.remove(cityId); holders.remove(cityId); unfinishedControls.remove(cityId)
     }
-    fun clear() { cities.clear(); revisions.clear(); plainRevisions.clear(); registrations.clear() }
+    fun clear() {
+        cities.clear(); revisions.clear(); plainRevisions.clear(); registrations.clear()
+        geometries.clear(); holders.clear(); unfinishedControls.clear()
+    }
 
     private fun dirtyPlain(cityId: UUID) { plainRevisions[cityId] = ++generation }
 
@@ -161,6 +296,8 @@ internal class CivsSupplyCaptures(
         store.key = store.key.copy(generation = ++generation)
         revisions[cityId] = generation
     }
+
+    private companion object { const val HOLDER_TTL_MILLIS = 5_000L }
 }
 
 /**
@@ -175,6 +312,10 @@ internal class CivsSupplyCapture(
     private val finish: (CivSupplyStorageKey, Map<CivPosition, CivSupplyCapturedContainer?>) -> CivSupplyStorageKey,
     private val coverage: () -> Boolean = { false },
     private val plainRevision: () -> Long? = { null },
+    extraPositions: Collection<CivPosition> = emptyList(),
+    private val oldestReadAt: (Set<CivPosition>) -> Long? = { null },
+    private val publish: (CivSupplyCaptureResult) -> Unit = {},
+    clock: () -> Long = System::currentTimeMillis,
 ) {
     private class Totals {
         val stock = linkedMapOf<String, Long>()
@@ -185,7 +326,7 @@ internal class CivsSupplyCapture(
     }
     private val owner = Thread.currentThread()
     private val totals = keys.mapValues { Totals() }
-    private val startedAtMillis = System.currentTimeMillis()
+    private val startedAtMillis = clock()
     private val plainStock = linkedMapOf<String, Long>()
     private val completeAtStart = coverage()
     private val plainRevisionAtStart = plainRevision()
@@ -201,6 +342,7 @@ internal class CivsSupplyCapture(
         } }
         city.inventory?.takeIf { it.mode == CivStorageMode.PHYSICAL }?.containers.orEmpty()
             .forEach { position -> entries.putIfAbsent(position, null to mutableListOf()) }
+        extraPositions.forEach { position -> entries.putIfAbsent(position, "BARREL" to mutableListOf()) }
     }.entries.iterator()
     var result: CivSupplyCaptureResult? = null
         private set
@@ -213,24 +355,17 @@ internal class CivsSupplyCapture(
             val captured = read(city, position, entry.first)
             if (position in plainPositions) {
                 if (captured == null) plainHoldersAvailable = false
-                captured?.slots?.filter { it.plain && it.material != null }?.forEach { slot ->
-                    plainStock.merge(requireNotNull(slot.material), slot.amount.toLong(), Math::addExact)
-                }
+                captured?.stock?.forEach { (material, amount) -> plainStock.merge(material, amount, Math::addExact) }
             }
             entry.second.forEach { buildingId ->
                 val sum = totals.getValue(buildingId)
                 sum.contents[position] = captured
-                val acceptsInsert = captured?.acceptsInsert == true
-                val empty = captured?.takeIf { it.acceptsInsert }?.slots?.count { it.material == null } ?: 0
-                sum.outputEmptySlots += (empty - productionOutputHeadroom(city.building(buildingId)?.type)).coerceAtLeast(0)
-                captured?.slots?.forEach { slot ->
-                    if (slot.material == null) { if (acceptsInsert) sum.emptySlots++ }
-                    else if (slot.plain) {
-                        sum.stock.merge(slot.material, slot.amount.toLong(), Math::addExact)
-                        val room = (slot.stackSize - slot.amount).coerceAtLeast(0).toLong()
-                        if (acceptsInsert && room > 0) sum.partialRoom.merge(slot.material, room, Math::addExact)
-                    }
-                }
+                if (captured == null) return@forEach
+                sum.emptySlots += captured.emptySlots
+                sum.outputEmptySlots += (captured.emptySlots -
+                    productionOutputHeadroom(city.building(buildingId)?.type)).coerceAtLeast(0)
+                captured.stock.forEach { (material, amount) -> sum.stock.merge(material, amount, Math::addExact) }
+                captured.partialRoom.forEach { (material, amount) -> sum.partialRoom.merge(material, amount, Math::addExact) }
             }
             if (containers.hasNext()) return false
         }
@@ -244,8 +379,10 @@ internal class CivsSupplyCapture(
                     sum.outputEmptySlots.takeIf { productionOutputHeadroom(city.building(buildingId)?.type) > 0 })
             CivSupplyCapturedStore(stock, capacity, finish(key, sum.contents),
                 sum.contents.values.sumOf { it?.slots?.size ?: 0 }, sum.contents.size, sum.contents.values.count { it == null })
-        }, plainStock.toMap().takeIf { keys.values.all { it.mode == CivStorageMode.PHYSICAL } }, startedAtMillis,
+        }, plainStock.toMap().takeIf { keys.values.all { it.mode == CivStorageMode.PHYSICAL } },
+            minOf(startedAtMillis, oldestReadAt(plainPositions) ?: startedAtMillis),
             completeAtStart && plainHoldersAvailable && coverage() && plainRevisionAtStart == plainRevision(), plainRevisionAtStart)
+            .also(publish)
         return true
     }
 }

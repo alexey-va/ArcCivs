@@ -275,6 +275,7 @@ class CivsUpkeepSupplyBufferServiceTest : FunSpec({
             h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe false
             val own = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
             own.setItem(0, ItemStack(Material.COBBLESTONE, 1))
+            captureServicePlanningStorage(h.service, upkeep.city)
             h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe true
             own.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 1)
             h.saves shouldBe emptyList()
@@ -1010,8 +1011,9 @@ class CivsLostToolReceiptServiceTest : FunSpec({
             afterFirst.mineProgress shouldBe before.mineProgress
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
 
-            // A later real local tool can be selected and paid once by the same unchanged worker cycle.
+            // A silent native write becomes visible to planning through the next bounded capture.
             barrel.setItem(0, ItemStack(Material.IRON_PICKAXE))
+            captureServicePlanningStorage(h.service, afterFirst)
             runtime.pulse(listOf(afterFirst))
             val retry = requireNotNull(runtime.plan(afterFirst, waiting))
             retry.cycle shouldBe waiting.completedCycles
@@ -1376,9 +1378,14 @@ class CivsAutoSupplyAckAuthorityTest : FunSpec({
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.paper.addPlayer("GrantWitness").teleport(Location(h.world, 1.5, 65.0, .5))
             h.start()
+            val observation = CivsResidentSupplies::class.java.getDeclaredMethod("autoSupplyObservation", Settlement::class.java)
+                .also { it.isAccessible = true }
+            h.tickUntil("native Auto supply observation") { observation.invokeService(h.service, city) != null }
             val pulse = CivsResidentSupplies::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
+            h.time += 1_000
             pulse.invokeService(h.service)
-            receipt!!.autoSupplyBuildingId shouldBe hall.id
+            h.tickUntil("Auto supply journal admission") { receipt != null }
+            requireNotNull(receipt).autoSupplyBuildingId shouldBe hall.id
             barrel.isEmpty shouldBe true
             allowed = false
             ack.complete(receipt!!)
@@ -1439,6 +1446,7 @@ class CivsNativeRoadUpkeepTest : FunSpec({
             h.service.upkeepSupplyRequests(upkeep.city) { emptyMap() } shouldBe
                 listOf(CivSupplyRequest(upkeep.worker.assignment!!, "COBBLESTONE", 16, 0))
             own.setItem(0, ItemStack(Material.COBBLESTONE, 2))
+            captureServicePlanningStorage(h.service, upkeep.city)
             h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe true
             val result = upkeep.deliver()
             val tx = requireNotNull(receipt)
@@ -7624,6 +7632,12 @@ class CivsServiceTest : FunSpec({
 private fun autonomousDevelopment(service: CivsService): CivsAutonomousDevelopment =
     CivsService::class.java.getDeclaredField("autonomousDevelopment").also { it.isAccessible = true }
         .get(service) as CivsAutonomousDevelopment
+
+private fun captureServicePlanningStorage(service: CivsService, city: Settlement) {
+    val storage = CivsService::class.java.getDeclaredField("storage").also { it.isAccessible = true }
+        .get(service) as CivsStorage
+    storage.capturePlanningStorage(city)
+}
 
 private fun constructionRuntime(service: CivsService): CivsConstructionRuntime =
     CivsService::class.java.getDeclaredField("construction").also { it.isAccessible = true }

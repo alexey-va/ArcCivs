@@ -26,12 +26,16 @@ internal class CivsStorageContainers(
     private val frozenPositions: (UUID) -> Map<CivPosition, String?>?,
     private val checkReady: () -> Unit,
     private val canModify: (Settlement, CivPosition) -> Boolean,
+    clock: () -> Long,
 ) {
     private val index = CivsContainerIndex(plugin.server, tileEntities)
     private val supplyCaptures = CivsSupplyCaptures(index, { city ->
         val positions = index.positions(city)
         city.buildings.associate { it.id to selectBuildingPositions(city, it.id, positions) }
-    }, ::captureSupplyContainer)
+    }, ::captureSupplyContainer, { city, position, value ->
+        storagePositionAllowed(city, position, value.type) && value.acceptsInsert == civsNativeContainerAcceptsInsert(city, position) &&
+            (city.autonomy == null || canModify(city, position))
+    }, clock)
     private val autonomousCaptures = mutableMapOf<UUID, CivSupplyCaptureResult>()
 
     fun positions(city: Settlement): Map<CivPosition, String?> = frozenPositions(city.id) ?: index.positions(city)
@@ -43,7 +47,13 @@ internal class CivsStorageContainers(
         supplyCaptures.invalidate(city.id, building?.let { setOf(it.id) })
         index.refresh(city, building)
     }
-    fun startSupplyCapture(city: Settlement): CivsSupplyCapture = supplyCaptures.start(city)
+    fun startSupplyCapture(city: Settlement, forceNative: Boolean): CivsSupplyCapture = supplyCaptures.start(city, forceNative)
+    fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long>? =
+        supplyCaptures.planningBuildingStock(city, buildingId)
+    fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? =
+        supplyCaptures.planningContainer(city, buildingId, position)
+    fun invalidateSupplyPositions(worldId: UUID, positions: Collection<CivPosition>) =
+        positions.forEach { supplyCaptures.changed(worldId, it) }
     fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null,
         requireComplete: Boolean = false): Boolean = supplyCaptures.current(city, result, buildingIds, requireComplete)
     fun supplyRevision(cityId: UUID): Long = supplyCaptures.revision(cityId)

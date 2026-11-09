@@ -356,6 +356,8 @@ class CivsCollectedItemsTest : FunSpec({
         val barrel = (world.getBlockAt(0, 64, 0).state as Barrel).inventory
         repeat(barrel.size) { barrel.setItem(it, ItemStack(Material.STONE, 64)) }
         barrel.setItem(0, custom.clone().apply { amount = 60 })
+        storage.foodCanModify = { _, _ -> true }
+        storage.capturePlanningStorage(city)
         storage.homeDestination(city, worker, mapOf("BREAD" to 16L)) shouldBe control
         val id = UUID.randomUUID()
         storage.reserve(city, id)
@@ -415,6 +417,7 @@ class CivsCollectedItemsTest : FunSpec({
         city = city.copy(buildings = listOf(hall, home, foreign), workers = listOf(worker))
         val homeBarrel = (world.getBlockAt(8, 64, 0).state as Barrel).inventory
         repeat(homeBarrel.size) { homeBarrel.setItem(it, ItemStack(Material.STONE, 64)) }
+        storage.capturePlanningStorage(city)
         storage.homeDestination(city, worker, emptyMap()) shouldBe rack
         storage.buildingAvailable(city.copy(buildings = listOf(hall, workshop.copy(phase = BuildingPhase.SITE), foreign)),
             workshop.id) shouldBe mapOf("STONE" to 1728L)

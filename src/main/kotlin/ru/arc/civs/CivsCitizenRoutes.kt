@@ -171,12 +171,13 @@ internal class CivsCitizenRoutes(
         val logs = org.bukkit.Tag.LOGS.values.toSet()
         fun outsideSnapshot(building: CivBuilding, x: Int, z: Int) =
             x !in building.bounds.min.x..building.bounds.max.x || z !in building.bounds.min.z..building.bounds.max.z
+        val controls = CitizenRouteControls(city)
         val policy = CitizenSnapshotPolicy({ point, material ->
-            citizenRoutePointAllowed(city, allowed, point, routeMine) && citizenControlClear(city, point) &&
+            citizenRoutePointAllowed(city, allowed, point, routeMine) && controls.clear(point) &&
                 (!outsideWaitingMine || outsideSnapshot(requireNotNull(waitingMine), point.x, point.z)) &&
                 (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, origin, point, mealTarget) &&
                     citizenIdleTerrain(point, minimumY, maximumY, city.buildings, material, climbable, leaves, logs))
-        }, { first, second -> citizenControlStepClear(city, first, second) &&
+        }, { first, second -> controls.stepClear(first, second) &&
             (waitingMine == null || !outsideSnapshot(waitingMine, kotlin.math.floor(first.x).toInt(), kotlin.math.floor(first.z).toInt()) ||
                 outsideSnapshot(waitingMine, kotlin.math.floor(second.x).toInt(), kotlin.math.floor(second.z).toInt())) &&
             (entrance != null || minePassage == null || minePassage.allows(second)) },

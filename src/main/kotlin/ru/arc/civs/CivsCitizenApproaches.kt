@@ -18,29 +18,40 @@ internal fun citizenControlBuilding(city: Settlement, point: CivPosition): CivBu
 
 /** A control is furniture, including for the worker whose route enters that building. */
 internal fun citizenControlClear(city: Settlement, feet: CivPosition): Boolean =
-    civsProtectedBuildings(city).none { building -> building.control?.let {
-        feet.x == it.x && feet.z == it.z && feet.y.toLong() in it.y.toLong()..(it.y.toLong() + 1)
-    } == true }
+    civsProtectedBuildings(city).none { it.control?.let { control -> citizenControlBlocksFeet(control, feet) } == true }
+
+internal fun citizenControlStepClear(city: Settlement, from: CitizenPoint, to: CitizenPoint): Boolean =
+    civsProtectedBuildings(city).none { it.control?.let { control -> citizenControlBlocksStep(control, from, to) } == true }
+
+/** A route uses the exact controls of its admitted city geometry, including a planned building. */
+internal class CitizenRouteControls(city: Settlement) {
+    private val controls = civsProtectedBuildings(city).mapNotNull(CivBuilding::control).toList()
+
+    fun clear(feet: CivPosition): Boolean {
+        for (index in controls.indices) if (citizenControlBlocksFeet(controls[index], feet)) return false
+        return true
+    }
+
+    fun stepClear(from: CitizenPoint, to: CitizenPoint): Boolean {
+        for (index in controls.indices) if (citizenControlBlocksStep(controls[index], from, to)) return false
+        return true
+    }
+}
+
+private fun citizenControlBlocksFeet(control: CivPosition, feet: CivPosition): Boolean =
+    feet.x == control.x && feet.z == control.z && feet.y.toLong() in control.y.toLong()..(control.y.toLong() + 1)
 
 /** Include the native player's width so a diagonal corner cannot turn a barrel into a shortcut. */
-internal fun citizenControlStepClear(city: Settlement, from: CitizenPoint, to: CitizenPoint): Boolean {
-    val origin = Vector(from.x, from.y, from.z)
-    val destination = Vector(to.x, to.y, to.z)
-    val delta = destination.clone().subtract(origin)
+private fun citizenControlBlocksStep(p: CivPosition, from: CitizenPoint, to: CitizenPoint): Boolean {
+    if (maxOf(from.x, to.x) < p.x - .3 || minOf(from.x, to.x) > p.x + 1.3 ||
+        maxOf(from.y, to.y) < p.y - 1.8 || minOf(from.y, to.y) > p.y + 1.01 ||
+        maxOf(from.z, to.z) < p.z - .3 || minOf(from.z, to.z) > p.z + 1.3) return false
+    val obstacle = BoundingBox(p.x - .3, p.y - 1.8, p.z - .3, p.x + 1.3, p.y + 1.01, p.z + 1.3)
+    if (obstacle.contains(to.x, to.y, to.z)) return true
+    if (obstacle.contains(from.x, from.y, from.z)) return false
+    val delta = Vector(to.x - from.x, to.y - from.y, to.z - from.z)
     val distance = delta.length()
-    if (distance > 0) delta.normalize()
-    val minX = minOf(from.x, to.x); val maxX = maxOf(from.x, to.x)
-    val minY = minOf(from.y, to.y); val maxY = maxOf(from.y, to.y)
-    val minZ = minOf(from.z, to.z); val maxZ = maxOf(from.z, to.z)
-    return civsProtectedBuildings(city).none { building ->
-        val p = building.control ?: return@none false
-        // Keep touching boundaries in the exact predicate; distant furniture needs no box or ray.
-        if (maxX < p.x - .3 || minX > p.x + 1.3 || maxY < p.y - 1.8 || minY > p.y + 1.01 ||
-            maxZ < p.z - .3 || minZ > p.z + 1.3) return@none false
-        val obstacle = BoundingBox(p.x - 0.3, p.y - 1.8, p.z - 0.3, p.x + 1.3, p.y + 1.01, p.z + 1.3)
-        obstacle.contains(destination) || !obstacle.contains(origin) && distance > 0 &&
-            obstacle.rayTrace(origin, delta, distance) != null
-    }
+    return distance > 0 && obstacle.rayTrace(Vector(from.x, from.y, from.z), delta.normalize(), distance) != null
 }
 
 /** One real barrel, at most twenty-four supported adjacent cells; never its top or another building's interior. */

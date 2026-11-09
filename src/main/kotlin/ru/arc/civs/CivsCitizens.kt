@@ -557,6 +557,7 @@ class CivsCitizens(
         campfires.scanOne(Bukkit.getCurrentTick()) { plugin.server.getWorld(it) }
         threats.pulse(actors.values.filter { it.workerId !in pendingHarm && it.npc.isValid }
             .map { CivsThreatTarget(it.cityId, it.workerId, it.npc) }, nowMillis)
+        observations.publishReadFrame(workers, nowMillis)
     }
 
     /** Hand over admitted work, courier transfers and short idle legs on the existing bounded pulse. */
@@ -980,6 +981,7 @@ class CivsCitizens(
             actor.cycle.close(); actor.route?.motion?.cancel(); actor.route?.previousMotion?.cancel()
         }
         actors.clear()
+        observations.clearReadFrame()
         combat.clear()
         life.close()
         logistics.close()
@@ -1008,6 +1010,8 @@ class CivsCitizens(
     internal fun courierPosition(cityId: UUID, workerId: UUID): CivPosition? = couriers.courierPosition(cityId, workerId)
 
     internal fun courierUnavailable(cityId: UUID, workerId: UUID): Boolean = couriers.courierUnavailable(cityId, workerId)
+
+    internal fun residentReadFrame(): CivResidentReadFrame = observations.readFrame()
 
     internal fun courierSupplySources(cityId: UUID, retainedSources: Set<UUID> = emptySet()): Map<UUID, CivPosition> = couriers.courierSupplySources(cityId, retainedSources)
 

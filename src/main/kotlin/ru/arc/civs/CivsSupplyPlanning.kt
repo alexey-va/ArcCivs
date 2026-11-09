@@ -15,6 +15,9 @@ internal fun civSupplyInputs(city: Settlement): Any = listOf(
 /** Owner metadata is stripped before dispatch; no native inventory or callback enters the worker. */
 internal data class CivSupplyObservation(val inputs: Any, val capture: CivSupplyCaptureResult)
 
+/** Accepted settlement data and the latest detached physical resident observations. */
+internal data class CivSettlementWorkFrame(val city: Settlement, val residents: CivResidentReadFrame)
+
 internal class CivsSupplyPlanning(
     private val city: Settlement,
     private val capture: CivsSupplyCapture,

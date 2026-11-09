@@ -8,6 +8,8 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.logging.Level
 
+private val STORAGE_BLOCK_IDS = CIVS_STORAGE_TYPES.mapTo(hashSetOf()) { it.lowercase() }
+
 /** Main-thread receipt state machine: source fence, durable intent, native reconcile, publication and retirement. */
 internal class CivsInventoryJournal(
     private val plugin: Plugin,
@@ -294,7 +296,17 @@ internal class CivsInventoryJournal(
                     }
                 }.exceptionOrNull()
                 if (stale != null) return fail(stale)
-                storage.invalidateSupply(tx.cityId)
+                val changedHolders = buildSet {
+                    tx.changes.forEach { add(it.container) }
+                    tx.collected?.containers.orEmpty().forEach { add(it.container) }
+                    tx.containerRelocation?.containers.orEmpty().forEach { add(it.position) }
+                    tx.worldChanges.orEmpty().forEach { cell ->
+                        val before = cell.before.substringBefore('[').removePrefix("minecraft:")
+                        val after = cell.after.substringBefore('[').removePrefix("minecraft:")
+                        if (before in STORAGE_BLOCK_IDS || after in STORAGE_BLOCK_IDS) add(cell.position)
+                    }
+                }
+                if (changedHolders.isNotEmpty()) storage.invalidateSupplyPositions(tx.after.worldId, changedHolders)
                 store.save(tx.after).whenCompleteSync(tasks) { saved, failure ->
                     if (failure != null) return@whenCompleteSync fail(CivsRejection("inventory-recovery").also { it.initCause(failure) })
                     publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->

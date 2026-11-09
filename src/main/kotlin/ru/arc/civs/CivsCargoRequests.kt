@@ -22,7 +22,8 @@ internal class CivsCargoRequests(
     private val inventoryJournal: CivsInventoryJournal,
 ) {
     private val residentSupplies get() = residentSuppliesOwner()
-    private val supplyObservations = mutableMapOf<UUID, Pair<Long, Long>>()
+    private data class SupplyObservation(val storageRevision: Long, val legacyRevision: Long?, val requestedAt: Long)
+    private val supplyObservations = mutableMapOf<UUID, SupplyObservation>()
     private val capacityWrites = mutableSetOf<UUID>()
     private data class CargoWait(val cityId: UUID, val shipmentId: UUID, val destinationId: UUID,
         val storageRevision: Long, val retryAt: Long)
@@ -56,7 +57,9 @@ internal class CivsCargoRequests(
                 worker.cargo != null || worker.pendingStock != null || worker.assignment?.let(city::building)?.let {
                     it.type == BuildingType.WAREHOUSE || CivsRules.resource(it.type) != null
                 } == true
-            } else city.workers.any { worker ->
+            } else (city.inventory?.mode == CivStorageMode.PHYSICAL && city.workers.isNotEmpty() &&
+                (authority.settlementActive(city) || city.workers.any { citizens.residentFeet(it.id) != null })) ||
+                city.workers.any { worker ->
                 worker.cargo != null || worker.assignment?.let(city::building)?.type.let {
                     it == BuildingType.WAREHOUSE || it == BuildingType.FORESTER || it in CivsCarpentry.workshops
                 }
@@ -66,12 +69,15 @@ internal class CivsCargoRequests(
         // recovery owner publishes or definitively rejects that receipt.
         ids += supply.cityIds().filter { inventoryJournal.pending(it) }
         (supply.cityIds() - ids).forEach { supply.remove(it); supplyObservations.remove(it) }
+        val now = authority.now()
         for (city in relevant) {
-            val revision = if (CivsAutonomy.legacyStock(city)) city.revision else storage.supplyRevision(city.id)
+            val storageRevision = storage.supplyRevision(city.id)
+            val legacyRevision = city.revision.takeIf { CivsAutonomy.legacyStock(city) }
             val previous = supplyObservations[city.id]
-            if (previous == null || revision != previous.first || authority.now() - previous.second >= 5_000L) {
+            if (previous == null || storageRevision != previous.storageRevision || legacyRevision != previous.legacyRevision ||
+                now - previous.requestedAt >= 5_000L) {
                 supply.request(city.id)
-                supplyObservations[city.id] = revision to authority.now()
+                supplyObservations[city.id] = SupplyObservation(storageRevision, legacyRevision, now)
             }
             refreshWaitingCargo(city)
         }
@@ -79,8 +85,8 @@ internal class CivsCargoRequests(
     }
 
     fun captureSupply(cityId: UUID, retained: Map<UUID, CivCourierPlan>): () -> CivSupplySnapshot? {
-        val city = records.cities[cityId]?.takeIf { authority.ready() && cityId !in records.unhealthy && it.pendingDeletion == null &&
-            (it.inventory != null || it.autonomy?.paused == false) }
+        val frame = authority.settlementWorkFrame(cityId) ?: throw CivsRejection("storage-unavailable")
+        val city = frame.city.takeIf { it.inventory != null || it.autonomy?.paused == false }
             ?: throw CivsRejection("storage-unavailable")
         if (cityId in records.busy) throw CivsRejection("city-busy")
         if (CivsAutonomy.legacyStock(city)) {
@@ -112,13 +118,14 @@ internal class CivsCargoRequests(
                     return@capture null
                 }
                 storage.rememberAutonomousCapacity(current, observed)
-                CivsAutonomousLogistics.snapshot(current, retained, { citizens.courierPosition(cityId, it) },
+                val residents = authority.settlementWorkFrame(cityId)?.residents ?: return@capture null
+                CivsAutonomousLogistics.snapshot(current, retained, { residents.courierPosition(cityId, it) },
                     citizens.courierSupplySources(cityId, retained.values.mapNotNullTo(hashSetOf()) { it.cargo.sourceWorkerId }),
-                    observed, { citizens.courierUnavailable(cityId, it) })
+                    observed, { residents.courierUnavailable(cityId, it) })
             }
         }
         val capture = CivsSupplyPlanning(city, storage.startSupplyCapture(city), retained,
-            { citizens.courierPosition(cityId, it) }, { citizens.courierUnavailable(cityId, it) }, supply.craftJobs(cityId),
+            { frame.residents.courierPosition(cityId, it) }, { frame.residents.courierUnavailable(cityId, it) }, supply.craftJobs(cityId),
             construction.supplyNeed(city)?.toMap())
         return {
             if (!authority.ready() || cityId in records.unhealthy) throw CivsRejection("storage-unavailable")

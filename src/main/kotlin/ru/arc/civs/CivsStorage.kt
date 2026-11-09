@@ -67,6 +67,7 @@ import java.util.logging.Level
 /** Bounded main-thread storage. No IO, chunk loads, item drops or native mutation during planning. */
 class CivsStorage(private val plugin: Plugin,
     private val playerDataPersistence: PaperPlayerDataPersistence = NativePaperPlayerDataPersistence,
+    supplyClock: () -> Long = System::currentTimeMillis,
     tileEntities: (Chunk) -> Array<BlockState> = { it.tileEntities }) : Listener, AutoCloseable {
     private data class Claim(val city: Settlement, val positions: Map<CivPosition, String?>, val playerId: UUID?,
         val worldPositions: Set<CivPosition> = emptySet(), val groundItems: Set<UUID> = emptySet(),
@@ -116,7 +117,7 @@ class CivsStorage(private val plugin: Plugin,
     private val persistenceTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val containers = CivsStorageContainers(plugin, tileEntities,
         { cityId -> cityClaims[cityId]?.let(claims::get)?.positions }, ::checkReady,
-        { city, position -> foodCanModify(city, position) })
+        { city, position -> foodCanModify(city, position) }, supplyClock)
     private val planner = CivsStoragePlanner(containers, ::checkReady, ::checkClaim,
         { cityId -> claims.getValue(cityClaims.getValue(cityId)).playerId }, { residentFoods })
     private val residents = CivsResidentStorage(plugin, containers, ::checkReady, ::checkClaim,
@@ -224,8 +225,17 @@ class CivsStorage(private val plugin: Plugin,
             .flatMap { listOf(requireNotNull(it.retire).position, it.position) }.mapTo(hashSetOf()) { Key(city.worldId, it) }
         if (points.isNotEmpty()) { retiringByCity[city.id] = points; retiringControls += points }
     }
-    internal fun startSupplyCapture(city: Settlement): CivsSupplyCapture {
-        checkReady(); return containers.startSupplyCapture(city)
+    internal fun startSupplyCapture(city: Settlement, forceNative: Boolean = false): CivsSupplyCapture {
+        checkReady(); return containers.startSupplyCapture(city, forceNative)
+    }
+    internal fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long>? {
+        checkReady(); return containers.planningBuildingStock(city, buildingId)
+    }
+    internal fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? {
+        checkReady(); return containers.planningContainer(city, buildingId, position)
+    }
+    internal fun invalidateSupplyPositions(worldId: UUID, positions: Collection<CivPosition>) {
+        checkReady(); containers.invalidateSupplyPositions(worldId, positions)
     }
     internal fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null,
         requireComplete: Boolean = false): Boolean {

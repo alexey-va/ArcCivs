@@ -116,7 +116,7 @@ internal class CivsResidentStorage(
     }
 
     /** Cached membership limits discovery to four real holders in this resident's own home. */
-    private fun homeSources(city: Settlement, worker: CivWorker, destination: CivPosition? = null): Sequence<Source> {
+    private fun homePositions(city: Settlement, worker: CivWorker, destination: CivPosition? = null): Sequence<Pair<CivPosition, String?>> {
         val home = civsCollectionHome(city, worker) ?: return emptySequence()
         val positions = containers.buildingPositions(city, home.id)
         val ordered = linkedMapOf<CivPosition, String?>()
@@ -125,8 +125,11 @@ internal class CivsResidentStorage(
         val cursor = (homeCursors[worker.id] ?: 0).takeIf { it in entries.indices } ?: 0
         for (entry in entries.drop(cursor) + entries.take(cursor)) ordered[entry.key] = entry.value
         if (destination == null && entries.isNotEmpty()) homeCursors[worker.id] = (cursor + 4) % entries.size
-        return containers.resolveSources(city, ordered.asSequence().take(4).map { it.key to it.value }).filter { it.acceptsInsert }
+        return ordered.asSequence().take(4).map { it.key to it.value }
     }
+
+    private fun homeSources(city: Settlement, worker: CivWorker, destination: CivPosition): Sequence<Source> =
+        containers.resolveSources(city, homePositions(city, worker, destination)).filter { it.acceptsInsert }
 
     internal fun homeDestination(city: Settlement, worker: CivWorker, reserve: Map<String, Long>): CivPosition? {
         checkReady()
@@ -134,21 +137,36 @@ internal class CivsResidentStorage(
         val surplus = CivsEquipment.homeSurplus(worker, reserve)
         if (surplus.isEmpty()) return null
         val home = civsCollectionHome(city, worker) ?: return null
-        for (source in homeSources(city, worker)) {
-            val world = plugin.server.getWorld(city.worldId) ?: return null
-            if (!citizenChunkReady(world, source.position.x shr 4, source.position.z shr 4)) continue
-            val slots = source.inventory.storageContents
-            if (surplus.any { (index, _) ->
-                val item = requireNotNull(CivsEquipment.slots(worker)[index]).stack()
-                slots.any { native -> isEmpty(native) || native != null && native.isSimilar(item) && native.amount < native.maxStackSize }
-            } && citizenCollectedHomeTarget(city, home, world, source.position) != null) return source.position
+        val world = plugin.server.getWorld(city.worldId) ?: return null
+        val items = CivsEquipment.slots(worker)
+        for ((point, type) in homePositions(city, worker)) {
+            val snapshot = containers.planningContainer(city, home.id, point)?.takeIf { it.acceptsInsert } ?: continue
+            if (!citizenChunkReady(world, point.x shr 4, point.z shr 4)) continue
+            val room = snapshot.slots.any { it.material == null } || surplus.any { (index, _) ->
+                val item = requireNotNull(items[index])
+                snapshot.slots.any { it.material == item.material && it.plain && item.data == null && it.amount < it.stackSize }
+            }
+            // The detached supply view does not carry custom NBT. Only a possible custom merge needs exact similarity.
+            val custom = !room && surplus.any { (index, _) ->
+                val item = requireNotNull(items[index])
+                item.data != null && snapshot.slots.any { it.material == item.material && !it.plain && it.amount < it.stackSize }
+            }
+            val matchingCustom = custom && containers.resolveSources(city, sequenceOf(point to type)).any { source ->
+                source.acceptsInsert && source.inventory.storageContents.any { native ->
+                    native != null && !isEmpty(native) && native.amount < native.maxStackSize && surplus.any { (index, _) ->
+                        val item = requireNotNull(items[index])
+                        item.data != null && native.type.name == item.material && native.isSimilar(item.stack())
+                    }
+                }
+            }
+            if ((room || matchingCustom) && citizenCollectedHomeTarget(city, home, world, point) != null) return point
         }
         return null
     }
 
     /** At most sixteen nearest indexed holders; never load chunks or invent a stock entry. */
-    private fun foodSources(city: Settlement, worker: CivWorker, from: org.bukkit.Location,
-        reserve: Boolean = false): Sequence<Pair<CivBuilding, Source>> {
+    private fun foodPositions(city: Settlement, worker: CivWorker, from: org.bukkit.Location,
+        reserve: Boolean = false): Sequence<Triple<CivBuilding, CivPosition, String?>> {
         // The shared selector keeps unfinished buildings control-only; resolve requires its actual BARREL.
         val positions = city.buildings.filter { CivsResidentFood.eligible(city, worker, it) &&
             (!reserve || CivsResidentFood.reserveBuilding(city, it)) }.flatMap { building ->
@@ -166,13 +184,9 @@ internal class CivsResidentStorage(
         val count = minOf(15, rest.size)
         if (rest.isNotEmpty()) cursors[worker.id] = (cursor + count) % rest.size
         // Keep the preferred venue fast while empty large venues cannot hide all emergency holders.
-        val window = sequence {
+        return sequence {
             yield(first)
             repeat(count) { offset -> yield(rest[(cursor + offset) % rest.size]) }
-        }
-        return window.mapNotNull { (building, point, type) ->
-            if (!foodCanModify(city, point)) null
-            else containers.resolveSources(city, sequenceOf(point to type)).firstOrNull()?.let { building to it }
         }
     }
 
@@ -181,15 +195,16 @@ internal class CivsResidentStorage(
         checkReady()
         if (city.inventory?.mode == CivStorageMode.VIRTUAL || feet.world?.uid != city.worldId ||
             CivsResidents.hunger(worker) > 14 || !tavernService && residentFoods().carried(city, worker) != null) return null
-        for ((building, source) in foodSources(city, worker, feet)) {
+        val world = plugin.server.getWorld(city.worldId) ?: return null
+        for ((building, point) in foodPositions(city, worker, feet)) {
             if (tavernService && (building.type != BuildingType.TAVERN || building.phase != BuildingPhase.ACTIVE)) continue
-            val material = source.inventory.storageContents.asSequence().mapNotNull(::plain).firstOrNull {
-                residentFoods().mayPickUp(city, worker, it.material) &&
-                    CivsEquipment.supplyRoom(worker, Material.valueOf(it.material)) > 0
-            }?.material ?: continue
-            val world = plugin.server.getWorld(city.worldId) ?: return null
-            val target = citizenCollectedHomeTarget(city, building, world, source.position) ?: continue
-            return CivResidentFoodSource(building.id, source.position, target, material)
+            val stock = containers.planningContainer(city, building.id, point) ?: continue
+            val material = stock.slots.asSequence().filter { it.plain }.mapNotNull { it.material }.firstOrNull {
+                residentFoods().mayPickUp(city, worker, it) && CivsEquipment.supplyRoom(worker, Material.valueOf(it)) > 0
+            } ?: continue
+            if (!foodCanModify(city, point)) continue
+            val target = citizenCollectedHomeTarget(city, building, world, point) ?: continue
+            return CivResidentFoodSource(building.id, point, target, material)
         }
         return null
     }
@@ -200,8 +215,10 @@ internal class CivsResidentStorage(
         val worker = city.workers.single { it.id == workerId }
         reject(city.autonomy?.paused != false || city.inventory != null || city.stock.food <= 0 ||
             feet.world?.uid != city.worldId, "resident-food-missing")
-        for ((building, source) in foodSources(city, worker, feet, reserve = true)) {
-            if (!source.acceptsInsert) continue
+        for ((building, point, type) in foodPositions(city, worker, feet, reserve = true)) {
+            if (!foodCanModify(city, point)) continue
+            val source = containers.resolveSources(city, sequenceOf(point to type)).firstOrNull()?.takeIf { it.acceptsInsert }
+                ?: continue
             val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
             if (citizenCollectedHomeTarget(city, building, world, source.position) == null) continue
             val original = source.inventory.storageContents.map(CivResidentItem::of)

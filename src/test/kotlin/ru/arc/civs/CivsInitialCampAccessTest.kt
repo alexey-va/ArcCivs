@@ -18,6 +18,7 @@ class CivsInitialCampAccessTest : FunSpec({
             val before = h.service.settlements().single()
             citizenStandable(h.world, camp.standing) shouldBe true
             civsCanReachContainer(camp.feet, camp.control) shouldBe false
+            storage.capturePlanningStorage(before)
             storage.residentFoodSource(before, before.workers.single(), camp.feet) shouldBe null
             val originalSlots = camp.slots()
 
@@ -52,6 +53,7 @@ class CivsInitialCampAccessTest : FunSpec({
             val accessible = h.service.settlements().single()
             accessible.construction shouldBe before.construction
             val worker = accessible.workers.single()
+            storage.capturePlanningStorage(accessible)
             val source = requireNotNull(storage.residentFoodSource(accessible, worker, camp.feet))
             source shouldBe CivResidentFoodSource(camp.hall.id, camp.control, camp.standing)
             civsCanReachContainer(camp.feet, camp.control) shouldBe true

@@ -162,7 +162,7 @@ internal class CivsResidentSupplies(
         if (CivsRules.isBuilder(city, building) || building.type in CivsWorksites.TYPES) return true
         val inputs = craftPlan(city, worker)?.inputs ?: if (building.type == BuildingType.SAWMILL) return false
             else CivsProduction.inputs(city, building)
-        return CivsEquipment.inputsReady(worker, inputs, localStocks(city)(building.id))
+        return CivsEquipment.inputsReady(worker, inputs, authority.planningBuildingStock(city, building.id))
     }
 
     internal fun requireAutonomousStorage(city: Settlement, buildingId: UUID? = null) {
@@ -179,7 +179,7 @@ internal class CivsResidentSupplies(
         if (building.type == BuildingType.UNIVERSITY) return CivsRules.productionAvailable(city, building)
         if (CivsRules.isBuilder(city, building)) {
             val order = city.construction ?: return roadMaintenance.requirements(city)[worker.id]?.let {
-                CivsEquipment.inputsReady(worker, it, localStocks(city)(building.id))
+                CivsEquipment.inputsReady(worker, it, authority.planningBuildingStock(city, building.id))
             } ?: true
             if (order.payment == null || order.payment.reservedBatch != null) return true
             val required = order.payment.awaiting ?: construction.supplyNeed(city)
@@ -199,7 +199,7 @@ internal class CivsResidentSupplies(
             CivsEquipment.supplyRoom(worker, Material.BREAD) == 0) return null
         return city.buildings.sortedBy { if (it.type == BuildingType.TAVERN) 0 else 1 }.firstOrNull {
             (it.type == BuildingType.TOWN_HALL || it.type == BuildingType.TAVERN && it.phase == BuildingPhase.ACTIVE) && it.control != null &&
-            (localStocks(city)(it.id)["BREAD"] ?: 0L) > 0L }?.id
+            (authority.planningBuildingStock(city, it.id)["BREAD"] ?: 0L) > 0L }?.id
     }
 
     fun citizensFeetForFood(workerId: UUID): org.bukkit.Location? = citizens.residentFeet(workerId)
