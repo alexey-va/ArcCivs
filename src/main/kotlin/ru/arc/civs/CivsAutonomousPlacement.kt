@@ -135,18 +135,9 @@ internal class CivsAutonomousPlacement(
                 autonomy = requireNotNull(city.autonomy).copy(plan = sameSlotPlan, layoutHalfWidth = requireNotNull(oldPlan).halfWidth))
             val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
             val templates = CivsAutonomy.profile.associateWith { type ->
-                val id = UUID.nameUUIDFromBytes("arccivs-plan-template/${city.id}/$type".toByteArray(Charsets.UTF_8))
                 val entry = seed?.takeIf { type == it.type }?.schematicId?.takeIf { it.startsWith("civs/v2/") }
                     ?: blueprints.autonomousSource(city.style, type)
-                val first = if (entry == null) blueprints.prepare(city.style, type, 1, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
-                    else blueprints.prepareEntry(entry, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
-                val last = if (entry != null) first.thenCompose { blueprint ->
-                    val maximum = blueprints.maximumLevel(blueprint.building)
-                    if (maximum == 1) CompletableFuture.completedFuture(blueprint)
-                    else blueprints.prepareUpgrade(blueprint.building, maximum, city.worldId)
-                } else if (type.maxLevel == 1) first else
-                    blueprints.prepare(city.style, type, type.maxLevel, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
-                first.thenCombine(last) { x, y -> x.building to y.building }
+                planTemplate(city, type, entry)
             }
             val frame = CivsSettlementLayout.frame(surveyCity)
             val fortification: CompletableFuture<CivFortificationTemplate?> = if (frame.halfWidth > 56 && surveyCity.autonomy?.plan == null &&
@@ -163,8 +154,8 @@ internal class CivsAutonomousPlacement(
                         CivsSettlementPlans.at(loaded.getValue(candidate.type).second, candidate.anchor, candidate.rotation, candidate.id).bounds)
                 }
                 if (seed != null && oldPlan?.deferredPerimeter?.plotId == seed.id) {
-                    return@thenCombineAsync replaceDeferredParcel(city, oldPlan, seed, requireNotNull(envelope),
-                        requireNotNull(unpaidSite.terrain), input.first)
+                    return@thenCombineAsync CompletableFuture.completedFuture(replaceDeferredParcel(city, oldPlan, seed,
+                        requireNotNull(envelope), requireNotNull(unpaidSite.terrain), input.first))
                 }
                 val kept = sameSlotPlan ?: oldPlan?.takeIf { intent ->
                     seed != null && seed.type in CivsSettlementLayout.exteriorTypes &&
@@ -178,34 +169,59 @@ internal class CivsAutonomousPlacement(
                 val profile = if (seed == null) CivsSettlementGrowth.profile(city) else requireNotNull(oldPlan).plots
                     .filter { !it.building.type.isInfrastructure && it.building.type != BuildingType.DECORATION }
                     .map { it.building.type }
-                val plan = if (seed == null) CivsSettlementPlans.prepareGrowth(projected, loaded, input.second, access,
-                    profile, fortification = input.third)
-                else CivsSettlementPlans.prepare(projected, loaded, input.second, access,
-                    fortification = input.third, profile = profile)
-                if (seed == null) plan else {
-                    if (!CivsSettlementGrowth.covers(city, plan) ||
-                        plan.plots.count { it.building.type != BuildingType.DECORATION } !=
-                            requireNotNull(oldPlan).plots.count { it.building.type != BuildingType.DECORATION } ||
-                        plan.plots.singleOrNull { it.building.id == seed.id }?.building != seed ||
-                        plan.routes[seed.id.toString()] != seedRoute || city.buildings.filterNot { it.type.isInfrastructure }.any { actual ->
-                            !civsSameBuildingGeometry(plan.plots.singleOrNull { it.building.id == actual.id }?.building,
-                                actual.copy(phase = BuildingPhase.SITE))
-                        }) throw CivsRejection("invalid-plan")
-                    val paidRoutes = input.first.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
-                        .mapKeys { it.key.toString() }
-                    if (kept != null && (plan.plots.filter { it.building.id != seed.id && city.building(it.building.id) == null } !=
-                        kept.plots.filter { city.building(it.building.id) == null } ||
-                        (kept.routes + paidRoutes).any { (id, route) -> plan.routes[id] != route } || plan.walls != kept.walls ||
-                        plan.gates != kept.gates || plan.gateSides != kept.gateSides)) throw CivsRejection("invalid-plan")
-                    plan.copy(revision = Math.addExact(requireNotNull(city.autonomy?.plan).revision, 1L))
+                if (seed == null) {
+                    return@thenCombineAsync try {
+                        CompletableFuture.completedFuture(CivsSettlementPlans.prepareGrowth(projected, loaded, input.second,
+                            access, profile, fortification = input.third))
+                    } catch (failure: CivsRejection) {
+                        if (!CivsSettlementPlans.compactUniversityMayFit(projected, input.second, access, profile, failure)) throw failure
+                        val type = BuildingType.UNIVERSITY
+                        val entry = blueprints.autonomousAlternatives(city.style, type).firstOrNull() ?: throw failure
+                        planTemplate(city, type, entry).thenApplyAsync({ alternative ->
+                            if (result.isDone || closed) throw CivsRejection("world-closed")
+                            if (alternative.second.level != type.maxLevel) throw failure
+                            CivsSettlementPlans.deferCivicParcel(projected, loaded + (type to alternative), input.second,
+                                access, profile, failure) ?: throw failure
+                        }, executor)
+                    }
                 }
-            }, executor)
+                val plan = CivsSettlementPlans.prepare(projected, loaded, input.second, access,
+                    fortification = input.third, profile = profile)
+                if (!CivsSettlementGrowth.covers(city, plan) ||
+                    plan.plots.count { it.building.type != BuildingType.DECORATION } !=
+                        requireNotNull(oldPlan).plots.count { it.building.type != BuildingType.DECORATION } ||
+                    plan.plots.singleOrNull { it.building.id == seed.id }?.building != seed ||
+                    plan.routes[seed.id.toString()] != seedRoute || city.buildings.filterNot { it.type.isInfrastructure }.any { actual ->
+                        !civsSameBuildingGeometry(plan.plots.singleOrNull { it.building.id == actual.id }?.building,
+                            actual.copy(phase = BuildingPhase.SITE))
+                    }) throw CivsRejection("invalid-plan")
+                val paidRoutes = input.first.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
+                    .mapKeys { it.key.toString() }
+                if (kept != null && (plan.plots.filter { it.building.id != seed.id && city.building(it.building.id) == null } !=
+                    kept.plots.filter { city.building(it.building.id) == null } ||
+                    (kept.routes + paidRoutes).any { (id, route) -> plan.routes[id] != route } || plan.walls != kept.walls ||
+                    plan.gates != kept.gates || plan.gateSides != kept.gateSides)) throw CivsRejection("invalid-plan")
+                CompletableFuture.completedFuture(plan.copy(revision = Math.addExact(requireNotNull(city.autonomy?.plan).revision, 1L)))
+            }, executor).thenCompose { it }
         }.getOrElse { CompletableFuture.failedFuture(it) }
         prepared.whenComplete { value, failure ->
             synchronized(jobs) { planning.remove(city.id, result) }
             if (failure == null) result.complete(value) else result.completeExceptionally(failure)
         }
         return result
+    }
+
+    private fun planTemplate(city: Settlement, type: BuildingType, entry: String?): CompletableFuture<Pair<CivBuilding, CivBuilding>> {
+        val id = UUID.nameUUIDFromBytes("arccivs-plan-template/${city.id}/$type".toByteArray(Charsets.UTF_8))
+        val origin = CivPosition(0, 0, 0)
+        val first = if (entry == null) blueprints.prepare(city.style, type, 1, id, city.worldId, origin, 2, 0)
+            else blueprints.prepareEntry(entry, id, city.worldId, origin, 2, 0)
+        val last = if (entry != null) first.thenCompose { blueprint ->
+            val maximum = blueprints.maximumLevel(blueprint.building)
+            if (maximum == 1) CompletableFuture.completedFuture(blueprint)
+            else blueprints.prepareUpgrade(blueprint.building, maximum, city.worldId)
+        } else if (type.maxLevel == 1) first else blueprints.prepare(city.style, type, type.maxLevel, id, city.worldId, origin, 2, 0)
+        return first.thenCombine(last) { x, y -> x.building to y.building }
     }
 
     private fun sameHorizontalSlot(a: CivBuilding, b: CivBuilding): Boolean = a.id == b.id && a.type == b.type &&
@@ -382,7 +398,7 @@ internal class CivsAutonomousPlacement(
         private var access = CivAutonomousAccess()
         private val protectedRoadColumns by lazy {
             val deferred = (adopted ?: initialPlan)?.deferredPerimeter
-            if (deferred?.stage == CivsSettlementPlans.HOUSING_PERIMETER && deferred.plotId == buildingId)
+            if (deferred?.plotId == buildingId && CivsSettlementPlans.protectsPaidApproach(deferred.stage))
                 access.roadColumns(nativeCity) else emptySet()
         }
         private var pieces = emptyMap<UUID, CivSettlementPiece>()

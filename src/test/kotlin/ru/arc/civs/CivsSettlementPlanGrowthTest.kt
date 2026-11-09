@@ -172,6 +172,59 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         }
     }
 
+    test("a surveyed Hall II city can admit its next university without rebuilding a paid perimeter") {
+        val old = requireNotNull(CivsSettlementPlans.current(legacy))
+        val plots = old.plots.filter { it.building.type in CivsAutonomy.baseProfile }
+        val routes = old.routes.filterKeys { id -> plots.any { it.building.id.toString() == id } }
+        val prior = old.copy(plots = plots, routes = routes)
+        val gateBounds = prior.gates.first()
+        val gate = CivSettlementPiece(UUID(94, 901), BuildingType.GATE, gateBounds, gateBounds.min, emptyList())
+        val city = legacy.copy(radius = 128, inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = plots.map { it.building.copy(level = minOf(it.building.type.maxLevel, 2), phase = BuildingPhase.ACTIVE) } +
+                CivsInfrastructure.building(gate).copy(phase = BuildingPhase.ACTIVE),
+            autonomy = requireNotNull(legacy.autonomy).copy(plan = prior))
+        val access = CivAutonomousAccess(routes.mapKeys { UUID.fromString(it.key) }, listOf(gate))
+        val profile = CivsSettlementGrowth.profile(city)
+        profile.last() shouldBe BuildingType.UNIVERSITY
+        val surface = settlementPlanSurface(city.copy(radius = 127))
+        val templates = settlementPlanTemplates()
+        mockkObject(CivsSettlementPlans)
+        try {
+            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } throws
+                CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure", "infrastructure-slope" to "13"))
+            val grown = CivsSettlementPlans.prepareGrowth(city, templates, surface, access, profile)
+            val university = grown.plots.single { it.building.type == BuildingType.UNIVERSITY }
+            grown.deferredPerimeter?.plotId shouldBe university.building.id
+            access.routes.forEach { (id, route) -> grown.routes[id.toString()] shouldBe route }
+            CivsAutonomousGeometry.overlaps(university.envelope, gate.bounds) shouldBe false
+            val route = grown.routes.getValue(university.building.id.toString())
+            val protected = access.roadColumns(city)
+            val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(university.building.copy(bounds = university.envelope), 0),
+                surface, access, grown.walls, reservedRoute = route, protectedRoadColumns = protected)
+            draft.columns.none { !it.preserve && civsTerrainKey(it.x, it.z) in protected } shouldBe true
+            val incomplete = surface.copy(columns = surface.columns - surface.columns.keys.first())
+            shouldThrow<CivsRejection> { CivsSettlementPlans.prepareGrowth(city, templates, incomplete, access, profile) }
+                .values["infrastructure-slope"] shouldBe "13"
+        } finally {
+            unmockkObject(CivsSettlementPlans)
+        }
+    }
+
+    test("a paid catalog family keeps its shared upgrade footprint when the city prefers another family") {
+        val base = settlementPlanCity()
+        val templates = settlementPlanTemplates()
+        val (first, last) = templates.getValue(BuildingType.UNIVERSITY)
+        val compact = CivsSettlementPlans.at(first.copy(
+            schematicId = "civs/v2/acacia/education-communitycollege/3a78844a2ef09e51183e/level1"),
+            CivPosition(24, 64, -24), 270).copy(phase = BuildingPhase.ACTIVE)
+        val preferred = last.copy(schematicId = "civs/v2/medievaloak/education-university/48c5844d7ebe5a1c05af/level3")
+        val city = base.copy(buildings = base.buildings + compact)
+        val profile = city.buildings.map { it.type }
+        val grown = CivsSettlementPlans.prepare(city, templates + (BuildingType.UNIVERSITY to (first to preferred)),
+            settlementPlanSurface(city), CivAutonomousAccess(), profile = profile, halfWidth = 56)
+        grown.plots.single { it.building.id == compact.id }.envelope shouldBe compact.bounds
+    }
+
     test("accepted orders and FIFO entries defer extension and a failed search keeps all old intent") {
         val before = legacy
         val plot = requireNotNull(CivsSettlementPlans.next(before, BuildingType.HOUSE))
