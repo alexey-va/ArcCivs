@@ -37,12 +37,12 @@ internal class CivsCitizenNap(
             actor.nextIdleNapAt = now + 45_000L + offset
             return false
         }
-        actor.nextIdleNapAt = now + 120_000L + offset
-        if (runtime.actors.values.count { it.idleNap != null } >= 2) return false
-
+        // A missed audience or unsafe seat is a short staggered recheck; actual rest uses the long cooldown.
+        actor.nextIdleNapAt = now + 5_000L + offset % 5_000L
         val npc = actor.npc
         val ground = npc.location
-        if (ground.world != world || !hasViewer(world, ground) || !safeGround(city, world, ground)) return false
+        if (ground.world != world || !hasViewer(world, ground)) return false
+        if (runtime.actors.values.count { it.idleNap != null } >= 2 || !safeGround(city, world, ground)) return false
         val yaw = npc.bodyYaw
         val bounds = seatedBounds(ground, yaw, npc.scale)
         if (!clear(actor, world, ground, bounds)) return false
@@ -61,6 +61,7 @@ internal class CivsCitizenNap(
             runtime.logFailure(actor, "idle-nap", error)
             return false
         }
+        actor.nextIdleNapAt = now + 120_000L + offset
         runtime.statuses[actor.workerId] = "resting"
         CivsDiagnostics.event("citizen_idle_nap", "city" to actor.cityId, "worker" to actor.workerId,
             "action" to "start", "ground" to ground.point().coordinates(), "idle_reason" to actor.plan.idleReason)

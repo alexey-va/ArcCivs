@@ -7,6 +7,7 @@ import net.kyori.adventure.text.Component
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.event.player.PlayerQuitEvent
+import java.util.UUID
 
 class CivsCitizenNapTest : FunSpec({
     test("an idle adult sits above its actual ground and gives the place back when hungry") {
@@ -43,6 +44,42 @@ class CivsCitizenNapTest : FunSpec({
         }
     }
 
+    test("a viewer who comes closer after a missed attempt can see a nap at a completed local walk") {
+        residentRuntime(workerId = UUID(0, 42)) { h ->
+            h.background = true
+            val visual = NapVisualProbe(h)
+            val viewer = h.paper.server.onlinePlayers.single()
+            viewer.teleport(Location(h.world, 40.5, 64.0, .5))
+            h.idleNapGround()
+            val due = requireNotNull(h.actor().nextIdleNapAt)
+            h.navigationNow = due
+            h.owner.pulse(due)
+            visual.opened shouldBe 0
+            val walk = requireNotNull(h.actor().route?.wanderWalk)
+
+            viewer.teleport(Location(h.world, 12.5, 64.0, .5))
+            repeat(600) { tick ->
+                if (visual.opened == 0) {
+                    h.navigate()
+                    if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                }
+            }
+            walk.legs shouldBe walk.legLimit
+            visual.opened shouldBe 1
+            h.actor().npc.isSeated shouldBe true
+            h.routeIdentity() shouldBe null
+            val seatedAt = requireNotNull(h.navigationNow)
+            val cooldown = seatedAt + 120_000L + Math.floorMod(h.workerId.hashCode(), 45_000)
+            h.actor().nextIdleNapAt shouldBe cooldown
+
+            h.paper.performTicks(161)
+            h.owner.pulse(seatedAt + 8_050)
+            visual.closed shouldBe 1
+            visual.opened shouldBe 1
+            h.actor().nextIdleNapAt shouldBe cooldown
+        }
+    }
+
     test("an idle adult cannot sit in the air") {
         residentRuntime { h ->
             val visual = NapVisualProbe(h)
@@ -53,6 +90,7 @@ class CivsCitizenNapTest : FunSpec({
             h.owner.pulse(100_000)
             visual.opened shouldBe 0
             npc.isSeated shouldBe false
+            (requireNotNull(h.actor().nextIdleNapAt) - 100_000L in 5_000L..10_000L) shouldBe true
         }
     }
 
