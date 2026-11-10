@@ -149,7 +149,8 @@ class CivsStore(
     fun savePlan(plan: CivPlacementPlan): CompletableFuture<CivPlacementPlan> {
         val snapshot = plan.copy(building = snapshotBuilding(plan.building), blocks = plan.blocks.toList(), terrain = plan.terrain?.let {
             it.copy(blocks = it.blocks.toList(), route = it.route.toList(), waterFoundations = it.waterFoundations?.toList(),
-                requiredGrass = it.requiredGrass?.toList(), paidGateFloors = it.paidGateFloors?.toList())
+                requiredGrass = it.requiredGrass?.toList(), paidGateFloors = it.paidGateFloors?.toList(),
+                paidWaterFloors = it.paidWaterFloors?.toList())
         })
         return submit {
             // A failed atomic write can have reached rename; never retain its previous cached value.
@@ -489,7 +490,8 @@ class CivsStore(
         terrain = plan.terrain?.let { it.copy(blocks = java.util.List.copyOf(it.blocks),
             route = java.util.List.copyOf(it.route), waterFoundations = it.waterFoundations?.let { java.util.List.copyOf(it) },
             requiredGrass = it.requiredGrass?.let { java.util.List.copyOf(it) },
-            paidGateFloors = it.paidGateFloors?.let { java.util.List.copyOf(it) }) },
+            paidGateFloors = it.paidGateFloors?.let { java.util.List.copyOf(it) },
+            paidWaterFloors = it.paidWaterFloors?.let { java.util.List.copyOf(it) }) },
     ).also { planCache[it.id] = it }
 
     private fun snapshotBuilding(building: CivBuilding) = building.copy(transit = building.transit?.toList())

@@ -17,7 +17,11 @@ internal data class CivSettlementFrame(
     val fortified: Boolean = false,
 )
 
-internal data class CivSettlementGate(val side: Int, val center: CivPosition, val passage: CivBox)
+internal data class CivSettlementGate(val side: Int, val center: CivPosition, val passage: CivBox) {
+    fun apron(rotation: Int): CivBox = if (Math.floorMod(side + rotation / 90, 2) == 0)
+        CivBox(center.copy(x = center.x - 1, z = passage.min.z - 4), center.copy(x = center.x + 1, z = passage.max.z + 4))
+    else CivBox(center.copy(x = passage.min.x - 4, z = center.z - 1), center.copy(x = passage.max.x + 4, z = center.z + 1))
+}
 internal data class CivSettlementStreet(val from: CivPosition, val to: CivPosition)
 internal data class CivSettlementBlock(val position: CivPosition, val after: String)
 
@@ -33,7 +37,16 @@ internal data class CivSettlementPiece(
     val profileStage: Int? = null,
     val requiredGrass: List<CivPosition> = emptyList(),
     val paidGateFloors: List<CivPosition> = emptyList(),
-)
+    val paidWaterFloors: List<CivPosition> = emptyList(),
+) {
+    fun waterFloors(): List<CivPosition> = waterFoundations.map(CivWaterFoundation::floorPosition) + paidWaterFloors
+
+    /** Authored fills and AIR above preserved gate floors do not own the standing grade. */
+    fun floorGrades(): Map<Long, Int> = blocks.groupBy { civsTerrainKey(it.position.x, it.position.z) }
+        .mapValues { (_, cells) -> cells.minOf { it.position.y } } +
+        transit.associate { civsTerrainKey(it.x, it.z) to it.y - 1 } +
+        waterFloors().associate { civsTerrainKey(it.x, it.z) to it.y }
+}
 
 internal data class CivSettlementInfrastructure(
     val pieces: List<CivSettlementPiece>,
@@ -351,7 +364,7 @@ internal object CivsSettlementLayout {
         CivSettlementPiece(building.id, building.type, building.bounds, building.entrance,
             plan.blocks.map { CivSettlementBlock(it.position, it.after) }, building.transit.orEmpty(),
             plan.terrain?.waterFoundations.orEmpty(), CivsInfrastructureRebuild.stage(building).takeIf { it > 0 },
-            paidGateFloors = plan.terrain?.paidGateFloors.orEmpty())
+            paidGateFloors = plan.terrain?.paidGateFloors.orEmpty(), paidWaterFloors = plan.terrain?.paidWaterFloors.orEmpty())
     }.distinctBy { it.id }
 
     /**
@@ -450,7 +463,7 @@ internal object CivsSettlementLayout {
         }
         val retainedFloors = accepted.flatMap { it.blocks }.groupBy { key(it.position) }
             .mapValues { (_, cells) -> cells.minOf { it.position.y } } +
-            accepted.flatMap { it.waterFoundations }.associate { key(it.x, it.z) to it.floorY } +
+            accepted.flatMap(CivSettlementPiece::waterFloors).associate { key(it) to it.y } +
             accepted.flatMap { it.paidGateFloors }.associate { key(it) to it.y } +
             fortificationGround.mapValues { it.value.y }
         val wood = wood(city.style)
@@ -556,11 +569,22 @@ internal object CivsSettlementLayout {
             return true
         }
         // Gates own their threshold. Adjacent roads stop at it, avoiding overlapping building boxes.
+        fun knownWater(box: CivBox): CivPosition? {
+            for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z) {
+                val y = surface.at(x, z)?.waterTopY ?: continue
+                return CivPosition(x, y, z)
+            }
+            return null
+        }
         for (gate in frame.gates) {
             if (accepted.any { it.type == BuildingType.GATE && sameColumns(it.bounds, gate.passage) }) continue
             if (deferred != null) {
                 reject("deferred-gate", gate.center)
                 continue
+            }
+            if (protectPaidGateFloors) {
+                val wet = knownWater(gate.passage) ?: knownWater(gate.apron(frame.rotation))
+                if (wet != null) { reject("gate-wet", wet); continue }
             }
             val cells = mutableListOf<CivSettlementBlock>()
             val transit = mutableListOf<CivPosition>()

@@ -120,10 +120,16 @@ internal class CivsAutonomousPlacement(
                 if (unpaidSite != null) throw CivsRejection("stale-development")
                 val hall = city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL }
                     ?: throw CivsRejection("stale-development")
-                return@runCatching loadAccess(city).thenCombineAsync(world.autonomousHeightField(city, hall, hall), { access, surface ->
+                return@runCatching loadAccess(city).thenCombineAsync(world.autonomousHeightField(city, hall, hall, markWaterTop = true), { access, surface ->
                     if (result.isDone || closed) throw CivsRejection("world-closed")
-                    CivsSettlementPlans.recoverDeferredPerimeter(city, surface, access)
-                }, executor)
+                    CivsSettlementPlans.recoverDeferredPerimeter(city, surface, access, executor) { columns ->
+                        if (result.isDone || closed) throw CivsRejection("world-closed")
+                        world.autonomousShoreField(city, hall, columns).thenApply { survey ->
+                            if (result.isDone || closed) throw CivsRejection("world-closed")
+                            survey
+                        }
+                    }
+                }, executor).thenCompose { it }
             }
             val seed = unpaidSite?.blueprint?.building?.copy(phase = BuildingPhase.SITE)
             val seedRoute = unpaidSite?.terrain?.route?.toList()
@@ -477,7 +483,7 @@ internal class CivsAutonomousPlacement(
                 val waterColumns = (frame().wallObstacles + frame().gates.map { it.passage }).flatMapTo(hashSetOf()) { box ->
                     (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
                 }
-                await(world.autonomousHeightField(city, hall, hall, waterColumns)) { field ->
+                await(world.autonomousHeightField(city, hall, hall, waterColumns, markWaterTop = protectPaidGateFloors)) { field ->
                     surface = field; columns = field.columns.size
                     if (wallInfill != null) {
                         val (piece, buildable) = CivsWallInfill.prepare(city, wallInfill, field, access, acceptedWork)
@@ -724,15 +730,7 @@ internal class CivsAutonomousPlacement(
             val futureObstacles = adopted?.plots.orEmpty().filter {
                 it.building.id != option.building.id && city.building(it.building.id) == null
             }.map { it.envelope }
-            val infrastructureFloors = buildMap {
-                piece?.blocks?.groupBy { civsTerrainKey(it.position.x, it.position.z) }?.forEach { (column, cells) ->
-                    put(column, cells.minOf { it.position.y })
-                }
-                // Skipped paid floors can still have AIR writes above them. Transit, rather
-                // than the lowest remaining write, owns each public column's exact grade.
-                piece?.transit.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.y - 1) }
-                piece?.waterFoundations.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.floorY) }
-            }
+            val infrastructureFloors = piece?.floorGrades().orEmpty()
             val reservedRoute = when {
                 routeRefreshed -> null
                 reservation == null -> pinnedRoute

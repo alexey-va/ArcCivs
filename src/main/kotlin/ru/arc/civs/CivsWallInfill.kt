@@ -78,14 +78,16 @@ internal object CivsWallInfill {
         val wallPlan = access.infrastructure.single { it.id == wall.id }
         val gateEdge = if (axis(wall.bounds.min) > axis(gate.bounds.max)) axis(gate.bounds.max) else axis(gate.bounds.min)
         val wallEdge = if (axis(wall.bounds.min) > axis(gate.bounds.max)) axis(wall.bounds.min) else axis(wall.bounds.max)
+        val waterFloors = wallPlan.waterFloors().filter { axis(it) == wallEdge }.associateBy(::cross)
         return buildMap {
             val box = target.footprint
             for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z) {
                 val p = CivPosition(x, 0, z)
                 val g = gate.transit.orEmpty().filter { cross(it) == cross(p) }
                     .minByOrNull { kotlin.math.abs(axis(it) - gateEdge) }?.y?.minus(1) ?: gate.bounds.min.y
-                val w = wallPlan.blocks.filter { axis(it.position) == wallEdge && cross(it.position) == cross(p) }
-                    .minOfOrNull { it.position.y } ?: throw CivsRejection("wall-infill-source-missing")
+                val w = waterFloors[cross(p)]?.y ?:
+                    wallPlan.blocks.filter { axis(it.position) == wallEdge && cross(it.position) == cross(p) }
+                        .minOfOrNull { it.position.y } ?: throw CivsRejection("wall-infill-source-missing")
                 val fraction = (axis(p) - gateEdge).toDouble() / (wallEdge - gateEdge)
                 val ground = kotlin.math.floor(g + (w - g) * fraction).toInt()
                 val native = surface.at(x, z) ?: throw CivsRejection("chunks-unloaded")

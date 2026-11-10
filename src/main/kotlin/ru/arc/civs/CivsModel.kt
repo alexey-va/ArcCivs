@@ -265,6 +265,8 @@ data class CivPlanBlock(val position: CivPosition, val before: String, val after
 data class CivWaterFoundation(val x: Int, val z: Int, val floorY: Int, val waterTopY: Int, val bottomY: Int) {
     fun contains(position: CivPosition): Boolean = position.x == x && position.z == z &&
         position.y > bottomY && position.y <= floorY
+
+    internal fun floorPosition() = CivPosition(x, floorY, z)
 }
 
 /** Journaled earthworks precede the authored schematic; route positions are standing coordinates. */
@@ -278,7 +280,11 @@ data class CivTerraformPlan(
     val waterFoundations: List<CivWaterFoundation>? = null,
     val requiredGrass: List<CivPosition>? = null,
     val paidGateFloors: List<CivPosition>? = null,
-)
+    /** A refit keeps this already built foundation at its paid grade. */
+    val paidWaterFloors: List<CivPosition>? = null,
+) {
+    internal fun waterFloors(): List<CivPosition> = paidWaterFloors ?: waterFoundations.orEmpty().map(CivWaterFoundation::floorPosition)
+}
 data class CivPlacementPlan(
     val id: UUID,
     val cityId: UUID,

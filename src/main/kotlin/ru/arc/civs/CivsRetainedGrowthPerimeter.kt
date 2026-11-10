@@ -119,10 +119,7 @@ internal object CivsRetainedGrowthPerimeter {
             val open = CivsInfrastructureRebuild.openColumns(gate.passage, acrossX)
             admit(paid.filter { contains(gate.passage, it) }.all { (it.x to it.z) in open } &&
                 columns(gate.passage).none { (x, z) -> civsTerrainKey(x, z) in paidFloors && (x to z) !in open }, "gate-paid-road")
-            val apron = if (acrossX) CivBox(gate.center.copy(x = gate.center.x - 1, z = gate.passage.min.z - 4),
-                gate.center.copy(x = gate.center.x + 1, z = gate.passage.max.z + 4))
-                else CivBox(gate.center.copy(x = gate.passage.min.x - 4, z = gate.center.z - 1),
-                    gate.center.copy(x = gate.passage.max.x + 4, z = gate.center.z + 1))
+            val apron = gate.apron(frame.rotation)
             admit(ordinary.none { overlaps(apron, it) } && retained.infrastructure.none { overlaps(apron, it.bounds) } &&
                 columns(apron).all { (x, z) -> city.contains(x, z) && surface.at(x, z)?.let { native ->
                     native.loaded && (native.natural || native.topY == native.groundY &&
@@ -162,9 +159,9 @@ internal object CivsRetainedGrowthPerimeter {
         val full = setOf("minecraft:stone_bricks", "minecraft:cobblestone") +
             listOf("oak", "spruce", "dark_oak").flatMap { wood -> listOf("minecraft:${wood}_log", "minecraft:${wood}_planks") }
         val barrier = perimeter.flatMapTo(hashSetOf()) { piece ->
-            val water = piece.waterFoundations.associateBy { civsTerrainKey(it.x, it.z) }
+            val water = piece.waterFloors().associateBy { civsTerrainKey(it.x, it.z) }
             piece.blocks.groupBy { civsTerrainKey(it.position.x, it.position.z) }.mapNotNull { (key, column) ->
-                val floor = water[key]?.floorY ?: column.minOf { it.position.y }
+                val floor = water[key]?.y ?: column.minOf { it.position.y }
                 key.takeIf { (1..2).all { height -> column.any {
                     it.position.y == floor + height && it.after.substringBefore('[') in full
                 } } }

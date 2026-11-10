@@ -16,7 +16,7 @@ internal data class CivTerrainSurface(
     fun at(x: Int, z: Int): CivTerrainSurfaceColumn? = columns[civsTerrainKey(x, z)]
 }
 
-/** Water metadata is opt-in survey evidence; a water column always remains non-natural. */
+/** Water top alone is an observation. Only an exact surveyed bottom allows a foundation. */
 internal data class CivTerrainSurfaceColumn(val groundY: Int, val natural: Boolean, val loaded: Boolean = true,
     val topY: Int = groundY, val waterTopY: Int? = null, val waterBottomY: Int? = null,
     val dirtPath: Boolean = false, val cleanGrass: Boolean = false)
@@ -46,9 +46,13 @@ internal data class CivRouteStreet(val center: CivPosition, val alongX: Boolean)
 /** A shorter unpaid approach, witnessed by one completed building's exact retained street. */
 internal data class CivPaidApproachReuse(val original: List<CivPosition>, val route: List<CivPosition>)
 
-internal fun civsGeneratedWaterInfrastructure(building: CivBuilding): Boolean =
-    building.type in setOf(BuildingType.WALL, BuildingType.GATE) && building.level == 1 && building.control == null &&
-        building.schematicId == "civs/infrastructure/v1/${building.type.name.lowercase()}/${building.id}"
+internal fun civsGeneratedWaterInfrastructure(building: CivBuilding): Boolean {
+    if (building.type !in setOf(BuildingType.WALL, BuildingType.GATE) || building.level != 1 || building.control != null) return false
+    if (building.schematicId == "civs/infrastructure/v1/${building.type.name.lowercase()}/${building.id}") return true
+    val stage = CivsInfrastructureRebuild.stage(building)
+    return building.type == BuildingType.WALL && stage > 0 &&
+        building.schematicId == CivsInfrastructureRebuild.schematicId(BuildingType.WALL, stage, building.id)
+}
 
 /** The generated palette has only stable full blocks; partial, falling and container blocks cannot become fill. */
 internal fun civsPaidWaterFoundationBlock(state: String): Boolean = state.substringBefore("[") in setOf(
@@ -72,6 +76,28 @@ internal fun civsWaterFoundationColumns(building: CivBuilding, foundations: List
 /** Full saved plans must contain every paid fill cell; a runtime batch validates only its own immutable cells. */
 internal fun civsValidateWaterFoundations(plan: CivPlacementPlan, complete: Boolean = true) {
     val columns = civsWaterFoundationColumns(plan.building, plan.terrain?.waterFoundations.orEmpty(), plan.terrain?.blocks.orEmpty())
+    val paid = plan.terrain?.paidWaterFloors.orEmpty()
+    if (paid.isNotEmpty()) {
+        val wall = plan.building
+        val terrain = requireNotNull(plan.terrain)
+        CivsRules.check(columns.isEmpty() && !plan.adminPlacement && wall.type == BuildingType.WALL &&
+            wall.level == 1 && wall.control == null && CivsInfrastructureRebuild.version(wall) == 5 &&
+            CivsInfrastructureRebuild.stage(wall) > 0 && CivsGateRefit.retainedPlanId(wall) != wall.id &&
+            paid.size <= 256, "invalid-plan")
+        val floors = paid.associateBy { civsTerrainKey(it.x, it.z) }
+        CivsRules.check(floors.size == paid.size && paid.all { p ->
+            wall.bounds.contains(p.x, p.y, p.z) && terrain.bounds.contains(p.x, p.y, p.z)
+        } && terrain.blocks.none { civsTerrainKey(it.position.x, it.position.z) in floors }, "invalid-plan")
+        val seen = hashSetOf<CivPosition>()
+        for (cell in plan.blocks) {
+            val p = cell.position
+            val floor = floors[civsTerrainKey(p.x, p.z)] ?: continue
+            if (p.y > floor.y) continue
+            CivsRules.check(cell.before == cell.after && civsPaidWaterFoundationBlock(cell.after), "invalid-plan")
+            if (p == floor) seen += p
+        }
+        CivsRules.check(!complete || seen.size == floors.size, "invalid-plan")
+    }
     if (columns.isEmpty()) return
     val cells = plan.blocks.associateBy { it.position }
     for (f in columns.values) for (y in f.bottomY + 1..f.floorY) {

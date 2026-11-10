@@ -59,6 +59,16 @@ internal object CivsInfrastructureRebuild {
 
     fun matchesSource(source: CivPlacementPlan, captured: CivPlacementPlan): Boolean {
         val expected = source.blocks.associate { it.position to it.after }
+        val water = if (source.building.type == BuildingType.WALL) source.terrain?.waterFloors().orEmpty() else emptyList()
+        if (water != captured.terrain?.paidWaterFloors.orEmpty()) return false
+        if (water.isNotEmpty()) {
+            val floors = water.associateBy { civsTerrainKey(it.x, it.z) }
+            fun foundation(rows: List<CivPlanBlock>) = rows.filter { cell ->
+                val p = cell.position
+                floors[civsTerrainKey(p.x, p.z)]?.let { p.y <= it.y } == true
+            }.associate { it.position to it.after }
+            if (foundation(source.blocks) != foundation(captured.blocks)) return false
+        }
         return source.terrain?.paidGateFloors.orEmpty() == captured.terrain?.paidGateFloors.orEmpty() &&
             captured.blocks.all { sameOwnedState(expected[it.position] ?: "minecraft:air", it.before) }
     }
@@ -265,6 +275,7 @@ internal object CivsInfrastructureRebuild {
         val paidGateFloors = source.terrain?.paidGateFloors.orEmpty()
         requireGate(survivor == null || paidGateFloors.isEmpty(), "gate-refit-route-conflict")
         val capture = captureId(source.id, stage, survivor?.id)
+        val paidWater = source.terrain?.waterFloors().orEmpty()
         var piece = CivSettlementPiece(old.id, old.type, old.bounds, old.entrance,
             source.blocks.map { CivSettlementBlock(it.position, it.after) }, old.transit.orEmpty())
         if (old.type == BuildingType.GATE && survivor == null) {
@@ -273,11 +284,12 @@ internal object CivsInfrastructureRebuild {
         } else {
             val alongX = if (old.type == BuildingType.GATE) axis(old) else wallAxis(city, old)
             val middle = if (alongX) (old.bounds.min.z + old.bounds.max.z) / 2 else (old.bounds.min.x + old.bounds.max.x) / 2
-            val water = source.terrain?.waterFoundations.orEmpty().associateBy { it.x to it.z }
+            val water = paidWater.associateBy { it.x to it.z }
             val joins = wallJoins(city.buildings.filter { it.type == BuildingType.WALL }.map { it.bounds })
             val cells = source.blocks.associate { it.position to it.after }.toMutableMap()
             for ((column, authored) in source.blocks.groupBy { it.position.x to it.position.z }) {
-                val floor = water[column]?.floorY ?: authored.minOf { it.position.y }
+                val waterFloor = water[column]
+                val floor = waterFloor?.y ?: authored.minOf { it.position.y }
                 val top = authored.maxOf { it.position.y } - floor
                 requireGate(top in 3..16)
                 // The retired gate's front/back rows remain service ground, never a second public passage.
@@ -293,6 +305,7 @@ internal object CivsInfrastructureRebuild {
                     else if (alongX) column.second in setOf(old.bounds.min.z, old.bounds.max.z)
                     else column.first in setOf(old.bounds.min.x, old.bounds.max.x)
                 wallColumn(city.style, stage, column.first, floor, column.second, alongX, middle, top, edge, column in joins)
+                    .filter { old.type != BuildingType.WALL || waterFloor == null || it.position.y > floor }
                     .forEach { cells[it.position] = it.after }
             }
             piece = piece.copy(blocks = cells.entries.sortedWith(compareBy({ it.key.y }, { it.key.z }, { it.key.x }))
@@ -309,7 +322,8 @@ internal object CivsInfrastructureRebuild {
         return source.copy(id = capture, building = target, blocks = piece.blocks.filterNot { it.position in protected }.map {
             CivPlanBlock(it.position, before[it.position] ?: "minecraft:air", it.after)
         }, terrain = source.terrain?.copy(blocks = emptyList(), cutCount = 0, fillCount = 0, waterFoundations = null,
-            requiredGrass = null), capturedSha256 = null)
+            requiredGrass = null, paidWaterFloors = paidWater.takeIf { old.type == BuildingType.WALL && it.isNotEmpty() }),
+            capturedSha256 = null)
     }
 
     private fun captureId(source: UUID, stage: Int, survivor: UUID? = null): UUID = UUID.nameUUIDFromBytes(

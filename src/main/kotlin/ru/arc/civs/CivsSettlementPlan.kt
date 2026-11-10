@@ -2,6 +2,8 @@ package ru.arc.civs
 
 import java.util.UUID
 import java.util.Collections
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
 import kotlin.math.abs
 
 /** Adopted spatial intent. Native before-images and payment remain owned by each construction order. */
@@ -224,7 +226,9 @@ internal object CivsSettlementPlans {
     }
 
     /** Replace an unbuilt outline only after the whole new ring and each ordinary builder approach are proven. */
-    fun recoverDeferredPerimeter(city: Settlement, surface: CivTerrainSurface, retained: CivAutonomousAccess): CivSettlementPlan {
+    fun recoverDeferredPerimeter(city: Settlement, surface: CivTerrainSurface, retained: CivAutonomousAccess,
+        executor: Executor, surveyShore: ((List<CivPosition>) -> CompletableFuture<CivTerrainSurface>)? = null):
+        CompletableFuture<CivSettlementPlan> {
         val prior = current(city) ?: throw CivsRejection("stale-development")
         val deferred = prior.deferredPerimeter ?: throw CivsRejection("stale-development")
         val origin = city.building(deferred.plotId)
@@ -246,25 +250,54 @@ internal object CivsSettlementPlans {
         val envelopes = prior.plots.associate { it.building.id to it.envelope }
         val routes = prior.routes.mapKeys { UUID.fromString(it.key) } + retained.routes
         val base = CivsSettlementLayout.frame(city)
-        val frame = CivsSettlementPerimeter.adapt(reserved, base, surface, routes, retained.routes.values,
-            envelopes = envelopes, insidePaid = paidWall.map { it.bounds })
-        val interior = CivsSettlementGrowth.interior(frame)
-        if (interior.isEmpty() || paidWall.any { piece ->
-                val box = piece.bounds
-                (box.min.x..box.max.x).any { x -> (box.min.z..box.max.z).any { z -> civsTerrainKey(x, z) !in interior } }
-            }) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-growth-paid-quarter"))
-        val next = prior.copy(revision = Math.addExact(prior.revision, 1), walls = frame.wallObstacles,
-            gates = frame.gates.map { it.passage }, gateSides = frame.gates.map { it.side }, deferredPerimeter = null)
-        val forecast = reserved.copy(autonomy = city.autonomy.copy(plan = next))
-        val allRoutes = (routes.values + retained.routes.values).distinct()
-        val layout = CivsSettlementLayout.infrastructure(forecast, frame, surface, allRoutes, retained.infrastructure,
-            pavingRoutes = emptyList(), retainedRoutes = retained.routes.values, retainedAccess = retained, protectPaidGateFloors = true)
-        if (!layout.perimeterClosed || layout.rejected.isNotEmpty()) throw CivsRejection("autonomy-layout-obstructed",
-            mapOf("stage" to "retained-growth-infrastructure") + layout.rejected.mapValues { it.value.toString() })
-        CivsRetainedGrowthPerimeter.validateResult(frame, retained, layout, allRoutes)
+        fun finish(frame: CivSettlementFrame, surveyed: CivTerrainSurface): CivSettlementPlan {
+            val interior = CivsSettlementGrowth.interior(frame)
+            if (interior.isEmpty() || paidWall.any { piece ->
+                    val box = piece.bounds
+                    (box.min.x..box.max.x).any { x -> (box.min.z..box.max.z).any { z -> civsTerrainKey(x, z) !in interior } }
+                }) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-growth-paid-quarter"))
+            val next = prior.copy(revision = Math.addExact(prior.revision, 1), walls = frame.wallObstacles,
+                gates = frame.gates.map { it.passage }, gateSides = frame.gates.map { it.side }, deferredPerimeter = null)
+            val forecast = reserved.copy(autonomy = city.autonomy.copy(plan = next))
+            val allRoutes = (routes.values + retained.routes.values).distinct()
+            val layout = CivsSettlementLayout.infrastructure(forecast, frame, surveyed, allRoutes, retained.infrastructure,
+                pavingRoutes = emptyList(), retainedRoutes = retained.routes.values, retainedAccess = retained, protectPaidGateFloors = true)
+            if (!layout.perimeterClosed || layout.rejected.isNotEmpty()) throw CivsRejection("autonomy-layout-obstructed",
+                mapOf("stage" to "retained-growth-infrastructure") + layout.rejected.mapValues { it.value.toString() })
+            CivsRetainedGrowthPerimeter.validateResult(frame, retained, layout, allRoutes)
 
-        val entrances = perimeterEntrances(city, forecast, frame, surface, retained, layout, envelopes.values)
-        return next.copy(perimeterEntrances = entrances).also { validate(city, it) }
+            val entrances = perimeterEntrances(city, forecast, frame, surveyed, retained, layout, envelopes.values)
+            return next.copy(perimeterEntrances = entrances).also { validate(city, it) }
+        }
+        var shore: CivPerimeterShore? = null
+        val observeShore: ((CivPerimeterShore) -> Unit)? = surveyShore?.let { { survey -> shore = survey } }
+        val frame = try {
+            CivsSettlementPerimeter.adapt(reserved, base, surface, routes, retained.routes.values,
+                envelopes = envelopes, insidePaid = paidWall.map { it.bounds }, surveyShore = observeShore)
+        } catch (failure: CivsRejection) {
+            val retry = shore ?: throw failure
+            return requireNotNull(surveyShore)(retry.columns).thenApplyAsync({ native ->
+                val proved = buildMap {
+                    for (top in retry.columns) {
+                        val column = native.at(top.x, top.z) ?: continue
+                        val bottom = column.waterBottomY ?: continue
+                        if (column.loaded && !column.natural && column.waterTopY == top.y && column.topY == top.y &&
+                            column.groundY == top.y && top.y.toLong() - bottom in 1L..CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH.toLong())
+                            put(civsTerrainKey(top.x, top.z), column)
+                    }
+                }
+                try {
+                    if (proved.isEmpty() || native.minHeight != surface.minHeight || native.maxHeight != surface.maxHeight)
+                        throw failure
+                    val enriched = surface.copy(columns = surface.columns + proved)
+                    finish(retry.separate(enriched), enriched)
+                } catch (refusal: CivsRejection) {
+                    throw CivsRejection(refusal.reason, refusal.values + mapOf("shore_requested" to retry.columns.size.toString(),
+                        "shore_proved" to proved.size.toString())).also { it.initCause(refusal) }
+                }
+            }, executor)
+        }
+        return CompletableFuture.completedFuture(finish(frame, surface))
     }
 
     private fun completedPerimeter(city: Settlement, prior: CivSettlementPlan,
@@ -308,12 +341,11 @@ internal object CivsSettlementPlans {
         frame: CivSettlementFrame, retained: CivAutonomousAccess, envelopes: Collection<CivBox>,
         paidRoads: Set<Long>, preferred: Set<Long>): CivPosition {
         val building = CivsInfrastructure.building(piece)
-        val floors = piece.blocks.groupBy { civsTerrainKey(it.position.x, it.position.z) }
-            .mapValues { (_, cells) -> cells.minOf { it.position.y } }
+        val floors = piece.floorGrades()
         fun accepts(entrance: CivPosition): Boolean = try {
             CivsAutonomousTerraform.draft(city, CivTerraformOption(building.copy(entrance = entrance), 0),
                 surface, retained, frame.wallObstacles, floors, protectedRoadColumns = paidRoads,
-                paidGateFloors = piece.paidGateFloors, preferredRoads = preferred)
+                paidGateFloors = piece.paidGateFloors, preferredRoads = preferred, waterFoundations = piece.waterFoundations)
             true
         } catch (rejection: CivsRejection) {
             if (!CivsRetainedGrowthPerimeter.geometric(rejection)) throw rejection

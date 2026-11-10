@@ -4,15 +4,21 @@ import java.util.ArrayDeque
 import java.util.UUID
 import kotlin.math.abs
 
+internal class CivPerimeterShore(val columns: List<CivPosition>,
+    val separate: (CivTerrainSurface) -> CivSettlementFrame)
+
 /** A bounded separator around adopted parcels. Produces ordinary wall/gate rectangles, never world writes. */
 internal object CivsSettlementPerimeter {
+    const val MAXIMUM_SHORE_COLUMNS = 256
+    private const val SHORE_REACH = 8
     private val exterior = CivsSettlementLayout.exteriorTypes
     private val neighbours = listOf(-1 to -1, 0 to -1, 1 to -1, -1 to 0, 1 to 0, -1 to 1, 0 to 1, 1 to 1)
 
     fun adapt(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
         routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>,
         fortifications: Map<UUID, CivFortificationProof> = emptyMap(),
-        envelopes: Map<UUID, CivBox> = emptyMap(), insidePaid: List<CivBox> = emptyList()): CivSettlementFrame {
+        envelopes: Map<UUID, CivBox> = emptyMap(), insidePaid: List<CivBox> = emptyList(),
+        surveyShore: ((CivPerimeterShore) -> Unit)? = null): CivSettlementFrame {
         val box = frame.core
         val maximumSize = CivsSettlementLayout.MAXIMUM_HALF_WIDTH * 2 + 1
         require(box.max.x - box.min.x + 1 in 1..maximumSize && box.max.z - box.min.z + 1 in 1..maximumSize)
@@ -30,8 +36,34 @@ internal object CivsSettlementPerimeter {
         })
         val occupied = city.buildings.filterNot { it.type.isInfrastructure }.map { envelopes[it.id] ?: it.bounds } + insidePaid
         val budget = CutBudget()
-        return try { separate(city, frame, surface, routes, retainedRoutes, fortifications, box, maximumSize, budget, occupied, interior, inner) }
-        catch (original: CivsRejection) {
+        fun capturedInterior(canvas: CivBox) = interior.allColumns { x, z ->
+            x > canvas.min.x && x < canvas.max.x && z > canvas.min.z && z < canvas.max.z &&
+                surface.at(x, z)?.loaded == true
+        }
+        fun preserveInterior(adapted: CivSettlementFrame): CivSettlementFrame {
+            val enclosed = CivsSettlementGrowth.interior(adapted)
+            // A gate can cover an approach seed. The reserved parcels must still stay inside.
+            if (!interior.boxes.all { it.allColumns { x, z -> civsTerrainKey(x, z) in enclosed } } || !singleInterior(enclosed))
+                throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-boundary-interior"))
+            if (city.buildings.any { building -> building.type == BuildingType.QUARRY &&
+                    !(envelopes[building.id] ?: building.bounds).allColumns { x, z -> civsTerrainKey(x, z) !in enclosed }
+                }) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-boundary-quarry"))
+            return adapted
+        }
+        var failedShore: CivPerimeterShore? = null
+        fun attempt(canvas: CivBox, size: Int): CivSettlementFrame {
+            failedShore = null
+            val collect: ((List<CivPosition>) -> Unit)? = if (surveyShore == null || frame.fortified) null else { columns ->
+                if (columns.isNotEmpty() && capturedInterior(canvas)) failedShore = CivPerimeterShore(columns) { enriched ->
+                    // One retry on the last dry canvas and its remaining original cut budget.
+                    preserveInterior(separate(city, frame, enriched, routes, retainedRoutes, fortifications, canvas,
+                        size, budget, occupied, interior, inner, dryGateCollars = true))
+                }
+            }
+            return separate(city, frame, surface, routes, retainedRoutes, fortifications, canvas, size, budget, occupied,
+                interior, inner, collectShore = collect)
+        }
+        fun dry(): CivSettlementFrame = try { attempt(box, maximumSize) } catch (original: CivsRejection) {
             if (frame.fortified || original.reason != "autonomy-layout-obstructed" ||
                 original.values["stage"] != "no-dry-perimeter" || surface.columns.isEmpty()) throw original
             val paidBoundaryRetry = original.values["inner_boundary_seeds"] != "0"
@@ -50,25 +82,13 @@ internal object CivsSettlementPerimeter {
             // input seed, including that unseen part, strictly inside the loaded retry tile.
             if (expanded.min.x > box.min.x || expanded.min.z > box.min.z || expanded.max.x < box.max.x ||
                 expanded.max.z < box.max.z || expanded == box ||
-                paidBoundaryRetry && !interior.allColumns { x, z ->
-                    x > expanded.min.x && x < expanded.max.x && z > expanded.min.z && z < expanded.max.z &&
-                        surface.at(x, z)?.loaded == true
-                }) throw original
-            val adapted = separate(city, frame, surface, routes, retainedRoutes, fortifications,
-                expanded, 165, budget, occupied, interior, inner)
-            if (paidBoundaryRetry) {
-                val enclosed = CivsSettlementGrowth.interior(adapted)
-                // The gate's closed footprint may cover route or apron seed cells. Native
-                // transit and grades are validated separately; the reserved parcels stay inside.
-                if (!interior.boxes.all { it.allColumns { x, z -> civsTerrainKey(x, z) in enclosed } } ||
-                    !singleInterior(enclosed))
-                    throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-boundary-interior"))
-                if (city.buildings.any { building ->
-                        building.type == BuildingType.QUARRY &&
-                            !(envelopes[building.id] ?: building.bounds).allColumns { x, z -> civsTerrainKey(x, z) !in enclosed }
-                    }) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-boundary-quarry"))
-            }
-            adapted
+                paidBoundaryRetry && !capturedInterior(expanded)) throw original
+            val adapted = attempt(expanded, 165)
+            if (paidBoundaryRetry) preserveInterior(adapted) else adapted
+        }
+        return try { dry() } catch (failure: CivsRejection) {
+            failedShore?.let { surveyShore?.invoke(it) }
+            throw failure
         }
     }
 
@@ -101,7 +121,8 @@ internal object CivsSettlementPerimeter {
     private fun separate(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
         routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>,
         fortifications: Map<UUID, CivFortificationProof>, box: CivBox, maximumSize: Int,
-        budget: CutBudget, occupied: List<CivBox>, interior: InteriorSeeds, inner: List<CivBuilding>): CivSettlementFrame {
+        budget: CutBudget, occupied: List<CivBox>, interior: InteriorSeeds, inner: List<CivBuilding>,
+        collectShore: ((List<CivPosition>) -> Unit)? = null, dryGateCollars: Boolean = false): CivSettlementFrame {
         val width = box.max.x - box.min.x + 1
         val height = box.max.z - box.min.z + 1
         require(width in 1..maximumSize && height in 1..maximumSize)
@@ -131,16 +152,28 @@ internal object CivsSettlementPerimeter {
                 }
             }
         }
-        fun clear(p: CivPosition) = surface.at(p.x, p.z)?.let { it.loaded &&
-            (it.natural || it.waterTopY != null && it.waterBottomY != null && it.topY == it.waterTopY &&
-                it.groundY == it.waterTopY && it.waterTopY.toLong() - it.waterBottomY in 1L..CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH.toLong() ||
-                retainedFloors[civsTerrainKey(p.x, p.z)] == it.groundY && it.topY == it.groundY) } == true &&
-            occupied.none { CivsAutonomousGeometry.horizontalContains(it, p) }
+        fun unoccupied(p: CivPosition) = occupied.none { CivsAutonomousGeometry.horizontalContains(it, p) }
+        val shoreRecovery = collectShore != null || dryGateCollars
+        fun clear(p: CivPosition) = surface.at(p.x, p.z)?.let { native ->
+            val retainedFloor = retainedFloors[civsTerrainKey(p.x, p.z)]
+            val dry = (!shoreRecovery || native.waterTopY == null) &&
+                (native.natural || retainedFloor == native.groundY && native.topY == native.groundY)
+            val wet = (!shoreRecovery || retainedFloor == null) && native.waterTopY != null && native.waterBottomY != null &&
+                native.topY == native.waterTopY && native.groundY == native.waterTopY &&
+                native.waterTopY.toLong() - native.waterBottomY in 1L..CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH.toLong()
+            native.loaded && (dry || wet)
+        } == true && unoccupied(p)
+        fun gateGround(p: CivPosition): Boolean {
+            if (!dryGateCollars) return clear(p)
+            val native = surface.at(p.x, p.z) ?: return false
+            return native.loaded && native.waterTopY == null && native.topY == native.groundY &&
+                (native.natural || native.dirtPath && retainedFloors[civsTerrainKey(p.x, p.z)] == native.groundY) && unoccupied(p)
+        }
         // A new ordinary gate reserves two solid flanks around its actual three-wide core.
         // Paid/adopted footprints never pass through this new separator branch.
         val gateRadius = 2
         fun gateClear(p: CivPosition) = (-gateRadius..gateRadius).all { dx -> (-gateRadius..gateRadius).all { dz ->
-            clear(p.copy(x = p.x + dx, z = p.z + dz))
+            gateGround(p.copy(x = p.x + dx, z = p.z + dz))
         } }
         val seeds = BooleanArray(area)
         fun seed(p: CivPosition) { index(p.x, p.z)?.let { seeds[it] = true } }
@@ -171,6 +204,8 @@ internal object CivsSettlementPerimeter {
         val source = area * 2
         val sink = source + 1
         val cut = Cut(sink + 1, budget)
+        val blocked = collectShore?.let { BooleanArray(area) }
+        fun boundary(i: Int) = i % width == 0 || i % width == width - 1 || i / width == 0 || i / width == height - 1
         var firstSteepSeed: CivPosition? = null
         for (i in 0 until area) {
             val p = point(i)
@@ -187,22 +222,29 @@ internal object CivsSettlementPerimeter {
             }
             val eligible = !seeds[i] && (fortification || clear(p) && (if (road) gateRoom else gentle) &&
                 (!frame.fortified || wideClear(p)))
+            blocked?.set(i, !eligible)
             // A small grid preference removes arbitrary one-cell zigzags among equally short cuts.
             val cost = if (!eligible) Cut.INFINITE else if (fortification) 0 else if (road) 100 else
                 10 + (if (surface.at(p.x, p.z)?.waterTopY != null) 10 else 0) +
                     if (Math.floorMod(p.x, 4) == 0 || Math.floorMod(p.z, 4) == 0) 0 else 2
             cut.edge(i * 2, i * 2 + 1, cost)
             if (seeds[i]) cut.edge(source, i * 2, Cut.INFINITE)
-            if (i % width == 0 || i % width == width - 1 || i / width == 0 || i / width == height - 1)
-                cut.edge(i * 2 + 1, sink, Cut.INFINITE)
+            if (boundary(i)) cut.edge(i * 2 + 1, sink, Cut.INFINITE)
             for ((dx, dz) in neighbours) index(p.x + dx, p.z + dz)?.let { neighbour ->
                 cut.edge(i * 2 + 1, neighbour * 2, Cut.INFINITE)
             }
         }
         val reachable = try { cut.separate(source, sink) } catch (failure: CivsRejection) {
             if (failure.values["stage"] != "no-dry-perimeter") throw failure
-            val boundarySeeds = (0 until area).filter { seeds[it] &&
-                (it % width == 0 || it % width == width - 1 || it / width == 0 || it / width == height - 1) }
+            val boundarySeeds = (0 until area).filter { seeds[it] && boundary(it) }
+            if (blocked != null && boundarySeeds.isEmpty()) collectShore(shoreColumns(width, height, seeds, blocked) { i ->
+                val p = point(i)
+                val key = civsTerrainKey(p.x, p.z)
+                surface.columns[key]?.takeIf { c ->
+                    c.loaded && !c.natural && c.waterBottomY == null && c.waterTopY == c.groundY &&
+                        c.topY == c.groundY && key !in retainedFloors && unoccupied(p)
+                }?.let { p.copy(y = it.groundY) }
+            })
             val routeBoundary = inner.asSequence().flatMap { building -> routes[building.id].orEmpty().asSequence()
                 .map { building to it } }.firstOrNull { (_, p) ->
                     p.x !in box.min.x + 1 until box.max.x || p.z !in box.min.z + 1 until box.max.z }
@@ -254,7 +296,7 @@ internal object CivsSettlementPerimeter {
                     for (n in minOf(0, positions.min())..maxOf(0, positions.max())) add(at(a, n))
                 }
             }
-            if (caps.any { !clear(it) || !gentle(it) || seeds[index(it.x, it.z)!!] ||
+            if (caps.any { !gateGround(it) || !gentle(it) || seeds[index(it.x, it.z)!!] ||
                     civsTerrainKey(it.x, it.z) in retainedFloors }) return null
             val passage = CivBox(at(-2, -2), at(2, 2))
             val open = CivsInfrastructureRebuild.openColumns(passage, alongX)
@@ -325,7 +367,7 @@ internal object CivsSettlementPerimeter {
                         val a = at(0, -3); val b = at(0, 3)
                         val ai = index(a.x, a.z) ?: continue
                         val bi = index(b.x, b.z) ?: continue
-                        if (!clear(a) || !clear(b) || reachable[ai * 2] != reachable[ai * 2 + 1] ||
+                        if (!gateGround(a) || !gateGround(b) || reachable[ai * 2] != reachable[ai * 2 + 1] ||
                             reachable[bi * 2] != reachable[bi * 2 + 1] || reachable[ai * 2] == reachable[bi * 2]) {
                             reject("approach"); continue
                         }
@@ -339,6 +381,9 @@ internal object CivsSettlementPerimeter {
                             reject("retained-route"); continue
                         }
                         val gate = CivSettlementGate(Math.floorMod(direction - frame.rotation / 90, 4), center, passage)
+                        if (dryGateCollars && !gate.apron(frame.rotation).allColumns { x, z ->
+                                gateGround(CivPosition(x, center.y, z))
+                            }) { reject("approach"); continue }
                         // Prefer an unchanged straight separator. Only a paid crossing can require
                         // the bounded endcap correction after every strict candidate was tried.
                         if ((-3..3).any { at(it, 0) !in cutCells } ||
@@ -374,7 +419,7 @@ internal object CivsSettlementPerimeter {
                 CivPosition(group.minOf { it.x } - gateRadius, city.center.y, group.minOf { it.z } - gateRadius),
                 CivPosition(group.maxOf { it.x } + gateRadius, city.center.y, group.maxOf { it.z } + gateRadius))
             for (x in passage.min.x..passage.max.x) for (z in passage.min.z..passage.max.z)
-                if (!clear(CivPosition(x, city.center.y, z)))
+                if (!gateGround(CivPosition(x, city.center.y, z)))
                     throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "gate-clearance", "x" to "$x", "z" to "$z"))
             val route = externalRoutes.first { first in it }
             val at = route.indexOf(first)
@@ -408,6 +453,37 @@ internal object CivsSettlementPerimeter {
         if (walls.size + gates.size > CivsRules.MAX_INFRASTRUCTURE)
             throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "dry-perimeter-budget", "walls" to "${walls.size}"))
         return frame.copy(wallObstacles = walls, gates = gates)
+    }
+
+    /** Only probe near interior seeds with an opaque path all the way to this canvas's rim. */
+    private fun shoreColumns(width: Int, height: Int, seeds: BooleanArray, blocked: BooleanArray,
+        sample: (Int) -> CivPosition?): List<CivPosition> {
+        val area = width * height
+        val leaks = BooleanArray(area)
+        val queue = ArrayDeque<Int>()
+        fun visitNeighbours(i: Int, visit: (Int) -> Unit) {
+            val x = i % width; val z = i / width
+            for ((dx, dz) in neighbours) if (x + dx in 0 until width && z + dz in 0 until height)
+                visit(i + dz * width + dx)
+        }
+        fun leak(i: Int) {
+            if (blocked[i] && !leaks[i]) { leaks[i] = true; queue.addLast(i) }
+        }
+        for (x in 0 until width) { leak(x); leak((height - 1) * width + x) }
+        for (z in 1 until height - 1) { leak(z * width); leak(z * width + width - 1) }
+        while (queue.isNotEmpty()) visitNeighbours(queue.removeFirst(), ::leak)
+
+        val distance = IntArray(area) { -1 }
+        for (i in 0 until area) if (seeds[i] && leaks[i]) { distance[i] = 0; queue.addLast(i) }
+        val result = ArrayList<CivPosition>()
+        while (queue.isNotEmpty() && result.size < MAXIMUM_SHORE_COLUMNS) {
+            val i = queue.removeFirst()
+            sample(i)?.let(result::add)
+            if (distance[i] < SHORE_REACH) visitNeighbours(i) { next ->
+                if (leaks[next] && distance[next] < 0) { distance[next] = distance[i] + 1; queue.addLast(next) }
+            }
+        }
+        return result
     }
 
     /** Both canvases share the original finite work allowance. */

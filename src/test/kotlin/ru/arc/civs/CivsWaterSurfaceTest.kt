@@ -108,6 +108,29 @@ class CivsWaterSurfaceTest : FunSpec({
             s.world.isChunkLoaded(2, 0) shouldBe false
         }
     }
+
+    test("a shore retry only probes loaded matching water tops with a full bed") {
+        waterSurfaceScenario { s ->
+            val hall = s.activeHall()
+            s.water(0, 0, 2)
+            s.water(1, 0, 2, bottom = Material.OAK_SLAB)
+            s.water(0, 1, 2)
+            val marked = s.capture(markWaterTop = true, previous = hall)
+            marked.at(0, 0) shouldBe CivTerrainSurfaceColumn(62, natural = false, waterTopY = 62)
+            s.world.getBlockAt(0, 63, 1).type = Material.WATER
+            val unavailable = CivPosition(32, 62, 0)
+            s.city = s.city.copy(radius = 32)
+            val selected = listOf(CivPosition(0, 62, 0), CivPosition(1, 62, 0), CivPosition(0, 62, 1), unavailable)
+            val shore = s.shore(hall, selected)
+            shore.columns.keys shouldBe selected.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            shore.at(0, 0) shouldBe CivTerrainSurfaceColumn(62, natural = false, waterTopY = 62, waterBottomY = 60)
+            shore.at(1, 0)?.waterBottomY shouldBe null
+            shore.at(0, 1)?.waterBottomY shouldBe null
+            shore.at(unavailable.x, unavailable.z)?.loaded shouldBe false
+            s.world.isChunkLoaded(2, 0) shouldBe false
+            s.world.getBlockAt(0, 62, 0).type shouldBe Material.WATER
+        }
+    }
 })
 
 private class WaterSurfaceScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
@@ -127,10 +150,21 @@ private class WaterSurfaceScenario(paper: MockBukkitTestRuntime) : AutoCloseable
         for (y in bed + 1..63) world.getBlockAt(x, y, z).type = if (y <= 62) liquid else Material.AIR
     }
 
-    fun capture(waterColumns: Set<Long> = emptySet()): CivTerrainSurface {
-        val capture = subject.autonomousHeightField(city, building, waterColumns = waterColumns)
+    fun activeHall(): CivBuilding = building.copy(phase = BuildingPhase.ACTIVE).also { city = city.copy(buildings = listOf(it)) }
+
+    fun capture(waterColumns: Set<Long> = emptySet(), markWaterTop: Boolean = false,
+        previous: CivBuilding? = null): CivTerrainSurface {
+        val capture = subject.autonomousHeightField(city, previous ?: building, previous, waterColumns, markWaterTop = markWaterTop)
         scheduler.tick(4)
         check(capture.isDone) { "Bounded native surface capture did not finish" }
+        return capture.join()
+    }
+
+    fun shore(hall: CivBuilding, columns: List<CivPosition>): CivTerrainSurface {
+        subject.scanChunks = { _, _, _ -> error("Sparse shore probes must never load chunks") }
+        val capture = subject.autonomousShoreField(city, hall, columns)
+        scheduler.tick(1)
+        check(capture.isDone) { "Sparse native water capture did not finish" }
         return capture.join()
     }
 

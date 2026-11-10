@@ -7,6 +7,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.spyk
+import org.bukkit.Bukkit
 import org.bukkit.Material
 import org.bukkit.block.Chest
 import org.bukkit.inventory.ItemStack
@@ -52,6 +53,77 @@ class CivsPaidWaterFoundationTest : FunSpec({
             plan.blocks.filter { s.foundations.single().contains(it.position) }.size shouldBe 7
             for (y in 56..62) s.world.getBlockAt(0, y, 0).type shouldBe Material.WATER
             s.world.getBlockAt(0, 55, 0).type shouldBe Material.GRAVEL
+        }
+    }
+
+    test("a paid generated shore wall keeps its foundation through the two native refits") {
+        paidWaterScenario(width = 2) { s ->
+            val wall = CivBox(CivPosition(0, 62, 0), CivPosition(1, 62, 0))
+            val frame = CivsSettlementLayout.frame(s.city).copy(wallObstacles = listOf(wall), gates = emptyList())
+            val piece = CivsSettlementLayout.infrastructure(s.city, frame, s.surface(), emptyList()).pieces.single()
+            piece.waterFoundations shouldBe s.foundations
+            val building = CivsInfrastructure.building(piece)
+            building.schematicId shouldBe CivsInfrastructureRebuild.schematicId(BuildingType.WALL, 1, building.id)
+            val initial = s.capture(piece, frame)
+            initial.terrain?.waterFoundations shouldBe s.foundations
+            initial.terrain!!.blocks.none { cell -> s.foundations.any { it.contains(cell.position) } } shouldBe true
+            val paid = initial.blocks.filter { cell -> s.foundations.any { it.contains(cell.position) } }
+            paid.size shouldBe 14
+            CivsMaterials.required(initial.copy(blocks = paid)) shouldBe mapOf("COBBLESTONE" to 2L, "STONE_BRICKS" to 12L)
+            val first = paid.first()
+            val native = s.world.getBlockAt(first.position.x, first.position.y, first.position.z)
+            native.type shouldBe Material.WATER
+            s.subject.permitsWaterFoundationMutation(initial, first, native) shouldBe true
+            s.denied += first.position
+            s.subject.permitsWaterFoundationMutation(initial, first, native) shouldBe false
+            s.denied -= first.position
+
+            val root = Files.createTempDirectory("civs-shore-wall-refit-")
+            try {
+                var source = initial.copy(id = building.id, capturedSha256 = "a".repeat(64))
+                val floors = s.foundations.map(CivWaterFoundation::floorPosition)
+                for (stage in 2..3) {
+                    val city = s.refitCity(source, stage)
+                    val proposal = CivsInfrastructureRebuild.proposal(city, source, emptyList())
+                    proposal.terrain?.waterFoundations shouldBe null
+                    proposal.terrain?.paidWaterFloors shouldBe floors
+                    val kept = proposal.blocks.filter { cell -> s.foundations.any { it.contains(cell.position) } }
+                    kept.toSet() shouldBe paid.map { it.copy(before = it.after) }.toSet()
+                    CivsMaterials.required(proposal.copy(blocks = kept)) shouldBe emptyMap()
+
+                    val capture = s.captureRefit(city, source, proposal)
+                    CivsInfrastructureRebuild.matchesSource(source, capture) shouldBe true
+                    val persisted = requireNotNull(capture.terrain)
+                    persisted.paidWaterFloors shouldBe floors
+                    CivsInfrastructureRebuild.matchesSource(source, capture.copy(terrain = persisted.copy(paidWaterFloors = null))) shouldBe false
+                    val protected = capture.blocks.single { it.position == first.position }
+                    CivsInfrastructureRebuild.matchesSource(source, capture.copy(blocks = capture.blocks - protected)) shouldBe false
+                    s.subject.permitsWaterFoundationMutation(capture, protected, native) shouldBe true
+                    native.type = Material.GLASS
+                    s.subject.permitsWaterFoundationMutation(capture, protected, native) shouldBe false
+                    shouldThrow<CompletionException> { s.revalidate(capture) }.cause!!.let {
+                        (it as CivsRejection).reason
+                    } shouldBe "world-changed"
+                    native.blockData = Bukkit.createBlockData(protected.after)
+                    val stored = capture.copy(id = proposal.id, capturedSha256 = "b".repeat(64))
+                    CivsStore(root, Executor(Runnable::run)).use { it.savePlan(stored).join() }
+                    source = CivsStore(root, Executor(Runnable::run)).use { requireNotNull(it.loadPlan(stored.id).join()) }
+                    source shouldBe stored
+                    CivsSettlementLayout.accepted(s.refitCity(source, stage), listOf(source)).single().waterFloors() shouldBe floors
+                }
+            } finally { root.toFile().deleteRecursively() }
+        }
+    }
+
+    test("an exact generated v5 gate cannot admit a water foundation") {
+        paidWaterScenario(width = 2) { s ->
+            val gate = CivSettlementGate(1, CivPosition(1, 63, 2), CivBox(CivPosition(-1, 63, 0), CivPosition(3, 63, 4)))
+            val frame = CivsSettlementLayout.frame(s.city).copy(wallObstacles = emptyList(), gates = listOf(gate))
+            val piece = CivsSettlementLayout.infrastructure(s.city, frame, s.surface(), emptyList()).pieces.single()
+            piece.waterFoundations shouldBe s.foundations
+            val building = CivsInfrastructure.building(piece)
+            building.schematicId shouldBe CivsInfrastructureRebuild.schematicId(BuildingType.GATE, 1, building.id)
+            shouldThrow<CivsRejection> { s.capture(piece, frame) }.reason shouldBe "invalid-plan"
         }
     }
 
@@ -216,9 +288,10 @@ private class PaidWaterScenario(paper: MockBukkitTestRuntime, width: Int) : Auto
     val city = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Paid water", world.uid, CivPosition(0, 64, 0), 96,
         "fixture", Stock(), listOf(hall), emptyList(), autonomy = CivAutonomy())
     val denied = mutableSetOf<CivPosition>()
+    private var activeCity = city
     private val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler, true)
-    val subject = spyk(CivsWorld(paper.createSimplePlugin("PaidWaterTest"), tasks, { 0L }) { listOf(city) })
+    val subject = spyk(CivsWorld(paper.createSimplePlugin("PaidWaterTest"), tasks, { 0L }) { listOf(activeCity) })
     private val terrain = CivTerraformPlan(building.bounds, emptyList(), listOf(building.entrance), 62, 0, 0, foundations)
     init {
         for (x in -2..1) for (z in -1..1) world.loadChunk(x, z)
@@ -237,9 +310,47 @@ private class PaidWaterScenario(paper: MockBukkitTestRuntime, width: Int) : Auto
         } }
         return finish(subject.captureAutonomousSite(city.id, city.owner, city.worldId, building, cells, terrain))
     }
+    fun surface(): CivTerrainSurface = CivTerrainSurface(-64, 320, buildMap {
+        for (x in -24..8) for (z in -8..8) put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(63, true))
+        for (f in foundations) put(civsTerrainKey(f.x, f.z),
+            CivTerrainSurfaceColumn(f.waterTopY, false, waterTopY = f.waterTopY, waterBottomY = f.bottomY))
+    })
+
+    fun capture(piece: CivSettlementPiece, frame: CivSettlementFrame): CivPlacementPlan {
+        val building = CivsInfrastructure.building(piece)
+        val floors = piece.blocks.groupBy { civsTerrainKey(it.position.x, it.position.z) }
+            .mapValues { (_, cells) -> cells.minOf { it.position.y } } +
+            piece.waterFoundations.associate { civsTerrainKey(it.x, it.z) to it.floorY }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface(),
+            additionalObstacles = frame.wallObstacles, infrastructureFloors = floors, waterFoundations = piece.waterFoundations)
+        val terrain = finish(subject.captureTerraform(city, draft, Executor(Runnable::run)))
+        val cells = schematicCells(piece.bounds, piece.blocks.associate { it.position to it.after })
+        return finish(subject.captureAutonomousSite(city.id, city.owner, city.worldId, building, cells, terrain))
+    }
+
+    fun refitCity(source: CivPlacementPlan, stage: Int): Settlement =
+        city.copy(buildings = listOf(hall.copy(level = stage), source.building.copy(phase = BuildingPhase.ACTIVE)))
+
+    fun captureRefit(city: Settlement, source: CivPlacementPlan, proposal: CivPlacementPlan): CivPlacementPlan {
+        activeCity = city
+        for (cell in source.terrain?.blocks.orEmpty() + source.blocks) {
+            val (x, y, z) = cell.position
+            world.getBlockAt(x, y, z).blockData = Bukkit.createBlockData(cell.after)
+        }
+        val cells = schematicCells(proposal.building.bounds, proposal.blocks.associate { it.position to it.after })
+        return finish(subject.captureSite(city.id, city.owner, city.worldId, proposal.building, cells,
+            city.building(source.building.id), proposal.terrain))
+    }
+
+    private fun schematicCells(bounds: CivBox, authored: Map<CivPosition, String>): List<ArcSchematicBlock> = buildList {
+        for (x in bounds.min.x..bounds.max.x) for (z in bounds.min.z..bounds.max.z) for (y in bounds.min.y..bounds.max.y) {
+            val after = authored[CivPosition(x, y, z)] ?: "minecraft:barrier"
+            add(ArcSchematicBlock(ArcSchematicPoint(x, y, z), after, after == "minecraft:air", after == "minecraft:barrier"))
+        }
+    }
     fun revalidate(plan: CivPlacementPlan) = finish(subject.revalidate(plan, city.owner))
     private fun <T> finish(future: CompletableFuture<T>): T {
-        scheduler.tick(4)
+        repeat(80) { if (!future.isDone) scheduler.tick() }
         check(future.isDone) { "Bounded paid foundation scan did not finish" }
         return future.join()
     }

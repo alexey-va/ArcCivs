@@ -1083,7 +1083,9 @@ private class InfrastructurePlacementScenario(halfWidth: Int = 24) : AutoCloseab
     init {
         every { blueprints.autonomousSource(any(), any()) } returns null
         // The same dry fixture answers both ordinary scans and explicit infrastructure water-survey columns.
-        every { world.autonomousHeightField(any(), any(), any(), any()) } answers { CompletableFuture.completedFuture(surface) }
+        every { world.autonomousHeightField(any(), any(), any(), any(), markWaterTop = any()) } answers {
+            CompletableFuture.completedFuture(surface)
+        }
         every { world.captureTerraform(any(), any(), any(), any()) } answers {
             drafts += arg<CivTerraformDraft>(1)
             CompletableFuture.failedFuture(CivsRejection("test-selected-infrastructure-draft"))
