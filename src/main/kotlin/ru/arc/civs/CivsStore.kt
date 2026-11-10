@@ -149,7 +149,7 @@ class CivsStore(
     fun savePlan(plan: CivPlacementPlan): CompletableFuture<CivPlacementPlan> {
         val snapshot = plan.copy(building = snapshotBuilding(plan.building), blocks = plan.blocks.toList(), terrain = plan.terrain?.let {
             it.copy(blocks = it.blocks.toList(), route = it.route.toList(), waterFoundations = it.waterFoundations?.toList(),
-                requiredGrass = it.requiredGrass?.toList())
+                requiredGrass = it.requiredGrass?.toList(), paidGateFloors = it.paidGateFloors?.toList())
         })
         return submit {
             // A failed atomic write can have reached rename; never retain its previous cached value.
@@ -488,7 +488,8 @@ class CivsStore(
         blocks = java.util.List.copyOf(plan.blocks),
         terrain = plan.terrain?.let { it.copy(blocks = java.util.List.copyOf(it.blocks),
             route = java.util.List.copyOf(it.route), waterFoundations = it.waterFoundations?.let { java.util.List.copyOf(it) },
-            requiredGrass = it.requiredGrass?.let { java.util.List.copyOf(it) }) },
+            requiredGrass = it.requiredGrass?.let { java.util.List.copyOf(it) },
+            paidGateFloors = it.paidGateFloors?.let { java.util.List.copyOf(it) }) },
     ).also { planCache[it.id] = it }
 
     private fun snapshotBuilding(building: CivBuilding) = building.copy(transit = building.transit?.toList())
@@ -542,6 +543,7 @@ class CivsStore(
         requireSafePosition(building.anchor)
         requireSafePosition(building.entrance)
 
+        val paidGateCells = civsValidatePaidGateFloors(plan)
         val grass = plan.terrain?.requiredGrass.orEmpty().toSet()
         require(grass.size == plan.terrain?.requiredGrass.orEmpty().size)
         require(grass.isEmpty() || building.type == BuildingType.WALL && !plan.terrain?.route.isNullOrEmpty())
@@ -564,11 +566,13 @@ class CivsStore(
             requireSafePosition(terrain.bounds.min); requireSafePosition(terrain.bounds.max)
             require(terrain.bounds.min.x <= terrain.bounds.max.x && terrain.bounds.min.y <= terrain.bounds.max.y &&
                 terrain.bounds.min.z <= terrain.bounds.max.z)
+            require(paidGateCells.all { terrain.bounds.contains(it.x, it.y, it.z) })
             require(terrain.groundY in -4095..4095)
             val terrainCoordinates = hashSetOf<CivPosition>()
             terrain.blocks.forEach { cell ->
                 requireSafePosition(cell.position)
                 require(terrain.bounds.contains(cell.position.x, cell.position.y, cell.position.z))
+                CivsRules.check(cell.position !in paidGateCells, "invalid-plan")
                 // This only validates capture shape; native admission still requires the exact linked SITE/order.
                 val hallMarkerCut = cell.position == building.control && building.type == BuildingType.TOWN_HALL && building.level == 1 &&
                     building.phase == BuildingPhase.CONSTRUCTING && plan.capturedSha256 != null && !plan.adminPlacement &&

@@ -11,12 +11,13 @@ internal object CivsSettlementPerimeter {
 
     fun adapt(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
         routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>,
-        fortifications: Map<UUID, CivFortificationProof> = emptyMap()): CivSettlementFrame {
+        fortifications: Map<UUID, CivFortificationProof> = emptyMap(),
+        envelopes: Map<UUID, CivBox> = emptyMap(), insidePaid: List<CivBox> = emptyList()): CivSettlementFrame {
         val box = frame.core
         val maximumSize = CivsSettlementLayout.MAXIMUM_HALF_WIDTH * 2 + 1
         require(box.max.x - box.min.x + 1 in 1..maximumSize && box.max.z - box.min.z + 1 in 1..maximumSize)
         val budget = CutBudget()
-        return try { separate(city, frame, surface, routes, retainedRoutes, fortifications, box, maximumSize, budget) }
+        return try { separate(city, frame, surface, routes, retainedRoutes, fortifications, box, maximumSize, budget, envelopes, insidePaid) }
         catch (original: CivsRejection) {
             if (frame.fortified || original.reason != "autonomy-layout-obstructed" ||
                 original.values["stage"] != "no-dry-perimeter" || original.values["inner_boundary_seeds"] != "0" ||
@@ -31,14 +32,14 @@ internal object CivsSettlementPerimeter {
             // The retry must preserve every original seed and add actual captured room.
             if (expanded.min.x > box.min.x || expanded.min.z > box.min.z || expanded.max.x < box.max.x ||
                 expanded.max.z < box.max.z || expanded == box) throw original
-            separate(city, frame, surface, routes, retainedRoutes, fortifications, expanded, 165, budget)
+            separate(city, frame, surface, routes, retainedRoutes, fortifications, expanded, 165, budget, envelopes, insidePaid)
         }
     }
 
     private fun separate(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
         routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>,
         fortifications: Map<UUID, CivFortificationProof>, box: CivBox, maximumSize: Int,
-        budget: CutBudget): CivSettlementFrame {
+        budget: CutBudget, envelopes: Map<UUID, CivBox>, insidePaid: List<CivBox>): CivSettlementFrame {
         val width = box.max.x - box.min.x + 1
         val height = box.max.z - box.min.z + 1
         require(width in 1..maximumSize && height in 1..maximumSize)
@@ -47,7 +48,7 @@ internal object CivsSettlementPerimeter {
             (z - box.min.z) * width + x - box.min.x else null
         fun point(i: Int) = CivPosition(box.min.x + i % width, city.center.y, box.min.z + i / width)
         val inner = city.buildings.filter { !it.type.isInfrastructure && it.type !in exterior && it.id !in fortifications }
-        val occupied = city.buildings.filterNot { it.type.isInfrastructure }.map { it.bounds }
+        val occupied = city.buildings.filterNot { it.type.isInfrastructure }.map { envelopes[it.id] ?: it.bounds } + insidePaid
         val fortificationGround = fortifications.values.flatMap { it.groundBarrier }
             .associateBy { civsTerrainKey(it.x, it.z) }
         val externalRoutes = routes.filterKeys { city.building(it)?.type in exterior }.values.toList()
@@ -83,9 +84,12 @@ internal object CivsSettlementPerimeter {
         } }
         val seeds = BooleanArray(area)
         fun seed(p: CivPosition) { index(p.x, p.z)?.let { seeds[it] = true } }
+        fun reserve(box: CivBox) {
+            for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z) seed(CivPosition(x, 0, z))
+        }
+        insidePaid.forEach(::reserve)
         inner.forEach { building ->
-            for (x in building.bounds.min.x..building.bounds.max.x)
-                for (z in building.bounds.min.z..building.bounds.max.z) seed(CivPosition(x, 0, z))
+            reserve(envelopes[building.id] ?: building.bounds)
             CivsAutonomousGeometry.approach(building).forEach(::seed)
             routes[building.id].orEmpty().forEach(::seed)
         }

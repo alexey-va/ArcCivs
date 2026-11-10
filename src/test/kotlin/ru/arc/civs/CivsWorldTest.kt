@@ -24,6 +24,7 @@ import ru.arc.paper.api.ArcSceneObservationService
 import org.bukkit.plugin.ServicePriority
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
+import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
@@ -195,6 +196,134 @@ class CivsOwnControlTreeSupportTest : FunSpec({
 })
 
 class CivsWorldTest : FunSpec({
+    test("reopened paid gate proofs guard queued recapture and both kinds of paid batch") {
+        worldScenario(collisionWorld = true) { s ->
+            val box = CivBox(CivPosition(0, 64, 0), CivPosition(4, 69, 4))
+            val entry = CivPosition(2, 65, -1)
+            val id = UUID.randomUUID()
+            val transit = CivsInfrastructureRebuild.openColumns(box, true).map { (x, z) -> CivPosition(x, 65, z) }
+            val gate = CivBuilding(id, BuildingType.GATE, 1, box.min, 0,
+                CivsInfrastructureRebuild.schematicId(BuildingType.GATE, 1, id), box, entry,
+                BuildingPhase.CONSTRUCTING, transit = transit)
+            val floor = CivPosition(2, 64, 2)
+            val second = CivPosition(3, 64, 2)
+            val head = floor.copy(y = 66)
+            val floors = listOf(floor, second)
+            val skipped = civsPaidGateFloorCells(gate, floors)
+            val pier = CivPosition(0, 65, 2)
+            val blueprint = worldSchematicCells(gate).map { cell ->
+                val p = CivPosition(cell.position.x, cell.position.y, cell.position.z)
+                when (p) {
+                    in skipped -> cell.copy(blockData = "minecraft:barrier", isAir = false, isBarrier = true)
+                    pier -> cell.copy(blockData = "minecraft:cobblestone", isAir = false)
+                    else -> cell
+                }
+            }
+            fun block(p: CivPosition) = s.world.getBlockAt(p.x, p.y, p.z)
+            floors.forEach { block(it).type = Material.COBBLESTONE }
+            block(entry.copy(y = 64)).type = Material.STONE
+            val paving = CivPlanBlock(CivPosition(5, 64, -1), "minecraft:dirt", "minecraft:coarse_dirt")
+            block(paving.position).type = Material.DIRT
+            val terrain = CivTerraformPlan(CivBox(CivPosition(0, 64, -1), CivPosition(5, 66, 4)),
+                listOf(paving), listOf(entry), 64, 0, 1, paidGateFloors = floors)
+            val city = worldCity(s.world.uid, gate).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            s.cities += city
+
+            val initial = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, gate, blueprint, terrain)
+            s.scheduler.tick()
+            val queued = completed(initial).copy(id = gate.id, capturedSha256 = "a".repeat(64))
+            queued.terrain?.paidGateFloors shouldBe floors
+            queued.blocks.none { it.position in skipped } shouldBe true
+            val old = queued.copy(id = UUID.randomUUID(), terrain = terrain.copy(paidGateFloors = null))
+            val root = Files.createTempDirectory("civs-paid-gate-")
+            try {
+                CivsStore(root, java.util.concurrent.Executor(Runnable::run)).use {
+                    it.savePlan(queued).join() shouldBe queued
+                    it.savePlan(old).join() shouldBe old
+                }
+                Files.readString(root.resolve("plans/${old.id}.json")).contains("paidGateFloors") shouldBe false
+                CivsStore(root, java.util.concurrent.Executor(Runnable::run)).use { store ->
+                    val restored = requireNotNull(store.loadPlan(queued.id).join())
+                    restored shouldBe queued
+                    store.loadPlan(old.id).join()?.terrain?.paidGateFloors shouldBe null
+                    for (forged in listOf(
+                        restored.copy(terrain = terrain.copy(paidGateFloors = floors.reversed())),
+                        restored.copy(blocks = restored.blocks + CivPlanBlock(floor, "minecraft:cobblestone", "minecraft:dirt")),
+                        restored.copy(terrain = terrain.copy(paidGateFloors = listOf(pier.copy(y = 64)))),
+                        restored.copy(terrain = terrain.copy(blocks = listOf(
+                            paving.copy(position = floor, before = "minecraft:cobblestone")))),
+                    )) {
+                        failureReason(store.savePlan(forged.copy(id = UUID.randomUUID()))) shouldBe "invalid-plan"
+                    }
+
+                    val site = gate.copy(phase = BuildingPhase.SITE)
+                    s.cities[0] = city.copy(buildings = listOf(site), constructionQueue = listOf(site.id))
+                    fun recapture() = s.subject.capture(city.id, city.owner, city.worldId, gate, blueprint, site, restored.terrain)
+                    block(head).type = Material.GLASS
+                    val blocked = recapture()
+                    s.scheduler.tick()
+                    failureReason(blocked) shouldBe "gate-paid-floor"
+                    block(head).type = Material.AIR
+                    val recaptured = recapture()
+                    s.scheduler.tick()
+                    val plan = completed(recaptured)
+                    plan.terrain?.paidGateFloors shouldBe floors
+                    s.cities[0] = city.copy(buildings = listOf(gate), construction = CivConstruction(plan.id, gate.id,
+                        1, 2, 0, ConstructionPhase.PLACING, Stock(), plannedBuilding = gate,
+                        payment = CivConstructionPayment(reservedBatch = 0)))
+
+                    val preparation = plan.copy(blocks = listOf(paving))
+                    val preflight = s.subject.revalidate(preparation, city.owner, terrainBatch = true)
+                    s.scheduler.tick()
+                    completed(preflight) shouldBe Unit
+                    block(floor).type = Material.AIR
+                    val refused = s.subject.revalidate(preparation, city.owner, terrainBatch = true)
+                    val placed = mutableListOf<CivPlanBlock>()
+                    val staleApply = s.subject.applyTerraform(plan, city.owner, listOf(paving), 0, { true }, placed::add)
+                    s.scheduler.tick()
+                    failureReason(refused) shouldBe "gate-paid-floor"
+                    failureReason(staleApply) shouldBe "gate-paid-floor"
+                    placed shouldBe emptyList()
+                    block(paving.position).type shouldBe Material.DIRT
+                    block(floor).type = Material.COBBLESTONE
+                    val validApply = s.subject.applyTerraform(plan, city.owner, listOf(paving), 0, { true }, placed::add)
+                    s.scheduler.tick()
+                    completed(validApply) shouldBe Unit
+                    placed shouldBe listOf(paving)
+                    block(paving.position).type shouldBe Material.COARSE_DIRT
+
+                    s.cities[0] = s.cities[0].let { snapshot ->
+                        snapshot.copy(construction = snapshot.construction!!.copy(workDone = 1,
+                            payment = CivConstructionPayment(reservedBatch = 1)))
+                    }
+                    val authored = plan.copy(blocks = listOf(plan.blocks.single { it.position == pier }))
+                    block(head).type = Material.GLASS
+                    val obstructed = s.subject.revalidate(authored, city.owner)
+                    s.scheduler.tick()
+                    failureReason(obstructed) shouldBe "gate-paid-floor"
+                    block(head).type = Material.AIR
+                    val valid = s.subject.revalidate(authored, city.owner)
+                    s.scheduler.tick()
+                    completed(valid) shouldBe Unit
+                    floors.forEach { block(it).type shouldBe Material.COBBLESTONE }
+                    block(pier).type shouldBe Material.AIR
+                    val lands = s.paper.createSimplePlugin("Lands")
+                    lands.server.pluginManager.disablePlugin(lands)
+                    val denied = s.subject.revalidate(authored, city.owner)
+                    s.scheduler.tick()
+                    rejection(denied).let { failure ->
+                        failure.reason shouldBe "lands-denied"
+                        failure.values["x"] shouldBe floor.x.toString()
+                        failure.values["y"] shouldBe floor.y.toString()
+                        failure.values["z"] shouldBe floor.z.toString()
+                    }
+                }
+            } finally {
+                root.toFile().deleteRecursively()
+            }
+        }
+    }
+
     test("active wall refit captures the existing paid lower road as its approach") {
         worldScenario(collisionWorld = true) { s ->
             val wallCell = CivPosition(2, 64, 0)

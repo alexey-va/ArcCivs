@@ -379,8 +379,10 @@ internal class CivsConstructionRuntime(
             if (closed || placementRuns[city.id] != run) return@whenCompleteSync
             if (failure != null) return@whenCompleteSync placementFailed(city.id, order.id, failure)
             val (plan, snapshot, access, batch, batchPlan, retainedContainers) = requireNotNull(recovered)
-            val validation = if (batch?.terrainStart != null || batchPlan.blocks.isEmpty()) CompletableFuture.completedFuture(Unit)
-                else world.revalidate(batchPlan, city.owner)
+            val terrainBatch = batch?.terrainStart != null
+            val validation = if (plan.terrain?.paidGateFloors.isNullOrEmpty() && (terrainBatch || batchPlan.blocks.isEmpty()))
+                CompletableFuture.completedFuture(Unit)
+            else world.revalidate(batchPlan, city.owner, terrainBatch)
             validation.whenCompleteSync(tasks) { _, validationFailure ->
                 if (closed || placementRuns[city.id] != run) return@whenCompleteSync
                 if (validationFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, validationFailure)

@@ -62,8 +62,10 @@ internal class CivsAutonomousPlacement(
     fun decoration(city: Settlement, entryId: String, buildingId: UUID): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, BuildingType.DECORATION, 1, buildingId, catalogEntry = entryId))
 
-    fun infrastructure(city: Settlement): CompletableFuture<CivAutonomousDesign> =
-        admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
+    fun infrastructure(city: Settlement, protectPaidGateFloors: Boolean =
+        CivsSettlementPlans.current(city)?.perimeterEntrances != null): CompletableFuture<CivAutonomousDesign> =
+        admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true,
+            protectPaidGateFloors = protectPaidGateFloors))
 
     /** Refit geometry is captured by the same admission and queue as a new resident-built site. */
     fun rebuildInfrastructure(city: Settlement, source: CivPlacementPlan, plans: List<CivPlacementPlan>,
@@ -104,7 +106,8 @@ internal class CivsAutonomousPlacement(
     }
 
     /** One adopted plan, using the same detached height field, catalogue and finite solvers. */
-    fun plan(city: Settlement, unpaidSite: CivAutonomousDesign? = null): CompletableFuture<CivSettlementPlan> {
+    fun plan(city: Settlement, unpaidSite: CivAutonomousDesign? = null,
+        recoverPerimeter: Boolean = false): CompletableFuture<CivSettlementPlan> {
         val result = CompletableFuture<CivSettlementPlan>()
         synchronized(jobs) {
             if (closed) return CompletableFuture.failedFuture(CivsRejection("world-closed"))
@@ -113,6 +116,15 @@ internal class CivsAutonomousPlacement(
             planning[city.id] = result
         }
         val prepared = runCatching {
+            if (recoverPerimeter) {
+                if (unpaidSite != null) throw CivsRejection("stale-development")
+                val hall = city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL }
+                    ?: throw CivsRejection("stale-development")
+                return@runCatching loadAccess(city).thenCombineAsync(world.autonomousHeightField(city, hall, hall), { access, surface ->
+                    if (result.isDone || closed) throw CivsRejection("world-closed")
+                    CivsSettlementPlans.recoverDeferredPerimeter(city, surface, access)
+                }, executor)
+            }
             val seed = unpaidSite?.blueprint?.building?.copy(phase = BuildingPhase.SITE)
             val seedRoute = unpaidSite?.terrain?.route?.toList()
             if (seed != null && (seed.type !in CivsAutonomy.profile || seed.type == BuildingType.TOWN_HALL ||
@@ -311,7 +323,8 @@ internal class CivsAutonomousPlacement(
     /** Legacy, player-pinned SITE plans retain their exact anchor and receive the same durable earthworks. */
     fun prepareExisting(city: Settlement, blueprint: CivBlueprint,
         waterFoundations: List<CivWaterFoundation> = emptyList(),
-        requiredGrass: List<CivPosition> = emptyList()): CompletableFuture<CivAutonomousDesign> {
+        requiredGrass: List<CivPosition> = emptyList(),
+        paidGateFloors: List<CivPosition> = emptyList()): CompletableFuture<CivAutonomousDesign> {
         val previous = city.building(blueprint.building.id)
         if (previous?.phase != BuildingPhase.SITE || previous.entrance != blueprint.building.entrance ||
             previous.rotation != blueprint.building.rotation)
@@ -323,7 +336,8 @@ internal class CivsAutonomousPlacement(
         return admit(Search(city, blueprint.building.type, blueprint.building.level, blueprint.building.id, blueprint, previous,
             infrastructure = blueprint.building.type.isInfrastructure, reservation = reserved,
             pinnedRoute = adopted?.routes?.get(blueprint.building.id.toString()),
-            pinnedWaterFoundations = waterFoundations.toList(), pinnedRequiredGrass = requiredGrass.toList()))
+            pinnedWaterFoundations = waterFoundations.toList(), pinnedRequiredGrass = requiredGrass.toList(),
+            pinnedPaidGateFloors = paidGateFloors.toList()))
     }
 
     private fun admit(job: Search): CompletableFuture<CivAutonomousDesign> = synchronized(jobs) {
@@ -374,6 +388,8 @@ internal class CivsAutonomousPlacement(
         private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null,
         private val pinnedWaterFoundations: List<CivWaterFoundation> = emptyList(),
         private val pinnedRequiredGrass: List<CivPosition> = emptyList(),
+        private val pinnedPaidGateFloors: List<CivPosition> = emptyList(),
+        private val protectPaidGateFloors: Boolean = false,
         private val captureVolume: Boolean = false, private val nativeCity: Settlement = city,
         private val initialPlan: CivSettlementPlan? = null, skipPrepared: Int = 0,
         private val wallInfill: CivWallInfillTarget? = null,
@@ -398,7 +414,8 @@ internal class CivsAutonomousPlacement(
         private var access = CivAutonomousAccess()
         private val protectedRoadColumns by lazy {
             val deferred = (adopted ?: initialPlan)?.deferredPerimeter
-            if (deferred?.plotId == buildingId && CivsSettlementPlans.protectsPaidApproach(deferred.stage))
+            if (infrastructure && adopted?.perimeterEntrances != null ||
+                deferred?.plotId == buildingId && CivsSettlementPlans.protectsPaidApproach(deferred.stage))
                 access.roadColumns(nativeCity) else emptySet()
         }
         private var pieces = emptyMap<UUID, CivSettlementPiece>()
@@ -432,8 +449,10 @@ internal class CivsAutonomousPlacement(
             "catalog_source" to resolvedCatalogEntry, "families_tried" to familiesTried, "attempted" to attempted,
             "route_refreshed" to routeRefreshed, "preferred_terraces_attempted" to preferredAttempts)
 
-        private fun frame(): CivSettlementFrame = CivsPerimeterCrossings.adapt(
-            CivsSettlementLayout.frame(city), access.routes.values + adopted?.routes.orEmpty().values, access.infrastructure)
+        private fun frame(): CivSettlementFrame = CivsSettlementLayout.frame(city).let { frame ->
+            if (adopted?.perimeterEntrances != null) frame else CivsPerimeterCrossings.adapt(
+                frame, access.routes.values + adopted?.routes.orEmpty().values, access.infrastructure)
+        }
 
         fun start() {
             phase = "access"
@@ -474,17 +493,21 @@ internal class CivsAutonomousPlacement(
                         .filter { city.building(it.building.id) == null }.map { it.building.copy(bounds = it.envelope) })
                     val plan = CivsSettlementLayout.infrastructure(reservedCity, frame(), field,
                         (access.routes.values + pavingRoutes).distinct(), access.infrastructure, pavingRoutes, access.routes.values,
-                        acceptedFortifications = access.acceptedFortifications, retainedAccess = access)
+                        acceptedFortifications = access.acceptedFortifications, retainedAccess = access,
+                        protectPaidGateFloors = protectPaidGateFloors)
                     rejections.putAll(plan.rejected)
                     blockers = plan.blockers
-                    val completePerimeter = plan.perimeterClosed && plan.rejected.isEmpty()
+                    val unplaced = plan.pieces.filter { city.building(it.id) == null }
+                    val approvedEntrances = adopted?.perimeterEntrances
+                    val completePerimeter = plan.perimeterClosed && plan.rejected.isEmpty() &&
+                        (approvedEntrances == null || unplaced.all { it.type == BuildingType.ROAD || it.id.toString() in approvedEntrances })
                     if (blockers.isNotEmpty() || !completePerimeter) CivsDiagnostics.record(java.util.logging.Level.WARNING, city.id,
                         CivsDiagnostics.line("autonomous_layout_obstructed", "city" to city.id,
                             "perimeter_closed" to plan.perimeterClosed, "blockers" to blockers.take(4), "count" to blockers.size,
                             "rejected" to plan.rejected, "samples" to plan.rejectionSamples.mapValues { it.value.take(1) }))
                     // A partial outline can still contribute ordinary roads, but does not start a wall ring.
-                    val missing = plan.pieces.filter { city.building(it.id) == null &&
-                        (completePerimeter || it.type == BuildingType.ROAD) }
+                    val missing = unplaced.filter { completePerimeter || it.type == BuildingType.ROAD }
+                        .map { piece -> approvedEntrances?.get(piece.id.toString())?.let { piece.copy(entrance = it) } ?: piece }
                         .sortedWith(compareBy<CivSettlementPiece> { when (it.type) {
                             BuildingType.GATE -> 0; BuildingType.WALL -> 1; else -> 2
                         } }.thenBy { it.bounds.min.x }.thenBy { it.bounds.min.z })
@@ -524,7 +547,7 @@ internal class CivsAutonomousPlacement(
                     pinned.building.type, pinned.building.bounds, pinned.building.entrance,
                     pinned.cells.filterNot { it.isBarrier }.map { CivSettlementBlock(
                         CivPosition(it.position.x, it.position.y, it.position.z), it.blockData) }, pinned.building.transit.orEmpty(),
-                    pinnedWaterFoundations, requiredGrass = pinnedRequiredGrass))
+                    pinnedWaterFoundations, requiredGrass = pinnedRequiredGrass, paidGateFloors = pinnedPaidGateFloors))
                 candidates = listOf(CivsAutonomousCandidate(pinned.building.copy(bounds =
                     CivsAutonomousGeometry.futureBounds(city, pinned.building))))
                 captureSurface()
@@ -735,7 +758,7 @@ internal class CivsAutonomousPlacement(
                 infrastructureFloors, waterFoundations = piece?.waterFoundations.orEmpty(),
                 reservedRoute = paidApproach?.route ?: reservedRoute,
                 preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) },
-                protectedRoadColumns = protectedRoadColumns)
+                protectedRoadColumns = protectedRoadColumns, paidGateFloors = piece?.paidGateFloors.orEmpty())
                     .copy(requiredGrass = piece?.requiredGrass.orEmpty()) }
             catch (failure: RuntimeException) { retryApproach(failure); return }
             phase = "earthworks"

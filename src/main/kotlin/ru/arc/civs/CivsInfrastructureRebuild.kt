@@ -59,7 +59,8 @@ internal object CivsInfrastructureRebuild {
 
     fun matchesSource(source: CivPlacementPlan, captured: CivPlacementPlan): Boolean {
         val expected = source.blocks.associate { it.position to it.after }
-        return captured.blocks.all { sameOwnedState(expected[it.position] ?: "minecraft:air", it.before) }
+        return source.terrain?.paidGateFloors.orEmpty() == captured.terrain?.paidGateFloors.orEmpty() &&
+            captured.blocks.all { sameOwnedState(expected[it.position] ?: "minecraft:air", it.before) }
     }
 
     /** Native fence neighbours are derived by Minecraft; every other material/property remains exact. */
@@ -261,6 +262,8 @@ internal object CivsInfrastructureRebuild {
             source.building.copy(phase = BuildingPhase.ACTIVE) == old && source.capturedSha256 != null)
         val stage = maxOf(stage(city), stage(old))
         val targetType = if (survivor == null) old.type else BuildingType.WALL
+        val paidGateFloors = source.terrain?.paidGateFloors.orEmpty()
+        requireGate(survivor == null || paidGateFloors.isEmpty(), "gate-refit-route-conflict")
         val capture = captureId(source.id, stage, survivor?.id)
         var piece = CivSettlementPiece(old.id, old.type, old.bounds, old.entrance,
             source.blocks.map { CivSettlementBlock(it.position, it.after) }, old.transit.orEmpty())
@@ -302,7 +305,8 @@ internal object CivsInfrastructureRebuild {
         requireGate(witnesses.all { p -> (0..1).all { dy -> after[p.copy(y = p.y + dy)] == "minecraft:air" } },
             "gate-refit-route-conflict")
         val before = source.blocks.associate { it.position to it.after }
-        return source.copy(id = capture, building = target, blocks = piece.blocks.map {
+        val protected = civsPaidGateFloorCells(target, paidGateFloors)
+        return source.copy(id = capture, building = target, blocks = piece.blocks.filterNot { it.position in protected }.map {
             CivPlanBlock(it.position, before[it.position] ?: "minecraft:air", it.after)
         }, terrain = source.terrain?.copy(blocks = emptyList(), cutCount = 0, fillCount = 0, waterFoundations = null,
             requiredGrass = null), capturedSha256 = null)
@@ -398,7 +402,9 @@ internal object CivsInfrastructureRebuild {
                 if (city.buildings.none { CivsAutonomousGeometry.overlaps(it.bounds, infill.footprint) })
                     return Work(gate, infill = infill)
             }
-            if (readyPair(city, pair, survivor)) return Work(closing, survivor)
+            if (readyPair(city, pair, survivor) && plans.none {
+                    it.building.id == closing.id && !it.terrain?.paidGateFloors.isNullOrEmpty()
+                }) return Work(closing, survivor)
         }
         return city.buildings.filter { it.id in available && it.id !in protected && needsProfile(city, it) }
             .minWithOrNull(compareBy<CivBuilding> { if (it.type == BuildingType.GATE) 0 else 1 }

@@ -333,6 +333,50 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
+    for (whole in listOf(false, true))
+    test("a recovered ring uses its saved approaches only with every remaining piece proven, whole=$whole") {
+        InfrastructurePlacementScenario().use { s ->
+            val frame = CivsSettlementLayout.frame(s.city)
+            val layout = CivsSettlementLayout.infrastructure(s.city, frame, s.surface, emptyList())
+            layout.perimeterClosed shouldBe true
+            val fortifications = layout.pieces.filter { it.type == BuildingType.GATE || it.type == BuildingType.WALL }
+            val first = fortifications.filter { it.type == BuildingType.GATE }
+                .minWith(compareBy<CivSettlementPiece> { it.bounds.min.x }.thenBy { it.bounds.min.z })
+            val floors = first.blocks.groupBy { civsTerrainKey(it.position.x, it.position.z) }
+                .mapValues { (_, cells) -> cells.minOf { it.position.y } }
+            val building = CivsInfrastructure.building(first)
+            val alternative = buildList {
+                for (x in first.bounds.min.x..first.bounds.max.x) {
+                    add(CivPosition(x, 65, first.bounds.min.z - 1))
+                    add(CivPosition(x, 65, first.bounds.max.z + 1))
+                }
+                for (z in first.bounds.min.z..first.bounds.max.z) {
+                    add(CivPosition(first.bounds.min.x - 1, 65, z))
+                    add(CivPosition(first.bounds.max.x + 1, 65, z))
+                }
+            }.first { entrance -> entrance != first.entrance && runCatching {
+                CivsAutonomousTerraform.draft(s.city, CivTerraformOption(building.copy(entrance = entrance), 0),
+                    s.surface, s.access, frame.wallObstacles, floors)
+            }.isSuccess }
+            val witnesses = fortifications.associate { it.id.toString() to it.entrance } + (first.id.toString() to alternative)
+            val plan = CivSettlementPlan(CivsSettlementPlans.VERSION, 1, frame.halfWidth, emptyList(), emptyMap(),
+                frame.wallObstacles, frame.gates.map { it.passage }, frame.gates.map { it.side },
+                perimeterEntrances = if (whole) witnesses else witnesses - fortifications.last().id.toString())
+            s.city = s.city.copy(autonomy = requireNotNull(s.city.autonomy).copy(plan = plan))
+            val result = spatialFailure(s.planner.infrastructure(s.city))
+            if (whole) {
+                result shouldBe "test-selected-infrastructure-draft"
+                val draft = s.drafts.single()
+                draft.building.id shouldBe first.id
+                draft.building.entrance shouldBe alternative
+                draft.route.last() shouldBe alternative
+            } else {
+                result shouldBe "autonomy-no-site"
+                s.drafts shouldBe emptyList()
+            }
+        }
+    }
+
     for (type in listOf(BuildingType.ROAD, BuildingType.GATE, BuildingType.WALL))
     test("a completed $type approach remains protected without requesting a new paving generation") {
         InfrastructurePlacementScenario().use { s ->

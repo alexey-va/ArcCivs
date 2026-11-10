@@ -524,7 +524,7 @@ internal class CivsBuildingRequests(
                                         .thenApply { CivAutonomousDesign(blueprint, it) }
                                 city.autonomy != null && building.phase == BuildingPhase.SITE ->
                                     autonomousPlacement.prepareExisting(city, blueprint, sitePlan.terrain?.waterFoundations.orEmpty(),
-                                        sitePlan.terrain?.requiredGrass.orEmpty())
+                                        sitePlan.terrain?.requiredGrass.orEmpty(), sitePlan.terrain?.paidGateFloors.orEmpty())
                                 else -> CompletableFuture.completedFuture(CivAutonomousDesign(blueprint, sitePlan.terrain))
                             }
                             design.thenCompose { prepared ->

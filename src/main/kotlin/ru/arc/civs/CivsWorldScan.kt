@@ -241,6 +241,18 @@ internal abstract class CivsWorldScan<T>(
         }
     }
 
+    protected fun checkPaidGateCell(floors: List<CivPosition>, cursor: Int) {
+        val floor = floors[cursor / 3]
+        val offset = cursor % 3
+        checkPaidGateCell(read(floor.copy(y = floor.y + offset)), offset == 0)
+    }
+
+    protected fun checkPaidGateCell(block: Block, floor: Boolean) {
+        if (!access.canModify(owner, block)) rejectAt("lands-denied", block)
+        val safe = if (floor) naturalTerraform(block) && routeTerraformSupport(block) else passableTerraform(block)
+        if (!safe) rejectAt("gate-paid-floor", block)
+    }
+
     protected fun rejectAt(reason: String, block: Block, states: Map<String, String> = emptyMap()): Nothing = throw CivsRejection(reason, mapOf(
         "block" to block.type.name,
         "x" to block.x.toString(), "y" to block.y.toString(), "z" to block.z.toString(),

@@ -313,7 +313,11 @@ internal class CivsAutonomousDevelopment(
         }
         // Legacy planless towns keep their ordinary one-goal search. New founding records its hall-sized quarter.
         val compactFounding = city.autonomy?.layoutHalfWidth == CivsSettlementGrowth.initialHalfWidth(city)
-        val extendPlan = ordinary != null && existing == null && !infrastructure && (adopted != null || compactFounding) &&
+        val recoverPerimeter = infrastructure && adopted?.deferredPerimeter?.let { deferred ->
+            city.building(deferred.plotId)?.let { it.phase == BuildingPhase.ACTIVE && it.anchor == deferred.plotAnchor } == true
+        } == true && now() >= (autonomyPlanRetryAt[city.id] ?: 0L)
+        val extendPlan = recoverPerimeter ||
+            ordinary != null && existing == null && !infrastructure && (adopted != null || compactFounding) &&
             (adopted == null || CivsSettlementPlans.next(city, goal.type) == null && CivsSettlementPlans.needsExtension(city))
         if (extendPlan && now() < (autonomyPlanRetryAt[city.id] ?: 0L) && city.id !in deferredInitialPlans) return
         if (extendPlan && now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
@@ -327,12 +331,22 @@ internal class CivsAutonomousDevelopment(
             deferredInitialPlans.remove(city.id)
             autonomyRequests[city.id] = request
             autonomyProgress[city.id] = CivsAutonomyView("planning", goal.type, goal.targetLevel)
-            runCatching { autonomousPlacement.plan(civsPlanBoardCapture(city)) }
+            runCatching { autonomousPlacement.plan(civsPlanBoardCapture(city), recoverPerimeter = recoverPerimeter) }
                 .getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { plan, failure ->
                 if (autonomyRequests[city.id] != request) return@whenCompleteSync
                 if (failure != null) {
                     autonomyRequests.remove(city.id)
                     val rejection = CivsDiagnostics.rejection(failure)
+                    if (recoverPerimeter) {
+                        val delay = if (rejection?.reason in setOf("world-busy", "chunks-unloaded", "stale-development"))
+                            30_000L else 300_000L
+                        autonomyLayoutChecked[city.id] = city.buildings.toList() to (now() + delay)
+                        developmentFinished(city.id)
+                        autonomyProgress.remove(city.id)
+                        CivsDiagnostics.event("autonomous_perimeter_recovery_deferred", "city" to city.id,
+                            "reason" to rejection?.reason, "details" to rejection?.values)
+                        return@whenCompleteSync
+                    }
                     autonomyPlanRetryAt[city.id] = now() + if (rejection?.reason in
                         setOf("world-busy", "chunks-unloaded", "stale-development")) 30_000 else 300_000
                     val latest = cities[city.id]
@@ -371,6 +385,11 @@ internal class CivsAutonomousDevelopment(
                         autonomyRetryAt.remove(city.id)
                         autonomyPlanRetryAt.remove(city.id)
                         failedGrowthYields.remove(city.id)
+                        if (recoverPerimeter) {
+                            autonomyLayoutChecked.remove(city.id)
+                            CivsDiagnostics.event("autonomous_perimeter_recovery_adopted", "city" to city.id,
+                                "pieces" to requireNotNull(plan).perimeterEntrances?.size, "gates" to plan.gates.size)
+                        }
                         CivsDiagnostics.event("autonomous_plan_adopted", "city" to city.id,
                             "plots" to requireNotNull(plan).plots.size, "roads" to plan.routes.size, "revision" to plan.revision)
                         plan.deferredPerimeter?.let { deferred ->

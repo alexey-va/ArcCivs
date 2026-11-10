@@ -47,6 +47,30 @@ class CivsInfrastructureRebuildTest : FunSpec({
         }
     }
 
+    test("later gate stages retain paid proof and never write the floor or its clear passage") {
+        val (base, old) = legacyInfrastructureGate(5, true)
+        val first = CivsInfrastructureRebuild.proposal(base, old, emptyList())
+        val feet = first.building.transit!!.single { it.x == 22 && it.z == 22 }
+        val floor = feet.copy(y = feet.y - 1)
+        val protected = civsPaidGateFloorCells(first.building, listOf(floor))
+        var source = first.copy(blocks = first.blocks.filterNot { it.position in protected }, capturedSha256 = "a".repeat(64),
+            terrain = CivTerraformPlan(first.building.bounds, emptyList(), listOf(first.building.entrance), floor.y,
+                0, 0, paidGateFloors = listOf(floor)))
+        for (stage in 2..3) {
+            val active = source.building.copy(phase = BuildingPhase.ACTIVE)
+            val city = base.copy(buildings = base.buildings.map { if (it.id == active.id) active else it.copy(level = stage) })
+            shouldThrow<CivsRejection> {
+                CivsInfrastructureRebuild.proposal(city, source, listOf(feet), survivor = active)
+            }.reason shouldBe "gate-refit-route-conflict"
+            val refit = CivsInfrastructureRebuild.proposal(city, source, listOf(feet))
+            CivsInfrastructureRebuild.stage(refit.building) shouldBe stage
+            refit.terrain?.paidGateFloors shouldBe listOf(floor)
+            refit.blocks.none { it.position in protected } shouldBe true
+            CivsInfrastructureRebuild.matchesSource(source, refit) shouldBe true
+            source = refit.copy(capturedSha256 = "b".repeat(64))
+        }
+    }
+
     test("side forecourts retain paid access but a route through a solid wing is refused") {
         val (city, source) = legacyInfrastructureGate(7, true)
         val edge = source.building.transit!!.filter { it.x == source.building.bounds.min.x && it.z == 20 }

@@ -29,7 +29,7 @@ internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int,
 internal data class CivTerraformDraft(val building: CivBuilding, val columns: List<CivTerraformColumn>,
     val route: List<CivPosition>, val groundY: Int, val access: CivAutonomousAccess = CivAutonomousAccess(),
     val waterFoundations: List<CivWaterFoundation> = emptyList(), val prepareControl: Boolean = false,
-    val requiredGrass: List<CivPosition> = emptyList())
+    val requiredGrass: List<CivPosition> = emptyList(), val paidGateFloors: List<CivPosition> = emptyList())
 
 /** Exact native state; [supportSafe] permits retaining a solid block, never changing it. */
 internal data class CivTerraformCell(val position: CivPosition, val data: String, val safe: Boolean,
@@ -81,6 +81,25 @@ internal fun civsValidateWaterFoundations(plan: CivPlacementPlan, complete: Bool
             (if (y <= f.waterTopY) cell.before.substringBefore("[") == "minecraft:water"
                 else cell.before in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")), "invalid-plan")
     }
+}
+
+/** The paid floor, feet and head are inside the open v5 passage and never belong to its write journal. */
+internal fun civsPaidGateFloorCells(building: CivBuilding, floors: List<CivPosition>): Set<CivPosition> {
+    if (floors.isEmpty()) return emptySet()
+    CivsRules.check(floors.size <= 256 && building.type == BuildingType.GATE && building.level == 1 &&
+        building.control == null && CivsInfrastructureRebuild.version(building) == 5 &&
+        CivsInfrastructureRebuild.validTransit(building), "invalid-plan")
+    val transitFloors = building.transit.orEmpty().mapTo(hashSetOf()) { it.copy(y = it.y - 1) }
+    CivsRules.check(floors.all { it in transitFloors } &&
+        floors.zipWithNext().all { (a, b) -> a.x < b.x || a.x == b.x && a.z < b.z }, "invalid-plan")
+    return floors.flatMapTo(linkedSetOf()) { floor -> (0..2).map { floor.copy(y = floor.y + it) } }
+}
+
+internal fun civsValidatePaidGateFloors(plan: CivPlacementPlan): Set<CivPosition> {
+    val cells = civsPaidGateFloorCells(plan.building, plan.terrain?.paidGateFloors.orEmpty())
+    CivsRules.check(cells.isEmpty() || !plan.adminPlacement && !plan.terrain?.route.isNullOrEmpty() &&
+        plan.blocks.none { it.position in cells }, "invalid-plan")
+    return cells
 }
 
 /** Finite cut/fill terraces and a graded, three-block-wide connection to an existing entrance. */
@@ -236,6 +255,7 @@ internal object CivsAutonomousTerraform {
         preferredRoads: Set<Long> = emptySet(), waterFoundations: List<CivWaterFoundation> = emptyList(),
         reservedShoulders: Set<Long> = emptySet(),
         protectedRoadColumns: Set<Long> = emptySet(),
+        paidGateFloors: List<CivPosition> = emptyList(),
         inspectRoute: (CivRouteSearchStats) -> Unit = {}): CivTerraformDraft {
         val building = option.building
         if (!building.type.isInfrastructure && access.reservedFortificationPorts.any {
@@ -248,8 +268,17 @@ internal object CivsAutonomousTerraform {
                 infrastructureFloors[civsTerrainKey(f.x, f.z)] != f.floorY) throw CivsRejection("autonomy-terrain")
         }
         val standing = access.standing(city, building.id)
-        if (protectedRoadColumns.isNotEmpty() && (building.bounds.min.x..building.bounds.max.x).any { x ->
-                (building.bounds.min.z..building.bounds.max.z).any { z -> civsTerrainKey(x, z) in protectedRoadColumns }
+        val protectedRoads = if (paidGateFloors.isEmpty()) protectedRoadColumns else protectedRoadColumns + access.roadColumns(city)
+        val gateFloors = if (paidGateFloors.isEmpty()) emptyMap() else {
+            val proven = provePaidGateFloors(building, surface, access, protectedRoads)
+            if (paidGateFloors != proven) throw CivsRejection("gate-paid-floor")
+            proven.associateBy { civsTerrainKey(it.x, it.z) }
+        }
+        if (protectedRoads.isNotEmpty() && (building.bounds.min.x..building.bounds.max.x).any { x ->
+                (building.bounds.min.z..building.bounds.max.z).any { z ->
+                    val key = civsTerrainKey(x, z)
+                    key in protectedRoads && key !in gateFloors
+                }
             }) throw CivsRejection("building-overlap")
         val preservedDirtPaths = buildMap<Long, Int> {
             access.routes.values.flatten().forEach { feet -> for (dx in -1..1) for (dz in -1..1) {
@@ -302,6 +331,9 @@ internal object CivsAutonomousTerraform {
             val native = surface.at(x, z) ?: throw CivsRejection("autonomy-no-path")
             if (!native.loaded) throw CivsRejection("chunks-unloaded")
             val key = civsTerrainKey(x, z)
+            gateFloors[key]?.let {
+                if (ground != it.y || floor != it.y) throw CivsRejection("gate-paid-floor")
+            }
             val protected = standing[key]
             if (protected != null && ground != protected.y - 1) throw CivsRejection("autonomy-no-path",
                 mapOf("stage" to "retained-grade", "x" to "$x", "z" to "$z",
@@ -309,7 +341,7 @@ internal object CivsAutonomousTerraform {
             val pathFloor = preservedDirtPaths[key]?.takeIf {
                 if (building.type == BuildingType.GATE) abs(it.toLong() - ground) <= 1 else it == ground
             }
-            val publicRoad = key in protectedRoadColumns
+            val publicRoad = key in protectedRoads
             if (publicRoad && protected == null && (native.groundY != ground || native.topY != ground)) throw CivsRejection("autonomy-no-path",
                 mapOf("stage" to "retained-road-grade", "x" to "$x", "z" to "$z"))
             val retained = preserve || protected != null || pathFloor != null || publicRoad
@@ -342,7 +374,7 @@ internal object CivsAutonomousTerraform {
                 if (dx == 0 && dz == 0) continue
                 val x = point.x + dx; val z = point.z + dz
                 val key = civsTerrainKey(x, z)
-                if (key in centerline || key in columns || key in standing || key in reservedShoulders || key in protectedRoadColumns ||
+                if (key in centerline || key in columns || key in standing || key in reservedShoulders || key in protectedRoads ||
                     CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, ground, z)) ||
                     routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, ground, z)) }) continue
                 // Unavailable shoulder terrain does not invalidate a safe centre corridor. It is
@@ -373,7 +405,7 @@ internal object CivsAutonomousTerraform {
                     val x = route[index].x + dx; val z = route[index].z + dz
                     val key = civsTerrainKey(x, z)
                     val shoulder = ground + (maxOf(abs(dx), abs(dz)) - 2).coerceAtLeast(0)
-                    if (key in profile || key in standing || key in reservedShoulders || key in protectedRoadColumns || !city.contains(x, z) ||
+                    if (key in profile || key in standing || key in reservedShoulders || key in protectedRoads || !city.contains(x, z) ||
                         CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, shoulder, z)) ||
                         routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, shoulder, z)) }) continue
                     val native = surface.at(x, z)
@@ -388,7 +420,7 @@ internal object CivsAutonomousTerraform {
         CivsAutonomousGeometry.approach(building).forEach { point ->
             // The route already validates and preserves any shared lane. Its other columns are
             // outside the mandatory footprint and must not be raised to the new doorstep.
-            if (civsTerrainKey(point.x, point.z) in protectedRoadColumns) return@forEach
+            if (civsTerrainKey(point.x, point.z) in protectedRoads) return@forEach
             add(point.x, point.z, building.entrance.y - 1, building.entrance.y - 1,
                 point.x == route.first().x && point.z == route.first().z, visibleFillLimit = apronFillLimit)
         }
@@ -403,7 +435,8 @@ internal object CivsAutonomousTerraform {
             (maxOf(it.surfaceY, it.groundY) + 2 - maxOf(surface.minHeight, it.floorY - MAXIMUM_CHANGE) + 1).toLong()
         }
         if (count > MAXIMUM_CAPTURE_CELLS) throw CivsRejection("autonomy-search-budget")
-        return CivTerraformDraft(building, columns.values.toList(), route, building.anchor.y, access, waterFoundations.toList())
+        return CivTerraformDraft(building, columns.values.toList(), route, building.anchor.y, access, waterFoundations.toList(),
+            paidGateFloors = gateFloors.values.toList())
     }
 
     internal fun connection(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
@@ -494,7 +527,9 @@ internal object CivsAutonomousTerraform {
                 change(at(x, ground, z), "minecraft:grass_block[snowy=false]")
         }
         val waterColumns = civsWaterFoundationColumns(draft.building, draft.waterFoundations, result.values.toList())
-        val points = result.keys + draft.route + waterColumns.values.flatMap { f ->
+        val gateCells = civsPaidGateFloorCells(draft.building, draft.paidGateFloors)
+        CivsRules.check(gateCells.none { it in result }, "invalid-plan")
+        val points = result.keys + draft.route + gateCells + waterColumns.values.flatMap { f ->
             listOf(CivPosition(f.x, f.bottomY + 1, f.z), CivPosition(f.x, f.floorY, f.z))
         }
         if (points.isEmpty()) return CivTerraformPlan(draft.building.bounds, emptyList(), emptyList(), draft.groundY, 0, 0)
@@ -504,7 +539,8 @@ internal object CivsAutonomousTerraform {
         return CivTerraformPlan(bounds, blocks, draft.route.toList(), draft.groundY,
             blocks.count { air(it.after) }, blocks.count { !air(it.after) },
             draft.waterFoundations.takeIf { it.isNotEmpty() }?.toList(),
-            draft.requiredGrass.takeIf { it.isNotEmpty() }?.toList())
+            draft.requiredGrass.takeIf { it.isNotEmpty() }?.toList(),
+            draft.paidGateFloors.takeIf { it.isNotEmpty() }?.toList())
     }
 
     /** Three-wide road surface. Equal-distance shoulders use the lower grade, never a raised curb. */
@@ -520,6 +556,37 @@ internal object CivsAutonomousTerraform {
                 distance == previousDistance && point.y < previous.y) owners[key] = point
         }
         return owners.mapValues { (key, point) -> CivPosition((key shr 32).toInt(), point.y - 1, key.toInt()) }
+    }
+
+    /** Only the existing paid grade of each open transit column can cross the gate footprint. */
+    internal fun provePaidGateFloors(building: CivBuilding, surface: CivTerrainSurface,
+        access: CivAutonomousAccess, protectedRoads: Set<Long>): List<CivPosition> {
+        val overlap = (building.bounds.min.x..building.bounds.max.x).flatMap { x ->
+            (building.bounds.min.z..building.bounds.max.z).map { z -> civsTerrainKey(x, z) }
+        }.filterTo(linkedSetOf()) { it in protectedRoads }
+        if (overlap.isEmpty()) return emptyList()
+        if (building.type != BuildingType.GATE || building.level != 1 || building.control != null ||
+            CivsInfrastructureRebuild.version(building) != 5 || !CivsInfrastructureRebuild.validTransit(building))
+            throw CivsRejection("gate-paid-floor")
+        val open = building.transit.orEmpty().associateBy { civsTerrainKey(it.x, it.z) }
+        if (!open.keys.containsAll(overlap)) throw CivsRejection("gate-paid-post")
+        val grades = hashMapOf<Long, Int>()
+        fun witness(key: Long, y: Int) {
+            if (key in overlap && grades.putIfAbsent(key, y)?.let { it != y } == true)
+                throw CivsRejection("gate-paid-floor")
+        }
+        access.routes.values.forEach { route -> roadProfile(route).forEach { (key, floor) -> witness(key, floor.y) } }
+        access.infrastructure.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }.forEach { piece ->
+            piece.transit.forEach { feet -> witness(civsTerrainKey(feet.x, feet.z), feet.y - 1) }
+        }
+        return overlap.map { key ->
+            val feet = open.getValue(key)
+            val floor = feet.copy(y = feet.y - 1)
+            val native = surface.columns[key]?.takeIf { it.loaded } ?: throw CivsRejection("chunks-unloaded")
+            if (grades[key] != floor.y || native.groundY != floor.y || native.topY != floor.y || native.waterTopY != null)
+                throw CivsRejection("gate-paid-floor")
+            floor
+        }
     }
 
     /** Matches one floor without materializing the three-wide road profile. */

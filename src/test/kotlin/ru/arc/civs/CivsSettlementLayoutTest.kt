@@ -597,6 +597,82 @@ class CivsSettlementLayoutTest : FunSpec({
         passage.transit.single { it.x == gate.center.x && it.z == gate.center.z }.y shouldBe 66
     }
 
+    test("complete gate openings preserve all verified road floors and headroom through a fresh draft") {
+        val base = layoutFixtureCity()
+        val frame = CivsSettlementLayout.frame(base, 48)
+        val gate = frame.gates.first()
+        val surface = layoutSurface(base, "flat")
+        fun retained(offset: Int): Pair<Settlement, CivAutonomousAccess> {
+            val forester = layoutFixtureBuilding(BuildingType.FORESTER,
+                CivPosition(gate.passage.max.x + 12, 64, gate.center.z + offset))
+            val city = base.copy(buildings = base.buildings + forester)
+            val start = base.buildings.single().entrance
+            val turn = start.copy(z = forester.entrance.z)
+            val route = layoutAxisRoute(start, turn) + layoutAxisRoute(turn, forester.entrance).drop(1)
+            val journal = CivPlacementPlan(forester.id, city.id, city.worldId, forester, emptyList(), "a".repeat(64),
+                CivTerraformPlan(forester.bounds, emptyList(), route, 64, 0, 0))
+            return city to CivAutonomousAccess.from(city, listOf(journal))
+        }
+        fun generate(city: Settlement, access: CivAutonomousAccess, protect: Boolean) = CivsSettlementLayout.infrastructure(
+            city, frame, surface, access.routes.values.toList(), pavingRoutes = emptyList(),
+            retainedRoutes = access.routes.values, retainedAccess = access, protectPaidGateFloors = protect)
+        val (city, access) = retained(0)
+        val before = generate(city, access, false)
+        val complete = generate(city, access, true)
+        complete.perimeterClosed shouldBe true
+        complete.rejected shouldBe emptyMap()
+        val passage = complete.pieces.single { it.paidGateFloors.isNotEmpty() }
+        passage.paidGateFloors.size shouldBe 15
+        val normalZ = Math.floorMod(gate.side + frame.rotation / 90, 2) == 0
+        (if (normalZ) passage.entrance.x else passage.entrance.z) shouldBe
+            if (normalZ) gate.center.x else gate.center.z
+        (passage.entrance in access.routes.values.single()) shouldBe true
+        val protected = passage.paidGateFloors.flatMapTo(hashSetOf()) { floor -> (0..2).map { floor.copy(y = floor.y + it) } }
+        passage.blocks.filter { it.position in protected }.map { it.after }.toSet() shouldBe setOf("minecraft:barrier")
+        val original = before.pieces.single { it.id == passage.id }
+        passage.blocks.filterNot { it.position in protected } shouldBe original.blocks.filterNot { it.position in protected }
+        original.blocks.any { it.position in passage.paidGateFloors && it.after != "minecraft:barrier" } shouldBe true
+
+        val building = CivsInfrastructure.building(passage)
+        val floors = passage.blocks.groupBy { civsTerrainKey(it.position.x, it.position.z) }
+            .mapValues { (_, cells) -> cells.minOf { it.position.y } }
+        fun draft(field: CivTerrainSurface, proof: List<CivPosition> = passage.paidGateFloors) = CivsAutonomousTerraform.draft(
+            city, CivTerraformOption(building, 0), field, access, frame.wallObstacles, floors,
+            protectedRoadColumns = access.roadColumns(city), paidGateFloors = proof)
+        val prepared = draft(surface)
+        val paid = access.roadColumns(city)
+        prepared.columns.filter { civsTerrainKey(it.x, it.z) in paid }.all { it.preserve } shouldBe true
+        passage.paidGateFloors.forEach { floor ->
+            val column = prepared.columns.single { it.x == floor.x && it.z == floor.z }
+            column.preserve shouldBe true
+            column.floorY shouldBe floor.y
+        }
+        val native = buildMap {
+            for (column in prepared.columns) for (y in column.supportY..(maxOf(column.groundY, column.surfaceY) + 2)) {
+                val point = CivPosition(column.x, y, column.z)
+                val solid = y <= 64
+                put(point, CivTerraformCell(point, if (solid) "minecraft:grass_block" else "minecraft:air", true, solid, !solid))
+            }
+        }
+        val terrain = CivsAutonomousTerraform.materialize(prepared, native)
+        terrain.paidGateFloors shouldBe passage.paidGateFloors
+        terrain.blocks.none { it.position in protected } shouldBe true
+        val first = passage.paidGateFloors.first()
+        val head = first.copy(y = first.y + 2)
+        val blocked = native + (head to CivTerraformCell(head, "minecraft:stone", true, true, false))
+        shouldThrow<CivsRejection> { CivsAutonomousTerraform.materialize(prepared, blocked) }.reason shouldBe "autonomy-no-path"
+        val changed = surface.copy(columns = surface.columns + (civsTerrainKey(first.x, first.z) to CivTerrainSurfaceColumn(65, true)))
+        shouldThrow<CivsRejection> { draft(changed) }.reason shouldBe "gate-paid-floor"
+        shouldThrow<CivsRejection> { draft(surface, passage.paidGateFloors.drop(1)) }.reason shouldBe "gate-paid-floor"
+
+        val (edgeCity, edgeAccess) = retained(-1)
+        generate(edgeCity, edgeAccess, false).perimeterClosed shouldBe true
+        val blockedGate = generate(edgeCity, edgeAccess, true)
+        blockedGate.perimeterClosed shouldBe false
+        blockedGate.rejected["gate-paid-post"] shouldBe 1
+        blockedGate.pieces.none { it.paidGateFloors.isNotEmpty() } shouldBe true
+    }
+
     test("a deferred wall joins across bare grass beside its retained work approach") {
         val base = layoutFixtureCity()
         val hall = base.buildings.single()

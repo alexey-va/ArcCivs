@@ -32,6 +32,7 @@ internal data class CivSettlementPiece(
     val waterFoundations: List<CivWaterFoundation> = emptyList(),
     val profileStage: Int? = null,
     val requiredGrass: List<CivPosition> = emptyList(),
+    val paidGateFloors: List<CivPosition> = emptyList(),
 )
 
 internal data class CivSettlementInfrastructure(
@@ -349,7 +350,8 @@ internal object CivsSettlementLayout {
                 plan.building.schematicId != building.schematicId || plan.building.transit != building.transit)) return@mapNotNull null
         CivSettlementPiece(building.id, building.type, building.bounds, building.entrance,
             plan.blocks.map { CivSettlementBlock(it.position, it.after) }, building.transit.orEmpty(),
-            plan.terrain?.waterFoundations.orEmpty(), CivsInfrastructureRebuild.stage(building).takeIf { it > 0 })
+            plan.terrain?.waterFoundations.orEmpty(), CivsInfrastructureRebuild.stage(building).takeIf { it > 0 },
+            paidGateFloors = plan.terrain?.paidGateFloors.orEmpty())
     }.distinctBy { it.id }
 
     /**
@@ -363,7 +365,8 @@ internal object CivsSettlementLayout {
         acceptedFortifications: Set<UUID> = emptySet(),
         forecastFortifications: Set<UUID> = emptySet(),
         wallProfileStage: Int? = null, wallFloors: Map<Long, Int> = emptyMap(),
-        retainedAccess: CivAutonomousAccess = CivAutonomousAccess()): CivSettlementInfrastructure {
+        retainedAccess: CivAutonomousAccess = CivAutonomousAccess(),
+        protectPaidGateFloors: Boolean = false): CivSettlementInfrastructure {
         val rejected = sortedMapOf<String, Int>()
         val samples = linkedMapOf<String, MutableList<CivPosition>>()
         fun reject(reason: String, at: CivPosition? = null) {
@@ -448,6 +451,7 @@ internal object CivsSettlementLayout {
         val retainedFloors = accepted.flatMap { it.blocks }.groupBy { key(it.position) }
             .mapValues { (_, cells) -> cells.minOf { it.position.y } } +
             accepted.flatMap { it.waterFoundations }.associate { key(it.x, it.z) to it.floorY } +
+            accepted.flatMap { it.paidGateFloors }.associate { key(it) to it.y } +
             fortificationGround.mapValues { it.value.y }
         val wood = wood(city.style)
         val stone = if (city.style == "nordic") "minecraft:cobblestone" else "minecraft:stone_bricks"
@@ -474,8 +478,9 @@ internal object CivsSettlementLayout {
             }
             return routeFloors[key(x, z)] ?: c.groundY
         }
+        val paidCenterline = if (protectPaidGateFloors) retainedRoutes.flatMapTo(hashSetOf()) { it } else emptySet()
         fun add(type: BuildingType, cells: List<CivSettlementBlock>, hint: CivPosition, transit: List<CivPosition> = emptyList(),
-            reportRejection: Boolean = true): Boolean {
+            reportRejection: Boolean = true, gate: CivSettlementGate? = null): Boolean {
             if (cells.isEmpty()) return false
             val bounds = box(cells.map { it.position })
             val floors = cells.groupBy { key(it.position) }.mapValues { (column, group) ->
@@ -524,7 +529,11 @@ internal object CivsSettlementLayout {
                 if (abs(y - 1 - edgeFloor) > 1) return@mapNotNull null
                 p.copy(y = y)
             }
-            val entrance = approaches.minWithOrNull(compareBy<CivPosition> { manhattan(it, frame.origin) }
+            val paidCenter = if (gate == null || paidCenterline.isEmpty()) emptyList() else {
+                val normalZ = Math.floorMod(gate.side + frame.rotation / 90, 2) == 0
+                approaches.filter { p -> (if (normalZ) p.x == gate.center.x else p.z == gate.center.z) && p in paidCenterline }
+            }
+            val entrance = paidCenter.ifEmpty { approaches }.minWithOrNull(compareBy<CivPosition> { manhattan(it, frame.origin) }
                 .thenBy { manhattan(it, hint) }.thenBy { it.x }.thenBy { it.z })
             if (entrance == null) {
                 if (reportRejection) reject("infrastructure-no-approach", bounds.min)
@@ -598,7 +607,7 @@ internal object CivsSettlementLayout {
                     continue
                 }
                 val piece = shaped.getOrThrow()
-                add(BuildingType.GATE, piece.blocks, piece.entrance, piece.transit)
+                add(BuildingType.GATE, piece.blocks, piece.entrance, piece.transit, gate = gate)
             }
         }
         // Keep clear 24-column orders stable; split failed dry runs without spanning paid pieces or holes.
@@ -737,7 +746,27 @@ internal object CivsSettlementLayout {
                     "south=${connects(0, 1)},waterlogged=false,west=${connects(-1, 0)}]")
             }
         }) }
-        return CivSettlementInfrastructure(repaired, rejected, closed, blockers.values.toList(), samples.mapValues { it.value.toList() })
+        val protected = if (!protectPaidGateFloors || !closed || rejected.isNotEmpty()) repaired else {
+            val roads = retainedAccess.roadColumns(city)
+            repaired.map { piece ->
+                if (piece.type != BuildingType.GATE || piece in accepted) return@map piece
+                val building = CivsInfrastructure.building(piece)
+                val floors = try {
+                    CivsAutonomousTerraform.provePaidGateFloors(building, surface, retainedAccess, roads)
+                } catch (failure: CivsRejection) {
+                    reject(failure.reason, piece.entrance)
+                    return@map piece
+                }
+                if (floors.isEmpty()) return@map piece
+                val preserved = civsPaidGateFloorCells(building, floors)
+                piece.copy(blocks = piece.blocks.map { cell ->
+                    if (cell.position in preserved) cell.copy(after = "minecraft:barrier") else cell
+                }, paidGateFloors = floors)
+            }
+        }
+        val complete = !protectPaidGateFloors || rejected.isEmpty()
+        return CivSettlementInfrastructure(if (complete) protected else repaired, rejected, closed && complete,
+            blockers.values.toList(), samples.mapValues { it.value.toList() })
     }
 
     internal fun wood(style: String): String = when (style) { "nordic" -> "spruce"; "caledonia" -> "dark_oak"; else -> "oak" }

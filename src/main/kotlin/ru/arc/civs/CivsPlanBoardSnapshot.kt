@@ -53,6 +53,10 @@ internal fun civsPlanBoardLayoutKey(city: Settlement): String {
         plan.routes.toSortedMap().forEach { (id, route) -> field(id); route.forEach(::field) }
         plan.walls.forEach(::field); plan.gates.forEach(::field); plan.gateSides.orEmpty().forEach(::field)
         plan.deferredPerimeter?.let { field("deferred-perimeter"); field(it.stage); field(it.plotId); field(it.plotAnchor); field(it.crossing) }
+        plan.perimeterEntrances?.let { entrances ->
+            field("perimeter-entrances")
+            entrances.toSortedMap().forEach { (id, entrance) -> field(id); field(entrance) }
+        }
     }
     field(city.roadRouteOverrides.orEmpty().size)
     city.roadRouteOverrides.orEmpty().toSortedMap().forEach { (id, route) ->

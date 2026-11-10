@@ -195,10 +195,13 @@ class CivsWorld(
         AutonomousAccessRepair(city, protected, repairs.toList())
     }
 
-    fun revalidate(plan: CivPlacementPlan, owner: UUID): CompletableFuture<Unit> = admit(terrainPoints(plan.terrain)) {
-        requireCivs(plan.blocks.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-        Revalidation(plan.copy(blocks = plan.blocks.toList()), owner)
-    }
+    fun revalidate(plan: CivPlacementPlan, owner: UUID, terrainBatch: Boolean = false): CompletableFuture<Unit> =
+        admit(terrainPoints(plan.terrain)) {
+            val paidGate = !plan.terrain?.paidGateFloors.isNullOrEmpty()
+            requireCivs(plan.blocks.size <= CivsStore.MAX_PLAN_BLOCKS &&
+                (plan.blocks.isNotEmpty() || paidGate) && (!terrainBatch || paidGate), "invalid-plan")
+            Revalidation(plan.copy(blocks = plan.blocks.toList()), owner, terrainBatch)
+        }
 
     /** Exact owner identity, including material-specific Lands role flags. Server thread only. */
     fun canModify(owner: UUID, block: Block, placing: Material? = null): Boolean {
@@ -955,7 +958,10 @@ class CivsWorld(
     ) : CivsWorldScan<CivPlacementPlan>(this@CivsWorld, cityId, owner, worldId, building) {
         private val blocks = ArrayList<CivPlanBlock>()
         private var terraform = terrain?.copy(blocks = terrain.blocks.toList(), route = terrain.route.toList(),
-            waterFoundations = terrain.waterFoundations?.toList(), requiredGrass = terrain.requiredGrass?.toList())
+            waterFoundations = terrain.waterFoundations?.toList(), requiredGrass = terrain.requiredGrass?.toList(),
+            paidGateFloors = terrain.paidGateFloors?.toList())
+        private val paidGateFloors = terraform?.paidGateFloors.orEmpty().toSet()
+        private val paidGateCells = civsPaidGateFloorCells(building, terraform?.paidGateFloors.orEmpty())
         private val terrainOverlay = terraform?.blocks.orEmpty().associateBy { it.position }
         private val requiredGrass = terraform?.requiredGrass.orEmpty().toSet()
         private val terrainBlocks = ArrayList<CivPlanBlock>()
@@ -985,6 +991,11 @@ class CivsWorld(
                 requireTerrainRoute(it.route, building, allowManualFoundation = true)
                 requireCivs(requiredGrass.isEmpty() || building.type == BuildingType.WALL && it.route.isNotEmpty() &&
                     requiredGrass.all { p -> infrastructureGround[civsTerrainKey(p.x, p.z)] == p.y }, "invalid-plan")
+                requireCivs(paidGateCells.isEmpty() || !adminPlacement && it.route.isNotEmpty() &&
+                    paidGateCells.none { p -> p in terrainOverlay } &&
+                    (previous?.phase == BuildingPhase.ACTIVE || building.schematicId ==
+                        CivsInfrastructureRebuild.schematicId(building.type, CivsInfrastructureRebuild.stage(building), building.id)),
+                    "invalid-plan")
                 if (it.route.isNotEmpty()) strictAutonomous = true
             }
             wallApproach?.let { approach ->
@@ -1161,9 +1172,11 @@ class CivsWorld(
             if (position in requiredGrass && (block.type != Material.GRASS_BLOCK ||
                     world.getHighestBlockYAt(position.x, position.z, HeightMap.MOTION_BLOCKING) != position.y))
                 rejectAt("world-changed", block)
+            requireCivs(position !in paidGateCells || cell.isBarrier, "invalid-plan")
             if (cell.isBarrier) {
                 requireCivs(parse(cell.blockData).material == Material.BARRIER, "invalid-plan")
-                if (!canModify(owner, block)) rejectAt("lands-denied", block)
+                if (position in paidGateCells) checkPaidGateCell(block, position in paidGateFloors)
+                else if (!canModify(owner, block)) rejectAt("lands-denied", block)
                 return
             }
             if (position == building.control && parse(cell.blockData).material == Material.STRUCTURE_VOID) {
@@ -1204,6 +1217,8 @@ class CivsWorld(
         private val cells: List<CivPlanBlock>, private val terrainStart: Int, private val canAdvance: () -> Boolean,
         private val onPlaced: (CivPlanBlock) -> Unit) : CivsWorldScan<Unit>(this@CivsWorld, plan.cityId, owner, plan.worldId, plan.building) {
         private val terraform = plan.terrain ?: throw CivsRejection("invalid-plan")
+        private val paidGateFloors = terraform.paidGateFloors.orEmpty()
+        private var paidGateCursor = 0
         private var membershipIndex = 0
         private var matched = 0
         private var admitted = false
@@ -1215,6 +1230,8 @@ class CivsWorld(
             requireCivs(terraform.blocks.size in 1..CivsStore.MAX_PLAN_BLOCKS &&
                 plan.blocks.size.toLong() + terraform.blocks.size <= CivsStore.MAX_PLAN_BLOCKS &&
                 terrainStart >= 0 && terrainStart.toLong() + cells.size <= terraform.blocks.size, "invalid-plan")
+            val protected = civsValidatePaidGateFloors(plan)
+            requireCivs(cells.none { it.position in protected }, "invalid-plan")
             requireTerrainRoute(terraform.route, building, allowManualFoundation = true)
         }
         override fun validateIdentity(city: Settlement?) {
@@ -1235,7 +1252,17 @@ class CivsWorld(
                 return
             }
             if (index == cells.size) return completeBatch()
-            if (!canAdvance()) { blockedTick = tickSequence; return }
+            val checkingGate = paidGateCursor < paidGateFloors.size * 3
+            // Check builder presence before the proof and again before the write, not on each proof cell.
+            if ((!checkingGate || paidGateCursor == 0) && !canAdvance()) {
+                if (index == 0) paidGateCursor = 0
+                blockedTick = tickSequence
+                return
+            }
+            if (checkingGate) {
+                checkPaidGateCell(paidGateFloors, paidGateCursor++)
+                return
+            }
             validateContext()
             checkPreservedControl()
             val cell = cells[index]
@@ -1265,8 +1292,10 @@ class CivsWorld(
         }
     }
 
-    private inner class Revalidation(private val plan: CivPlacementPlan, owner: UUID) :
+    private inner class Revalidation(private val plan: CivPlacementPlan, owner: UUID, private val terrainBatch: Boolean) :
         CivsWorldScan<Unit>(this@CivsWorld, plan.cityId, owner, plan.worldId, plan.building) {
+        private val paidGateFloors = plan.terrain?.paidGateFloors.orEmpty()
+        private var paidGateCursor = 0
         private val waterColumns = civsWaterFoundationColumns(building, plan.terrain?.waterFoundations.orEmpty(), plan.terrain?.blocks.orEmpty())
         private val waterFoundations = if (waterColumns.isEmpty()) emptyList() else plan.blocks.mapNotNull { cell ->
             waterColumns[civsTerrainKey(cell.position.x, cell.position.z)]?.takeIf { it.contains(cell.position) }
@@ -1277,6 +1306,7 @@ class CivsWorld(
         init {
             requireCivs(!CivsBlueprints.hasAuthoredControl(building) || plan.blocks.none { it.position == building.control }, "invalid-plan")
             civsValidateWaterFoundations(plan, complete = false)
+            civsValidatePaidGateFloors(plan)
         }
         override fun validateIdentity(city: Settlement?) {
             val current = city?.building(building.id)
@@ -1308,7 +1338,11 @@ class CivsWorld(
                     rejectAt("autonomy-foundation", bed)
                 return
             }
-            if (index == plan.blocks.size) {
+            if (paidGateCursor < paidGateFloors.size * 3) {
+                checkPaidGateCell(paidGateFloors, paidGateCursor++)
+                return
+            }
+            if (terrainBatch || index == plan.blocks.size) {
                 checkPreservedControl()
                 finish(Unit)
                 return
