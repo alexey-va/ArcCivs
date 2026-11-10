@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.mockk.every
@@ -25,6 +26,80 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsAutonomousFamilyFallbackTest : FunSpec({
+    test("the next paid civic site can use a smaller full Blacksmith family between existing roads") {
+        InfrastructurePlacementScenario(32).use { s ->
+            val (city, access) = civicFamilyTown()
+            s.city = city
+            s.access = access
+            val protectedRoads = access.roadColumns(city)
+            val flat = settlementPlanSurface(city)
+            s.surface = flat.copy(columns = flat.columns.mapValues { (key, cell) -> cell.copy(dirtPath = key in protectedRoads) })
+
+            // Relative frames and entrances of the installed Medieval Oak level I–III families.
+            fun family(name: String, revision: String, bounds: CivBox): Pair<CivBuilding, CivBuilding> {
+                val id = "civs/v2/medievaloak/craftsmanship-metallurgy-$name/$revision"
+                val first = CivBuilding(UUID(146, 99), BuildingType.BLACKSMITH, 1, CivPosition(0, 0, 0), 0,
+                    "$id/level1", bounds, CivPosition(0, 1, 0), BuildingPhase.CONSTRUCTING, CivPosition(1, 1, -1))
+                return first to first.copy(level = 3, schematicId = "$id/level3")
+            }
+            val preferred = family("altblacksmith", "7353cff2441dd2f55db1",
+                CivBox(CivPosition(-14, -1, -26), CivPosition(11, 21, -1)))
+            val compact = family("blacksmith", "e8468c3965a2e160aa67",
+                CivBox(CivPosition(-13, -2, -14), CivPosition(8, 13, -1)))
+            val type = BuildingType.BLACKSMITH
+            val templates = settlementPlanTemplates() + (type to preferred)
+            val profile = CivsSettlementGrowth.profile(city)
+            profile.last() shouldBe type
+            val refusal = shouldThrow<CivsRejection> {
+                CivsSettlementPlans.prepareGrowth(city, templates, s.surface, access, profile)
+            }
+            refusal.reason shouldBe "autonomy-no-site"
+            refusal.values shouldBe mapOf("type" to type.name, "frontage_candidates" to "0", "frontage_options" to "0",
+                "infill_candidates" to "0", "infill_options" to "0", "samples" to "", "draft_samples" to "")
+
+            val snapshot = mockk<ArcSchematicSnapshot>()
+            fun loaded(building: CivBuilding) = CompletableFuture.completedFuture(
+                CivBlueprint(building, city.worldId, snapshot, emptyList(), emptyList(), byteArrayOf(1)))
+            val families = listOf(preferred, compact).associateBy { it.first.schematicId }
+            every { s.blueprints.autonomousSource(city.style, type) } returns preferred.first.schematicId
+            every { s.blueprints.autonomousAlternatives(city.style, type) } returns listOf(compact.first.schematicId)
+            every { s.blueprints.maximumLevel(any()) } returns 3
+            every { s.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                val pair = templates.getValue(arg(1))
+                loaded((if (arg<Int>(2) == 1) pair.first else pair.second).copy(id = arg(3)))
+            }
+            every { s.blueprints.prepareEntry(any(), any(), any(), any(), any(), any()) } answers {
+                loaded(families.getValue(firstArg<String>()).first.copy(id = arg(1)))
+            }
+            every { s.blueprints.prepareUpgrade(any(), any(), any()) } answers {
+                val first = firstArg<CivBuilding>()
+                loaded(families.getValue(first.schematicId).second.copy(id = first.id))
+            }
+
+            val planned = s.planner.plan(city).join()
+            val previous = requireNotNull(city.autonomy?.plan)
+            val added = planned.plots.single { city.building(it.building.id) == null }
+            added.building.schematicId shouldBe compact.first.schematicId
+            added.envelope shouldBe CivsSettlementPlans.at(compact.second, added.building.anchor, added.building.rotation).bounds
+            planned.plots.filter { it != added } shouldBe previous.plots
+            planned.walls shouldBe previous.walls
+            planned.gates shouldBe previous.gates
+            planned.deferredPerimeter?.plotId shouldBe added.building.id
+            access.routes.forEach { (owner, route) -> planned.routes[owner.toString()] shouldBe route }
+            val route = planned.routes.getValue(added.building.id.toString())
+            val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(added.building.copy(bounds = added.envelope), 0),
+                s.surface, access, planned.walls, reservedRoute = route, protectedRoadColumns = protectedRoads)
+            draft.columns.any { it.preserve && civsTerrainKey(it.x, it.z) in protectedRoads } shouldBe true
+            draft.columns.none { !it.preserve && civsTerrainKey(it.x, it.z) in protectedRoads } shouldBe true
+            verify(exactly = 1) { s.blueprints.autonomousAlternatives(city.style, type) }
+
+            val typed = previous.copy(perimeterEntrances = mapOf(UUID(146, 600).toString() to CivPosition(0, 65, 30)))
+            val pinned = city.copy(autonomy = requireNotNull(city.autonomy).copy(plan = typed))
+            CivsSettlementPlans.current(pinned) shouldBe typed
+            CivsSettlementPlans.deferCivicParcel(pinned, templates + (type to compact), s.surface, access, profile, refusal) shouldBe null
+        }
+    }
+
     for (type in listOf(BuildingType.CRUSHER, BuildingType.FARM))
     test("a reachable $type infill reaches native capture before sixty four gradeable frontage refusals exhaust the budget") {
         InfrastructurePlacementScenario(56).use { s ->
@@ -949,6 +1024,46 @@ private fun spatialFortificationPlot(template: CivFortificationTemplate): CivSet
     val building = CivsSettlementPlans.at(template.building, anchor, 0, UUID(141, 1)).copy(phase = BuildingPhase.SITE)
     return CivSettlementPlot(building, building.bounds, CivSettlementFortification(
         template.sourceSha256, template.recipeSha256, template.proofAt(anchor, 0)))
+}
+
+/** Settled side streets leave a narrow central parcel. The accepted roads and yards are immovable. */
+private fun civicFamilyTown(): Pair<Settlement, CivAutonomousAccess> {
+    val base = settlementPlanCity().copy(radius = 56, style = "medievaloak", autonomy = CivAutonomy(layoutHalfWidth = 32),
+        inventory = CivInventory(CivStorageMode.PHYSICAL),
+        research = CivResearchState(setOf(CivResearchId.MATERIALS, CivResearchId.METALLURGY)))
+    fun parcel(type: BuildingType, index: Int, x: Int, z: Int, entrance: CivPosition = CivPosition(x + 1, 65, z + 4)) =
+        CivBuilding(UUID(146, index.toLong()), type, minOf(2, type.maxLevel), CivPosition(x, 64, z), 0,
+            "civs/v2/fixture/settled-${type.name.lowercase()}/00000000000000000000/level${minOf(2, type.maxLevel)}",
+            CivBox(CivPosition(x, 64, z), CivPosition(x + 3, 68, z + 3)), entrance, BuildingPhase.ACTIVE)
+    val needed = CivsAutonomy.profile.filter { it !in setOf(BuildingType.TOWN_HALL, BuildingType.WAREHOUSE, BuildingType.BLACKSMITH) } +
+        listOf(BuildingType.HOUSE, BuildingType.HOUSE)
+    val sides = listOf(-28, -21, -14, -7, 7, 15, 23).flatMap { z -> listOf(-24 to z, 21 to z) }
+    val ordinary = needed.zip(sides).mapIndexed { index, (type, at) ->
+        val x = if (type in CivsSettlementLayout.exteriorTypes) (if (at.first < 0) -44 else 41) else at.first
+        parcel(type, index + 1, x, at.second)
+    }
+    val hall = base.buildings.single().copy(level = 2,
+        schematicId = "civs/v2/fixture/settled-hall/00000000000000000000/level2")
+    val warehouse = parcel(BuildingType.WAREHOUSE, 50, 21, -2, CivPosition(20, 65, 0)).copy(rotation = 90)
+    val roads = listOf(-14, 14).flatMap { x ->
+        (-32..32).toList().chunked(23).map { columns ->
+            val floor = columns.map { z -> CivPosition(x, 64, z) }
+            val feet = floor.map { it.copy(y = it.y + 1) }
+            CivSettlementPiece(UUID(146, 200L + 5 * x + columns.first()), BuildingType.ROAD,
+                CivBox(floor.first(), feet.last()), feet.first(), floor.map { CivSettlementBlock(it, "minecraft:dirt_path") },
+                transit = feet)
+        }
+    }
+    val retainedRoute = (0..warehouse.entrance.x).map { x -> CivPosition(x, 65, 0) }
+    val access = CivAutonomousAccess(routes = mapOf(warehouse.id to retainedRoute), infrastructure = roads)
+    val buildings = listOf(hall, warehouse) + ordinary
+    val frame = CivsSettlementLayout.frame(base)
+    val plan = CivSettlementPlan(CivsSettlementPlans.VERSION, 1, frame.halfWidth,
+        buildings.map { CivSettlementPlot(it.copy(phase = BuildingPhase.SITE), it.bounds) },
+        access.routes.mapKeys { it.key.toString() }, frame.wallObstacles, frame.gates.map { it.passage },
+        frame.gates.map { it.side })
+    return base.copy(buildings = buildings + roads.map { CivsInfrastructure.building(it).copy(phase = BuildingPhase.ACTIVE) },
+        autonomy = requireNotNull(base.autonomy).copy(plan = plan)) to access
 }
 
 /** Real catalog and terraform draft; stop at the native boundary so selection has no world side effects. */

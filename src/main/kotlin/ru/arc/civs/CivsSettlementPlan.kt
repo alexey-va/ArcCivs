@@ -503,13 +503,15 @@ internal object CivsSettlementPlans {
             it.contains("unloaded") || it.contains("lands-denied") || it.contains("storage-unavailable")
         }
 
-    internal fun compactUniversityMayFit(city: Settlement, surface: CivTerrainSurface, retained: CivAutonomousAccess,
+    internal fun compactCivicMayFit(city: Settlement, surface: CivTerrainSurface, retained: CivAutonomousAccess,
         profile: List<BuildingType>, failure: CivsRejection): Boolean =
-        failure.reason == "autonomy-no-site" && failure.values["type"] == BuildingType.UNIVERSITY.name &&
+        failure.reason == "autonomy-no-site" && failure.values["type"] == profile.lastOrNull()?.name &&
             failure.values["frontage_candidates"] == "0" && failure.values["frontage_options"] == "0" &&
             failure.values["infill_candidates"] == "0" && failure.values["infill_options"] == "0" &&
-            failure.values["samples"] == "" && failure.values["draft_samples"] == "" &&
-            civicObstruction(failure) && paidCivicStage(city, surface, retained, profile) == CIVIC_PERIMETER
+            failure.values["samples"] == "" && failure.values["draft_samples"] == "" && civicObstruction(failure) &&
+            // The deferred forecast has no authority to replace a pinned ring or its history.
+            current(city)?.let { it.perimeterEntrances == null && it.completedPerimeters.isNullOrEmpty() } == true &&
+            paidCivicStage(city, surface, retained, profile) == CIVIC_PERIMETER
 
     internal fun deferCivicParcel(city: Settlement, templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>,
         surface: CivTerrainSurface, retained: CivAutonomousAccess, profile: List<BuildingType>, failure: CivsRejection): CivSettlementPlan? {
@@ -537,9 +539,11 @@ internal object CivsSettlementPlans {
 
     private fun ordinaryGrowth(city: Settlement, forecast: CivSettlementPlan, retained: CivAutonomousAccess,
         target: BuildingType, failure: CivsRejection): CivSettlementPlan? {
+        val prior = current(city)
+        // A deferred forecast cannot replace exact perimeter membership or its completed history.
+        if (prior?.perimeterEntrances != null || !prior?.completedPerimeters.isNullOrEmpty()) return null
         if (retained.infrastructure.isNotEmpty() && !protectsPaidApproach(failure.values["stage"])) {
-            val prior = current(city) ?: return null
-            if (prior.deferredPerimeter == null || forecast.halfWidth != prior.halfWidth || forecast.walls != prior.walls ||
+            if (prior?.deferredPerimeter == null || forecast.halfWidth != prior.halfWidth || forecast.walls != prior.walls ||
                 forecast.gates != prior.gates || forecast.gateSides != prior.gateSides) return null
         }
         val next = forecast.plots.filter { city.building(it.building.id) == null }.singleOrNull()

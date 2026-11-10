@@ -188,8 +188,8 @@ internal class CivsAutonomousPlacement(
                         CompletableFuture.completedFuture(CivsSettlementPlans.prepareGrowth(projected, loaded, input.second,
                             access, profile, fortification = input.third))
                     } catch (failure: CivsRejection) {
-                        if (!CivsSettlementPlans.compactUniversityMayFit(projected, input.second, access, profile, failure)) throw failure
-                        val type = BuildingType.UNIVERSITY
+                        if (!CivsSettlementPlans.compactCivicMayFit(projected, input.second, access, profile, failure)) throw failure
+                        val type = profile.last()
                         val entry = blueprints.autonomousAlternatives(city.style, type).firstOrNull() ?: throw failure
                         planTemplate(city, type, entry).thenApplyAsync({ alternative ->
                             if (result.isDone || closed) throw CivsRejection("world-closed")
