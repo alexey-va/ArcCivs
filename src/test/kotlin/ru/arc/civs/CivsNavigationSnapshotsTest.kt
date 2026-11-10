@@ -322,6 +322,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 updated.states(64, 79) shouldBeSameInstanceAs surfacePalette
                 updated.states(32, 47).keys.map { it.material } shouldBe listOf(Material.STONE, Material.AIR)
                 snapshots.debug()["chunk_captures"] shouldBe 2L
+                snapshots.debug()["chunk_captures_dirty"] shouldBe 1L
                 snapshots.debug()["detached_section_decodes"] shouldBe 3L
                 snapshots.debug()["retained_sections_on_refresh"] shouldBe 1L
                 val terrain = CitizenSnapshotTerrain().also { it.chunks[chunkKey] = old }
@@ -338,6 +339,12 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 val reloaded = requireNotNull(snapshots.capture(world, chunkKey, 6))
                 (reloaded.states(64, 79) === expired.states(64, 79)) shouldBe false
                 snapshots.currentSections(world.uid, mapOf(CitizenSnapshotSectionKey(0, 4, 0) to expired.revision)) shouldBe false
+                val counts = snapshots.debug()
+                counts["chunk_captures"] shouldBe 4L
+                counts["chunk_captures_cold"] shouldBe 2L
+                counts["chunk_captures_dirty"] shouldBe 1L
+                counts["chunk_captures_lru"] shouldBe 0L
+                counts["chunk_captures_ttl"] shouldBe 1L
             } finally { snapshots.clear(); tasks.close() }
         }
     }
@@ -890,12 +897,25 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 val a = CitizenSnapshotKey(0, 0)
                 val b = CitizenSnapshotKey(1, 0)
                 val first = requireNotNull(snapshots.capture(world, a, 0))
+                snapshots.capture(world, a, 0) shouldBeSameInstanceAs first
                 snapshots.capture(world, b, 0)
                 snapshots.debug()["chunks"] shouldBe 1
                 snapshots.capture(world, a, 1)?.revision shouldBe first.revision
                 snapshots.current(world.uid, mapOf(a to first.revision)) shouldBe true
                 snapshots.capture(world, a, 6)
                 snapshots.current(world.uid, mapOf(a to first.revision)) shouldBe false
+                // A native edit after eviction marks the next capture dirty.
+                world.getBlockAt(24, 64, 8).type = Material.STONE
+                snapshots.changed(world.uid, CivPosition(24, 64, 8))
+                paper.performTicks(2)
+                requireNotNull(snapshots.capture(world, b, 7))
+                val counts = snapshots.debug()
+                counts["chunk_cache_hits"] shouldBe 1L
+                counts["chunk_captures"] shouldBe 5L
+                counts["chunk_captures_cold"] shouldBe 2L
+                counts["chunk_captures_dirty"] shouldBe 1L
+                counts["chunk_captures_lru"] shouldBe 1L
+                counts["chunk_captures_ttl"] shouldBe 1L
 
                 val workers = ArrayDeque<Runnable>()
                 val owner = CivsResidentNavigation(tasks, executor = Executor { workers.addLast(it) }, snapshotCache = snapshots)

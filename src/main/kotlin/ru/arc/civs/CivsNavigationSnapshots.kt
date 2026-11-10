@@ -135,7 +135,11 @@ internal class CivsNavigationSnapshots(
     private var refresh: ScheduledTask? = null
     private var refreshBatches = 0L
     private var revisionSerial = 0L
-    private var captures = 0L
+    private var cacheHits = 0L
+    private var coldCaptures = 0L
+    private var lruCaptures = 0L
+    private var dirtyCaptures = 0L
+    private var ttlCaptures = 0L
     private var deferredRecaptures = 0L
     private val sectionDecodes = AtomicLong()
     private var retainedSections = 0L
@@ -149,7 +153,10 @@ internal class CivsNavigationSnapshots(
         val id = Key(world.uid, key)
         if (id in dirty) { dirtyRequested += id; throw CitizenSnapshotPending() }
         val cached = chunks[id]
-        cached?.takeIf { !it.stale && tick - it.geometryTick < refreshTicks }?.let { return it.chunk }
+        cached?.takeIf { !it.stale && tick - it.geometryTick < refreshTicks }?.let {
+            cacheHits++
+            return it.chunk
+        }
         val snapshot = world.getChunkAt(key.x, key.z).getChunkSnapshot(false, false, false, false)
         val previousTick = revisionTicks[id]
         val geometryTick = cached?.geometryTick
@@ -166,7 +173,13 @@ internal class CivsNavigationSnapshots(
         val captured = CitizenSnapshotChunk(snapshot, world.minHeight, world.maxHeight, revision, retained, invalidated, sectionDecodes)
         // Event refreshes cannot indefinitely postpone checking inherited sections against a fresh native snapshot.
         chunks[id] = Cached(geometryTick?.takeIf { captured.retainedSections > 0 } ?: tick, captured)
-        captures++
+        // Dirtying an evicted chunk drops its capture tick but retains its changed sections.
+        when {
+            expired -> ttlCaptures++
+            cached?.stale == true || previousTick == null && id in sectionChanges -> dirtyCaptures++
+            previousTick != null -> lruCaptures++
+            else -> coldCaptures++
+        }
         retainedSections += captured.retainedSections
         while (chunks.size > maximumChunks) chunks.remove(chunks.keys.first())
         return captured
@@ -317,7 +330,10 @@ internal class CivsNavigationSnapshots(
     }
     fun debug(): Map<String, Any> {
         checkOwner()
-        return mapOf("chunks" to chunks.size, "maximum_chunks" to maximumChunks, "chunk_captures" to captures,
+        return mapOf("chunks" to chunks.size, "maximum_chunks" to maximumChunks, "chunk_cache_hits" to cacheHits,
+            "chunk_captures" to (coldCaptures + lruCaptures + dirtyCaptures + ttlCaptures),
+            "chunk_captures_cold" to coldCaptures, "chunk_captures_lru" to lruCaptures,
+            "chunk_captures_dirty" to dirtyCaptures, "chunk_captures_ttl" to ttlCaptures,
             "detached_section_decodes" to sectionDecodes.get(), "retained_sections_on_refresh" to retainedSections,
             "deferred_native_recaptures" to deferredRecaptures,
             "palette_states" to palette.size, "palette_shape_reads" to paletteReads,
