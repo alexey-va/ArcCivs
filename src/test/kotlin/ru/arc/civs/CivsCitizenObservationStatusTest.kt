@@ -8,6 +8,8 @@ import io.mockk.mockk
 import io.mockk.verify
 import org.bukkit.Location
 import org.bukkit.Material
+import java.util.Locale
+import java.util.concurrent.CompletableFuture
 
 class CivsCitizenObservationStatusTest : FunSpec({
     test("travel captions distinguish preparation contact ready movement and stopped segments") {
@@ -66,7 +68,7 @@ class CivsCitizenObservationStatusTest : FunSpec({
         verify { route wasNot Called }
     }
 
-    test("raw held search remains diagnostic while public nameplates show assigned work without replanning") {
+    test("raw held search remains diagnostic while public nameplates show waiting without replanning") {
         residentRuntime { h ->
             h.assignFarm()
             val hall = h.city.buildings.first().copy(control = h.city.buildings.first().entrance)
@@ -93,20 +95,60 @@ class CivsCitizenObservationStatusTest : FunSpec({
             val text = CivsText.fromYaml(civsLocaleSource())
             for ((key, label) in mapOf("route-preparing" to "Готовится идти", "route-searching" to "Ищет путь",
                 "route-blocked" to "Ждёт свободный проход", "route-stopped" to "Остановился")) {
-                plainText(text.status(null, key, hasWork = true)) shouldBe "Работает"
-                plainText(text.status(null, key)) shouldBe "Отдыхает"
+                plainText(text.status(null, key, hasWork = true)) shouldBe "Ждёт"
+                plainText(text.status(null, key)) shouldBe "Ждёт"
                 plainText(text.render("workers.status.$key")) shouldBe label
                 for (locale in listOf("ru", "en")) {
                     text.keys(locale).contains("workers.status.$key") shouldBe true
                     text.keys(locale).contains("building-status.$key") shouldBe true
                 }
             }
-            plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[2] shouldBe "Работает"
+            plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[2] shouldBe "Ждёт"
             h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
             h.routeIdentity() shouldBe route
             h.city shouldBe city
             h.workPlans shouldBe workPlans
             h.observedWork() shouldBe 0L
+        }
+    }
+
+    test("public captions distinguish waiting, ordinary travel, guard duty and work in both languages") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        for ((locale, waiting, walking, guarding, working) in listOf(
+            listOf("ru", "Ждёт", "Идёт", "На посту", "Работает"),
+            listOf("en", "Waiting", "Walking", "On watch", "Working"),
+        )) {
+            for (state in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped",
+                "searching-work", "workstation-unavailable", "mine-waiting", "paused", "waiting", "idle")) {
+                plainText(text.status(null, state, locale = locale, hasWork = true)) shouldBe waiting
+            }
+            for (state in listOf("walking", "moving-to-work", "moving-to-storage", "carrying-cargo", "patrolling")) {
+                plainText(text.status(null, state, locale = locale, hasWork = true)) shouldBe walking
+            }
+            plainText(text.status(null, "guarding", locale = locale, hasWork = true)) shouldBe guarding
+            for (state in listOf("working", "working-field", "building", "placing")) {
+                plainText(text.status(null, state, locale = locale, hasWork = true)) shouldBe working
+            }
+        }
+    }
+
+    test("an assigned worker awaiting work leaves the building waiting") {
+        serviceScenario { h ->
+            val home = h.city.buildings.last()
+            val forester = home.copy(type = BuildingType.FORESTER, control = CivPosition(10, 63, 0),
+                schematicId = CivsBlueprints.schematicId(h.city.style, BuildingType.FORESTER, 1))
+            val worker = h.city.workers.first().copy(assignment = forester.id)
+            val city = h.city.copy(buildings = listOf(h.city.buildings.first(), forester),
+                workers = listOf(worker) + h.city.workers.drop(1))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.citizens.status(worker.id) } returns "workers.status.waiting"
+            every { h.player.locale() } returns Locale.forLanguageTag("ru-RU")
+            h.start()
+            h.service.workerStatus(worker.id) shouldBe "workers.status.waiting"
+            val status = h.service.buildingStatus(forester.id)
+            status shouldBe "building-status.waiting"
+            val text = CivsText.fromYaml(civsLocaleSource())
+            plainText(text.buildingStatus(h.player, city, forester, status)) shouldBe "Ждёт"
         }
     }
 })

@@ -174,6 +174,7 @@ internal class CivsCitizenObservations(
             } == true) return "walking"
         plan.idleReason?.takeUnless { it == "placing" }?.let { return it }
         if (plan.token.assignmentId != worker.assignment || plan.token.completedCycles != worker.completedCycles) return "waiting"
+        if (actor.patrolTarget?.let { it == actor.route?.idleAnchor } == true) return "patrolling"
         citizenWorkStatus(plan, actor.cycle.phase, life.servingTavernGuests(actor, city))?.let { return it }
         return runtime.statuses[actor.workerId]?.takeUnless { it == "mine-waiting" } ?: actor.cycle.status()
     }

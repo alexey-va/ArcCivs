@@ -477,16 +477,19 @@ internal class CivsAutonomousPlacement(
                         acceptedFortifications = access.acceptedFortifications, retainedAccess = access)
                     rejections.putAll(plan.rejected)
                     blockers = plan.blockers
-                    if (blockers.isNotEmpty() || !plan.perimeterClosed) CivsDiagnostics.record(java.util.logging.Level.WARNING, city.id,
+                    val completePerimeter = plan.perimeterClosed && plan.rejected.isEmpty()
+                    if (blockers.isNotEmpty() || !completePerimeter) CivsDiagnostics.record(java.util.logging.Level.WARNING, city.id,
                         CivsDiagnostics.line("autonomous_layout_obstructed", "city" to city.id,
                             "perimeter_closed" to plan.perimeterClosed, "blockers" to blockers.take(4), "count" to blockers.size,
                             "rejected" to plan.rejected, "samples" to plan.rejectionSamples.mapValues { it.value.take(1) }))
-                    val missing = plan.pieces.filter { city.building(it.id) == null }
+                    // A partial outline can still contribute ordinary roads, but does not start a wall ring.
+                    val missing = plan.pieces.filter { city.building(it.id) == null &&
+                        (completePerimeter || it.type == BuildingType.ROAD) }
                         .sortedWith(compareBy<CivSettlementPiece> { when (it.type) {
                             BuildingType.GATE -> 0; BuildingType.WALL -> 1; else -> 2
                         } }.thenBy { it.bounds.min.x }.thenBy { it.bounds.min.z })
                     if (missing.isEmpty()) {
-                        fail(if (plan.perimeterClosed && plan.rejected.isEmpty()) "autonomy-layout-complete" else "autonomy-no-site")
+                        fail(if (completePerimeter) "autonomy-layout-complete" else "autonomy-no-site")
                         return@await
                     }
                     pieces = missing.associateBy { it.id }

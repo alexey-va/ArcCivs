@@ -49,6 +49,9 @@ internal class CivsCitizenRoutes(
     private val logistics get() = logisticsOwner()
     private val life get() = lifeOwner()
 
+    fun paidGuardApproach(city: Settlement, towerId: UUID): List<CivPosition> =
+        workFrame(city.id)?.takeIf { it.territory.matches(city) }?.roads?.guardApproach(towerId).orEmpty()
+
     /** Ordinary preparation failures retry quietly; food recovery checks its own physical intent and deadline. */
     fun retryPreparation(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
         val reason = route.motion.failure?.takeIf { it in PREPARATION_FAILURES } ?: return false

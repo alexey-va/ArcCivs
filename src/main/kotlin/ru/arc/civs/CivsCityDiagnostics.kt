@@ -198,7 +198,7 @@ internal class CivsCityDiagnostics(
                 } else workers.map { workerStatus(it.id).removePrefix("workers.status.") }.let { states ->
                     val selected = states.firstOrNull { it in setOf("working", "moving-to-work", "moving-to-storage") } ?: states.first()
                     when (selected) {
-                        "waiting", "delivering" -> "working"
+                        "delivering" -> "working"
                         "world-unloaded", "chunk-unloaded", "capacity", "closed" -> "sleeping"
                         "construction-paused", "building-unavailable", "unavailable" -> "paused"
                         else -> selected

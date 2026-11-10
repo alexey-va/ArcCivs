@@ -106,9 +106,9 @@ class CivsHologramsTest : FunSpec({
             plainText(label) shouldContain "Василий\n"
             plainText(label) shouldContain "\nФермер\n"
             for (status in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped")) {
-                plainText(civsNpcHologramText(text, npc.copy(status = status))).lines()[2] shouldBe "Работает"
-                plainText(civsNpcHologramText(text, npc.copy(status = status, profession = "unassigned"))).lines()[2] shouldBe "Отдыхает"
-                plainText(civsNpcHologramText(text, npc.copy(status = status, child = true))).lines()[2] shouldBe "Отдыхает"
+                plainText(civsNpcHologramText(text, npc.copy(status = status))).lines()[2] shouldBe "Ждёт"
+                plainText(civsNpcHologramText(text, npc.copy(status = status, profession = "unassigned"))).lines()[2] shouldBe "Ждёт"
+                plainText(civsNpcHologramText(text, npc.copy(status = status, child = true))).lines()[2] shouldBe "Ждёт"
             }
             plainText(label) shouldContain "\n\uE601 18.5/20   \uE603 20/20"
             plainText(civsNpcHologramText(text, npc.copy(hunger = 6))) shouldContain "\uE604 6/20"

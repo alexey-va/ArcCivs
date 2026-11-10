@@ -308,6 +308,31 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
+    test("an incomplete perimeter never drafts isolated gates or walls ahead of ordinary paving") {
+        InfrastructurePlacementScenario().use { s ->
+            val route = (0..10).map { CivPosition(0, 65, it) }
+            val frame = CivsSettlementLayout.frame(s.city)
+            val gate = frame.gates.first()
+            val blocked = civsTerrainKey(gate.center.x, gate.center.z)
+            s.surface = s.surface.copy(columns = s.surface.columns.mapValues { (key, column) ->
+                if (key == blocked) column.copy(natural = false) else column
+            })
+            val incomplete = CivsSettlementLayout.infrastructure(s.city, frame, s.surface, listOf(route))
+            incomplete.perimeterClosed shouldBe false
+            incomplete.pieces.any { it.type == BuildingType.WALL || it.type == BuildingType.GATE } shouldBe true
+            incomplete.pieces.any { it.type == BuildingType.ROAD } shouldBe true
+            val plan = CivSettlementPlan(CivsSettlementPlans.VERSION, 0, frame.halfWidth, emptyList(),
+                mapOf(s.city.buildings.first().id.toString() to route), frame.wallObstacles,
+                frame.gates.map { it.passage }, frame.gates.map { it.side })
+            s.city = s.city.copy(autonomy = requireNotNull(s.city.autonomy).copy(plan = plan))
+            CivsSettlementPlans.current(s.city) shouldBe plan
+
+            spatialFailure(s.planner.infrastructure(s.city)) shouldBe "test-selected-infrastructure-draft"
+
+            s.drafts.single().building.type shouldBe BuildingType.ROAD
+        }
+    }
+
     for (type in listOf(BuildingType.ROAD, BuildingType.GATE, BuildingType.WALL))
     test("a completed $type approach remains protected without requesting a new paving generation") {
         InfrastructurePlacementScenario().use { s ->

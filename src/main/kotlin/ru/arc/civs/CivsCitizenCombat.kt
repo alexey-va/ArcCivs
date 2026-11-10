@@ -116,7 +116,14 @@ internal class CivsCitizenCombat(
             .distinct().sortedWith(compareBy<CivPosition> { it.x }.thenBy { it.z }).let { points ->
                 if (points.size <= 4) points else listOf(0, points.size / 3, points.size * 2 / 3, points.lastIndex).map(points::get)
             }
-        if (posts.isEmpty()) return false
+        val towerPatrol = posts.isEmpty()
+        val approach = if (towerPatrol && actor.cycle.phase == CitizenPhase.WORKING)
+            routes.paidGuardApproach(city, home.id) else emptyList()
+        if (towerPatrol && actor.patrolTarget?.let { it !in approach } == true) {
+            if (actor.route?.idleAnchor == actor.patrolTarget) routes.cancelRoute(actor)
+            actor.patrolTarget = null
+        }
+        if (towerPatrol && approach.isEmpty()) return false
         val target = actor.patrolTarget
         if (target != null) {
             if (citizenArrived(actor.npc.location, target.location(world))) {
@@ -128,14 +135,31 @@ internal class CivsCitizenCombat(
                 routes.cancelRoute(actor); actor.patrolTarget = null; actor.patrolAfter = now + 5_000; actor.patrolIndex++
             }
         } else if (now >= actor.patrolAfter && runtime.wanderBudget > 0) {
+            val available = if (towerPatrol) guardApproachPosts(approach, home.entrance, radius) else posts
+            if (available.isEmpty()) return false
             runtime.wanderBudget--
-            val next = posts[Math.floorMod(actor.patrolIndex + worker.id.hashCode(), posts.size)]
-            if (citizenStandable(world, next) && citizenControlClear(city, next) && collisions.idleDestinationFree(actor, next.location(world)) &&
+            val next = available[Math.floorMod(actor.patrolIndex + worker.id.hashCode(), available.size)]
+            val destination = next.location(world)
+            if ((!towerPatrol || !citizenArrived(actor.npc.location, destination)) && citizenStandable(world, next) &&
+                citizenControlClear(city, next) && collisions.idleDestinationFree(actor, destination) &&
                 routes.startRoute(actor, world, next, now, idleAnchor = next)) actor.patrolTarget = next
             else { actor.patrolAfter = now + 5_000; actor.patrolIndex++ }
         }
         runtime.statuses[worker.id] = if (actor.patrolTarget == null) "guarding" else "patrolling"
         return true
+    }
+
+    private fun guardApproachPosts(approach: List<CivPosition>, entrance: CivPosition, radius: Double): List<CivPosition> {
+        if (approach.lastOrNull() != entrance) return emptyList()
+        val center = entrance.point()
+        val posts = mutableListOf(entrance)
+        for (position in approach.asReversed()) {
+            val point = position.point()
+            if (point.distanceSquared(center) > radius * radius || posts.any { point.distanceSquared(it.point()) < 36.0 }) continue
+            posts += position
+            if (posts.size == 3) break
+        }
+        return if (posts.size > 1) posts else emptyList()
     }
 
     fun combat(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {

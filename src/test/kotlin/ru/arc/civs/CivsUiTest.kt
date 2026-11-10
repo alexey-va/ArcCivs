@@ -181,9 +181,9 @@ class CivsVillageVisitUiTest : FunSpec({
 class CivsBuildingStatusUiTest : FunSpec({
     test("building inspection uses public work labels and preserves concrete mine needs") {
         for (language in listOf("ru", "en")) for ((status, publicStatus) in listOf(
-            "securing-mine" to "working", "returning-output" to "working", "defending" to "defending",
+            "securing-mine" to "working", "returning-output" to "walking", "defending" to "defending",
             "retreating" to "retreating", "no-research" to "no-work", "research-paused" to "research-paused",
-            "research-unfunded" to "waiting-materials", "mine-descending" to "working", "mine-returning" to "working",
+            "research-unfunded" to "waiting-materials", "mine-descending" to "walking", "mine-returning" to "walking",
         )) {
             withUi { h ->
                 h.player.setLocale(Locale.forLanguageTag(language))
@@ -559,9 +559,9 @@ class CivsUiTest : FunSpec({
                 export("auto2-hall")
             }
             val statuses = if (russian) mapOf("to-meal" to "Идёт поесть", "eating" to "Ест", "learning" to "Учится у взрослого",
-                "patrolling" to "Работает", "alarm-shelter" to "Укрывается от опасности")
+                "patrolling" to "Идёт", "alarm-shelter" to "Укрывается от опасности")
             else mapOf("to-meal" to "Going for a meal", "eating" to "Eating", "learning" to "Learning from an adult",
-                "patrolling" to "Working", "alarm-shelter" to "Taking shelter from danger")
+                "patrolling" to "Walking", "alarm-shelter" to "Taking shelter from danger")
             statuses.forEach { (status, expected) -> plainText(labels.status(h.player, status)) shouldBe expected }
         }
     }
@@ -1418,7 +1418,7 @@ class CivsUiTest : FunSpec({
             h.paper.performTicks(2)
             h.screen.id shouldBe "civs.worker"
             h.body() shouldContain "Forester"
-            h.body() shouldContain "Working"
+            h.body() shouldContain "Walking"
             h.body().contains("No work") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, forester.id) }
 
@@ -2150,11 +2150,11 @@ class CivsUiTest : FunSpec({
                 "collecting-supplies" to "Working",
                 "placing" to "Working",
                 "working" to "Working",
-                "route-preparing" to "Working",
-                "route-searching" to "Working",
-                "route-blocked" to "Working",
-                "route-stopped" to "Working",
-                "waiting" to "No work",
+                "route-preparing" to "Waiting",
+                "route-searching" to "Waiting",
+                "route-blocked" to "Waiting",
+                "route-stopped" to "Waiting",
+                "waiting" to "Waiting",
                 "injury-pending" to "Injured · saving condition",
             )) {
                 every { h.host.workerStatus(worker.id) } returns "workers.status.$status"
@@ -2923,7 +2923,7 @@ class CivsUiTest : FunSpec({
                 for (status in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped")) {
                     every { h.host.workerStatus(idle.id) } returns "workers.status.$status"
                     h.ui.openWorker(h.player, base.id, idle.id)
-                    h.body() shouldContain if (language == "ru") "Отдыхает" else "Resting"
+                    h.body() shouldContain if (language == "ru") "Ждёт" else "Waiting"
                     h.body().contains(if (language == "ru") "Работает" else "Working") shouldBe false
                 }
                 for (status in listOf("unassigned", "no-assignment")) {
@@ -3679,7 +3679,8 @@ class CivsUiTest : FunSpec({
                 workers = base.workers.map { if (it.id == base.workers.last().id) it.copy(assignment = building.id) else it })
             for ((status, label) in listOf("no-workers" to "No workers assigned", "route-unreachable" to "Worker cannot reach the destination",
                 "waiting-materials" to "Waiting for materials", "working" to "Working", "no-construction" to "No work",
-                "route-preparing" to "Working", "route-searching" to "Working", "route-blocked" to "Working", "route-stopped" to "Working",
+                "waiting" to "Waiting", "paused" to "Construction is paused",
+                "route-preparing" to "Waiting", "route-searching" to "Waiting", "route-blocked" to "Waiting", "route-stopped" to "Waiting",
                 "work-route-too-long" to "Storage is too far away", "control-missing" to "Control barrel is missing",
                 "lands-denied" to "No permission for this plot", "world-changed" to "The plot has changed",
                 "protected-terrain" to "A protected block cannot be replaced", "building-overlap" to "Overlaps another building",

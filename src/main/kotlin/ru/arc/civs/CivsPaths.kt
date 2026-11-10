@@ -34,9 +34,12 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     }
 
     /** Paid approach floors and public transit grades, detached from the existing receipts. */
-    internal class RetainedRoads private constructor(private val supports: Set<CivPosition>) {
+    internal class RetainedRoads private constructor(private val supports: Set<CivPosition>,
+        private val guardApproaches: Map<UUID, List<CivPosition>> = emptyMap()) {
+        // Navigation cost identity depends on the support grades, independently of patrol order.
         private val signature = supports.hashCode()
         operator fun contains(point: CivPosition): Boolean = point in supports
+        fun guardApproach(towerId: UUID): List<CivPosition> = guardApproaches[towerId].orEmpty()
         override fun hashCode(): Int = signature
         override fun equals(other: Any?): Boolean = this === other || other is RetainedRoads &&
             signature == other.signature && supports == other.supports
@@ -55,7 +58,11 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
                         for (feet in route.orEmpty()) add(feet.copy(y = feet.y - 1))
                     }
                 }
-                return if (supports.isEmpty()) EMPTY else RetainedRoads(supports)
+                if (supports.isEmpty()) return EMPTY
+                val guardApproaches = city.buildings.asSequence()
+                    .filter { it.type == BuildingType.GUARD_TOWER && it.phase == BuildingPhase.ACTIVE }
+                    .mapNotNull { tower -> access.routes[tower.id]?.let { tower.id to java.util.List.copyOf(it) } }.toMap()
+                return RetainedRoads(supports, guardApproaches)
             }
         }
     }

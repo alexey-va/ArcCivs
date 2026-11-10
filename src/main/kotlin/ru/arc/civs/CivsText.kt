@@ -126,20 +126,22 @@ class CivsText private constructor(
     fun style(player: Player, style: String): Component =
         if ("style.$style" in messages.getValue("ru")) render(player, "style.$style") else literal(style)
 
-    /** Public activity stays stable while the administrator observes individual navigation phases. */
+    /** Public activity uses concise labels while diagnostics retain the individual states. */
     internal fun publicStatusKey(status: String, hasWork: Boolean = false): String = when (
         val state = status.removePrefix("workers.status.").removePrefix("building-status.")
     ) {
         "route-preparing", "route-searching", "route-blocked", "route-stopped", "searching-work",
-        "workstation-unavailable", "mine-waiting" -> if (hasWork) "working" else "resting"
+        "workstation-unavailable", "mine-waiting" -> "waiting"
+        "paused" -> if (status == "building-status.paused") state else "waiting"
+        "idle", "waiting" -> if (hasWork) "waiting" else "no-work"
         "to-work", "moving-to-work", "moving-to-storage", "returning-output", "to-store",
-        "moving-to-pickup", "loading-cargo", "carrying-cargo", "collecting-supplies", "delivering",
-        "mine-descending", "mine-returning", "working-field", "repairing-road", "watering", "fertilizing",
+        "moving-to-pickup", "carrying-cargo", "mine-descending", "mine-returning", "patrolling" -> "walking"
+        "loading-cargo", "collecting-supplies", "delivering", "working-field", "repairing-road", "watering", "fertilizing",
         "felling-tree", "planting-tree", "digging-mine", "securing-mine", "building", "placing",
-        "guarding", "patrolling", "serving-guests" -> "working"
-        "idle", "waiting", "unassigned", "no-assignment", "no-construction", "no-research",
+        "serving-guests" -> "working"
+        "unassigned", "no-assignment", "no-construction", "no-research",
         "waiting-orders", "waiting-guests", "queued-construction", "waiting-reassignment" -> "no-work"
-        "walking", "wandering", "meeting", "talking", "to-campfire", "campfire", "old-age-retirement",
+        "wandering", "meeting", "talking", "to-campfire", "campfire", "old-age-retirement",
         "no-viewers", "capacity", "closed" -> "resting"
         "research-unfunded" -> "waiting-materials"
         else -> state
