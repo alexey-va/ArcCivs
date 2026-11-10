@@ -49,12 +49,15 @@ class CivsSupplyCaptureTest : FunSpec({
             }
 
             val buildings = h.city.buildings.mapTo(hashSetOf(), CivBuilding::id)
+            captures.planningPositions(h.city, h.city.buildings) shouldBe null
             val initial = capture()
             repeat(4) { n ->
                 h.city = h.city.copy(revision = h.city.revision + 1, stock = Stock(food = n.toLong()),
                     workers = h.city.workers.map { it.copy(hunger = n) })
                 captures.update(h.city)
                 captures.current(h.city, initial, null) shouldBe true
+                val positions = requireNotNull(captures.planningPositions(h.city, h.city.buildings, index.positions(h.city)))
+                initial.stores.forEach { (id, store) -> (positions[id] === store.key.positions) shouldBe true }
             }
             val barrel = requireNotNull(h.warehouse.control)
             captures.changed(h.city.worldId, barrel)

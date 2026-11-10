@@ -51,6 +51,16 @@ internal class CivsStorageContainers(
     fun settlementSupplyRead(city: Settlement): CivSettlementSupplyRead = supplyCaptures.readFrame(city)
     fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long>? =
         supplyCaptures.planningBuildingStock(city, buildingId)
+
+    fun planningPositions(city: Settlement, buildings: List<CivBuilding>): Map<UUID, Map<CivPosition, String?>> {
+        val frozen = frozenPositions(city.id)
+        supplyCaptures.planningPositions(city, buildings, frozen)?.let { return it }
+        if (frozen == null) return emptyMap()
+        // A holder indexed after reservation joins discovery when the claim is released.
+        val controls = city.buildings.mapNotNullTo(hashSetOf(), CivBuilding::control)
+        return buildings.associate { it.id to selectBuildingPositions(it, frozen, controls) }
+    }
+
     fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? =
         supplyCaptures.planningContainer(city, buildingId, position)
     fun invalidateSupplyPositions(worldId: UUID, positions: Collection<CivPosition>) =

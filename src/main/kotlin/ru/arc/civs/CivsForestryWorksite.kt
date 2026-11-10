@@ -10,6 +10,8 @@ import org.bukkit.inventory.ItemStack
 import java.util.UUID
 import ru.arc.civs.requireWorksite as requireCivs
 
+private const val FOREST_TURN_ADMISSIONS = 32
+
 /** Owns the retained zone, pending tree/plant observations and captured native forestry batches. */
 internal class CivsForestryWorksite(
     context: CivsWorksiteContext, approaches: CivsWorksiteApproaches,
@@ -65,7 +67,10 @@ internal class CivsForestryWorksite(
     override fun changed(workerId: UUID, building: CivBuilding, point: CivPosition) { changed(workerId, point) }
     override fun protectionChanged(workerId: UUID, building: CivBuilding?, affected: (CivPosition, Int) -> Boolean) { protectionChanged(workerId, affected) }
     override fun forget(workerId: UUID, building: CivBuilding?, buildingStillUsed: Boolean) { forget(workerId) }
-    override fun retain(workerIds: Set<UUID>, buildingIds: Set<UUID>) { retain(workerIds) }
+    override fun retain(workerIds: Set<UUID>, buildingIds: Set<UUID>) {
+        retain(workerIds)
+        discoveryTurns.keys.retainAll(buildingIds)
+    }
     override fun containsChunk(workerId: UUID, building: CivBuilding, chunk: Pair<Int, Int>): Boolean = containsChunk(workerId, chunk)
 
     private val budget = context.discoveryBudget
@@ -109,6 +114,8 @@ internal class CivsForestryWorksite(
         }
     }
     private val forestSearches = hashMapOf<UUID, ForestSearch>()
+    private data class DiscoveryTurn(val workerId: UUID, val cycle: Long, var emptyAdmissions: Int = 0)
+    private val discoveryTurns = hashMapOf<UUID, DiscoveryTurn>()
 
     fun workerIds(): Set<UUID> = forestSearches.keys + forestScans.keys + forestPlants.keys
     fun building(workerId: UUID): CivBuilding? = forestSearches[workerId]?.building ?:
@@ -124,9 +131,15 @@ internal class CivsForestryWorksite(
             work.forestry?.job?.roots?.forEach { search.mature.remove(it) }
         }
     }
-    fun forget(workerId: UUID) { forestSearches.remove(workerId); invalidate(workerId) }
+    fun forget(workerId: UUID) {
+        forestSearches.remove(workerId)
+        invalidate(workerId)
+        discoveryTurns.values.removeIf { it.workerId == workerId }
+    }
+
     fun retain(workerIds: Set<UUID>) {
         forestScans.keys.retainAll(workerIds); forestPlants.keys.retainAll(workerIds); forestSearches.keys.retainAll(workerIds)
+        discoveryTurns.values.removeIf { it.workerId !in workerIds }
     }
     fun approachReopened(workerId: UUID, focus: CivPosition) {
         forestSearches[workerId]?.let { search ->
@@ -189,17 +202,18 @@ internal class CivsForestryWorksite(
     fun plan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         harvestOnly: Boolean): CivWorldWork? {
         spotSearchPending = false
-        if (!CivsAutonomy.legacyStock(city) && CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") != true) return null
-        val paths = CivsForestry.paths(city, context.forestryPaths(city))
-        city.forestryJobs?.get(building.id.toString())?.let { job ->
-            return forestBatch(city, worker, building, world, job)
+        val paid = city.forestryJobs?.get(building.id.toString())
+        if (!searchEligible(city, worker, building)) {
+            if (paid == null && discoveryTurns[building.id]?.workerId == worker.id) retireDiscovery(building, worker.id)
+            return null
         }
+        if (paid != null) return forestBatch(city, worker, building, world, paid)
         // A selected work action is retained by propose(); paid tree jobs above always finish.
         // Only a fully evidenced family surplus may pause every fresh species before native scanning.
         if (CivsProduction.options(BuildingType.FORESTER).all { context.forestrySurplus(city, it) })
             return blocked(worker, "storage-surplus", CivsProduction.material(building), reason = "timber-family-surplus")
-        // One worker owns a mill's candidate until its first durable receipt. Other mills remain independent.
-        if (city.workers.filter { it.assignment == building.id }.minByOrNull { it.id.toString() }?.id != worker.id) return null
+        if (!takeDiscoveryTurn(city, worker, building)) return blocked(worker, "waiting")
+        val paths = CivsForestry.paths(city, context.forestryPaths(city))
         val timber = requireNotNull(CivsProduction.material(building))
         val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
         val growConfiguredTimber = !context.forestrySurplus(city, timber)
@@ -406,6 +420,42 @@ internal class CivsForestryWorksite(
             reason = "tree-observation-pending")
         if (context.currentNeed(city, worker)?.status == "searching-work") return blocked(worker, "waiting-growth")
         return null
+    }
+
+    private fun takeDiscoveryTurn(city: Settlement, worker: CivWorker, building: CivBuilding): Boolean {
+        fun eligible(candidate: CivWorker) = candidate.assignment == building.id && searchEligible(city, candidate, building)
+
+        val turn = discoveryTurns.getOrPut(building.id) { DiscoveryTurn(worker.id, worker.completedCycles) }
+        val owner = city.workers.firstOrNull { it.id == turn.workerId && eligible(it) }
+        if (owner == null) {
+            retireDiscovery(building, turn.workerId)
+            discoveryTurns[building.id] = DiscoveryTurn(worker.id, worker.completedCycles, emptyAdmissions = 1)
+            return true
+        }
+        val active = hasPending(owner.id) || context.plan(city, owner)?.let(::citizenWorkFocus) != null ||
+            approaches.rejectedWorkSpots[owner.id]?.pending?.let { context.cachedMatches(city, owner, building, it) } == true ||
+            approaches.workSpots[owner.id]?.target?.let { it in forestSearches[owner.id]?.care.orEmpty() } == true
+        if (active || turn.cycle == owner.completedCycles && turn.emptyAdmissions < FOREST_TURN_ADMISSIONS) {
+            if (owner.id != worker.id) return false
+            if (!active) turn.emptyAdmissions++
+            return true
+        }
+        // Keep each worker's bounded zone observations for their next turn. A real candidate owns its exact cursor.
+        val roster = city.workers.filter(::eligible)
+        val next = roster[(roster.indexOf(owner) + 1) % roster.size]
+        val admitted = next.id == worker.id
+        discoveryTurns[building.id] = DiscoveryTurn(next.id, next.completedCycles, if (admitted) 1 else 0)
+        return admitted
+    }
+
+    private fun retireDiscovery(building: CivBuilding, workerId: UUID) {
+        discoveryTurns.remove(building.id)
+        invalidate(workerId)
+        approaches.workSpots.remove(workerId)
+        approaches.rejectedWorkSpots.remove(workerId)
+        // An independent equipment pickup is still useful while the mill's other worker searches.
+        val work = context.cached[workerId]?.work
+        if (work?.buildingId == building.id && citizenWorkFocus(work) != null) approaches.retireAction(workerId)
     }
 
     private fun plantingRank(building: UUID, point: CivPosition): Long {

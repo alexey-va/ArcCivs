@@ -164,29 +164,47 @@ internal class CivsResidentStorage(
         return null
     }
 
-    /** At most sixteen nearest indexed holders; never load chunks or invent a stock entry. */
+    private data class FoodPosition(val building: CivBuilding, val point: CivPosition, val type: String?,
+        val venueRank: Int, val distanceSquared: Double)
+
+    /** Up to sixteen indexed holders, including the nearest holder of the preferred venue. */
     private fun foodPositions(city: Settlement, worker: CivWorker, from: org.bukkit.Location,
-        reserve: Boolean = false): Sequence<Triple<CivBuilding, CivPosition, String?>> {
-        // The shared selector keeps unfinished buildings control-only; resolve requires its actual BARREL.
-        val positions = city.buildings.filter { CivsResidentFood.eligible(city, worker, it) &&
-            (!reserve || CivsResidentFood.reserveBuilding(city, it)) }.flatMap { building ->
-            containers.buildingPositions(city, building.id).map { (point, type) -> Triple(building, point, type) }
-        }.distinctBy { it.second }.sortedWith(compareBy<Triple<CivBuilding, CivPosition, String?>> { (building, _, _) ->
-            when { building.type == BuildingType.TAVERN -> 0; !reserve -> 1; building.type == BuildingType.WAREHOUSE -> 1; else -> 2 }
-        }.thenBy { (_, point, _) ->
-            val dx = point.x + .5 - from.x; val dy = point.y - from.y; val dz = point.z + .5 - from.z
-            dx * dx + dy * dy + dz * dz
-        })
-        val first = positions.firstOrNull() ?: return emptySequence()
-        val rest = positions.drop(1)
+        reserve: Boolean = false): Sequence<FoodPosition> {
+        val buildings = city.buildings.filter { CivsResidentFood.eligible(city, worker, it) &&
+            (!reserve || CivsResidentFood.reserveBuilding(city, it)) }
+        if (buildings.isEmpty()) return emptySequence()
+        val membership = if (reserve) buildings.associate { it.id to containers.buildingPositions(city, it.id) }
+            else containers.planningPositions(city, buildings)
+        val positions = mutableListOf<FoodPosition>()
+        val seen = hashSetOf<CivPosition>()
+        for (building in buildings) {
+            val venueRank = when {
+                building.type == BuildingType.TAVERN -> 0
+                !reserve || building.type == BuildingType.WAREHOUSE -> 1
+                else -> 2
+            }
+            for ((point, type) in membership[building.id].orEmpty()) {
+                if (!seen.add(point)) continue
+                val dx = point.x + .5 - from.x
+                val dy = point.y - from.y
+                val dz = point.z + .5 - from.z
+                positions += FoodPosition(building, point, type, venueRank, dx * dx + dy * dy + dz * dz)
+            }
+        }
+        if (positions.isEmpty()) return emptySequence()
+        positions.sortWith { left, right ->
+            val byVenue = left.venueRank.compareTo(right.venueRank)
+            if (byVenue == 0) left.distanceSquared.compareTo(right.distanceSquared) else byVenue
+        }
+        val rest = positions.size - 1
         val cursors = foodCursors.getOrPut(city.id, ::mutableMapOf)
-        val cursor = if (rest.isEmpty()) 0 else Math.floorMod(cursors[worker.id] ?: 0, rest.size)
-        val count = minOf(15, rest.size)
-        if (rest.isNotEmpty()) cursors[worker.id] = (cursor + count) % rest.size
+        val cursor = if (rest == 0) 0 else Math.floorMod(cursors[worker.id] ?: 0, rest)
+        val count = minOf(15, rest)
+        if (rest > 0) cursors[worker.id] = (cursor + count) % rest
         // Keep the preferred venue fast while empty large venues cannot hide all emergency holders.
         return sequence {
-            yield(first)
-            repeat(count) { offset -> yield(rest[(cursor + offset) % rest.size]) }
+            yield(positions.first())
+            repeat(count) { offset -> yield(positions[1 + (cursor + offset) % rest]) }
         }
     }
 

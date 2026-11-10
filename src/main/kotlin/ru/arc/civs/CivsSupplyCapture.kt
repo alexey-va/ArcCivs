@@ -187,6 +187,21 @@ internal class CivsSupplyCaptures(
         return readFrame(city).store(buildingId, clock())?.store?.stock
     }
 
+    /** Membership is shared even when only some holders of a store have fresh stock observations. */
+    fun planningPositions(city: Settlement, buildings: List<CivBuilding>, frozen: Map<CivPosition, String?>? = null):
+        Map<UUID, Map<CivPosition, String?>>? {
+        if (city.pendingDeletion != null) return null
+        val geometry = geometries[city.id]?.takeIf { it.matches(city) } ?: return null
+        if (frozen != null && frozen !== geometry.indexedPositions) return null
+        val stores = cities[city.id].orEmpty()
+        val unfinished = unfinishedControls[city.id].orEmpty()
+        return buildings.associate { building ->
+            val positions = stores[building.id]?.key?.positions
+                ?: unfinished[building.id]?.let { mapOf(it to "BARREL") }.orEmpty()
+            building.id to positions
+        }
+    }
+
     fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? {
         if (city.pendingDeletion != null || geometries[city.id]?.matches(city) != true) return null
         val indexed = cities[city.id]?.get(buildingId)?.key?.positions

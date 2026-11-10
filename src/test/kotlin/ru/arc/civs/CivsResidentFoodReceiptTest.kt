@@ -35,6 +35,43 @@ class CivsResidentFoodReceiptTest : FunSpec({
         h.barrel.getItem(0) shouldBe null
     }
 
+    test("a dirty holder leaves fresh food visible in another holder of the same building") {
+        h.foodPhase(BuildingPhase.ACTIVE)
+        val hall = h.city.buildings.single()
+        val other = CivPosition(0, 64, 1)
+        val block = h.world.getBlockAt(other.x, other.y, other.z).also { it.type = Material.BARREL }
+        (block.state as Barrel).inventory.setItem(0, ItemStack(Material.BREAD, 4))
+        h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
+        h.indexed += other
+        h.storage.refreshBuilding(h.city, hall)
+        requireNotNull(h.observedFoodSource(h.worker, h.feet)).container shouldBe h.point
+
+        h.storage.invalidateSupplyPositions(h.city.worldId, listOf(h.point))
+        h.storage.planningContainer(h.city, hall.id, h.point) shouldBe null
+        requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet)).container shouldBe other
+    }
+
+    test("food discovery uses frozen membership until a city claim is released") {
+        h.foodPhase(BuildingPhase.ACTIVE)
+        val hall = h.city.buildings.single()
+        h.observedFoodSource(h.worker, h.feet) shouldBe null
+        val other = CivPosition(0, 64, 1)
+        val claim = UUID.randomUUID()
+        h.storage.reserve(h.city, claim)
+        try {
+            val block = h.world.getBlockAt(other.x, other.y, other.z).also { it.type = Material.BARREL }
+            (block.state as Barrel).inventory.setItem(0, ItemStack(Material.BREAD, 4))
+            h.indexed += other
+            h.storage.refreshBuilding(h.city, hall)
+            h.storage.capturePlanningStorage(h.city)
+            h.storage.planningContainer(h.city, hall.id, other)?.stock shouldBe mapOf("BREAD" to 4L)
+            h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+        } finally {
+            h.storage.unlock(claim)
+        }
+        requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet)).container shouldBe other
+    }
+
     for (phase in BuildingPhase.entries) test("existing hall control bread remains usable through $phase without creating food") {
         h.foodPhase(phase)
         h.barrel.setItem(0, ItemStack(Material.BREAD, 24))
