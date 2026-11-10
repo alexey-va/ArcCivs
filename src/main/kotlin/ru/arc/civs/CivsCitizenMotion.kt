@@ -178,12 +178,21 @@ internal class CivsCitizenMotion(
                 val elapsed = (now - route.startedAt).coerceAtLeast(0)
                 if (elapsed >= 1_000 || route.storageReason != null || city.inventory?.mode == CivStorageMode.PHYSICAL &&
                     actor.plan.type == BuildingType.WAREHOUSE && actor.plan.courier?.carrying == true &&
-                    actor.cycle.phase == CitizenPhase.RETURNING) CivsDiagnostics.event("citizen_route_ready", "city" to actor.cityId,
-                    "worker" to actor.workerId, "route_started_at" to route.startedAt,
-                    "reason" to route.storageReason, "source" to route.storageBuilding,
-                    "phase" to actor.cycle.phase, "state" to if (motion.continuation) "segment-ready" else "path-ready",
-                    "elapsed_ms" to elapsed, "path_nodes" to motion.nodeCount, "failure" to motion.failure,
-                    "intermediate" to route.intermediate, "corridor_hint" to motion.hasCourierCorridorHint)
+                    actor.cycle.phase == CitizenPhase.RETURNING) {
+                    val failure = motion.failure
+                    val event = if (failure == null) "citizen_route_ready" else "citizen_route_failed"
+                    val state = when {
+                        failure != null -> "failed"
+                        motion.continuation -> "segment-ready"
+                        else -> "path-ready"
+                    }
+                    CivsDiagnostics.event(event, "city" to actor.cityId,
+                        "worker" to actor.workerId, "route_started_at" to route.startedAt,
+                        "reason" to route.storageReason, "source" to route.storageBuilding,
+                        "phase" to actor.cycle.phase, "state" to state,
+                        "elapsed_ms" to elapsed, "path_nodes" to motion.nodeCount, "failure" to failure,
+                        "intermediate" to route.intermediate, "corridor_hint" to motion.hasCourierCorridorHint)
+                }
             }
             if (route.path == null) motion.endpoint?.let { route.path = CitizenPathSnapshot(motion.nodeCount, it, false) }
             if ((motion.failure != null || route.completion != null || route.timedOut(now)) &&

@@ -335,10 +335,10 @@ internal class CivsCitizenCollisions(
     }
 
     fun recoveryPointSafe(actor: CitizenActor, city: Settlement, point: CivPosition, allowed: Set<UUID>,
-                                  mine: CivBuilding? = null): Boolean {
+                                  mine: CivBuilding? = null, feet: Location? = null): Boolean {
         val npc = actor.npc
         if (!npc.isValid || city.pendingDeletion != null || npc.world.uid != city.worldId || actor.worldId != city.worldId) return false
-        val destination = point.location(npc.world)
+        val destination = feet ?: point.location(npc.world)
         val body = citizenStandingBounds(destination, npc.scale)
         for (x in kotlin.math.floor(body.minX).toInt()..kotlin.math.floor(body.maxX).toInt())
             for (z in kotlin.math.floor(body.minZ).toInt()..kotlin.math.floor(body.maxZ).toInt())

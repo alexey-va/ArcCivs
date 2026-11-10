@@ -494,5 +494,10 @@ internal class CitizenRoute(val from: CitizenPoint, val target: Location, val ch
 
     fun timedOut(now: Long): Boolean = timing.timedOut(now, motion.searching)
 }
+internal enum class CitizenLabCourierFailureCause { CHUNK_UNLOADED, CAPTURE_BUDGET }
+
+internal data class CitizenLabCourierFailure(val cause: CitizenLabCourierFailureCause, val startedAt: Long,
+                                             val origin: CitizenPoint, val trip: CivCourierPlan)
+
 internal data class CitizenArrivalWait(val token: CitizenToken, val target: CivPosition, val cargoId: UUID?,
-                               val carrying: Boolean?, val progressAt: Long, var firstLabChunkFailureAt: Long? = null)
+                               val carrying: Boolean?, val progressAt: Long, var firstLabCourierFailure: CitizenLabCourierFailure? = null)
