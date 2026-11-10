@@ -118,7 +118,7 @@ internal class CivsCitizenRoutes(
         }
         val entrance = workMine?.let { citizenMineEntranceWaypoint(it, from.point(), resolved, requireNotNull(minePassage)) }
         val waypoint = entrance ?: citizenMineWaypoint(city, world, from, resolved)
-        val to = (waypoint ?: resolved).location(world)
+        val to = if (storage != null && waypoint == null) storageFeet(world, resolved) else (waypoint ?: resolved).location(world)
         if (idleAnchor != null && !collisions.idleDestinationFree(actor, to)) return false
         val distance = from.distance(to)
         if (!citizenRouteWithinReach(from.point(), to.point(), CivsLogistics.maximumTransferDistance(city))) {
@@ -236,7 +236,11 @@ internal class CivsCitizenRoutes(
     private fun storageStanding(actor: CitizenActor, city: Settlement, world: World, target: CivPosition,
                                 storage: CivBuilding, allowCached: Boolean): CivPosition? {
         val control = requireNotNull(storage.control)
-        val safe: (CivPosition) -> Boolean = { storagePointClear(actor, city, world, it) }
+        val safe: (CivPosition) -> Boolean = { point ->
+            val feet = storageFeet(world, point)
+            storagePointClear(actor, city, world, point, feet) &&
+                (feet.y == point.y.toDouble() || citizenCanReachBlock(world, feet.add(0.0, actor.npc.eyeHeight, 0.0), control))
+        }
         val cached = actor.targets[target]?.takeIf { allowCached && citizenAtStorage(world, it.point(), control) && safe(it) }
         return cached ?: citizenStorageTarget(city, storage, world, safe)
             ?: storage.takeIf { !citizenStorageReady(world, control) && it.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == it.id }
@@ -254,9 +258,10 @@ internal class CivsCitizenRoutes(
         } ?: return false
         val oldStanding = route.target.point()
         val standing = citizenStorageTarget(city, storage, world) { point ->
-            point.point() != oldStanding && citizenRoutePointAllowed(city, route.allowedBuildings, point) &&
-                storagePointClear(actor, city, world, point) &&
-                citizenCanReachBlock(world, point.location(world).add(0.0, actor.npc.eyeHeight, 0.0), control)
+            val feet = storageFeet(world, point)
+            feet.point() != oldStanding && citizenRoutePointAllowed(city, route.allowedBuildings, point) &&
+                storagePointClear(actor, city, world, point, feet) &&
+                citizenCanReachBlock(world, feet.add(0.0, actor.npc.eyeHeight, 0.0), control)
         } ?: return false
         cancelRoute(actor)
         // A failed path to this side must not replace the usual cached storage approach.
@@ -268,11 +273,22 @@ internal class CivsCitizenRoutes(
         return true
     }
 
-    private fun storagePointClear(actor: CitizenActor, city: Settlement, world: World, point: CivPosition): Boolean =
+    private fun storagePointClear(actor: CitizenActor, city: Settlement, world: World, point: CivPosition,
+                                  feet: Location = point.location(world)): Boolean =
         citizenStandable(world, point) && citizenControlClear(city, point) &&
-            citizenPacketBodyClear(world, point.point(), false) && point.location(world).let { destination ->
-                collisions.residentMoveAllowed(actor, destination, destination)
-            }
+            citizenPacketBodyClear(world, feet.point(), false) && collisions.residentMoveAllowed(actor, feet, feet)
+
+    /** The cell remains the route authority; a thin carpet changes only the supported feet height. */
+    private fun storageFeet(world: World, point: CivPosition): Location {
+        val base = point.location(world)
+        if (point.y !in world.minHeight until world.maxHeight || !citizenChunkReady(world, point.x shr 4, point.z shr 4)) return base
+        val block = world.getBlockAt(point.x, point.y, point.z)
+        if (!block.type.name.endsWith("_CARPET")) return base
+        val rise = block.collisionShape.boundingBoxes.maxOfOrNull { it.maxY } ?: return base
+        if (rise <= 0.001 || rise > 0.125) return base
+        val lifted = base.clone().add(0.0, rise, 0.0)
+        return lifted.takeIf { citizenPacketSupported(world, it.point(), allowClimbable = false) } ?: base
+    }
 
     /** Keep a clear food approach stable; other residents' bodies and arrival goals retain their existing reservations. */
     fun foodStanding(actor: CitizenActor, city: Settlement, source: CivResidentFoodSource): CivPosition? {
