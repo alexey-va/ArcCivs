@@ -89,12 +89,15 @@ internal class CivsCitizenMotion(
                 if (!actor.sleeping && !actor.observedSleeping && previous != null &&
                     abs(citizenAngleChange(previous, npc.bodyYaw)) > 17f)
                     routes.navigationDiagnostic(actor, "abrupt-turn", route?.target ?: npc.location, now)
-                val at = npc.location.point()
-                if (actor.turnOrigin?.distanceSquared(at)?.let { it > 1.0 } != false || runtime.navigationTick - actor.turnSinceTick > 40) {
-                    actor.turnOrigin = at
+                // A new leg or observed travel ends the previous in-place turn.
+                val turningAt = if (route?.motion?.turning == true && !actor.sleeping && !actor.observedSleeping)
+                    npc.location.point() else null
+                if (turningAt == null || actor.turnOrigin?.distanceSquared(turningAt)?.let { it > .000001 } != false ||
+                    runtime.navigationTick - actor.turnSinceTick > 40) {
+                    actor.turnOrigin = turningAt
                     actor.turnSinceTick = runtime.navigationTick
                     actor.turnAmount = 0f
-                } else if (route != null && previous != null && !actor.sleeping) {
+                } else if (route != null && previous != null) {
                     actor.turnAmount += abs(citizenAngleChange(previous, npc.bodyYaw))
                     if (actor.turnAmount >= 270f) routes.navigationDiagnostic(actor, "turn-loop", route.target, now)
                 }
