@@ -205,8 +205,15 @@ internal class CivsAutonomousPlacement(
                         }, executor)
                     }
                 }
-                val plan = CivsSettlementPlans.prepare(projected, loaded, input.second, access,
-                    fortification = input.third, profile = profile)
+                val plan = try {
+                    CivsSettlementPlans.prepare(projected, loaded, input.second, access,
+                        fortification = input.third, profile = profile)
+                } catch (failure: CivsRejection) {
+                    if (kept == null || input.second.columns.values.any { !it.loaded }) throw failure
+                    val deferred = deferExteriorPerimeter(city, requireNotNull(oldPlan), seed, requireNotNull(envelope),
+                        requireNotNull(unpaidSite.terrain), input.first, failure) ?: throw failure
+                    return@thenCombineAsync CompletableFuture.completedFuture(deferred)
+                }
                 if (!CivsSettlementGrowth.covers(city, plan) ||
                     plan.plots.count { it.building.type != BuildingType.DECORATION } !=
                         requireNotNull(oldPlan).plots.count { it.building.type != BuildingType.DECORATION } ||
@@ -249,18 +256,48 @@ internal class CivsAutonomousPlacement(
         a.bounds.min.x == b.bounds.min.x && a.bounds.max.x == b.bounds.max.x &&
         a.bounds.min.z == b.bounds.min.z && a.bounds.max.z == b.bounds.max.z
 
-    /** A fresh native replacement changes one unpaid civic parcel, never the reason or status of the perimeter. */
+    private fun deferExteriorPerimeter(city: Settlement, plan: CivSettlementPlan, seed: CivBuilding, envelope: CivBox,
+        terrain: CivTerraformPlan, access: CivAutonomousAccess, failure: CivsRejection): CivSettlementPlan? {
+        val deferred = CivDeferredPerimeter("infrastructure", seed.id, seed.anchor)
+        val details = failure.values
+        val conflict = "gate-refit-route-conflict"
+        if (!deferredExteriorParcel(seed.type, deferred) || !unbuiltPerimeter(city, plan, access) ||
+            failure.reason != "autonomy-layout-obstructed" ||
+            details["stage"] != deferred.stage || details["closed"] != "false" ||
+            (details[conflict]?.toIntOrNull() ?: 0) <= 0 ||
+            details.keys.any { it !in setOf(conflict, "stage", "closed", "pieces", "wall_strips", "ROAD", "GATE", "WALL") })
+            return null
+        val replacement = replaceDeferredParcel(city, plan, seed, envelope, terrain, access, deferred)
+        CivsDiagnostics.event("autonomous_unpaid_perimeter_candidate", "city" to city.id, "plot" to seed.id,
+            "stage" to deferred.stage, "reason" to conflict, "count" to details[conflict])
+        return replacement
+    }
+
+    private fun unbuiltPerimeter(city: Settlement, plan: CivSettlementPlan, access: CivAutonomousAccess): Boolean =
+        plan.deferredPerimeter == null && plan.perimeterEntrances == null && plan.completedPerimeters.isNullOrEmpty() &&
+            plan.plots.none { it.fortification != null } && city.buildings.none { it.type.isInfrastructure } &&
+            access.infrastructure.isEmpty()
+
+    private fun deferredExteriorParcel(type: BuildingType, deferred: CivDeferredPerimeter): Boolean =
+        deferred.stage == "infrastructure" && type in CivsSettlementLayout.exteriorTypes
+
+    /** Replace only the unpaid parcel and its approach. Recovered perimeter membership stays pinned. */
     private fun replaceDeferredParcel(city: Settlement, plan: CivSettlementPlan, seed: CivBuilding, envelope: CivBox,
-        terrain: CivTerraformPlan, access: CivAutonomousAccess): CivSettlementPlan {
-        val deferred = requireNotNull(plan.deferredPerimeter)
-        val inside = CivsSettlementGrowth.interior(CivsSettlementLayout.frame(city))
+        terrain: CivTerraformPlan, access: CivAutonomousAccess,
+        deferred: CivDeferredPerimeter = requireNotNull(plan.deferredPerimeter)): CivSettlementPlan {
+        val exterior = deferredExteriorParcel(seed.type, deferred)
+        val inside = if (exterior) emptySet() else CivsSettlementGrowth.interior(CivsSettlementLayout.frame(city))
         val standing = access.standing(city, seed.id)
         val paid = access.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
+        val paidRoads = if (exterior) access.roadColumns(city) else emptySet()
         val fits = compatibleSlot(city, seed, terrain, plan, envelope) &&
-            (envelope.min.x..envelope.max.x).all { x ->
+            (exterior || (envelope.min.x..envelope.max.x).all { x ->
                 (envelope.min.z..envelope.max.z).all { z -> civsTerrainKey(x, z) in inside }
-            } && city.buildings.any { CivsRules.isDepot(it) && it.entrance == terrain.route.firstOrNull() } &&
+            }) && city.buildings.any { CivsRules.isDepot(it) && it.entrance == terrain.route.firstOrNull() } &&
             paid.all { (id, route) -> plan.routes[id.toString()] == route } &&
+            paidRoads.none { column -> (column shr 32).toInt() in envelope.min.x..envelope.max.x &&
+                column.toInt() in envelope.min.z..envelope.max.z } &&
+            terrain.blocks.none { it.before != it.after && civsTerrainKey(it.position.x, it.position.z) in paidRoads } &&
             terrain.route.all { point -> standing[civsTerrainKey(point.x, point.z)]?.y?.let { it == point.y } != false }
         if (!fits) throw CivsRejection("autonomy-no-site", mapOf("stage" to "deferred-perimeter-parcel"))
         val updated = plan.copy(revision = Math.addExact(plan.revision, 1L),
@@ -422,8 +459,12 @@ internal class CivsAutonomousPlacement(
         private var access = CivAutonomousAccess()
         private val protectedRoadColumns by lazy {
             val deferred = (adopted ?: initialPlan)?.deferredPerimeter
-            if (infrastructure && adopted?.perimeterEntrances != null ||
-                deferred?.plotId == buildingId && CivsSettlementPlans.protectsPaidApproach(deferred.stage))
+            // A replacement can borrow the paid road before its exterior perimeter is deferred.
+            val recoveringExterior = initialPlan != null && type in CivsSettlementLayout.exteriorTypes &&
+                unbuiltPerimeter(nativeCity, initialPlan, access)
+            if (recoveringExterior || infrastructure && adopted?.perimeterEntrances != null ||
+                deferred?.plotId == buildingId && (CivsSettlementPlans.protectsPaidApproach(deferred.stage) ||
+                    deferredExteriorParcel(type, deferred)))
                 access.roadColumns(nativeCity) else emptySet()
         }
         private var pieces = emptyMap<UUID, CivSettlementPiece>()

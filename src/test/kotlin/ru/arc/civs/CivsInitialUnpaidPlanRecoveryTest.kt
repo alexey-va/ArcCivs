@@ -5,6 +5,8 @@ import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import org.bukkit.Material
 import org.bukkit.block.Barrel
 import org.bukkit.inventory.ItemStack
@@ -104,6 +106,66 @@ class CivsCompatibleUnpaidPlanRecoveryTest : FunSpec({
             s.paidPlans shouldBe paidBefore
             s.saves shouldBe emptyList()
             s.reserveItems() shouldBe s.beforeItems
+        }
+    }
+
+    test("a compatible native forester survives only an unbuilt gate route conflict") {
+        initialRecoveryScenario(targetType = BuildingType.FORESTER, permuteUnpaidHouses = true) { s ->
+            val conflict = mapOf("stage" to "infrastructure", "closed" to "false", "gate-refit-route-conflict" to "1")
+            mockkObject(CivsSettlementPlans)
+            try {
+                every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } throws
+                    CivsRejection("autonomy-layout-obstructed", conflict)
+                val paidRoads = s.acceptedAccess.roadColumns(s.before)
+                val unsafe = runCatching { s.forecastCompatibleExterior().join() }.exceptionOrNull()
+                unsafe?.let(CivsDiagnostics::rejection)?.values shouldBe mapOf("stage" to "deferred-perimeter-parcel")
+                requireNotNull(s.forecastTerrain).blocks.any { civsTerrainKey(it.position.x, it.position.z) in paidRoads } shouldBe true
+
+                val plan = s.forecastCompatibleExterior(protectPaidRoads = true).join()
+                val selected = requireNotNull(s.selected)
+                val replacement = plan.plots.single { it.building.id == selected.id }
+                s.selectedRoute.any { civsTerrainKey(it.x, it.z) in paidRoads } shouldBe true
+                requireNotNull(s.forecastTerrain).blocks.none { civsTerrainKey(it.position.x, it.position.z) in paidRoads } shouldBe true
+                CivsSettlementGrowth.outside(s.before, replacement.envelope) shouldBe true
+                replacement.building shouldBe selected.copy(phase = BuildingPhase.SITE)
+                plan shouldBe s.oldPlan.copy(revision = s.oldPlan.revision + 1,
+                    plots = s.oldPlan.plots.map { if (it.building.id == selected.id) replacement else it },
+                    routes = s.oldPlan.routes + (selected.id.toString() to s.selectedRoute),
+                    deferredPerimeter = CivDeferredPerimeter("infrastructure", selected.id, selected.anchor))
+                s.acceptedAccess.routes.forEach { (id, route) -> plan.routes[id.toString()] shouldBe route }
+                val adopted = s.before.copy(autonomy = requireNotNull(s.before.autonomy).copy(plan = plan))
+                CivsSettlementPlans.current(adopted) shouldBe plan
+                s.city shouldBe s.before
+                s.saves shouldBe emptyList()
+                s.constructionAdmissions shouldBe 0
+                s.reserveItems() shouldBe s.beforeItems
+
+                val mixed = conflict + ("chunks-unloaded" to "1")
+                every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } throws
+                    CivsRejection("autonomy-layout-obstructed", mixed)
+                val failure = runCatching { s.forecastCompatibleExterior(protectPaidRoads = true).join() }.exceptionOrNull()
+                failure?.let(CivsDiagnostics::rejection)?.values shouldBe mixed
+            } finally {
+                unmockkObject(CivsSettlementPlans)
+            }
+        }
+    }
+
+    test("an existing paid road prevents deferring a conflicting exterior forecast") {
+        initialRecoveryScenario(targetType = BuildingType.FORESTER, paidInfrastructure = true) { s ->
+            val conflict = mapOf("stage" to "infrastructure", "closed" to "false", "gate-refit-route-conflict" to "1")
+            s.acceptedAccess.infrastructure.single().type shouldBe BuildingType.ROAD
+            mockkObject(CivsSettlementPlans)
+            try {
+                every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } throws
+                    CivsRejection("autonomy-layout-obstructed", conflict)
+                val failure = runCatching { s.forecastCompatibleExterior().join() }.exceptionOrNull()
+                failure?.let(CivsDiagnostics::rejection)?.values shouldBe conflict
+                s.city shouldBe s.before
+                s.saves shouldBe emptyList()
+            } finally {
+                unmockkObject(CivsSettlementPlans)
+            }
         }
     }
 
@@ -1021,11 +1083,12 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         return candidate
     }
     /** Real draft/materialization and full forecast; this is detached fixture evidence, not a native World replay. */
-    fun forecastCompatibleExterior(): CompletableFuture<CivSettlementPlan> {
+    fun forecastCompatibleExterior(protectPaidRoads: Boolean = false): CompletableFuture<CivSettlementPlan> {
         val shadow = city.copy(autonomy = city.autonomy!!.copy(plan = null, layoutHalfWidth = oldPlan.halfWidth))
         val remaining = oldPlan.plots.filter { it.building.id != oldTarget.id }.map { it.envelope }
         val obstacles = remaining + oldPlan.walls
         val gateSides = CivsSettlementLayout.gateConnectionObstacles(CivsSettlementLayout.frame(city))
+        val paidRoads = if (protectPaidRoads) acceptedAccess.roadColumns(city) else emptySet()
         val roads = oldPlan.routes.filterKeys { it != oldTarget.id.toString() && city.building(UUID.fromString(it)) == null }
             .values.flatten().groupBy { civsTerrainKey(it.x, it.z) }
         fun conflicts(building: CivBuilding, envelope: CivBox, terrain: CivTerraformPlan? = null): List<String> = buildList {
@@ -1068,7 +1131,7 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
                 return@firstNotNullOfOrNull null
             }
             val draft = try { CivsAutonomousTerraform.draft(shadow, option.copy(building = prepared.building.copy(bounds = envelope)),
-                surface, acceptedAccess, obstacles + gateSides) }
+                surface, acceptedAccess, obstacles + gateSides, protectedRoadColumns = paidRoads) }
             catch (failure: CivsRejection) {
                 if (refused.size < 4) refused += "${prepared.building.anchor}:${failure.reason}:${failure.values}"
                 return@firstNotNullOfOrNull null
