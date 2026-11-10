@@ -6,26 +6,30 @@ import org.bukkit.Tag
 import org.bukkit.World
 import java.util.Random
 import java.util.UUID
+import kotlin.math.floor
+import kotlin.math.roundToInt
 
 /** Transient visual movement has no production token, arrival grant or offline catch-up. */
 internal class CitizenWander(workerId: UUID) {
     private val random = Random(workerId.mostSignificantBits xor java.lang.Long.rotateLeft(workerId.leastSignificantBits, 23))
-    var step: Int = 0
-        private set
     private var nextAt: Long? = null
-    fun ready(now: Long): Boolean {
-        if (nextAt == null) schedule(now, 100L + random.nextInt(301))
+    fun ready(now: Long, returning: Boolean = false): Boolean {
+        if (nextAt == null) schedule(now, if (returning) 0L else 100L + random.nextInt(301))
         return now >= requireNotNull(nextAt)
     }
-    fun reject(now: Long) {
-        step = if (step == Int.MAX_VALUE) 0 else step + 1
-        schedule(now, 100L + random.nextInt(251))
+
+    fun directions(yaw: Float): List<Pair<Int, Int>> {
+        val forward = (yaw / 90f).roundToInt()
+        val turn = if (random.nextBoolean()) 1 else -1
+        val heading = if (random.nextInt(8) == 0) forward + turn else forward
+        return listOf(heading, heading + turn, heading - turn, heading + 2)
+            .map { CITIZEN_WANDER_DIRECTIONS[it and 3] }
     }
+
+    fun legLimit(): Int = 8 + random.nextInt(5)
+
     fun finish(now: Long, arrived: Boolean, resumeImmediately: Boolean = false) {
-        val next = (step.toLong() / CITIZEN_WANDER_HEIGHTS.size + 1) * CITIZEN_WANDER_HEIGHTS.size
-        step = if (next > Int.MAX_VALUE) 0 else next.toInt()
-        // Unassigned residents can continue at the next handoff. Assigned producers retain
-        // their offer window while asynchronous supply allocation validates a stationary meeting.
+        // A live bag offer retains its stationary window for asynchronous courier dispatch.
         schedule(now, if (!arrived) 2_500L + random.nextInt(1_501) else if (resumeImmediately) 0L
             else 2_000L + random.nextInt(4_501))
     }
@@ -34,10 +38,21 @@ internal class CitizenWander(workerId: UUID) {
     }
 }
 
-private val CITIZEN_WANDER_OFFSETS = (-7..7).flatMap { x ->
-    (-7..7).filter { z -> x * x + z * z in 4..49 }.map { z -> x to z }
+internal class CitizenWanderWalk(val home: CivBuilding, val outsideHome: Boolean, val territory: CivRouteTerritory,
+    val token: CitizenToken, val startedAt: Long, val legLimit: Int) {
+    var legs = 0
+    var reachedAt: Long? = null
+    var maxHandoffMillis = 0L
+
+    fun outside(x: Int, z: Int): Boolean =
+        x !in home.bounds.min.x..home.bounds.max.x || z !in home.bounds.min.z..home.bounds.max.z
+
+    fun distanceToExit(x: Int, z: Int): Long = if (outside(x, z)) -1 else
+        minOf(x.toLong() - home.bounds.min.x, home.bounds.max.x.toLong() - x,
+            z.toLong() - home.bounds.min.z, home.bounds.max.z.toLong() - z)
 }
-internal val CITIZEN_WANDER_HEIGHTS = listOf(0, 1, -1, 2, -2)
+
+private val CITIZEN_WANDER_DIRECTIONS = listOf(0 to 1, -1 to 0, 0 to -1, 1 to 0)
 private const val CITIZEN_IDLE_RADIUS = 8.0
 
 internal fun citizenIdleBuilding(city: Settlement, worker: CivWorker): CivBuilding? =
@@ -79,8 +94,11 @@ internal fun citizenIdleRouteAllowed(anchor: CivPosition, from: CitizenPoint, po
 internal fun citizenIdleTerrain(world: World, point: CivPosition, buildings: Collection<CivBuilding> = emptyList()): Boolean {
     if (point.y <= world.minHeight || point.y + 1 >= world.maxHeight ||
         !world.isChunkLoaded(point.x shr 4, point.z shr 4)) return false
-    return citizenIdleTerrain(point, world.minHeight, world.maxHeight, buildings,
-        { world.getBlockAt(it.x, it.y, it.z).type }, Tag.CLIMBABLE.values, Tag.LEAVES.values, Tag.LOGS.values)
+    val feet = world.getBlockAt(point.x, point.y, point.z).type
+    val support = world.getBlockAt(point.x, point.y - 1, point.z).type
+    val head = world.getBlockAt(point.x, point.y + 1, point.z).type
+    return citizenIdleMaterials(point, buildings, feet, support, head, Tag.CLIMBABLE::isTagged,
+        Tag.LEAVES::isTagged, Tag.LOGS::isTagged)
 }
 
 /** The identical idle policy over detached chunk materials and tag sets captured on Main. */
@@ -90,43 +108,34 @@ internal fun citizenIdleTerrain(point: CivPosition, minimumY: Int, maximumY: Int
     val feet = material(point) ?: return false
     val support = material(point.copy(y = point.y - 1)) ?: return false
     val head = material(point.copy(y = point.y + 1)) ?: return false
-    return feet !in CITIZEN_LEISURE_HAZARDS && support !in CITIZEN_LEISURE_HAZARDS && head !in CITIZEN_LEISURE_HAZARDS &&
-        feet !in climbable && support !in climbable &&
-        support !in leaves && (support !in logs ||
-            buildings.any { it.phase == BuildingPhase.ACTIVE && it.bounds.contains(point.x, point.y - 1, point.z) })
+    return citizenIdleMaterials(point, buildings, feet, support, head, climbable::contains, leaves::contains, logs::contains)
 }
+
+private inline fun citizenIdleMaterials(point: CivPosition, buildings: Collection<CivBuilding>,
+    feet: Material, support: Material, head: Material, climbable: (Material) -> Boolean,
+    leaves: (Material) -> Boolean, logs: (Material) -> Boolean): Boolean =
+    feet !in CITIZEN_LEISURE_HAZARDS && support !in CITIZEN_LEISURE_HAZARDS && head !in CITIZEN_LEISURE_HAZARDS &&
+        !climbable(feet) && !climbable(support) &&
+        !leaves(support) && (!logs(support) ||
+            buildings.any { it.phase == BuildingPhase.ACTIVE && it.bounds.contains(point.x, point.y - 1, point.z) })
 
 internal val CITIZEN_LEISURE_HAZARDS = setOf(Material.CAMPFIRE, Material.SOUL_CAMPFIRE, Material.FIRE,
     Material.SOUL_FIRE, Material.LAVA, Material.MAGMA_BLOCK, Material.CACTUS, Material.SWEET_BERRY_BUSH, Material.POWDER_SNOW)
 
-/** One candidate per actor admission. Native support/headroom checks belong to the bounded pulse. */
-internal fun citizenWanderTarget(city: Settlement, storage: CivPosition, workerId: UUID, step: Int,
-    allowedBuildings: Set<UUID> = emptySet(), from: CitizenPoint? = null, yaw: Float = 0f): CivPosition? {
-    val seed = workerId.mostSignificantBits xor java.lang.Long.rotateLeft(workerId.leastSignificantBits, 23)
-    val offset = Math.floorDiv(step, CITIZEN_WANDER_HEIGHTS.size)
-    // Each horizontal attempt gets an independent reproducible choice, not the next vertex of a shared ring.
-    val random = Random(seed xor (offset.toLong() * -7046029254386353131L))
-    val dy = CITIZEN_WANDER_HEIGHTS[Math.floorMod(step, CITIZEN_WANDER_HEIGHTS.size)]
-    // Pure geometry only: prefer a useful leg ahead over a tiny shuffle or another about-face.
-    // Native support/headroom still consumes just one existing admission check.
-    return List(if (from == null) 1 else 6) {
-        val (dx, dz) = CITIZEN_WANDER_OFFSETS[random.nextInt(CITIZEN_WANDER_OFFSETS.size)]
-        val x = storage.x.toLong() + dx
-        val y = storage.y.toLong() + dy
-        val z = storage.z.toLong() + dz
-        if (x !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() || y !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() ||
-            z !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) null
-        else CivPosition(x.toInt(), y.toInt(), z.toInt()).takeIf { point ->
-            citizenRouteCellAllowed(city, allowedBuildings, point.x, point.z) && citizenControlClear(city, point)
-        }
-    }.filterNotNull().maxByOrNull { target ->
-        if (from == null) 0.0 else {
-            val dx = target.x + .5 - from.x
-            val dz = target.z + .5 - from.z
-            val distance = kotlin.math.hypot(dx, dz)
-            val angle = Math.toRadians(yaw.toDouble())
-            if (distance < 3.0) -10.0 + distance
-            else (-dx * kotlin.math.sin(angle) + dz * kotlin.math.cos(angle)) / distance + distance * .05
-        }
+/** Inspect only adjacent native floor shapes within the ordinary walking step height. */
+internal fun citizenWanderFeet(world: World, x: Int, z: Int, fromY: Double): CitizenPoint? {
+    if (!citizenChunkReady(world, x shr 4, z shr 4)) return null
+    val low = (floor(fromY - 1.068).toInt() - 1).coerceAtLeast(world.minHeight)
+    val high = floor(fromY + 1.068).toInt().coerceAtMost(world.maxHeight - 1)
+    for (y in high downTo low) {
+        val block = world.getBlockAt(x, y, z)
+        if (block.type.isAir) continue
+        val top = block.collisionShape.boundingBoxes.maxOfOrNull {
+            if (.5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ) it.maxY else Double.NEGATIVE_INFINITY
+        }?.takeIf(Double::isFinite) ?: continue
+        val at = CitizenPoint(x + .5, y + top, z + .5)
+        if (citizenStepHeightAllowed(fromY, at.y) && citizenPacketSupported(world, at, allowClimbable = false))
+            return at
     }
+    return null
 }

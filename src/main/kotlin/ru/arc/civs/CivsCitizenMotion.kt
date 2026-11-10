@@ -44,6 +44,7 @@ internal class CivsCitizenMotion(
         threats.tick()
         val viewers = audience.viewers()
         var separationBudget = 4 // Shared by overlap exits, separation and fresh dynamic-body detours.
+        var wanderHandoffs = 2 // Whole owner, at most four neighbouring columns per handoff.
         for (actor in runtime.actors.values.toList().sortedBy {
             when { it.residentYield != null -> 0; it.route?.bodyBlockedSince != null -> 1; else -> 2 }
         }) {
@@ -64,7 +65,7 @@ internal class CivsCitizenMotion(
                         actor.route?.progressTick = runtime.navigationTick
                         continue
                     }
-                    val blocked = actor.route
+                    val blocked = actor.route?.takeIf { it.wanderWalk == null }
                     if (separated == false && blocked != null && collisions.recoverFoodOverlap(actor, blocked, now)) continue
                     if (blocked?.bodyBlockedSince != null) {
                         if (collisions.retryOccupiedDeliveryArrival(actor, blocked, now)) continue
@@ -105,11 +106,16 @@ internal class CivsCitizenMotion(
             }
             if (route == null || routes.navigationHeld(actor) || !npc.isValid ||
                 !audience.activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers) ||
-                !route.chunks.ready(npc.world)) {
+                route.demandChunks?.ready(npc.world) == false) {
                 actor.footsteps.reset()
                 continue
             }
             val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: continue
+            val walk = route.wanderWalk
+            if (walk != null) {
+                if (advanceWander(actor, city, route, walk, now, wanderHandoffs > 0)) wanderHandoffs--
+                continue
+            }
             routes.observeArrivalWait(actor, route)
             if (route.trip?.validFor(city) == false) {
                 // Replan from the observed position after a building change; this is not a stuck-route recovery.
@@ -227,12 +233,7 @@ internal class CivsCitizenMotion(
                 }
             }
             if (next != null) {
-                npc.teleport(next)
-                val actual = npc.location.point()
-                motion.observeAcceptedMove(before.point(), actual)
-                npc.bodyYaw = next.yaw
-                npc.headYaw = next.yaw
-                npc.pitch = next.pitch
+                val actual = applyMove(npc, motion, before, next)
                 val forward = (motion.forwardProgress - route.observedProgress).coerceAtLeast(0.0)
                 if (forward > .000001) {
                     actor.arrivalWait = null
@@ -328,6 +329,72 @@ internal class CivsCitizenMotion(
             }
         }
         threats.gravity(runtime.actors.values.filter { it.npc.isSeated || it.sleeping || it.route?.motion?.navigating == true }.mapTo(hashSetOf()) { it.workerId })
+    }
+
+    private fun advanceWander(actor: CitizenActor, city: Settlement, route: CitizenRoute, walk: CitizenWanderWalk,
+                              now: Long, canContinue: Boolean): Boolean {
+        val npc = actor.npc
+        val motion = route.motion
+        if (actor.plan.token != walk.token || npc.world.uid != city.worldId ||
+            city.pendingDeletion != null || !walk.territory.matches(city) ||
+            npc.world.time in 12_000L..23_000L && actor.plan.type != BuildingType.GUARD_TOWER) {
+            routes.cancelRoute(actor)
+            return false
+        }
+        actor.footsteps.reset()
+        if (!route.planningReported) {
+            route.planningReported = true
+            route.motionReady(runtime.navigationTick, now)
+        }
+        val failure = motion.failure ?: if (motion.waitingForCollision) "body-blocked"
+            else if (route.timedOut(now)) "timed-out" else null
+        if (failure != null) {
+            routes.finishWander(actor, city, walk, now, failure)
+            return false
+        }
+        if (!motion.finished) {
+            val before = npc.location
+            actor.collisionResident = null
+            val next = motion.move(before, .55, { from, to -> collisions.routeMoveAllowed(actor, from, to) }) { true }
+            val from = before.point()
+            val actual = next?.let { applyMove(npc, motion, before, it) } ?: from
+            val moved = actual.distanceSquared(from)
+            if (moved > .000001) {
+                actor.arrivalWait = null
+                if (route.bodyContactTick != runtime.navigationTick) collisions.observeWalkAfterContact(actor, from, actual)
+                actor.yieldProgress = minOf(2.0, actor.yieldProgress + kotlin.math.sqrt(moved))
+                route.progressTick = runtime.navigationTick
+                walk.reachedAt?.let { walk.maxHandoffMillis = maxOf(walk.maxHandoffMillis, now - it) }
+                walk.reachedAt = null
+            }
+            if (motion.finished && motion.failure == null) {
+                if (actual.distanceSquared(route.target.point()) > .000001)
+                    routes.finishWander(actor, city, walk, now, "movement-not-applied")
+                else {
+                    walk.legs++
+                    walk.reachedAt = now
+                }
+            }
+            return false
+        }
+        if (walk.legs >= walk.legLimit) {
+            routes.finishWander(actor, city, walk, now, null)
+            return false
+        }
+        if (!canContinue) return false
+        citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+        if (!routes.nextWanderLeg(actor, city, walk, now)) routes.finishWander(actor, city, walk, now, "target-unavailable")
+        return true
+    }
+
+    private fun applyMove(npc: PacketPlayerNpc, motion: CitizenPacketRoute, before: Location, next: Location): CitizenPoint {
+        npc.teleport(next)
+        val actual = npc.location.point()
+        motion.observeAcceptedMove(before.point(), actual)
+        npc.bodyYaw = next.yaw
+        npc.headYaw = next.yaw
+        npc.pitch = next.pitch
+        return actual
     }
 
     /** The last waypoint inside another body retains its route until an ordinary clear-body exit. */

@@ -71,6 +71,7 @@ class CivsHolograms internal constructor(
     private val epoch = tasks.token()
     private val rendered = linkedMapOf<UUID, Rendered>()
     private val carts = CivsCourierCart(displays)
+    internal val idleNap = CivsIdleNapRenderer(displays)
     private val decor = CivsWorkplaceDecor(displays)
     private var desired = emptyMap<UUID, Desired>()
     private var pending = false

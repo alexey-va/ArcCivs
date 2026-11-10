@@ -70,6 +70,8 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var sheltering = false
     var returningToWarehouse = false
     val social = CitizenCampRoutine(workerId)
+    var idleNap: CitizenIdleNap? = null
+    var nextIdleNapAt: Long? = null
     var sleeping = false
     var sleepOrigin: Location? = null
     var sleepPose: CitizenSleepPose? = null
@@ -116,4 +118,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var courierTargetAfter = 0L
     var courierRetry = CitizenRetry()
     var courierRetryAfter = 0L
+
+    fun occupiedBody() = idleNap?.bounds ?: mealVisit?.seat?.takeIf { npc.isSeated }?.bounds
+        ?: sleepPose?.takeIf { sleeping }?.bounds ?: citizenStandingBounds(npc.location, npc.scale)
 }

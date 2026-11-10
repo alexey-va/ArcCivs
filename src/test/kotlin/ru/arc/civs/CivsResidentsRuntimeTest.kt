@@ -1446,8 +1446,10 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.pulse(5_000)
             h.owner.status(h.workerId) shouldBe "workers.status.defending"
             h.owner.status(helperId) shouldBe "workers.status.defending"
-            h.owner.status(distantId) shouldBe "workers.status.unassigned"
-            h.owner.status(outsiderId) shouldBe "workers.status.unassigned"
+            for (idle in listOf(distantId, outsiderId)) {
+                (h.owner.status(idle) in setOf("workers.status.unassigned", "workers.status.walking")) shouldBe true
+                h.actor(idle).attacker shouldBe null
+            }
             verify(exactly = 1) { victim.swingMainHand() }
             verify(exactly = 1) { helper.swingMainHand() }
             verify(exactly = 0) { distant.swingMainHand() }
@@ -3771,8 +3773,10 @@ class CivsResidentsRuntimeTest : FunSpec({
             for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
             val original = h.city
             val actor = h.owner.collisionActors().single()
+            h.holdNavigation = true
             h.navigationNow = 2_000
             h.owner.pulse(2_000)
+            val initialCaptures = h.world.chunkSnapshotCaptures
             var moving = 0
             var samples = 0
             var gap = 0
@@ -3785,6 +3789,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
                 val distance = before.distance(actor.location)
                 (distance <= .118251) shouldBe true
+                (kotlin.math.abs(citizenAngleChange(before.yaw, actor.location.yaw)) <= CITIZEN_TURN_PER_TICK + .001f) shouldBe true
                 if (tick > 200) {
                     samples++
                     if (distance > .000001) { moving++; gap = 0 } else {
@@ -3800,10 +3805,63 @@ class CivsResidentsRuntimeTest : FunSpec({
             withClue("moving=$moving samples=$samples longestStillFrames=$longestGap waiting=$waiting ${h.navigationState()}") {
                 (moving.toDouble() / samples >= .75) shouldBe true
                 (longestGap <= 40) shouldBe true
+                h.pendingNavigationWorkers shouldBe 0
+                h.world.chunkSnapshotCaptures shouldBe initialCaptures
             }
             h.city shouldBe original
             h.deliveries shouldBe 0
             h.steps shouldBe emptyList()
+        }
+    }
+
+    test("an idle resident can leave a foreign plot without selecting another foot cell inside it") {
+        residentRuntime { h ->
+            val plot = CivBox(CivPosition(4, 64, -1), CivPosition(6, 68, 1))
+            val house = h.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+                anchor = plot.min, entrance = plot.min, bounds = plot)
+            h.city = h.city.copy(buildings = h.city.buildings + house,
+                workers = h.city.workers.map { it.copy(homeId = h.city.buildings.first().id) })
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 5.5, 64.0, .5))
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            repeat(20) { h.navigate() }
+            h.owner.pulse(3_000)
+            h.routeIdentity() shouldBe null
+            actor.location.point() shouldBe CitizenPoint(5.5, 64.0, .5)
+
+            actor.teleport(Location(h.world, 4.5, 64.0, .5))
+            h.navigationNow = 7_000
+            h.owner.pulse(7_000)
+            requireNotNull(h.routeTarget()).point() shouldBe CitizenPoint(3.5, 64.0, .5)
+            repeat(30) { if (actor.location.blockX == 4) h.navigate() }
+            actor.location.blockX shouldBe 3
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("an assignment cancels an admitted local walk before requesting the ordinary work route") {
+        residentRuntime { h ->
+            for (x in -2..2) for (z in -2..1) h.world.loadChunk(x, z)
+            h.navigationNow = 2_000
+            h.holdNavigation = true
+            h.owner.pulse(2_000)
+            repeat(20) { h.navigate() }
+            h.owner.pulse(3_000)
+            val walking = requireNotNull(h.routeMotion(h.workerId))
+            walking.preparationPhase shouldBe "local"
+            h.pendingNavigationWorkers shouldBe 0
+
+            val farm = h.assignFarm()
+            val focus = CivPosition(23, 63, 0)
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
+                durationMillis = 1_500, status = "working-field", focus = focus)
+            h.owner.pulse(3_050)
+            walking.finished shouldBe true
+            h.phase() shouldBe CitizenPhase.TO_WORK
+            requireNotNull(h.routeMotion(h.workerId)).searching shouldBe true
+            h.deliveries shouldBe 0
         }
     }
 
@@ -3859,49 +3917,35 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(nextDeliveryAt = 2) })
             val city = h.city
             h.navigationNow = 2_000
-            val messages = mutableListOf<String>()
-            val handler = object : java.util.logging.Handler() {
-                override fun publish(record: java.util.logging.LogRecord) { messages += record.message }
-                override fun flush() = Unit
-                override fun close() = Unit
-            }
-            h.logger.addHandler(handler)
-            try {
-                h.owner.pulse(2_000)
-                val teleports = h.teleports
-                var failedAt: Long? = null
-                for (tick in 1..240) {
-                    h.navigate()
-                    if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                    if (messages.any { "ARCCIVS_NAVIGATION_FAILED" in it && "reason=no-path" in it } &&
-                        h.routeIdentity() == null) {
-                        failedAt = h.navigationNow
-                        break
-                    }
-                }
-                withClue("position=${actor.location} diagnostics=${messages.takeLast(8)}") {
-                    (failedAt != null) shouldBe true
+            h.holdNavigation = true
+            h.owner.pulse(2_000)
+            val teleports = h.teleports
+            repeat(20) { h.navigate() }
+            val failedAt = requireNotNull(h.navigationNow)
+            h.owner.pulse(failedAt)
+            h.routeIdentity() shouldBe null
+            h.pendingNavigationWorkers shouldBe 0
+            actor.location.toVector() shouldBe origin.toVector()
+            h.teleports shouldBe teleports
+
+            // Reopen the neighbouring cells. The bounded local failure delay still applies.
+            for (x in -1..1) for (z in -1..1) if (x != 0 || z != 0)
+                for (y in 66..67) h.world.getBlockAt(x, y, z).type = Material.AIR
+            var walked = false
+            for (tick in 1..120) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                (before.distance(actor.location) <= .118251) shouldBe true
+                if (requireNotNull(h.navigationNow) < failedAt + 2_500)
                     actor.location.toVector() shouldBe origin.toVector()
-                    h.teleports shouldBe teleports
-                }
-                // Make the next optional destination reachable; the bounded failure delay still applies.
-                for (x in -1..1) for (z in -1..1) if (x != 0 || z != 0)
-                    for (y in 66..67) h.world.getBlockAt(x, y, z).type = Material.AIR
-                var walked = false
-                for (tick in 1..600) {
-                    val before = actor.location
-                    h.navigate()
-                    if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                    (before.distance(actor.location) <= .118251) shouldBe true
-                    if (requireNotNull(h.navigationNow) < requireNotNull(failedAt) + 2_500)
-                        actor.location.toVector() shouldBe origin.toVector()
-                    if (actor.location.distance(origin) >= .5) { walked = true; break }
-                }
-                withClue("position=${actor.location} diagnostics=${messages.takeLast(8)}") { walked shouldBe true }
-                h.city shouldBe city
-                h.deliveries shouldBe 0
-                h.steps shouldBe emptyList()
-            } finally { h.logger.removeHandler(handler) }
+                if (actor.location.distance(origin) >= .5) { walked = true; break }
+            }
+            withClue(h.navigationState()) { walked shouldBe true }
+            h.pendingNavigationWorkers shouldBe 0
+            h.city shouldBe city
+            h.deliveries shouldBe 0
+            h.steps shouldBe emptyList()
         }
     }
 

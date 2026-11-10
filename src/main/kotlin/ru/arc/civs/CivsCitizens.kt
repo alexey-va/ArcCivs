@@ -129,6 +129,9 @@ class CivsCitizens(
     private val shelter: CivsCitizenShelters
     private val couriers: CivsCitizenCouriers
     private val leisure: CivsCitizenLeisure
+    internal var showIdleNap: ((Location, Float, Double) -> CivsIdleNapVisual)?
+        get() = leisure.nap.show
+        set(value) { leisure.nap.show = value }
     private val workRuntime: CivsCitizenWork
     private val logistics: CivsCitizenLogistics
     private val combat: CivsCitizenCombat
@@ -143,6 +146,7 @@ class CivsCitizens(
         actors.values.any { actor ->
             actor.npc.isValid && actor.worldId == worldId &&
                 (citizenStandingBounds(actor.npc.location, actor.npc.scale).overlaps(body) ||
+                    actor.idleNap?.bounds?.overlaps(body) == true ||
                     actor.route?.target?.let { citizenStandingBounds(it, actor.npc.scale).overlaps(body) } == true ||
                     actor.sleepPose?.takeIf { actor.sleeping }?.bounds?.overlaps(body) == true ||
                     actor.shelterPose?.takeIf { actor.sheltering }?.bounds?.overlaps(body) == true)
@@ -195,15 +199,15 @@ class CivsCitizens(
             point.x + 1.0, point.y + 1.0, point.z + 1.0)
         // The resident runtime already caps this collection; no native entity/world scan.
         return actors.values.any { actor -> actor.worldId == worldId && actor.npc.isValid &&
-            (actor.mealVisit?.seat?.takeIf { actor.npc.isSeated }?.bounds ?: actor.sleepPose?.takeIf { actor.sleeping }?.bounds
-                ?: citizenStandingBounds(actor.npc.location, actor.npc.scale)).overlaps(block) }
+            actor.occupiedBody().overlaps(block) }
     }
 
     /** Logical grounded feet stay stable while the sleeping mesh has a pose-only lift. */
     internal fun residentFeet(workerId: UUID): Location? {
         checkCitizenMainThread()
         val actor = actors[workerId]?.takeIf { it.npc.isValid } ?: return null
-        return actor.mealVisit?.seatedFrom?.clone() ?: actor.sleepOrigin?.clone() ?: actor.npc.location.clone()
+        return actor.idleNap?.ground?.clone() ?: actor.mealVisit?.seatedFrom?.clone()
+            ?: actor.sleepOrigin?.clone() ?: actor.npc.location.clone()
     }
 
     internal fun residentCollectionFeet(workerId: UUID, allowNight: Boolean = false): Location? {
@@ -450,10 +454,11 @@ class CivsCitizens(
                 !audience.activeAt(city.id, city.worldId, actor.npc.location.point(), viewers) -> "sleeping"
                 plan == null -> "storage-unavailable"
                 !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
-                    !plan.chunksReady(world) || actor.route?.chunks?.ready(world) == false -> "chunk-unloaded"
+                    !plan.chunksReady(world) || actor.route?.demandChunks?.ready(world) == false -> "chunk-unloaded"
                 else -> null
             }
             if (reason != null) {
+                if (actor.idleNap != null) leisure.nap.stop(actor)
                 if (reason == "chunk-unloaded" && backgroundActive(city.id) && plan != null) {
                     // The new plan may precede the next chunk-owner pulse and actor reconciliation.
                     actor.pendingChunkTarget = plan.workplace ?: plan.storage
@@ -600,7 +605,7 @@ class CivsCitizens(
             val plan = plans.currentPlan(actor, city, worker) ?: continue
             if (plan.worldWork == null && plan.token.constructionId == null && plan.idleReason != "searching-work" && plan.courier == null || !plan.chunksReady(world) ||
                 !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
-                actor.route?.chunks?.ready(world) == false) continue
+                actor.route?.demandChunks?.ready(world) == false) continue
             if (!plans.reconcilePlan(actor, plan, city)) continue
             try {
                 equipment.syncResident(actor.npc, worker, plan)
@@ -624,7 +629,7 @@ class CivsCitizens(
                 !audience.activeAt(city.id, city.worldId, actor.npc.location.point(), viewers)) continue
             val plan = plans.currentPlan(actor, city, worker)?.takeIf { it.idleReason == "unassigned" } ?: continue
             if (!plan.chunksReady(world) || !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
-                actor.route?.chunks?.ready(world) == false || !plans.reconcilePlan(actor, plan, city)) continue
+                actor.route?.demandChunks?.ready(world) == false || !plans.reconcilePlan(actor, plan, city)) continue
             try {
                 equipment.syncResident(actor.npc, worker, plan)
                 workRuntime.update(actor, city, world, nowMillis)
@@ -844,7 +849,10 @@ class CivsCitizens(
         positions.forEach { navigation.changed(worldId, it); worksiteTerrainChanged(worldId, it) }
     }
     @EventHandler(priority = EventPriority.MONITOR)
-    fun onQuit(event: PlayerQuitEvent) = audience.pruneViewers(event.player.uniqueId)
+    fun onQuit(event: PlayerQuitEvent) {
+        audience.pruneViewers(event.player.uniqueId)
+        leisure.nap.releaseUnseen(event.player.uniqueId)
+    }
 
     @EventHandler(priority = EventPriority.MONITOR)
     fun onWorldChange(event: PlayerChangedWorldEvent) = audience.pruneViewers()
@@ -952,7 +960,7 @@ class CivsCitizens(
         navigation.removeChunk(event.world.uid, event.chunk.x, event.chunk.z)
         worksiteChunkUnloaded(event.world.uid, event.chunk.x, event.chunk.z)
         actors.values.toList().filter { actor ->
-            actor.worldId == event.world.uid && (actor.route?.chunks?.contains(event.chunk.x, event.chunk.z) == true ||
+            actor.worldId == event.world.uid && (actor.route?.demandChunks?.contains(event.chunk.x, event.chunk.z) == true ||
                 actor.plan.storage.inChunk(event.chunk.x, event.chunk.z) ||
                 actor.plan.workplace?.inChunk(event.chunk.x, event.chunk.z) == true ||
                 actor.npc.isValid && actor.npc.location.let { it.blockX shr 4 == event.chunk.x && it.blockZ shr 4 == event.chunk.z })
@@ -961,6 +969,7 @@ class CivsCitizens(
 
     private fun remove(actor: CitizenActor, reason: String) {
         actor.pendingChunkTarget = null
+        leisure.nap.stop(actor, restoreStanding = false)
         couriers.releaseCourierSource(actor, runtime.residentObservedAt)
         runCatching { life.stopMeal(actor) }.onFailure { runtime.logFailure(actor, "stop-meal", it) }
         actors.remove(actor.workerId)
@@ -990,6 +999,7 @@ class CivsCitizens(
         HandlerList.unregisterAll(this)
         packets.onInteract = null
         for (actor in actors.values) {
+            leisure.nap.stop(actor, restoreStanding = false)
             runCatching { life.stopMeal(actor) }.onFailure { runtime.logFailure(actor, "stop-meal", it) }
             actor.cycle.close(); actor.route?.motion?.cancel(); actor.route?.previousMotion?.cancel()
         }

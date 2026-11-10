@@ -10,13 +10,11 @@ import org.bukkit.Chunk
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
-import org.bukkit.block.Block
 import org.bukkit.block.data.type.Door
 import org.bukkit.block.data.type.Gate
 import org.bukkit.entity.Entity
 import org.bukkit.event.EventHandler
 import org.bukkit.event.Listener
-import org.bukkit.util.BoundingBox
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
@@ -1166,19 +1164,11 @@ class CivsCitizensTest : FunSpec({
         val cycle = CitizenCycle(plan.token, plan.workMillis)
         wander.ready(0) shouldBe false
         wander.ready(400) shouldBe true
-        val targets = (0..39).map { requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, it)) }
-        (targets.distinct().size >= 30) shouldBe true
-        targets.all { city.contains(it.x, it.z) && it.x * it.x + it.z * it.z <= 64 && it.y in 62..66 } shouldBe true
-        targets.take(5).map { it.x to it.z }.distinct().size shouldBe 1
-        targets.take(5).map { it.y } shouldBe listOf(64, 65, 63, 66, 62)
-        targets[5].let { it.x to it.z } shouldBe targets[9].let { it.x to it.z }
-        (targets[0].let { it.x to it.z } != targets[5].let { it.x to it.z }) shouldBe true
-        wander.reject(4_000)
-        wander.ready(4_099) shouldBe false
-        wander.ready(4_350) shouldBe true
-        wander.step shouldBe 1
+        repeat(40) {
+            wander.directions(0f).toSet() shouldBe setOf(0 to 1, -1 to 0, 0 to -1, 1 to 0)
+            (wander.legLimit() in 8..12) shouldBe true
+        }
         wander.finish(6_000, true, resumeImmediately = true)
-        wander.step shouldBe 5
         wander.ready(6_000) shouldBe true
         wander.finish(13_000, false)
         wander.ready(15_499) shouldBe false
@@ -1187,25 +1177,24 @@ class CivsCitizensTest : FunSpec({
         cycle.beginDelivery(Long.MAX_VALUE) shouldBe null
         worker.completedCycles shouldBe 0L
         city.stock shouldBe Stock()
-        (0..39).all { citizenWanderTarget(city.copy(radius = 1), hall.entrance, worker.id, it) == null } shouldBe true
-        repeat(40) { wander.reject(Long.MAX_VALUE) }
+        wander.finish(Long.MAX_VALUE, false)
         wander.ready(Long.MAX_VALUE - 1) shouldBe false
         wander.ready(Long.MAX_VALUE) shouldBe true
     }
 
-    test("residents that shared a ring start now have individual random destinations and rest times") {
-        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(phase = BuildingPhase.SITE, control = null)
+    test("idle direction preferences and supply windows are independent for each resident") {
         val ids = listOf("9d0a2c2a-2abb-4d5b-9150-7659bfb1df84", "06254fa5-4795-4a8e-a7c7-783f9fc90cfd")
             .map(UUID::fromString)
-        val city = city(listOf(hall), CivWorker(ids.first(), "Idle", null), null)
-        val targets = ids.map { id -> (0 until 24).map { round ->
-            requireNotNull(citizenWanderTarget(city, hall.entrance, id, round * 5))
-        } }
-        (targets[0] != targets[1]) shouldBe true
-        targets.forEach { sequence ->
-            (sequence.distinct().size >= 16) shouldBe true
-            (sequence.take(8) != sequence.drop(8).take(8)) shouldBe true
-            (sequence.map { it.x * it.x + it.z * it.z }.distinct().size >= 6) shouldBe true
+        fun directions(id: UUID): List<List<Pair<Int, Int>>> {
+            val wander = CitizenWander(id)
+            return (0 until 24).map { wander.directions(0f) }
+        }
+        directions(ids[0]) shouldBe directions(ids[0])
+        (directions(ids[0]) != directions(ids[1])) shouldBe true
+        for (id in ids) {
+            val choices = directions(id).map { it.first() }
+            (choices.count { it == (0 to 1) } > choices.size / 2) shouldBe true
+            (choices.distinct().size >= 2) shouldBe true
         }
         fun timing(id: UUID): List<Long> {
             val wander = CitizenWander(id)
@@ -1271,64 +1260,21 @@ class CivsCitizensTest : FunSpec({
         }
     }
 
-    test("wander finds nearby raised and lowered floors before moving to another horizontal target") {
-        MockBukkitTestRuntime.open().use {
-            val world = mockk<World>()
-            val chunk = mockk<Chunk>()
-            every { world.isChunkLoaded(any(), any()) } returns true
-            every { world.getChunkAt(any<Int>(), any<Int>(), false) } returns chunk
-            every { chunk.loadLevel } returns Chunk.LoadLevel.ENTITY_TICKING
-            every { world.minHeight } returns -64
-            every { world.maxHeight } returns 320
-            var floorY = 63
-            var blockedY: Int? = null
-            var liquidY: Int? = null
-            every { world.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } answers {
-                val x = firstArg<Int>(); val y = secondArg<Int>(); val z = thirdArg<Int>()
-                val solid = y <= floorY || y == blockedY
-                mockk<Block> {
-                    every { type } returns if (solid) Material.STONE else Material.AIR
-                    every { isPassable } returns !solid
-                    every { isLiquid } returns (y == liquidY)
-                    every { boundingBox } returns BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(),
-                        x + 1.0, y + if (solid) 1.0 else 0.0, z + 1.0)
-                }
-            }
-            // This fixture tests floor heights; a randomly selected barrel column is a
-            // separate geometric rejection and must not make its candidate disappear.
-            val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(control = null)
-            val worker = CivWorker(UUID.randomUUID(), "Idle", null)
-            val city = city(listOf(hall), worker, null)
-            for (height in listOf(64, 65, 63, 66, 62)) {
-                floorY = height - 1
-                val wander = CitizenWander(worker.id)
-                var selected: CivPosition? = null
-                var now = 0L
-                for (pulse in 0..4) {
-                    while (!wander.ready(now)) now += 50
-                    val target = requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, wander.step))
-                    if (citizenStandable(world, target)) { selected = target; break }
-                    wander.reject(now)
-                }
-                selected?.y shouldBe height
-            }
-            val target = requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, 0))
-            floorY = 63
-            blockedY = 64
-            citizenStandable(world, target) shouldBe false
-            blockedY = 65
-            citizenStandable(world, target) shouldBe false
-            blockedY = null
-            liquidY = 64
-            citizenStandable(world, target) shouldBe false
-            liquidY = 63
-            citizenStandable(world, target) shouldBe false
-            liquidY = null
-            citizenStandable(world, target) shouldBe true
-            every { world.isChunkLoaded(any(), any()) } returns false
-            every { world.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } throws AssertionError("Unloaded terrain must not be read")
-            citizenStandable(world, target) shouldBe false
-            verify(exactly = 0) { world.getChunkAt(any<Int>(), any<Int>(), true) }
+    test("local wander inspects exact fractional support and never reads an unloaded neighbour") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = ResidentRuntimeWorld().also(paper.server::addWorld)
+            world.loadChunk(0, 0)
+            citizenWanderFeet(world, 1, 0, 64.0) shouldBe CitizenPoint(1.5, 64.0, .5)
+            world.getBlockAt(1, 63, 0).type = Material.DIRT_PATH
+            citizenWanderFeet(world, 1, 0, 64.0) shouldBe CitizenPoint(1.5, 63.9375, .5)
+            world.getBlockAt(1, 63, 0).type = Material.AIR
+            citizenWanderFeet(world, 1, 0, 64.0) shouldBe CitizenPoint(1.5, 63.0, .5)
+            world.getBlockAt(1, 63, 0).type = Material.STONE
+            world.getBlockAt(1, 64, 0).type = Material.STONE
+            citizenWanderFeet(world, 1, 0, 64.0) shouldBe CitizenPoint(1.5, 65.0, .5)
+            world.unloadChunk(1, 0)
+            citizenWanderFeet(world, 16, 0, 64.0) shouldBe null
+            world.isChunkLoaded(1, 0) shouldBe false
         }
     }
 })

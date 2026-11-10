@@ -20,6 +20,7 @@ internal class CivsCitizenLeisure(
     private val routes get() = routesOwner()
     private val logistics get() = logisticsOwner()
     private val life get() = lifeOwner()
+    val nap = CivsCitizenNap(runtime, collisionsOwner)
 
     fun speak(actor: CitizenActor, event: CitizenVoiceEvent) {
         if (actor.sheltering || actor.sleeping || actor.workerId in runtime.pendingHarm ||
@@ -32,6 +33,7 @@ internal class CivsCitizenLeisure(
     }
 
     fun stopCamp(actor: CitizenActor, reason: String = "interrupted") {
+        if (actor.idleNap != null) nap.stop(actor)
         val visit = actor.social.visit ?: return
         actor.social.finish(Bukkit.getCurrentTick())
         CivsDiagnostics.event(if (visit.partnerId == null) "citizen_campfire" else "citizen_meeting",
@@ -52,7 +54,8 @@ internal class CivsCitizenLeisure(
         var visit = routine.visit
         if (visit == null) {
             val evening = actor.plan.idleReason == null
-            if (actor.route != null || runtime.campBudget == 0 || !routine.available(tick, world.fullTime / 24_000, evening)) return false
+            if (actor.route?.let { it.wanderWalk == null } == true ||
+                runtime.campBudget == 0 || !routine.available(tick, world.fullTime / 24_000, evening)) return false
             runtime.campBudget--
             citizenRotateAfterAdmission(runtime.actors, actor.workerId)
             val origin = citizenIdleBuilding(city, worker) ?: return false
@@ -77,6 +80,7 @@ internal class CivsCitizenLeisure(
                 return false
             }
             val (fire, seat) = place
+            if (actor.route?.wanderWalk != null) routes.cancelRoute(actor)
             routine.start(fire, seat, tick, world.fullTime / 24_000, evening)
             visit = requireNotNull(routine.visit)
             CivsDiagnostics.event("citizen_campfire", "city" to actor.cityId, "worker" to actor.workerId,
@@ -177,6 +181,7 @@ internal class CivsCitizenLeisure(
                 !threats.visible(first.location(world).add(0.0, actor.npc.eyeHeight, 0.0),
                     second.location(world).add(0.0, partner.npc.eyeHeight, 0.0))) continue
             // Optional walks need not finish in the same pulse for nearby adults to meet.
+            if (actor.route?.wanderWalk != null) routes.cancelRoute(actor)
             routes.cancelRoute(partner)
             actor.social.startMeeting(partner.workerId, first, tick)
             partner.social.startMeeting(actor.workerId, second, tick)
@@ -240,59 +245,56 @@ internal class CivsCitizenLeisure(
     }
 
     fun wander(actor: CitizenActor, city: Settlement, world: World, now: Long, outsideHome: Boolean = false) {
+        if (world.uid != actor.worldId) return
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
         val home = citizenIdleBuilding(city, worker) ?: return
-        val anchor = citizenIdleAnchor(city, home)
-        val outside: (CivPosition) -> Boolean = { point ->
-            point.x !in home.bounds.min.x..home.bounds.max.x || point.z !in home.bounds.min.z..home.bounds.max.z
-        }
-        val route = actor.route
-        if (route != null) {
-            val bodyClear = routes.arrivalBodyClear(actor)
-            if (!bodyClear && route.motion.failure == null && route.completion?.cancelReason == null) return
-            val outcome = if (!route.chunks.ready(world)) CitizenNavigationOutcome.STOPPED
-                else citizenNavigationOutcome(route.completion,
-                    bodyClear && citizenArrived(actor.npc.location, route.target),
-                    route.timing.elapsed(now), route.timeoutMillis, route.motion.navigating, route.motion.searching)
-            if (outcome == CitizenNavigationOutcome.PENDING) return
-            if (outcome != CitizenNavigationOutcome.ARRIVED &&
-                !citizenSafeIdlePosition(world, anchor, actor.npc.location.point(), city.buildings) &&
-                routes.recoverNavigation(actor, route.target, now, idleAnchor = anchor)) {
-                actor.wander.finish(now, true, resumeImmediately = worker.assignment == null)
-                return
-            }
+        val at = actor.npc.location
+        val withinArea = citizenWithinIdleArea(home.entrance, at.point())
+        val minePost = outsideHome && !inside(home, home.entrance.x, home.entrance.z)
+        val toolPost = !outsideHome && worker.assignment == home.id && actor.plan.idleReason == "waiting-tool"
+        if ((minePost || toolPost) && travelToPost(actor, city, world, home, now,
+                !withinArea || minePost && inside(home, at.blockX, at.blockZ))) return
+        val active = actor.route
+        if (active != null) {
+            val walk = active.wanderWalk ?: return
+            if (walk.home == home && walk.outsideHome == outsideHome) return
             routes.cancelRoute(actor)
-            actor.wander.finish(now, outcome == CitizenNavigationOutcome.ARRIVED,
-                resumeImmediately = worker.assignment == null)
-            CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
-                "outcome" to outcome.name.lowercase(), "target" to route.target.point().coordinates(),
-                "reason" to route.motion.failure, "actual" to actor.npc.location.point().coordinates(),
-                "from" to route.from.coordinates(), "path_progress" to route.motion.forwardProgress,
-                "path_nodes" to route.motion.nodeCount, "elapsed_ms" to now - route.startedAt)
-            return
         }
-        val returning = !citizenWithinIdleArea(anchor, actor.npc.location.point()) || outsideHome &&
-            !outside(CivPosition(actor.npc.location.blockX, actor.npc.location.blockY, actor.npc.location.blockZ))
-        if (!returning && !actor.wander.ready(now) || runtime.wanderBudget == 0) return
+        if (runtime.wanderBudget <= 0 || !actor.wander.ready(now, returning = !withinArea)) return
         runtime.wanderBudget--
-        // Keep short invalid-target retries fair within the shared eight-check budget.
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
-        val returnTarget = anchor.takeIf { returning && (!outsideHome || outside(it) &&
-            citizenStandable(world, it) && citizenIdleTerrain(world, it, city.buildings)) }
-        val target = if (returnTarget != null) returnTarget
-            else citizenWanderTarget(city, anchor, actor.workerId, actor.wander.step, if (outsideHome) emptySet() else setOf(home.id),
-                actor.npc.location.point(), actor.npc.bodyYaw)?.takeIf { !outsideHome || outside(it) }
-        // startRoute owns the single loaded-chunk, support and headroom check.
-        if (target != null && actor.npc.location.point().distanceSquared(target.point()) >= 1.0 &&
-            routes.startRoute(actor, world, target, now, idleAnchor = anchor)) {
-            CivsDiagnostics.event("citizen_wander", "city" to city.id,
-                "worker" to actor.workerId, "outcome" to "started", "target" to target)
-        } else {
-            actor.wander.reject(now)
-            if (actor.wander.step % CITIZEN_WANDER_HEIGHTS.size == 0) {
-                CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
-                    "outcome" to "target-unavailable", "target" to target, "next_step" to actor.wander.step)
-            }
-        }
+        routes.startWander(actor, city, home, outsideHome, now)
     }
+
+    /** The known work waiting post and mine exit retain ordinary travel and recovery. */
+    private fun travelToPost(actor: CitizenActor, city: Settlement, world: World, home: CivBuilding,
+                             now: Long, needed: Boolean): Boolean {
+        val anchor = home.entrance
+        val route = actor.route?.takeIf { it.wanderWalk == null && it.idleAnchor == anchor && it.authored == anchor }
+        if (route == null) {
+            if (!needed) return false
+            if (runtime.wanderBudget <= 0 || !actor.wander.ready(now, returning = true) ||
+                actor.route?.let { it.wanderWalk == null } == true) return true
+            runtime.wanderBudget--
+            citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+            if (actor.route != null) routes.cancelRoute(actor)
+            if (!routes.startRoute(actor, world, anchor, now, idleAnchor = anchor)) actor.wander.finish(now, false)
+            return true
+        }
+        val bodyClear = routes.arrivalBodyClear(actor)
+        if (!bodyClear && route.motion.failure == null && route.completion?.cancelReason == null) return true
+        val outcome = if (!route.chunks.ready(world)) CitizenNavigationOutcome.STOPPED else
+            citizenNavigationOutcome(route.completion, bodyClear && citizenArrived(actor.npc.location, route.target),
+                route.timing.elapsed(now), route.timeoutMillis, route.motion.navigating, route.motion.searching)
+        if (outcome == CitizenNavigationOutcome.PENDING) return true
+        val arrived = outcome == CitizenNavigationOutcome.ARRIVED ||
+            !citizenSafeIdlePosition(world, anchor, actor.npc.location.point(), city.buildings) &&
+                routes.recoverNavigation(actor, route.target, now, idleAnchor = anchor)
+        if (actor.route === route) routes.cancelRoute(actor)
+        actor.wander.finish(now, arrived, resumeImmediately = true)
+        return true
+    }
+
+    private fun inside(building: CivBuilding, x: Int, z: Int): Boolean =
+        x in building.bounds.min.x..building.bounds.max.x && z in building.bounds.min.z..building.bounds.max.z
 }

@@ -724,9 +724,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
 
     test("registered player block listeners ignore cancellation and batch accepted edits") {
         residentRuntime { h ->
-            h.assignFarm()
-            h.owner.pulse(2_000)
-            repeat(100) { h.navigate() }
+            h.warmSnapshotFromWorkRoute()
             fun cache() = (h.owner.debug(null, null).getValue("planner_global") as Map<*, *>)["snapshot_cache"] as Map<*, *>
             val captured = cache()["chunk_captures"] as Long
             (captured > 0) shouldBe true
@@ -747,9 +745,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
 
     test("piston listeners refresh empty head changes and the actual retract destination") {
         residentRuntime { h ->
-            h.assignFarm()
-            h.owner.pulse(2_000)
-            repeat(100) { h.navigate() }
+            h.warmSnapshotFromWorkRoute()
             fun cache() = (h.owner.debug(null, null).getValue("planner_global") as Map<*, *>)["snapshot_cache"] as Map<*, *>
             val captured = cache()["chunk_captures"] as Long
             val changed = hashSetOf<CivPosition>()
@@ -984,6 +980,16 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 })
+
+private fun ResidentRuntime.warmSnapshotFromWorkRoute() {
+    val farm = assignFarm()
+    work = CivWorldWork(workerId, 0, farm.id, CivPosition(24, 64, 0), emptyList(),
+        durationMillis = 4_000, status = "planting")
+    navigationNow = 2_000
+    owner.pulse(2_000)
+    phase() shouldBe CitizenPhase.TO_WORK
+    repeat(100) { navigate() }
+}
 
 private fun flatSnapshotTerrain(x: Int, z: Int, cells: Map<CivPosition, BlockData> = emptyMap()): CitizenSnapshotTerrain {
     val terrain = CitizenSnapshotTerrain()

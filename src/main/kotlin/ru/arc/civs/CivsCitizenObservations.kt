@@ -80,7 +80,7 @@ internal class CivsCitizenObservations(
                 val plan = actor.plan
                 val row = CivResidentRead(
                     cityId = city.id, worldId = city.worldId, workerId = worker.id, actorId = actor.instanceId,
-                    actual = if (valid) actor.npc.location.point() else null,
+                    actual = if (valid) (actor.idleNap?.ground ?: actor.npc.location).point() else null,
                     phase = actor.cycle.phase, status = runtime.statuses[worker.id],
                     assignmentId = worker.assignment, intent = plan.token, workType = plan.type,
                     workplace = plan.workplace, workFocus = plan.worldWork?.let(::citizenWorkFocus) ?: plan.workstation?.focus,
@@ -162,6 +162,7 @@ internal class CivsCitizenObservations(
                 if (it.conversationAt == null) "meeting" else "talking"
             } else if (it.arrivedAt == null) "to-campfire" else "campfire"
         }
+        if (actor.idleNap != null && actor.npc.isSeated) return "resting"
         if (workRuntime.waitingForMineAccess(actor, city, worker, register = false)) return "mine-waiting"
         val plan = actor.plan
         if (runtime.statuses[actor.workerId] == "workstation-unavailable") return "workstation-unavailable"
@@ -217,7 +218,13 @@ internal class CivsCitizenObservations(
                         "workplace" to actor.plan.workplace, "focus" to (actor.plan.worldWork?.let(::citizenWorkFocus) ?: actor.plan.workstation?.focus),
                         "workstation" to actor.plan.workstation?.let { mapOf("standing" to it.standing, "focus" to it.focus, "material" to it.material) },
                         "standing" to actor.plan.worldWork?.standing, "mining_step" to actor.plan.worldWork?.miningStep),
-                    "route" to route?.let { mapOf("from" to it.from, "target" to it.target.point(), "authored" to it.authored,
+                    "route" to route?.let {
+                        val walk = it.wanderWalk
+                        if (workerId == null && walk != null) return@let mapOf(
+                            "mode" to "local", "state" to it.motion.preparationPhase, "target" to it.target.point(),
+                            "started_at" to it.startedAt, "navigating" to it.motion.navigating,
+                            "failure" to it.motion.failure, "legs" to walk.legs)
+                        mapOf("from" to it.from, "target" to it.target.point(), "authored" to it.authored,
                         "started_at" to it.startedAt, "intermediate" to it.intermediate,
                         "state" to it.motion.preparationPhase, "searching" to it.motion.searching, "navigating" to it.motion.navigating,
                         "continuation" to it.motion.continuation,

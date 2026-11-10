@@ -459,7 +459,9 @@ internal fun citizenArrived(from: Location, to: Location): Boolean {
 
 internal class CitizenRoute(val from: CitizenPoint, val target: Location, val chunks: CitizenChunks, val startedAt: Long,
     val timeoutMillis: Long, val allowedBuildings: Set<UUID>, var motion: CitizenPacketRoute, val trip: CivsPaths.Trip?,
-    val authored: CivPosition, val intermediate: Boolean = false, val idleAnchor: CivPosition? = null) {
+    val authored: CivPosition, val intermediate: Boolean = false, val idleAnchor: CivPosition? = null,
+    val wanderWalk: CitizenWanderWalk? = null) {
+    val demandChunks: CitizenChunks? get() = chunks.takeIf { wanderWalk == null }
     var completion: CitizenNavigationCompletion? = null
     var planningReported = false
     var mineFailureReported = false

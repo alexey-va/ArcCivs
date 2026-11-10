@@ -234,6 +234,14 @@ internal class CitizenPacketRoute(
         (bodyContactAllowed || citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
             .299, 1.798, .299, avoiding) == null)
 
+    /** One already inspected native walking edge. No request, capture or detached search. */
+    internal fun readyWanderStep() {
+        val end = target.point()
+        path.addLast(Waypoint(origin, end, action = if (origin.y == end.y) CitizenRouteAction.WALK else CitizenRouteAction.STEP))
+        searching = false
+        preparationPhase = "local"
+    }
+
     /** Direct deterministic driver; production requests use the owner/executor and the identical solver. */
     fun expand() {
         if (!searching || asyncCancellation != null) return

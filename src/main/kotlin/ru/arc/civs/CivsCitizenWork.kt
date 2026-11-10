@@ -109,6 +109,7 @@ internal class CivsCitizenWork(
             couriers.releaseCourierSource(actor, now)
             return
         }
+        if (actor.idleNap != null && (leisure.nap.continueRest(actor, city, worker, world) || !actor.npc.isValid)) return
         if (logistics.collectedPending(actor)) { runtime.statuses[actor.workerId] = "loading-cargo"; return }
         if (world.time !in 12_000L..23_000L && actor.sheltering) {
             leaveShelter(actor, now)
@@ -183,6 +184,7 @@ internal class CivsCitizenWork(
         } else leisure.stopCamp(actor, "work-priority")
         actor.plan.idleReason?.let {
             if (it != "placing") {
+                if (leisure.nap.start(actor, city, worker, world, now) || !actor.npc.isValid) return
                 if (it == "searching-work") {
                     // A committed block invalidates the worksite cache before its bounded
                     // next-job search finishes. Returning to the surface in this gap made
@@ -220,6 +222,7 @@ internal class CivsCitizenWork(
         }
         when (cycle.phase) {
             CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING -> {
+                if (actor.route?.wanderWalk != null) routes.cancelRoute(actor)
                 val target = actor.plan.travelTarget(cycle.phase)
                 if (routes.arrivedAt(actor, city, world, target)) {
                     arriveForWork(actor, city, worker, now)

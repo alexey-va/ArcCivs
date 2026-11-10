@@ -155,7 +155,7 @@ internal fun diningStandingBounds(at: Location, scale: Double): BoundingBox = Bo
     at.x - .299 * scale, at.y + .001, at.z - .299 * scale,
     at.x + .299 * scale, at.y + 1.799 * scale, at.z + .299 * scale)
 
-private fun citizenDiningVolumeClear(world: World, box: BoundingBox, chair: CivPosition? = null,
+internal fun citizenDiningVolumeClear(world: World, box: BoundingBox, chair: CivPosition? = null,
     tableContact: CivPosition? = null): Boolean {
     for (x in floor(box.minX).toInt()..floor(box.maxX).toInt()) for (z in floor(box.minZ).toInt()..floor(box.maxZ).toInt()) {
         if (!citizenChunkReady(world, x shr 4, z shr 4)) return false

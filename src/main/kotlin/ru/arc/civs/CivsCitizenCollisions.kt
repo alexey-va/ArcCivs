@@ -500,8 +500,7 @@ internal class CivsCitizenCollisions(
 
     private fun residentOccupied(actor: CitizenActor): List<BoundingBox> = buildList {
         val meal = actor.mealVisit
-        add(meal?.seat?.takeIf { actor.npc.isSeated }?.bounds ?: actor.sleepPose?.takeIf { actor.sleeping }?.bounds
-            ?: citizenStandingBounds(actor.npc.location, actor.npc.scale))
+        add(actor.occupiedBody())
         meal?.seat?.let { seat ->
             add(seat.bounds)
             add(diningStandingBounds(meal.seatedFrom ?: seat.approach.location(actor.npc.world), actor.npc.scale))
