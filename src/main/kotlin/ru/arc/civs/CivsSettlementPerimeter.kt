@@ -16,12 +16,29 @@ internal object CivsSettlementPerimeter {
         val box = frame.core
         val maximumSize = CivsSettlementLayout.MAXIMUM_HALF_WIDTH * 2 + 1
         require(box.max.x - box.min.x + 1 in 1..maximumSize && box.max.z - box.min.z + 1 in 1..maximumSize)
+        val inner = city.buildings.filter { !it.type.isInfrastructure && it.type !in exterior && it.id !in fortifications }
+        val interior = InteriorSeeds(insidePaid + inner.map { envelopes[it.id] ?: it.bounds }, buildList {
+            inner.forEach { building ->
+                addAll(CivsAutonomousGeometry.approach(building))
+                addAll(routes[building.id].orEmpty())
+            }
+            fortifications.forEach { (id, proof) ->
+                addAll(proof.interiorWitnesses)
+                city.building(id)?.let { addAll(CivsAutonomousGeometry.approach(it)) }
+                addAll(routes[id].orEmpty())
+            }
+        })
+        val occupied = city.buildings.filterNot { it.type.isInfrastructure }.map { envelopes[it.id] ?: it.bounds } + insidePaid
         val budget = CutBudget()
-        return try { separate(city, frame, surface, routes, retainedRoutes, fortifications, box, maximumSize, budget, envelopes, insidePaid) }
+        return try { separate(city, frame, surface, routes, retainedRoutes, fortifications, box, maximumSize, budget, occupied, interior, inner) }
         catch (original: CivsRejection) {
             if (frame.fortified || original.reason != "autonomy-layout-obstructed" ||
-                original.values["stage"] != "no-dry-perimeter" || original.values["inner_boundary_seeds"] != "0" ||
-                surface.columns.isEmpty()) throw original
+                original.values["stage"] != "no-dry-perimeter" || surface.columns.isEmpty()) throw original
+            val paidBoundaryRetry = original.values["inner_boundary_seeds"] != "0"
+            if (paidBoundaryRetry && insidePaid.none { paid ->
+                    CivsAutonomousGeometry.overlaps(paid, box) && (paid.min.x <= box.min.x || paid.max.x >= box.max.x ||
+                        paid.min.z <= box.min.z || paid.max.z >= box.max.z)
+                }) throw original
             val radius = city.radius.coerceIn(0, 127)
             val expanded = CivBox(box.min.copy(
                 x = maxOf(box.min.x - 8, city.center.x - radius, surface.columns.keys.minOf { (it shr 32).toInt() }),
@@ -29,17 +46,62 @@ internal object CivsSettlementPerimeter {
                 box.max.copy(
                     x = minOf(box.max.x + 8, city.center.x + radius, surface.columns.keys.maxOf { (it shr 32).toInt() }),
                     z = minOf(box.max.z + 8, city.center.z + radius, surface.columns.keys.maxOf { it.toInt() })))
-            // The retry must preserve every original seed and add actual captured room.
+            // Retained boxes may already extend beyond the nominal tile. Require every
+            // input seed, including that unseen part, strictly inside the loaded retry tile.
             if (expanded.min.x > box.min.x || expanded.min.z > box.min.z || expanded.max.x < box.max.x ||
-                expanded.max.z < box.max.z || expanded == box) throw original
-            separate(city, frame, surface, routes, retainedRoutes, fortifications, expanded, 165, budget, envelopes, insidePaid)
+                expanded.max.z < box.max.z || expanded == box ||
+                paidBoundaryRetry && !interior.allColumns { x, z ->
+                    x > expanded.min.x && x < expanded.max.x && z > expanded.min.z && z < expanded.max.z &&
+                        surface.at(x, z)?.loaded == true
+                }) throw original
+            val adapted = separate(city, frame, surface, routes, retainedRoutes, fortifications,
+                expanded, 165, budget, occupied, interior, inner)
+            if (paidBoundaryRetry) {
+                val enclosed = CivsSettlementGrowth.interior(adapted)
+                // The gate's closed footprint may cover route or apron seed cells. Native
+                // transit and grades are validated separately; the reserved parcels stay inside.
+                if (!interior.boxes.all { it.allColumns { x, z -> civsTerrainKey(x, z) in enclosed } } ||
+                    !singleInterior(enclosed))
+                    throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-boundary-interior"))
+                if (city.buildings.any { building ->
+                        building.type == BuildingType.QUARRY &&
+                            !(envelopes[building.id] ?: building.bounds).allColumns { x, z -> civsTerrainKey(x, z) !in enclosed }
+                    }) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-boundary-quarry"))
+            }
+            adapted
         }
+    }
+
+    private class InteriorSeeds(val boxes: List<CivBox>, val points: List<CivPosition>) {
+        fun allColumns(test: (Int, Int) -> Boolean): Boolean =
+            boxes.all { it.allColumns(test) } && points.all { test(it.x, it.z) }
+    }
+
+    private fun CivBox.allColumns(test: (Int, Int) -> Boolean): Boolean =
+        (min.x..max.x).all { x -> (min.z..max.z).all { z -> test(x, z) } }
+
+    private fun singleInterior(interior: Set<Long>): Boolean {
+        val first = interior.firstOrNull() ?: return false
+        val remaining = interior.toHashSet()
+        val queue = ArrayDeque<Long>()
+        fun visit(x: Int, z: Int) {
+            val key = civsTerrainKey(x, z)
+            if (remaining.remove(key)) queue.addLast(key)
+        }
+        visit((first shr 32).toInt(), first.toInt())
+        while (queue.isNotEmpty()) {
+            val key = queue.removeFirst()
+            val x = (key shr 32).toInt()
+            val z = key.toInt()
+            visit(x - 1, z); visit(x + 1, z); visit(x, z - 1); visit(x, z + 1)
+        }
+        return remaining.isEmpty()
     }
 
     private fun separate(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
         routes: Map<UUID, List<CivPosition>>, retainedRoutes: Collection<List<CivPosition>>,
         fortifications: Map<UUID, CivFortificationProof>, box: CivBox, maximumSize: Int,
-        budget: CutBudget, envelopes: Map<UUID, CivBox>, insidePaid: List<CivBox>): CivSettlementFrame {
+        budget: CutBudget, occupied: List<CivBox>, interior: InteriorSeeds, inner: List<CivBuilding>): CivSettlementFrame {
         val width = box.max.x - box.min.x + 1
         val height = box.max.z - box.min.z + 1
         require(width in 1..maximumSize && height in 1..maximumSize)
@@ -47,8 +109,6 @@ internal object CivsSettlementPerimeter {
         fun index(x: Int, z: Int): Int? = if (x in box.min.x..box.max.x && z in box.min.z..box.max.z)
             (z - box.min.z) * width + x - box.min.x else null
         fun point(i: Int) = CivPosition(box.min.x + i % width, city.center.y, box.min.z + i / width)
-        val inner = city.buildings.filter { !it.type.isInfrastructure && it.type !in exterior && it.id !in fortifications }
-        val occupied = city.buildings.filterNot { it.type.isInfrastructure }.map { envelopes[it.id] ?: it.bounds } + insidePaid
         val fortificationGround = fortifications.values.flatMap { it.groundBarrier }
             .associateBy { civsTerrainKey(it.x, it.z) }
         val externalRoutes = routes.filterKeys { city.building(it)?.type in exterior }.values.toList()
@@ -87,17 +147,8 @@ internal object CivsSettlementPerimeter {
         fun reserve(box: CivBox) {
             for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z) seed(CivPosition(x, 0, z))
         }
-        insidePaid.forEach(::reserve)
-        inner.forEach { building ->
-            reserve(envelopes[building.id] ?: building.bounds)
-            CivsAutonomousGeometry.approach(building).forEach(::seed)
-            routes[building.id].orEmpty().forEach(::seed)
-        }
-        fortifications.forEach { (id, proof) ->
-            proof.interiorWitnesses.forEach(::seed)
-            city.building(id)?.let(CivsAutonomousGeometry::approach)?.forEach(::seed)
-            routes[id].orEmpty().forEach(::seed)
-        }
+        interior.boxes.forEach(::reserve)
+        interior.points.forEach(::seed)
         fun ground(x: Int, z: Int): Int? = fortificationGround[civsTerrainKey(x, z)]?.y ?: surface.at(x, z)?.groundY
         fun gentle(p: CivPosition): Boolean {
             val y = ground(p.x, p.z) ?: return false

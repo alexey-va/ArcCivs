@@ -174,6 +174,8 @@ internal class CivsAutonomousPlacement(
                         compatibleSlot(city, seed, unpaidSite.terrain, intent, requireNotNull(envelope))
                 }?.let { intent -> intent.copy(plots = intent.plots.filter { it.building.id != seed?.id },
                     routes = intent.routes - requireNotNull(seed).id.toString()) }
+                if (oldPlan?.perimeterEntrances != null && kept == null)
+                    throw CivsRejection("autonomy-no-site", mapOf("stage" to "retained-perimeter-parcel"))
                 val projected = if (seed == null) city else surveyCity.copy(autonomy = requireNotNull(surveyCity.autonomy).copy(plan = kept))
                 val access = if (seed == null) input.first else input.first.copy(
                     routes = input.first.routes + (seed.id to requireNotNull(seedRoute)), reservedFortificationPorts = emptyList())

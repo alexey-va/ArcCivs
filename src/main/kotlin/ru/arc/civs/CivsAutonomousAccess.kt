@@ -9,7 +9,8 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     val acceptedFortifications: Set<UUID> = emptySet(),
     val reservedFortificationPorts: List<CivBox> = emptyList(),
     val paidHallLeadOut: List<CivPosition> = emptyList(),
-    val wallApproachWrites: Map<UUID, Set<Long>> = emptyMap()) {
+    val wallApproachWrites: Map<UUID, Set<Long>> = emptyMap(),
+    val perimeterCaptures: Map<UUID, CivPerimeterCapture> = emptyMap()) {
     /** Preserve the full public surface when a civic parcel must borrow an existing street. */
     fun roadColumns(city: Settlement): Set<Long> = buildSet {
         routes.values.forEach { addAll(CivsAutonomousTerraform.roadProfile(it).keys) }
@@ -88,10 +89,23 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                         .mapTo(hashSetOf()) { civsTerrainKey(it.position.x, it.position.z) })
                 }
             }
+            val perimeterCaptures = adopted?.perimeterEntrances.orEmpty().mapNotNull { (id, stance) ->
+                val building = city.building(UUID.fromString(id)) ?: return@mapNotNull null
+                val plan = retained[building.id] ?: return@mapNotNull null
+                val sha = plan.capturedSha256 ?: return@mapNotNull null
+                val capture = CivPerimeterCapture(plan.id, sha)
+                if (building.phase != BuildingPhase.ACTIVE || building.entrance != stance ||
+                    building.type !in setOf(BuildingType.WALL, BuildingType.GATE) ||
+                    CivsInfrastructureRebuild.version(building) != 5 || CivsInfrastructureRebuild.stage(building) == 0 ||
+                    plan.id != CivsGateRefit.retainedPlanId(building) || plan.cityId != city.id || plan.worldId != city.worldId ||
+                    plan.adminPlacement || plan.building.copy(phase = BuildingPhase.ACTIVE) != building || !capture.valid())
+                    return@mapNotNull null
+                building.id to capture
+            }.toMap()
             return CivAutonomousAccess(routes, CivsSettlementLayout.accepted(city, plans), fortifications,
                 adopted?.plots.orEmpty().flatMap { plot ->
                     plot.fortification?.let { CivsSettlementPlans.portReservations(it.proof) }.orEmpty()
-                }, paidHallLeadOut(city, routes), wallApproachWrites)
+                }, paidHallLeadOut(city, routes), wallApproachWrites, perimeterCaptures)
         }
 
         /** Only an exact, corroborated paid centreline can replace the Hall's synthetic flat apron. */

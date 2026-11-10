@@ -44,6 +44,80 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         before.workers shouldBe emptyList()
     }
 
+    test("successive ordinary perimeters retain exact completed journals and keep a paved radial crossing") {
+        val initial = settlementPlanCity()
+        val hall = initial.buildings.single()
+        val forester = CivBuilding(UUID(94, 5), BuildingType.FORESTER, 1, CivPosition(0, 64, 100), 0, "fixture/forester",
+            CivBox(CivPosition(-2, 64, 100), CivPosition(2, 70, 103)), CivPosition(0, 65, 99), BuildingPhase.ACTIVE)
+        val base = initial.copy(style = "medievaloak", radius = 120, buildings = listOf(hall, forester),
+            autonomy = CivAutonomy(layoutHalfWidth = 24))
+        val route = (0..forester.entrance.z).map { CivPosition(0, 65, it) }
+        val flat = settlementPlanSurface(base)
+        val surface = flat.copy(columns = flat.columns + route.associate {
+            civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(64, false, dirtPath = true)
+        })
+        val radial = CivPlacementPlan(forester.id, base.id, base.worldId, forester.copy(phase = BuildingPhase.CONSTRUCTING),
+            listOf(CivPlanBlock(forester.bounds.min, "minecraft:air", "minecraft:cobblestone")), "a".repeat(64),
+            CivTerraformPlan(forester.bounds, emptyList(), route, 64, 0, 0))
+        val frame = CivsSettlementLayout.frame(base)
+        val seeded = CivsSettlementLayout.infrastructure(base, frame, surface, listOf(route), pavingRoutes = emptyList(),
+            retainedRoutes = listOf(route), retainedAccess = CivAutonomousAccess.from(base, listOf(radial)), protectPaidGateFloors = true)
+        seeded.perimeterClosed shouldBe true
+        val first = CivSettlementPlan(CivsSettlementPlans.VERSION, 3, frame.halfWidth,
+            base.buildings.map { CivSettlementPlot(it.copy(phase = BuildingPhase.SITE), it.bounds) },
+            mapOf(forester.id.toString() to route), frame.wallObstacles, frame.gates.map { it.passage }, frame.gates.map { it.side },
+            perimeterEntrances = seeded.pieces.associate { it.id.toString() to it.entrance })
+        fun captured(plan: CivSettlementPlan, layout: CivSettlementInfrastructure): List<CivPlacementPlan> =
+            requireNotNull(plan.perimeterEntrances).map { (id, stance) ->
+                val piece = layout.pieces.single { it.id.toString() == id }.copy(entrance = stance)
+                val capture = CivsInfrastructure.building(piece)
+                CivPlacementPlan(capture.id, base.id, base.worldId, capture,
+                    piece.blocks.filterNot { it.after == "minecraft:barrier" }.map {
+                        CivPlanBlock(it.position, "minecraft:air", it.after)
+                    }, CivsGateRefit.sha256(CivsInfrastructure.schematic(piece, 4671)))
+            }
+        fun adopt(city: Settlement, plan: CivSettlementPlan, newCaptures: List<CivPlacementPlan> = emptyList()) =
+            city.copy(autonomy = requireNotNull(city.autonomy).copy(plan = plan, layoutHalfWidth = plan.halfWidth),
+                buildings = city.buildings + newCaptures.map { it.building.copy(phase = BuildingPhase.ACTIVE) })
+        val oldCaptures = captured(first, seeded)
+        val inside = adopt(base, first, oldCaptures)
+        val gson = Gson()
+        gson.fromJson(gson.toJson(inside), Settlement::class.java).autonomy?.plan?.completedPerimeters shouldBe null
+        fun plan(city: Settlement, width: Int, journals: List<CivPlacementPlan>,
+            inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? = null) =
+            CivsSettlementPlans.prepare(city, emptyMap(), surface, CivAutonomousAccess.from(city, journals + radial),
+                profile = base.buildings.map { it.type }, halfWidth = width, inspect = inspect)
+
+        val missing = shouldThrow<CivsRejection> { plan(inside, 48, oldCaptures.dropLast(1)) }
+        missing.values["stage"] shouldBe "retained-growth-old-incomplete"
+        lateinit var middleLayout: CivSettlementInfrastructure
+        val middle = plan(inside, 48, oldCaptures) { _, layout -> middleLayout = layout }
+        val archived = requireNotNull(middle.completedPerimeters).single()
+        archived.planRevision shouldBe first.revision
+        archived.walls shouldBe first.walls
+        archived.gates shouldBe first.gates
+        archived.captures shouldBe oldCaptures.associate { it.building.id.toString() to
+            CivPerimeterCapture(it.id, requireNotNull(it.capturedSha256)) }
+        middle.routes[forester.id.toString()] shouldBe route
+        val outerGate = middleLayout.pieces.single { piece -> piece.type == BuildingType.GATE &&
+            piece.id.toString() in requireNotNull(middle.perimeterEntrances) && piece.paidGateFloors.isNotEmpty() }
+        outerGate.paidGateFloors.size shouldBe 15
+        outerGate.blocks.single { it.position == CivPosition(0, 64, 48) }.after shouldBe "minecraft:barrier"
+        middle.perimeterEntrances?.get(outerGate.id.toString())?.x shouldBe 0
+        val pending = adopt(inside, middle)
+        shouldThrow<CivsRejection> { plan(pending, 72, oldCaptures) }.values["stage"] shouldBe "retained-growth-old-incomplete"
+        val middleCaptures = captured(middle, middleLayout)
+        val two = gson.fromJson(gson.toJson(adopt(inside, middle, middleCaptures)), Settlement::class.java)
+        CivsSettlementPlans.current(two) shouldBe middle
+        val outer = plan(two, 72, oldCaptures + middleCaptures)
+        outer.completedPerimeters?.map { it.halfWidth } shouldBe listOf(24, 48)
+        outer.completedPerimeters?.first() shouldBe archived
+        outer.completedPerimeters?.last()?.captures?.keys shouldBe middle.perimeterEntrances?.keys
+        outer.routes[forester.id.toString()] shouldBe route
+        outer.perimeterEntrances?.isNotEmpty() shouldBe true
+        two.buildings.size shouldBe inside.buildings.size + middleCaptures.size
+    }
+
     test("a compact retained subset adds the next house without moving paid town geometry or invalidating accepted work") {
         // The current irregular enclosure is authoritative; add one needed plot rather than forcing all future houses inside it.
         val before = legacyGrowthCity(roomy = false)

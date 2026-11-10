@@ -64,6 +64,8 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.logging.Level
 
+private const val MAX_UPGRADE_HOLDER_HEADERS = 128
+
 /** Bounded main-thread storage. No IO, chunk loads, item drops or native mutation during planning. */
 class CivsStorage(private val plugin: Plugin,
     private val playerDataPersistence: PaperPlayerDataPersistence = NativePaperPlayerDataPersistence,
@@ -485,9 +487,29 @@ class CivsStorage(private val plugin: Plugin,
             target.type == building.type && target.level == building.level + 1 &&
             target.rotation == building.rotation && target.entrance == building.entrance)
         val positions = containers.buildingPositions(city, building.id)
-        reject(positions.size > CivContainerRelocation.MAX_CONTAINERS, "storage-transaction-too-large")
-        reject(positions.keys.map { (it.x shr 4) to (it.z shr 4) }.distinct().size > 8, "storage-transaction-too-large")
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
+        fun fitsReceipt(points: Collection<CivPosition>) = points.size <= CivContainerRelocation.MAX_CONTAINERS &&
+            points.map { (it.x shr 4) to (it.z shr 4) }.distinct().size <= 8
+
+        val retainedHeaders = if (fitsReceipt(positions.keys)) emptySet() else {
+            // Large warehouses can retain a whole shelf without reading any of its inventory slots.
+            reject(positions.size > MAX_UPGRADE_HOLDER_HEADERS, "storage-transaction-too-large")
+            val states = positions.mapValues { (point, type) ->
+                reject(!world.isChunkLoaded(point.x shr 4, point.z shr 4), "storage-unavailable")
+                reject(point.y !in world.minHeight until world.maxHeight, "storage-container-invalid")
+                val block = world.getBlockAt(point.x, point.y, point.z)
+                reject(block.type.name !in CIVS_STORAGE_TYPES || type != null && block.type.name != type, "storage-container-invalid")
+                block.blockData.asString
+            }
+            civsRelocationRetained(building, target, future, states).also {
+                if (it.size == positions.size) return null
+            }
+        }
+        // The already installed, unchanged control is the first receiver. The normal world
+        // capture still validates every affected cell before it can accept construction.
+        val participating = if (retainedHeaders.isEmpty()) positions
+            else positions.filterKeys { it == building.control || it !in retainedHeaders }
+        reject(!fitsReceipt(participating.keys), "storage-transaction-too-large")
         fun capture(point: CivPosition, type: String?): CivRelocatedContainer {
             reject(!foodCanModify(city, point), "lands-denied")
             val holder = containers.resolve(city, point, type)
@@ -496,7 +518,7 @@ class CivsStorage(private val plugin: Plugin,
             return CivRelocatedContainer(point, holder.type, world.getBlockAt(point.x, point.y, point.z).blockData.asString,
                 contents, contents)
         }
-        val holders = positions.map { (point, type) -> capture(point, type) }.toMutableList()
+        val holders = participating.map { (point, type) -> capture(point, type) }.toMutableList()
         fun plan() = civsPlanContainerRelocation(building, target, future, holders, city.inventory?.containers.orEmpty())
             ?.also { it.validated(it.after(city)) }
         val full = try { return plan() } catch (failure: CivsRejection) {
@@ -507,13 +529,17 @@ class CivsStorage(private val plugin: Plugin,
         val outputMaximums = holders.filter { it.position !in retained }.flatMap { it.before.filterNotNull() }
             .distinctBy { it.material to it.data }.associate { (it.material to it.data) to it.stack().maxStackSize }
         val candidates = containers.positions(city).filter { (point, _) ->
-            point !in positions && point !in future && !civsRelocationLocal(target, point) &&
-                civsRelocationExternalReceiver(city, building, point)
+            point in retainedHeaders && point !in participating ||
+                point !in positions && point !in future && !civsRelocationLocal(target, point) &&
+                    civsRelocationExternalReceiver(city, building, point)
         }
+        // The oversized path budgets all slot captures together; the existing small-holder
+        // path retains its separate bound for the search outside the building.
+        val maximumReceiverReads = CivContainerRelocation.MAX_CONTAINERS - if (retainedHeaders.isEmpty()) 0 else holders.size
         val captured = mutableMapOf<CivPosition, CivRelocatedContainer?>()
         fun receiver(point: CivPosition): CivRelocatedContainer? {
             if (point in captured) return captured[point]
-            if (point !in candidates || captured.size >= CivContainerRelocation.MAX_CONTAINERS) return null
+            if (point !in candidates || captured.size >= maximumReceiverReads) return null
             val value = if (!world.isChunkLoaded(point.x shr 4, point.z shr 4) || !foodCanModify(city, point)) null
             else try { capture(point, candidates[point]) } catch (failure: CivsRejection) {
                 if (failure.reason !in setOf("storage-unavailable", "storage-container-invalid", "not-authorized")) throw failure
@@ -522,16 +548,19 @@ class CivsStorage(private val plugin: Plugin,
             captured[point] = value
             return value
         }
-        // ponytail: at most 32 additional indexed reads; larger searches need sliced discovery, not chunk loads.
+        // ponytail: at most 32 indexed receiver probes; larger searches need sliced discovery, not chunk loads.
         for (point in candidates.keys.sortedWith(compareBy<CivPosition>(
-                { it.point().distanceSquared(building.entrance.point()) }, { it.x }, { it.y }, { it.z }))) {
+                { it !in positions }, { it.point().distanceSquared(building.entrance.point()) }, { it.x }, { it.y }, { it.z }))) {
             if (holders.size == CivContainerRelocation.MAX_CONTAINERS) break
             if (holders.any { it.position == point }) continue
+            val receiptPoints = holders.map { it.position } + point
+            if (!fitsReceipt(receiptPoints)) continue
             val holder = receiver(point) ?: continue
             val partner = relocationChestPartner(point, holder.blockData)
-            val group = if (partner == null) listOf(holder) else listOf(holder, receiver(partner) ?: continue)
-            if (holders.size + group.size > CivContainerRelocation.MAX_CONTAINERS ||
-                (holders + group).map { (it.position.x shr 4) to (it.position.z shr 4) }.distinct().size > 8) continue
+            val group = if (partner == null) listOf(holder) else {
+                if (partner in receiptPoints || !fitsReceipt(receiptPoints + partner)) continue
+                listOf(holder, receiver(partner) ?: continue)
+            }
             val unchanged = civsRelocationRetained(building, target, future, holders + group)
             if (group.any { it.position !in unchanged } || group.none { destination -> destination.before.any { slot ->
                     slot == null || slot.amount < (outputMaximums[slot.material to slot.data] ?: 0)

@@ -142,6 +142,16 @@ internal object CivsRetainedGrowthPerimeter {
         val fresh = infrastructure.pieces.filter { it.id !in paidIds }
         check(fresh.none { next -> retained.infrastructure.any { overlaps(next.bounds, it.bounds) } })
         val perimeter = fresh.filter { it.type in setOf(BuildingType.WALL, BuildingType.GATE) }
+        val grades = routes.flatten().groupBy { civsTerrainKey(it.x, it.z) }
+        val transit = fresh.flatMap { it.transit }.groupBy { civsTerrainKey(it.x, it.z) }
+        if (!closed(frame, perimeter) || grades.values.any { points -> points.map { it.y }.distinct().size != 1 } ||
+            retained.routes.values.flatten().any { point ->
+                transit[civsTerrainKey(point.x, point.z)]?.any { it.y != point.y } == true
+            }) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-growth-result"))
+    }
+
+    /** Detached authored-body proof for just the members of this perimeter. */
+    fun closed(frame: CivSettlementFrame, perimeter: List<CivSettlementPiece>): Boolean {
         val coverage = perimeter
             .flatMapTo(hashSetOf()) { piece -> piece.blocks.map { civsTerrainKey(it.position.x, it.position.z) } }
         val covered = (frame.wallObstacles + frame.gates.map { it.passage }).all { box ->
@@ -174,16 +184,9 @@ internal object CivsRetainedGrowthPerimeter {
             CivBox(p, p)
         })
         val interior = CivsSettlementGrowth.interior(frame)
-        // Reuse the bounded exterior flood with gates conditionally closed. Only NEW body
-        // columns participate, so a paid inner ring cannot conceal a broken outer side.
-        val closed = covered && gateBodies && interior.isNotEmpty() &&
+        // Only this ring's body columns participate in the flood.
+        return covered && gateBodies && interior.isNotEmpty() &&
             CivsSettlementGrowth.interior(bodyFrame).containsAll(interior)
-        val grades = routes.flatten().groupBy { civsTerrainKey(it.x, it.z) }
-        val transit = fresh.flatMap { it.transit }.groupBy { civsTerrainKey(it.x, it.z) }
-        if (!closed || grades.values.any { points -> points.map { it.y }.distinct().size != 1 } ||
-            retained.routes.values.flatten().any { point ->
-                transit[civsTerrainKey(point.x, point.z)]?.any { it.y != point.y } == true
-            }) throw CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "retained-growth-result"))
     }
 
     private fun ring(west: Int, north: Int, east: Int, south: Int, y: Int,

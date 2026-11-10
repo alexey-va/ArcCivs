@@ -692,6 +692,109 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
     beforeEach { f = UpgradeStorageFixture() }
     afterEach { f.close() }
 
+    test("a full old warehouse control evacuates into its new control beside 58 unchanged chests") {
+        val future = f.largeWarehouse()
+        f.h.world.getBlockAt(f.source.x, f.source.y, f.source.z).type = Material.BARREL
+        f.fillSource()
+        f.inventory(f.control).clear()
+        val keepsake = ItemStack(Material.GOLD_INGOT, 3)
+        f.inventory(f.destination).setItem(3, keepsake)
+        val before = f.h.city
+        val source = f.items(f.source)
+        val checked = mutableSetOf<CivPosition>()
+        f.h.storage.foodCanModify = { _, point -> checked.add(point); true }
+        val tx = f.prepare(future + (f.source to "minecraft:air"))
+
+        tx.containerRelocation!!.containers.map { it.position }.toSet() shouldBe setOf(f.source, f.control)
+        tx.playerId() shouldBe null
+        checked shouldBe setOf(f.source, f.control)
+        f.items(f.source) shouldBe source
+        f.items(f.control).all { it == null } shouldBe true
+        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
+
+        val result = f.h.journal.submitRelocation(before, tx)
+        f.h.ticks()
+        result.join() shouldBe tx.after
+        f.items(f.source).all { it == null } shouldBe true
+        f.items(f.control) shouldBe source
+        f.inventory(f.destination).getItem(3) shouldBe keepsake
+        f.h.city.inventory!!.containers shouldBe listOf(f.destination)
+        verify(exactly = 1) { f.h.store.saveInventoryTransaction(tx) }
+    }
+
+    test("one changed chest half evacuates both native inventories beside an oversized stable shelf set") {
+        val future = f.largeWarehouse()
+        val partner = f.source.copy(x = f.source.x - 1)
+        f.chest(f.source, "south", "left")
+        f.chest(partner, "south", "right")
+        f.inventory(f.source).setItem(0, ItemStack(Material.DIAMOND, 3))
+        f.inventory(partner).setItem(5, ItemStack(Material.GOLD_INGOT, 7))
+        f.inventory(f.control).clear()
+        val source = f.items(f.source).filterNotNull() + f.items(partner).filterNotNull()
+        val tx = f.prepare(future + mapOf(f.source to "minecraft:air", partner to f.state("south", "right")))
+
+        tx.containerRelocation!!.containers.map { it.position }.toSet() shouldBe setOf(f.source, partner, f.control)
+        f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        f.items(f.source).all { it == null } shouldBe true
+        f.items(partner).all { it == null } shouldBe true
+        f.items(f.control).filterNotNull().toSet() shouldBe source.toSet()
+    }
+
+    test("a full new warehouse control falls back to both safe halves of a retained local shelf before another building") {
+        val future = f.largeWarehouse()
+        f.h.world.getBlockAt(f.source.x, f.source.y, f.source.z).type = Material.BARREL
+        f.fillSource()
+        val left = f.source.copy(z = f.source.z - 1)
+        val right = left.copy(x = left.x - 1)
+        f.chest(left, "south", "left")
+        f.chest(right, "south", "right")
+        f.fillShelves(future, setOf(left, right))
+        val unused = ItemStack(Material.DIRT, 64)
+        for ((point, occupied) in listOf(left to 14, right to 13)) {
+            val shelf = f.inventory(point)
+            repeat(occupied) { shelf.setItem(it, unused.clone()) }
+        }
+        val elsewhere = f.addReceiver()
+        val external = f.items(elsewhere.anchor)
+        val source = f.items(f.source).filterNotNull()
+        val marker = f.items(f.control)
+        val tx = f.prepare(future + mapOf(f.source to "minecraft:air",
+            left to f.state("south", "left"), right to f.state("south", "right")))
+
+        tx.containerRelocation!!.containers.map { it.position }.toSet() shouldBe setOf(f.source, f.control, left, right)
+        f.items(f.source).filterNotNull() shouldBe source
+        f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        f.items(f.source).all { it == null } shouldBe true
+        f.items(f.control) shouldBe marker
+        f.items(elsewhere.anchor) shouldBe external
+        val moved = (f.items(left) + f.items(right)).filterNotNull()
+        moved.filter { it.material == "DIRT" }.size shouldBe 27
+        moved.filterNot { it.material == "DIRT" } shouldBe source
+    }
+
+    test("large warehouse evacuation leaves all inventories intact when every receiver is full") {
+        val future = f.largeWarehouse()
+        f.h.world.getBlockAt(f.source.x, f.source.y, f.source.z).type = Material.BARREL
+        f.fillSource()
+        f.fillShelves(future)
+        val city = f.h.city
+        val slots = f.allItems()
+        val checked = mutableSetOf<CivPosition>()
+        f.h.storage.foodCanModify = { _, point -> checked.add(point); true }
+        val id = UUID.randomUUID()
+        f.h.storage.reserve(city, id)
+
+        shouldThrow<CivsRejection> {
+            f.h.storage.prepareUpgradeRelocation(city, f.target, future + (f.source to "minecraft:air"))
+        }.reason shouldBe "storage-full"
+        f.h.city shouldBe city
+        f.allItems() shouldBe slots
+        (checked.size <= CivContainerRelocation.MAX_CONTAINERS) shouldBe true
+        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
+        f.h.storage.unlock(id)
+    }
+
     test("one empty changing barrel retires without a receiver when every other native holder is full") {
         f.configure()
         f.h.world.getBlockAt(f.source.x, f.source.y, f.source.z).type = Material.BARREL
@@ -1457,6 +1560,28 @@ private class UpgradeStorageFixture : AutoCloseable {
             inventory = CivInventory(CivStorageMode.PHYSICAL, containers = listOf(source, destination))))
         h.storage.replaceCities(listOf(h.city))
         h.storage.relocationCurrentCity = { h.city.takeIf { city -> city.id == it } }
+    }
+    fun largeWarehouse(): Map<CivPosition, String> {
+        configure()
+        val others = buildList {
+            for (x in 7..12) for (y in 64..68) for (z in -1..1) {
+                val point = CivPosition(x, y, z)
+                if (point != source && point != destination && point != control) add(point)
+            }
+        }.take(57)
+        for (point in others) {
+            h.world.loadChunk(point.x shr 4, point.z shr 4)
+            chest(point, "east")
+        }
+        h.indexed += others
+        h.storage.replaceCities(listOf(h.city))
+        return future + others.associateWith { state("east") }
+    }
+    fun fillShelves(future: Map<CivPosition, String>, except: Set<CivPosition> = emptySet()) {
+        for (point in future.keys - except - source - control) {
+            val shelf = inventory(point)
+            repeat(STORAGE_SLOTS) { shelf.setItem(it, ItemStack(Material.DIRT, 64)) }
+        }
     }
     fun addReceiver(type: BuildingType = BuildingType.WAREHOUSE, point: CivPosition = CivPosition(0, 64, 8)): CivBuilding {
         h.world.loadChunk(point.x shr 4, point.z shr 4)

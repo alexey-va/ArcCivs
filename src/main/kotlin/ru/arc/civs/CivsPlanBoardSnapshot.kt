@@ -57,6 +57,11 @@ internal fun civsPlanBoardLayoutKey(city: Settlement): String {
             field("perimeter-entrances")
             entrances.toSortedMap().forEach { (id, entrance) -> field(id); field(entrance) }
         }
+        plan.completedPerimeters?.forEach { ring ->
+            field("completed-perimeter"); field(ring.planRevision); field(ring.halfWidth)
+            ring.walls.forEach(::field); ring.gates.forEach(::field); ring.gateSides.forEach(::field)
+            ring.captures.toSortedMap().forEach { (id, capture) -> field(id); field(capture) }
+        }
     }
     field(city.roadRouteOverrides.orEmpty().size)
     city.roadRouteOverrides.orEmpty().toSortedMap().forEach { (id, route) ->

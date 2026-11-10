@@ -152,21 +152,24 @@ internal fun relocationChestPartner(position: CivPosition, state: String): CivPo
 }
 
 internal fun civsRelocationRetained(building: CivBuilding, target: CivBuilding,
-    future: Map<CivPosition, String>, holders: List<CivRelocatedContainer>): Set<CivPosition> {
-    val byPosition = holders.associateBy { it.position }
-    fun unchanged(holder: CivRelocatedContainer): Boolean = if (civsRelocationLocal(building, holder.position))
-        future[holder.position] == holder.blockData else holder.position !in future && !civsRelocationLocal(target, holder.position)
-    return holders.filter { holder ->
-        if (holder.position == building.control) return@filter holder.position == target.control && holder.type == "BARREL"
-        if (!civsRetainContainerState(holder.blockData) || !unchanged(holder)) return@filter false
-        val chest = retainedChest.matchEntire(holder.blockData) ?: return@filter true
+    future: Map<CivPosition, String>, holders: List<CivRelocatedContainer>): Set<CivPosition> =
+    civsRelocationRetained(building, target, future, holders.associate { it.position to it.blockData })
+
+internal fun civsRelocationRetained(building: CivBuilding, target: CivBuilding,
+    future: Map<CivPosition, String>, states: Map<CivPosition, String>): Set<CivPosition> {
+    fun unchanged(position: CivPosition, state: String): Boolean = if (civsRelocationLocal(building, position))
+        future[position] == state else position !in future && !civsRelocationLocal(target, position)
+    return states.entries.filter { (position, state) ->
+        if (position == building.control) return@filter position == target.control && state.substringBefore('[') == "minecraft:barrel"
+        if (!civsRetainContainerState(state) || !unchanged(position, state)) return@filter false
+        val chest = retainedChest.matchEntire(state) ?: return@filter true
         val part = chest.groupValues[2]
         if (part == "single") return@filter true
-        val partner = relocationChestPartner(holder.position, holder.blockData)?.let(byPosition::get)
-        partner != null && partner.type == holder.type && relocationChestPartner(partner.position, partner.blockData) == holder.position &&
-            retainedChest.matchEntire(partner.blockData)?.groupValues?.get(1) == chest.groupValues[1] &&
-            unchanged(partner)
-    }.mapTo(hashSetOf(), CivRelocatedContainer::position)
+        val partner = relocationChestPartner(position, state) ?: return@filter false
+        val other = states[partner] ?: return@filter false
+        other.substringBefore('[') == state.substringBefore('[') && relocationChestPartner(partner, other) == position &&
+            retainedChest.matchEntire(other)?.groupValues?.get(1) == chest.groupValues[1] && unchanged(partner, other)
+    }.mapTo(hashSetOf()) { it.key }
 }
 
 /** Detached all-or-nothing packing; native holders stay untouched until the existing receipt is durable. */
