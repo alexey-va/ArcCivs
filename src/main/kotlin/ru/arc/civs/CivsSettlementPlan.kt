@@ -24,6 +24,7 @@ internal object CivsSettlementPlans {
     const val VERSION = 1
     internal const val HOUSING_PERIMETER = "housing-perimeter"
     internal const val CIVIC_PERIMETER = "civic-perimeter"
+    private val civicPerimeterTypes = CivsIndustry.processorTypes + BuildingType.UNIVERSITY
     private val deferredPerimeterStages = setOf("no-dry-perimeter", "gate-junction", "infrastructure", HOUSING_PERIMETER, CIVIC_PERIMETER)
 
     internal fun protectsPaidApproach(stage: String?): Boolean = stage == HOUSING_PERIMETER || stage == CIVIC_PERIMETER
@@ -167,7 +168,7 @@ internal object CivsSettlementPlans {
         plan.deferredPerimeter?.let { deferred ->
             require(deferred.stage in deferredPerimeterStages && plan.plots.any {
                 it.building.id == deferred.plotId && it.building.anchor == deferred.plotAnchor && it.fortification == null &&
-                    (deferred.stage != CIVIC_PERIMETER || it.building.type == BuildingType.UNIVERSITY)
+                    (deferred.stage != CIVIC_PERIMETER || it.building.type in civicPerimeterTypes)
             })
             require(deferred.crossing?.let { city.contains(it.x, it.z) } != false)
         }
@@ -311,9 +312,10 @@ internal object CivsSettlementPlans {
 
     private fun paidCivicStage(city: Settlement, surface: CivTerrainSurface, retained: CivAutonomousAccess,
         profile: List<BuildingType>): String? {
-        val stage = when (profile.lastOrNull()) {
+        val target = profile.lastOrNull() ?: return null
+        val stage = when (target) {
             BuildingType.HOUSE -> HOUSING_PERIMETER
-            BuildingType.UNIVERSITY -> CIVIC_PERIMETER
+            in civicPerimeterTypes -> CIVIC_PERIMETER
             else -> return null
         }
         val prior = current(city) ?: return null
@@ -322,7 +324,7 @@ internal object CivsSettlementPlans {
             city.autonomy?.paused == false && city.pendingDeletion == null &&
                 city.inventory?.mode == CivStorageMode.PHYSICAL && profile.dropLast(1) == ordinary.map { it.type } &&
                 (stage != CIVIC_PERIMETER || CivsAutonomy.nextGoal(city)?.let {
-                    it.type == BuildingType.UNIVERSITY && it.targetLevel == 1 && it.buildingId == null
+                    it.type == target && it.targetLevel == 1 && it.buildingId == null
                 } == true) &&
                 city.construction == null && city.constructionQueue.orEmpty().isEmpty() && city.pendingControls.orEmpty().isEmpty() &&
                 city.buildings.all { it.phase == BuildingPhase.ACTIVE && !it.schematicId.startsWith("civs/fortifications/v1/") } &&

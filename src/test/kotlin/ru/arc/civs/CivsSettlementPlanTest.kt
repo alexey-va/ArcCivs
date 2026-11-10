@@ -3,8 +3,12 @@ package ru.arc.civs
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.every
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
@@ -161,6 +165,46 @@ class CivsSettlementPlanTest : FunSpec({
         refreshed.gates shouldBe frame.gates.map { it.passage }
         frame.gates.forEach { gate ->
             refreshed.routes.values.any { it.last() == gate.center.copy(y = 65) } shouldBe true
+        }
+    }
+
+    test("an obstructed perimeter defers for the next paid-safe industry site") {
+        val base = settlementPlanCity().copy(radius = 128)
+        val surface = settlementPlanSurface(base.copy(radius = 127))
+        val templates = settlementPlanTemplates()
+        val builtProfile = CivsAutonomy.baseProfile + listOf(BuildingType.HOUSE, BuildingType.HOUSE, BuildingType.UNIVERSITY)
+        val prior = CivsSettlementPlans.prepare(base, templates, surface, CivAutonomousAccess(), profile = builtProfile)
+        val gateBounds = prior.gates.first()
+        val gate = CivSettlementPiece(UUID(94, 901), BuildingType.GATE, gateBounds, gateBounds.min, emptyList())
+        val city = base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = prior.plots.map { it.building.copy(level = minOf(it.building.type.maxLevel, 2), phase = BuildingPhase.ACTIVE) } +
+                CivsInfrastructure.building(gate).copy(phase = BuildingPhase.ACTIVE),
+            autonomy = requireNotNull(base.autonomy).copy(plan = prior, layoutHalfWidth = prior.halfWidth),
+            research = CivResearchState(setOf(CivResearchId.MATERIALS)))
+        val access = CivAutonomousAccess(prior.routes.mapKeys { UUID.fromString(it.key) }, listOf(gate))
+        val profile = CivsSettlementGrowth.profile(city)
+        profile.last() shouldBe BuildingType.SMELTERY
+        val rejection = CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure", "protected-terrain" to "2"))
+        mockkObject(CivsSettlementPlans)
+        try {
+            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } throws rejection
+            val grown = CivsSettlementPlans.prepareGrowth(city, templates, surface, access, profile)
+            val smeltery = grown.plots.single { it.building.type == BuildingType.SMELTERY }
+            grown.deferredPerimeter shouldBe CivDeferredPerimeter(CivsSettlementPlans.CIVIC_PERIMETER, smeltery.building.id, smeltery.building.anchor)
+            access.routes.forEach { (id, route) -> grown.routes[id.toString()] shouldBe route }
+            CivsAutonomousGeometry.overlaps(smeltery.envelope, gate.bounds) shouldBe false
+            val protected = access.roadColumns(city)
+            val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(smeltery.building.copy(bounds = smeltery.envelope), 0),
+                surface, access, grown.walls, reservedRoute = grown.routes.getValue(smeltery.building.id.toString()),
+                protectedRoadColumns = protected)
+            draft.columns.none { !it.preserve && civsTerrainKey(it.x, it.z) in protected } shouldBe true
+            val incomplete = surface.copy(columns = surface.columns - surface.columns.keys.first())
+            shouldThrow<CivsRejection> { CivsSettlementPlans.prepareGrowth(city, templates, incomplete, access, profile) }.values shouldBe rejection.values
+            shouldThrow<CivsRejection> {
+                CivsSettlementPlans.prepareGrowth(city, templates, surface, access.copy(infrastructure = emptyList()), profile)
+            }.values shouldBe rejection.values
+        } finally {
+            unmockkObject(CivsSettlementPlans)
         }
     }
 
