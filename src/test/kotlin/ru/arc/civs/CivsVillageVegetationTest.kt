@@ -101,6 +101,33 @@ class CivsVillageVegetationTest : FunSpec({
         }
     }
 
+    test("vegetation sweep preserves the tree of a native nest and clears only unsupported snow") {
+        VillageVegetationFixture().use { h ->
+            val root = CivPosition(-5, 64, -5)
+            val tree = h.tree(root)
+            val nest = root.copy(y = 65, z = -6)
+            h.put(nest, "minecraft:bee_nest[facing=north,honey_level=5]")
+            val orphan = CivPosition(5, 71, -5)
+            val grounded = orphan.copy(x = 4, y = 64)
+            val gainedSupport = orphan.copy(x = 3)
+            h.put(orphan, Material.SNOW)
+            h.put(grounded, Material.SNOW)
+            h.put(gainedSupport, Material.SNOW)
+            h.startCapture()
+            h.finishCapture()
+            h.put(gainedSupport.copy(y = gainedSupport.y - 1), Material.STONE)
+            h.drain()
+            tree.forEachIndexed { i, cell ->
+                h.type(cell) shouldBe if (i == tree.lastIndex) Material.OAK_LEAVES else Material.OAK_LOG
+            }
+            h.type(nest) shouldBe Material.BEE_NEST
+            h.type(orphan) shouldBe Material.AIR
+            h.type(grounded) shouldBe Material.SNOW
+            h.type(gainedSupport) shouldBe Material.SNOW
+            h.notifications shouldBe setOf(orphan)
+        }
+    }
+
     test("village scope covers spatial plan and outlying buildings while respecting its territory") {
         val building = CivBuilding(UUID(0, 1), BuildingType.TOWN_HALL, 1, CivPosition(0, 64, 0), 0, "test",
             CivBox(CivPosition(-3, 63, -3), CivPosition(3, 68, 3)), CivPosition(0, 64, 4), BuildingPhase.ACTIVE)

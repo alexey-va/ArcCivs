@@ -62,6 +62,23 @@ internal class CivsForestryWorksite(
         if (work.remoteWork || CivsForestry.care(work))
             requireCivs(approaches.workAccessible(city, building, world, work) == true, "stale-worksite")
     }
+    override fun validateNativeProof(city: Settlement, worker: CivWorker, building: CivBuilding, world: World, work: CivWorldWork) {
+        val timber = work.forestry?.job?.timber ?: return
+        for (cell in work.changes) {
+            if (CivsForestry.material(cell.before) != timber) continue
+            val p = cell.position
+            // Inspect the backing relationship only. The neighboring tile is never a work target.
+            requireCivs(civsNestSides.none { (dx, dz) ->
+                val x = p.x + dx
+                val z = p.z + dz
+                if (!world.isChunkLoaded(x shr 4, z shr 4)) return@none false
+                val side = world.getBlockAt(x, p.y, z)
+                val material = side.type
+                (material == Material.BEE_NEST || material == Material.BEEHIVE) &&
+                    civsNestBackedBy(material, side.blockData, dx, dz)
+            }, "stale-worksite")
+        }
+    }
     override fun invalidate(workerId: UUID, building: CivBuilding?, completedWork: CivWorldWork?, hadCached: Boolean) { invalidate(workerId) }
     override fun completed(workerId: UUID, building: CivBuilding, work: CivWorldWork) { completed(workerId, work) }
     override fun changed(workerId: UUID, building: CivBuilding, point: CivPosition) { changed(workerId, point) }

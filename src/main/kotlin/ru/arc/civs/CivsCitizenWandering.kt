@@ -18,12 +18,19 @@ internal class CitizenWander(workerId: UUID) {
         return now >= requireNotNull(nextAt)
     }
 
-    fun directions(yaw: Float): List<Pair<Int, Int>> {
-        val forward = (yaw / 90f).roundToInt()
+    fun directions(yaw: Float, allowDiagonal: Boolean = false): List<Pair<Int, Int>> {
+        val forward = (yaw / (if (allowDiagonal) 45f else 90f)).roundToInt()
         val turn = if (random.nextBoolean()) 1 else -1
-        val heading = if (random.nextInt(8) == 0) forward + turn else forward
-        return listOf(heading, heading + turn, heading - turn, heading + 2)
+        val heading = if (random.nextInt(if (allowDiagonal) 3 else 8) == 0) forward + turn else forward
+        val diagonal = allowDiagonal && (heading and 1) != 0
+        val cardinal = when {
+            !allowDiagonal -> heading
+            diagonal -> (yaw / 90f).roundToInt()
+            else -> heading / 2
+        }
+        val fallback = listOf(cardinal, cardinal + turn, cardinal - turn, cardinal + 2)
             .map { CITIZEN_WANDER_DIRECTIONS[it and 3] }
+        return if (diagonal) listOf(CITIZEN_WANDER_DIAGONALS[(heading and 7) / 2]) + fallback else fallback
     }
 
     fun legLimit(): Int = 8 + random.nextInt(5)
@@ -53,6 +60,7 @@ internal class CitizenWanderWalk(val home: CivBuilding, val outsideHome: Boolean
 }
 
 private val CITIZEN_WANDER_DIRECTIONS = listOf(0 to 1, -1 to 0, 0 to -1, 1 to 0)
+private val CITIZEN_WANDER_DIAGONALS = listOf(-1 to 1, -1 to -1, 1 to -1, 1 to 1)
 private const val CITIZEN_IDLE_RADIUS = 8.0
 
 internal fun citizenIdleBuilding(city: Settlement, worker: CivWorker): CivBuilding? =

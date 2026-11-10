@@ -24,7 +24,11 @@ internal data class CivTerrainSurfaceColumn(val groundY: Int, val natural: Boole
 /** Native capture covers [supportY, maxOf(surfaceY, groundY) + 2]. */
 internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int, val floorY: Int,
     val surfaceY: Int, val preserve: Boolean = false,
-    val supportY: Int = floorY - CivsAutonomousTerraform.MAXIMUM_CHANGE)
+    val supportY: Int = floorY - CivsAutonomousTerraform.MAXIMUM_CHANGE,
+    val platformShoulderFrom: CivPosition? = null) {
+    fun shoulderFill(y: Int): String? = if (platformShoulderFrom == null || y <= floorY || y > groundY) null
+        else if (y == groundY) "minecraft:grass_block[snowy=false]" else "minecraft:dirt"
+}
 
 internal data class CivTerraformDraft(val building: CivBuilding, val columns: List<CivTerraformColumn>,
     val route: List<CivPosition>, val groundY: Int, val access: CivAutonomousAccess = CivAutonomousAccess(),
@@ -139,6 +143,8 @@ internal object CivsAutonomousTerraform {
     private const val COMPACT_TERRACE_COLUMNS = 100L
     private const val COMPACT_FILL_DEPTH = 4
     private const val LARGE_FILL_DEPTH = 3
+    private const val MAX_PLATFORM_SHOULDER_COLUMNS = 96
+    private const val MAX_PLATFORM_SHOULDER_RISE = 2
     private const val PARALLEL_ROAD_COST = 8
 
     /** Remove a loop only before a straight portal crossing. The original solver owns the entire
@@ -461,8 +467,56 @@ internal object CivsAutonomousTerraform {
             (maxOf(it.surfaceY, it.groundY) + 2 - maxOf(surface.minHeight, it.floorY - MAXIMUM_CHANGE) + 1).toLong()
         }
         if (count > MAXIMUM_CAPTURE_CELLS) throw CivsRejection("autonomy-search-budget")
+        if (unpaidTerrace(city, building) && building.type != BuildingType.FARM) {
+            val capture = columns.values.sumOf { maxOf(it.surfaceY, it.groundY).toLong() - it.supportY + 3 }
+            val limit = minOf(MAX_PLATFORM_SHOULDER_COLUMNS, MAXIMUM_SURFACE_COLUMNS - columns.size,
+                ((MAXIMUM_CAPTURE_CELLS - capture) / (MAX_PLATFORM_SHOULDER_RISE + 3)).toInt())
+            if (limit > 0) appendPlatformShoulders(city, building, surface, columns, routeObstacles,
+                standing.keys + reservedShoulders + protectedRoads + preferredRoads + access.roadColumns(city), limit)
+        }
         return CivTerraformDraft(building, columns.values.toList(), route, building.anchor.y, access, waterFoundations.toList(),
             paidGateFloors = gateFloors.values.toList())
+    }
+
+    /** Two shallow fill-only bands, with each outer cell attached to its admitted inner shoulder. */
+    private fun appendPlatformShoulders(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
+        columns: MutableMap<Long, CivTerraformColumn>, obstacles: List<CivBox>, protectedColumns: Set<Long>, limit: Int) {
+        val bounds = building.bounds
+        val chunks = columns.values.mapTo(hashSetOf()) { civsTerrainKey(it.x shr 4, it.z shr 4) }
+        var added = 0
+        val sides = listOf(0 to -1, 1 to 0, 0 to 1, -1 to 0)
+        for (distance in 1..2) for ((side, offset) in sides.withIndex()) {
+            val (dx, dz) = offset
+            val span = if (dx == 0) bounds.min.x..bounds.max.x else bounds.min.z..bounds.max.z
+            // Taper the ends of the outer band without making holes along a face.
+            val seed = HashCommon.mix(building.id.mostSignificantBits xor building.id.leastSignificantBits xor side.toLong())
+            val along = if (distance == 1) span else
+                (span.first + 1 + (seed and 1).toInt())..(span.last - 1 - ((seed ushr 1) and 1).toInt())
+            for (axis in along) {
+                if (added >= limit) return
+                val edgeX = if (dx == 0) axis else if (dx < 0) bounds.min.x else bounds.max.x
+                val edgeZ = if (dz == 0) axis else if (dz < 0) bounds.min.z else bounds.max.z
+                val x = edgeX + dx * distance
+                val z = edgeZ + dz * distance
+                val key = civsTerrainKey(x, z)
+                if (key in columns || key in protectedColumns || civsTerrainKey(x shr 4, z shr 4) !in chunks ||
+                    !city.contains(x, z)) continue
+                val parent = columns[civsTerrainKey(x - dx, z - dz)] ?: continue
+                if (distance == 1) {
+                    val original = surface.at(parent.x, parent.z) ?: continue
+                    if (parent.preserve || parent.groundY - original.groundY < 2) continue
+                } else if (parent.platformShoulderFrom == null) continue
+                val native = surface.at(x, z) ?: continue
+                if (!native.loaded || !native.natural || native.waterTopY != null || native.dirtPath || native.topY != native.groundY) continue
+                val ground = minOf(parent.groundY - 1, native.groundY + MAX_PLATFORM_SHOULDER_RISE)
+                val point = CivPosition(x, ground, z)
+                if (ground <= native.groundY || native.groundY <= surface.minHeight || ground + 2 >= surface.maxHeight ||
+                    obstacles.any { CivsAutonomousGeometry.horizontalContains(it, point) }) continue
+                columns[key] = CivTerraformColumn(x, z, ground, native.groundY, native.topY, supportY = native.groundY,
+                    platformShoulderFrom = CivPosition(parent.x, parent.groundY, parent.z))
+                added++
+            }
+        }
     }
 
     internal fun connection(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
@@ -514,8 +568,25 @@ internal object CivsAutonomousTerraform {
             result[cell.position] = CivPlanBlock(cell.position, cell.data, after)
             if (result.size > MAXIMUM_CHANGED_CELLS) throw CivsRejection("autonomy-search-budget")
         }
+        val completedShoulders = hashSetOf<Long>()
+        val shoulderWriteLimit = minOf(MAXIMUM_CHANGED_CELLS.toLong(),
+            CivsStore.MAX_PLAN_BLOCKS.toLong() - civsBoxVolume(draft.building.bounds))
         draft.columns.forEach { column ->
             val x = column.x; val z = column.z; val ground = column.groundY
+            val shoulderFrom = column.platformShoulderFrom
+            if (shoulderFrom != null) {
+                if (!CivsAutonomousGeometry.horizontalContains(draft.building.bounds, shoulderFrom) &&
+                    civsTerrainKey(shoulderFrom.x, shoulderFrom.z) !in completedShoulders) return@forEach
+                val rise = ground - column.floorY
+                if (rise !in 1..MAX_PLATFORM_SHOULDER_RISE || result.size.toLong() + rise > shoulderWriteLimit) return@forEach
+                val base = cells[CivPosition(x, column.floorY, z)] ?: return@forEach
+                if (!base.safe || !base.solid) return@forEach
+                val clearance = (column.floorY + 1..ground + 2).map { y -> cells[CivPosition(x, y, z)] ?: return@forEach }
+                if (clearance.any { !it.safe || !air(it.data) }) return@forEach
+                clearance.take(rise).forEach { change(it, requireNotNull(column.shoulderFill(it.position.y))) }
+                completedShoulders += civsTerrainKey(x, z)
+                return@forEach
+            }
             if (column.preserve) {
                 if (!at(x, ground, z).solid || !at(x, ground + 1, z).passable || !at(x, ground + 2, z).passable)
                     throw CivsRejection("autonomy-no-path")

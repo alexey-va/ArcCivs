@@ -41,6 +41,7 @@ data class CivsNpcHologramSnapshot(
     val hunger: Int = 20,
     val child: Boolean = false,
     val statusInputs: List<String> = emptyList(),
+    val speech: String? = null,
 )
 
 /** Nearby public nameplates. No Bukkit entities, block reads, routing or gameplay state changes. */
@@ -66,7 +67,8 @@ class CivsHolograms internal constructor(
                 snapshot.status == next.status && textInputs == next.statusInputs && snapshot.hunger == next.hunger &&
                 snapshot.health.toBits() == next.health.toBits() && snapshot.maxHealth.toBits() == next.maxHealth.toBits()
     }
-    private data class Rendered(val handle: PacketTextDisplay, var value: Desired?)
+    private data class Rendered(val handle: PacketTextDisplay, var value: Desired?,
+        var speech: PacketTextDisplay? = null)
     private val work = nativeWork ?: BudgetedTaskQueue(tasks)
     private val epoch = tasks.token()
     private val rendered = linkedMapOf<UUID, Rendered>()
@@ -107,8 +109,16 @@ class CivsHolograms internal constructor(
     /** One actor's bounded presentation per shared step; movement belongs to its carrier. */
     private fun reconcileOne(): Boolean {
         rendered.keys.firstOrNull { it !in desired }?.let {
-            rendered.remove(it)!!.handle.remove()
+            val expired = rendered.remove(it)!!
+            expired.handle.remove()
+            expired.speech?.remove()
             carts.remove(it)
+            return false
+        }
+        // Retire the last speaker before spending a budgeted step on the reply.
+        rendered.entries.firstOrNull { (id, shown) -> shown.speech != null && desired[id]?.snapshot?.speech == null }?.let {
+            it.value.speech?.remove()
+            it.value.speech = null
             return false
         }
         val changed = desired.entries.firstOrNull { !samePresentation(rendered[it.key]?.value, it.value) } ?: return decor.reconcileOne()
@@ -148,9 +158,39 @@ class CivsHolograms internal constructor(
             Vector3f(0f, if (npc.actor == null) 0f else CIVS_NPC_TEXT_GAP.toFloat(), 0f),
             Quaternionf(), Vector3f(CIVS_NPC_TEXT_SCALE), Quaternionf())
         if (before != null && before.text != value.text) shown.handle.text(value.text)
+        syncSpeech(shown, npc, location)
         carts.sync(npc)
         shown.value = value
         return false
+    }
+
+    private fun syncSpeech(shown: Rendered, npc: CivsNpcHologramSnapshot, location: Location) {
+        val speaker = npc.actor
+        val key = npc.speech
+        if (speaker == null || key == null) {
+            shown.speech?.remove()
+            shown.speech = null
+            return
+        }
+        val existing = shown.speech
+        val bubble = existing ?: displays.spawnText(location, text.render(key)).also {
+            shown.speech = it
+            it.billboard = Display.Billboard.CENTER
+            it.alignment = TextDisplay.TextAlignment.CENTER
+            it.lineWidth = 175
+            it.backgroundColor = Color.fromARGB(215, 45, 34, 23)
+            it.isShadowed = true
+            it.isSeeThrough = false
+            it.viewRange = .375f
+            it.displayWidth = 4f
+            it.displayHeight = 1f
+            it.brightness = Display.Brightness(15, 15)
+            it.transformation = Transformation(Vector3f(0f, .89f, 0f),
+                Quaternionf(), Vector3f(.53f), Quaternionf())
+        }
+        val before = shown.value?.snapshot
+        if (existing == null || before?.actor !== speaker) bubble.attachTo(speaker)
+        if (existing != null && before?.speech != key) bubble.text(text.render(key))
     }
 
     override fun close() {
@@ -172,7 +212,7 @@ class CivsHolograms internal constructor(
         if (first == null || second == null) return first == second
         val a = first.snapshot
         val b = second.snapshot
-        return first.text == second.text && a.actor === b.actor && a.nativeHeight == b.nativeHeight &&
+        return first.text == second.text && a.actor === b.actor && a.nativeHeight == b.nativeHeight && a.speech == b.speech &&
             a.courierCart == b.courierCart && a.cargo == b.cargo &&
             (a.actor != null || a.worldId == b.worldId && a.x == b.x && a.y == b.y && a.z == b.z)
     }

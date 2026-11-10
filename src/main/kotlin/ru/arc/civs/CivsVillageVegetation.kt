@@ -3,6 +3,7 @@ package ru.arc.civs
 import org.bukkit.ChunkSnapshot
 import org.bukkit.Material
 import org.bukkit.Tag
+import org.bukkit.block.data.Directional
 import org.bukkit.entity.LivingEntity
 import org.bukkit.plugin.Plugin
 import org.bukkit.util.BoundingBox
@@ -29,7 +30,15 @@ internal fun civsVillageVegetationArea(city: Settlement): CivBox? {
 internal fun civsVillageVegetationColumn(city: Settlement, x: Int, z: Int): Boolean =
     civsVillageVegetationArea(city)?.let { x in it.min.x..it.max.x && z in it.min.z..it.max.z } == true
 
-internal data class CivVegetationCell(val position: CivPosition, val before: String, val log: Boolean, val leaf: Boolean)
+internal data class CivVegetationCell(val position: CivPosition, val before: String, val log: Boolean, val leaf: Boolean) {
+    val unsupportedSnowCandidate: Boolean get() = before.startsWith("minecraft:snow[")
+}
+
+internal val civsNestSides = listOf(0 to -1, 0 to 1, -1 to 0, 1 to 0)
+
+internal fun civsNestBackedBy(material: Material, data: org.bukkit.block.data.BlockData, dx: Int, dz: Int): Boolean =
+    (material == Material.BEE_NEST || material == Material.BEEHIVE) &&
+        (data as? Directional)?.facing?.let { it.modX == dx && it.modZ == dz } == true
 
 private data class CivVegetationRemnant(val logs: List<CivVegetationCell>, val air: Set<CivPosition>)
 
@@ -173,7 +182,7 @@ internal class CivsVillageVegetation(
         val leaves = frame.leaves.mapTo(hashSetOf()) { "minecraft:${it.name.lowercase()}" }
         val expected = frame.plans.associateBy { it.building.id }
         val authored = frame.plans.flatMap { p -> p.blocks.filter { cell ->
-            cell.after.substringBefore('[') in logs || cell.after.substringBefore('[') in leaves
+            cell.after.substringBefore('[').let { it in logs || it in leaves || it == "minecraft:snow" }
         }.map { it.position } }.toHashSet()
         val previousNatural = frame.plans.flatMap { p -> (p.blocks + p.terrain?.blocks.orEmpty()).filter { cell ->
             cell.after == "minecraft:air" && cell.before.substringBefore('[') in logs
@@ -182,12 +191,14 @@ internal class CivsVillageVegetation(
         val protectedBounds = civsProtectedBuildings(frame.city)
             .filter { it.phase != BuildingPhase.ACTIVE || it.id !in expected }.map { it.bounds }.toList()
         val found = linkedMapOf<CivPosition, CivVegetationCell>()
+        val unsupportedSnow = mutableListOf<CivVegetationCell>()
         for (x in frame.area.min.x..frame.area.max.x) for (z in frame.area.min.z..frame.area.max.z) {
             if ((x to z) in frame.productiveGroves) continue
             val chunk = frame.chunks[(x shr 4) to (z shr 4)] ?: continue
             val unknown = protectedBounds.filter { x in it.min.x..it.max.x && z in it.min.z..it.max.z }
             val top = chunk.getHighestBlockYAt(x and 15, z and 15).coerceAtMost(frame.maximumY - 1)
-            for (y in top downTo maxOf(frame.minimumY, top - CivsForestry.MAX_HEIGHT)) {
+            // Snow layers left by no-physics edits can be above the heightmap.
+            for (y in minOf(frame.maximumY - 1, top + 12) downTo maxOf(frame.minimumY + 1, top - CivsForestry.MAX_HEIGHT)) {
                 val p = CivPosition(x, y, z)
                 if (p in authored || p in pending || p in frame.reserved) continue
                 var covered = false
@@ -197,6 +208,11 @@ internal class CivsVillageVegetation(
                 }
                 if (covered) continue
                 val type = chunk.getBlockType(x and 15, y, z and 15)
+                if (type == Material.SNOW && unsupportedSnow.size < MAXIMUM_CELLS &&
+                    chunk.getBlockType(x and 15, y - 1, z and 15).isAir) {
+                    unsupportedSnow += CivVegetationCell(p, chunk.getBlockData(x and 15, y, z and 15).asString,
+                        log = false, leaf = false)
+                }
                 if (type !in frame.logs && type !in frame.leaves) continue
                 val data = chunk.getBlockData(x and 15, y, z and 15)
                 val state = data.asString
@@ -208,10 +224,36 @@ internal class CivsVillageVegetation(
         fun typeAt(p: CivPosition): Material? =
             if (p.y !in frame.minimumY until frame.maximumY) null
             else frame.chunks[(p.x shr 4) to (p.z shr 4)]?.getBlockType(p.x and 15, p.y, p.z and 15)
+        val protectedCrown = hashSetOf<CivPosition>()
+        for (cell in found.values) {
+            if (!cell.log || cell.position in protectedCrown) continue
+            val p = cell.position
+            val supportsNest = civsNestSides.any { (dx, dz) ->
+                val side = p.copy(x = p.x + dx, z = p.z + dz)
+                val type = typeAt(side) ?: return@any false
+                if (type != Material.BEE_NEST && type != Material.BEEHIVE) false
+                else frame.chunks[(side.x shr 4) to (side.z shr 4)]?.let { c ->
+                    civsNestBackedBy(type, c.getBlockData(side.x and 15, side.y, side.z and 15), dx, dz)
+                } == true
+            }
+            if (!supportsNest) continue
+            val timber = CivsForestry.material(cell.before)
+            val pendingTree = ArrayDeque(listOf(p))
+            protectedCrown += p
+            while (pendingTree.isNotEmpty()) {
+                for (near in vegetationNeighbors(pendingTree.removeFirst())) {
+                    val part = found[near] ?: continue
+                    if ((part.log && CivsForestry.material(part.before) == timber ||
+                            part.leaf && CivsForestry.naturalLeaf(part.before, timber)) && protectedCrown.add(near))
+                        pendingTree += near
+                }
+            }
+        }
+        protectedCrown.forEach(found::remove)
         val stumps = found.values.filter { civsVillageVegetationStump(it, ::typeAt) }.mapTo(hashSetOf()) { it.position }
         val selection = civsVillageVegetationSelection(found, previousNatural, stumps)
         val extended = withConstructionRemnants(frame, found, selection, ::typeAt)
-        return extended.copy(cells = extended.cells.take(MAXIMUM_CELLS))
+        return extended.copy(cells = (extended.cells + unsupportedSnow).take(MAXIMUM_CELLS))
     }
 
     /** A completed, still-clear timber cut and its own original crown can witness a severed branch. */
@@ -317,7 +359,16 @@ internal class CivsVillageVegetation(
                 world.getNearbyEntities(BoundingBox(p.x.toDouble(), p.y + 1.0, p.z.toDouble(),
                     p.x + 1.0, p.y + 2.8, p.z + 1.0)).any { it is LivingEntity }) { skip(cell); continue }
             val block = world.getBlockAt(p.x, p.y, p.z)
-            if (block.blockData.asString != cell.before || !canModify(settlement, block)) { skip(cell); continue }
+            val data = block.blockData
+            if (data.asString != cell.before || !canModify(settlement, block)) { skip(cell); continue }
+            if (cell.unsupportedSnowCandidate && loaded(p.copy(y = p.y - 1))?.type?.isAir != true) {
+                skip(cell); continue
+            }
+            if (cell.log && civsNestSides.any { (dx, dz) ->
+                val side = loaded(p.copy(x = p.x + dx, z = p.z + dz))
+                side != null && (side.type == Material.BEE_NEST || side.type == Material.BEEHIVE) &&
+                    civsNestBackedBy(side.type, side.blockData, dx, dz)
+            }) { skip(cell); continue }
             if (p in current.selection.stumps && !civsVillageVegetationStump(cell) { loaded(it)?.type }) { skip(cell); continue }
             val remnant = current.selection.remnants[p]
             if (remnant != null && (remnant.air.any { loaded(it)?.type?.isAir != true } || remnant.logs.any {

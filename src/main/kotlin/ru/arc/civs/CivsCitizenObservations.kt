@@ -379,7 +379,10 @@ internal class CivsCitizenObservations(
             cargo = resident.cargo?.let { mapOf(it.material to it.amount.toInt()) }.orEmpty(),
             yaw = entity.bodyYaw, nativeHeight = entity.height, hunger = CivsResidents.hunger(resident),
             child = CivsResidents.isChild(resident),
-            statusInputs = if (status == "waiting-inputs") workStatusInputs(city, resident).distinct() else emptyList())
+            statusInputs = if (status == "waiting-inputs") workStatusInputs(city, resident).distinct() else emptyList(),
+            speech = actor.social.visit?.takeIf { status == "talking" }?.let {
+                citizenConversationLine(resident.id, it, Bukkit.getCurrentTick())
+            })
     }
 }
 

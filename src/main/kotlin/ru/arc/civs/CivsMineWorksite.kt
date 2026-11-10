@@ -347,6 +347,13 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             !ownedBefore && !initialCut) return denied("mine-foreign-block")
         val saved = city.minePlans?.get(building.id.toString())
         val after = Bukkit.createBlockData(cell.after).material
+        // The authored surface guard can stand in open air on its existing landing floor.
+        if (plan.version == 7 && plan.section(ordinal) == "0/shaft/railing" && before.isAir && block.type.isAir &&
+            local == plan.steps[ordinal].point && cell.after == plan.expectedAfter(ordinal, building.rotation)) {
+            val support = observeMineHazard(world, point.copy(y = point.y - 1)) ?: return denied("chunks-unloaded")
+            if (!soundMineFloor(support)) return denied("mine-early-floor")
+            return true
+        }
         val restoredSolid = after.isSolid && saved?.let {
             CivsMinePlan.forBuilding(building, it.version)?.expectedAt(local, it.nextStep, it.sectionSteps.orEmpty(), building.rotation)
         } == cell.after
@@ -446,11 +453,13 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         if (opening) for ((x, z) in plan.openingColumns) {
             val point = CivsWorksiteLayouts.point(building, CivPosition(x, plan.transferFeetY - 1, z))
             val block = observeMineHazard(world, point) ?: return "chunks-unloaded" to point
-            if (!CivsTerrainPolicy.fullTerraformSupport(block) || block.type.hasGravity() || block.type in CITIZEN_LEISURE_HAZARDS)
-                return "mine-early-floor" to point
+            if (!soundMineFloor(block)) return "mine-early-floor" to point
         }
         return null
     }
+
+    private fun soundMineFloor(block: Block): Boolean = CivsTerrainPolicy.fullTerraformSupport(block) &&
+        !block.type.hasGravity() && block.type !in CITIZEN_LEISURE_HAZARDS
 
     private fun requireEarlySurfaceReceipt(city: Settlement, building: CivBuilding, world: World,
         plan: CivsMinePlan, saved: CivMinePlanState, section: String, ordinal: Int,

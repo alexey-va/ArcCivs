@@ -54,6 +54,9 @@ internal object CivsFarmFields {
     fun columns(building: CivBuilding): Set<Pair<Int, Int>> = requireNotNull(profile(building)).columns
     fun soil(building: CivBuilding): List<CivPosition> = world(building, requireNotNull(profile(building)).soil)
     fun water(building: CivBuilding): List<CivPosition> = world(building, requireNotNull(profile(building)).water)
+    fun hydrates(water: CivPosition, soil: CivPosition): Boolean = water.y == soil.y &&
+        kotlin.math.abs(water.x.toLong() - soil.x) <= 4 && kotlin.math.abs(water.z.toLong() - soil.z) <= 4
+
     fun draining(building: CivBuilding): Set<CivPosition> = world(building, requireNotNull(profile(building)).draining).toSet()
     fun added(building: CivBuilding): List<CivPosition> = world(building, requireNotNull(profile(building)).added)
     fun corners(building: CivBuilding): List<CivPosition> = world(building, requireNotNull(profile(building)).corners)

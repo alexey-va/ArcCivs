@@ -18,7 +18,7 @@ internal class CivsIdleNapRenderer(private val displays: PaperPacketDisplays) {
         val at = ground.clone().apply { this.yaw = 0f; pitch = 0f }
         val size = scale.toFloat()
         val facing = Quaternionf().rotationY(Math.toRadians(-yaw.toDouble()).toFloat())
-        val handles = ArrayList<PacketDisplay>(5)
+        val handles = ArrayList<PacketDisplay>(8)
 
         fun block(material: Material, offset: Vector3f, dimensions: Vector3f) {
             val part = displays.spawnBlock(at, material.createBlockData())
@@ -30,11 +30,14 @@ internal class CivsIdleNapRenderer(private val displays: PaperPacketDisplays) {
 
         try {
             val seatTop = CIVS_IDLE_NAP_SEAT_TOP.toFloat()
-            val underside = seatTop - .09f
-            block(Material.SPRUCE_PLANKS, Vector3f(-.30f, underside, -.27f), Vector3f(.60f, .09f, .54f))
-            block(Material.DARK_OAK_PLANKS, Vector3f(-.25f, 0f, -.21f), Vector3f(.08f, underside, .42f))
-            block(Material.DARK_OAK_PLANKS, Vector3f(.17f, 0f, -.21f), Vector3f(.08f, underside, .42f))
-            block(Material.SPRUCE_PLANKS, Vector3f(-.28f, seatTop, -.27f), Vector3f(.56f, .43f, .08f))
+            val underside = seatTop - .10f
+            block(Material.SPRUCE_PLANKS, Vector3f(-.43f, underside, -.43f), Vector3f(.86f, .10f, .83f))
+            for (x in listOf(-.39f, .27f)) {
+                block(Material.STRIPPED_DARK_OAK_WOOD, Vector3f(x, 0f, .24f), Vector3f(.12f, underside, .12f))
+                block(Material.STRIPPED_DARK_OAK_WOOD, Vector3f(x, 0f, -.43f), Vector3f(.12f, 1.16f, .10f))
+            }
+            block(Material.SPRUCE_PLANKS, Vector3f(-.27f, .71f, -.42f), Vector3f(.54f, .13f, .08f))
+            block(Material.SPRUCE_PLANKS, Vector3f(-.27f, .98f, -.42f), Vector3f(.54f, .17f, .08f))
 
             val shoulder = facing.transform(Vector3f(.37f, 1.59f, -.05f).mul(size))
             val origin = at.clone().add(shoulder.x.toDouble(), shoulder.y.toDouble(), shoulder.z.toDouble())

@@ -69,7 +69,12 @@ internal class CivsFarmWorksites(context: CivsWorksiteContext, approaches: CivsW
                 age != null && age.age < age.maximumAge, "stale-worksite")
             requireCivs(work.status != "watering" || !world.hasStorm() || world.getHighestBlockYAt(focus.x, focus.z) > focus.y,
                 "stale-worksite")
-            CivsWorksiteLayouts.irrigation(building).forEach { point ->
+            val irrigation = CivsWorksiteLayouts.irrigation(building)
+            if (building.farmFieldVersion == CivsFarmFields.VERSION) {
+                val ground = focus.copy(y = focus.y - 1)
+                requireCivs(irrigation.any { CivsFarmFields.hydrates(it, ground) &&
+                    context.read(city, building, world, it)?.type == Material.WATER }, "stale-worksite")
+            } else irrigation.forEach { point ->
                 val water = context.read(city, building, world, point) ?: throw CivsRejection("protected-area")
                 requireCivs(water.type == Material.WATER, "stale-worksite")
             }

@@ -251,8 +251,9 @@ internal class CivsCitizenLeisure(
         val at = actor.npc.location
         val withinArea = citizenWithinIdleArea(home.entrance, at.point())
         val minePost = outsideHome && !inside(home, home.entrance.x, home.entrance.z)
-        val toolPost = !outsideHome && worker.assignment == home.id && actor.plan.idleReason == "waiting-tool"
-        if ((minePost || toolPost) && travelToPost(actor, city, world, home, now,
+        val workPost = !outsideHome && worker.assignment == home.id &&
+            actor.plan.idleReason in setOf("waiting-tool", "storage-surplus")
+        if ((minePost || workPost) && travelToPost(actor, city, world, home, now,
                 !withinArea || minePost && inside(home, at.blockX, at.blockZ))) return
         val active = actor.route
         if (active != null) {
@@ -266,7 +267,7 @@ internal class CivsCitizenLeisure(
         routes.startWander(actor, city, home, outsideHome, now)
     }
 
-    /** The known work waiting post and mine exit retain ordinary travel and recovery. */
+    /** Use the actual entrance for an idle return across the village, then resume local roaming. */
     private fun travelToPost(actor: CitizenActor, city: Settlement, world: World, home: CivBuilding,
                              now: Long, needed: Boolean): Boolean {
         val anchor = home.entrance

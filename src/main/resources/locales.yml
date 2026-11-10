@@ -612,6 +612,22 @@ ru:
     forest-worker: 'Дополнительный лесоруб рубит и восстанавливает деревья'
     mining: 'Подземных ярусов: <before> → <after>'
   workers:
+    conversation:
+      topic-0:
+        line-0: '<#fff0d5>Как дорога к складу?'
+        line-1: '<#fff0d5>Подсохла после дождя.'
+        line-2: '<#fff0d5>Хорошо, пройдём после обеда.'
+        line-3: '<#fff0d5>Договорились.'
+      topic-1:
+        line-0: '<#fff0d5>Уже созрела пшеница?'
+        line-1: '<#fff0d5>На солнечной грядке — да.'
+        line-2: '<#fff0d5>Надо сказать пекарю.'
+        line-3: '<#fff0d5>Он обрадуется.'
+      topic-2:
+        line-0: '<#fff0d5>Слышал, строят новый дом?'
+        line-1: '<#fff0d5>Видел, крышу уже начали.'
+        line-2: '<#fff0d5>Скоро будет новоселье.'
+        line-3: '<#fff0d5>Зайду посмотреть.'
     home-unassigned: 'Нет жилья'
     child: 'Ребёнок'
     adult: 'Взрослый'
@@ -2053,6 +2069,22 @@ en:
     forest-worker: 'An additional forester cuts and replants trees'
     mining: 'Underground levels: <before> → <after>'
   workers:
+    conversation:
+      topic-0:
+        line-0: '<#fff0d5>How is the road to the warehouse?'
+        line-1: '<#fff0d5>It dried out after the rain.'
+        line-2: '<#fff0d5>Good. We can go after lunch.'
+        line-3: '<#fff0d5>Sounds good.'
+      topic-1:
+        line-0: '<#fff0d5>Is the wheat ready yet?'
+        line-1: '<#fff0d5>The sunny patch is ready.'
+        line-2: '<#fff0d5>We should tell the baker.'
+        line-3: '<#fff0d5>That will make his day.'
+      topic-2:
+        line-0: '<#fff0d5>Did you hear about the new house?'
+        line-1: '<#fff0d5>I saw them start the roof.'
+        line-2: '<#fff0d5>There will be a housewarming soon.'
+        line-3: '<#fff0d5>I will go take a look.'
     home-unassigned: 'No home'
     child: 'Child'
     adult: 'Adult'

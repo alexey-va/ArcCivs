@@ -44,7 +44,7 @@ internal class CivsCitizenMotion(
         threats.tick()
         val viewers = audience.viewers()
         var separationBudget = 4 // Shared by overlap exits, separation and fresh dynamic-body detours.
-        var wanderHandoffs = 2 // Whole owner, at most four neighbouring columns per handoff.
+        var wanderHandoffs = 2 // Whole owner, at most five neighbouring destinations per handoff.
         for (actor in runtime.actors.values.toList().sortedBy {
             when { it.residentYield != null -> 0; it.route?.bodyBlockedSince != null -> 1; else -> 2 }
         }) {

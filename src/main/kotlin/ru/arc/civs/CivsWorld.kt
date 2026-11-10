@@ -599,8 +599,7 @@ class CivsWorld(
             requireCivs(columns.size in 1..CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS &&
                 columns.map { civsTerrainKey(it.x, it.z) }.distinct().size == columns.size, "invalid-plan")
             requireTerrainRoute(draft.route, building)
-            requireCivs(columns.sumOf { (maxOf(it.surfaceY, it.groundY).toLong() + 2 -
-                (it.floorY.toLong() - CivsAutonomousTerraform.MAXIMUM_CHANGE) + 1).coerceAtLeast(0) } <=
+            requireCivs(columns.sumOf { (maxOf(it.surfaceY, it.groundY).toLong() + 3 - it.supportY).coerceAtLeast(0) } <=
                 CivsAutonomousTerraform.MAXIMUM_CAPTURE_CELLS, "autonomy-search-budget")
             future.whenComplete { _, _ -> if (future.isCancelled) planned?.cancel(false) }
         }
@@ -615,14 +614,15 @@ class CivsWorld(
                 return
             }
             val column = columns[columnIndex]
-            val low = maxOf(world.minHeight, column.floorY - CivsAutonomousTerraform.MAXIMUM_CHANGE)
+            val low = maxOf(world.minHeight, column.supportY)
             val high = minOf(world.maxHeight - 1, maxOf(column.surfaceY, column.groundY) + 2)
             requireCivs(low <= high, "outside-world")
             val currentY = y ?: high
             val position = CivPosition(column.x, currentY, column.z)
             val block = read(position)
+            val shoulderFill = column.shoulderFill(currentY)?.let { parse(it).material }
             val safe = (column.preserve || civsTerrainKey(position.x, position.z) !in protectedAccess) &&
-                naturalTerraform(block) && canModify(owner, block) && try {
+                naturalTerraform(block) && canModify(owner, block, shoulderFill) && try {
                 checkTerrainOwnership(position); true
             } catch (_: CivsRejection) { false }
             captured[position] = CivTerraformCell(position, block.blockData.asString, safe,

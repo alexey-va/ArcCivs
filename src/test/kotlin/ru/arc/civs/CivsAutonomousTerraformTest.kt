@@ -16,6 +16,50 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.civs.CivsAutonomousTerraform.Node
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a raised new plot blends into shallow supported shoulders without borrowing its route or a protected column") {
+        val city = terraceCity()
+        val building = terraceBuilder(city, ground = 67).copy(id = UUID(276, 1))
+        val surface = terraceSurface { _, _ -> 64 }
+        val route = (0..18).map { z -> CivPosition(0, 65 + (z - 8).coerceIn(0, 3), z) }
+        val reserved = civsTerrainKey(-7, 24)
+        fun draft() = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface,
+            reservedRoute = route, reservedShoulders = setOf(reserved))
+        val prepared = draft()
+        val shoulders = prepared.columns.filter { it.platformShoulderFrom != null }
+        prepared shouldBe draft()
+        prepared.route shouldBe route
+        (shoulders.size in 1..96) shouldBe true
+        shoulders.all { it.groundY - it.floorY in 1..2 && it.supportY == it.floorY } shouldBe true
+        shoulders.none { civsTerrainKey(it.x, it.z) in CivsAutonomousTerraform.roadProfile(route) } shouldBe true
+        shoulders.none { it.x in -8..-7 && it.z == 24 } shouldBe true
+        shoulders.none { it.x == 8 && it.z in setOf(19, 31) } shouldBe true
+        val inner = shoulders.single { it.x == 7 && it.z == 24 }
+        val outer = shoulders.single { it.x == 8 && it.z == 24 }
+        inner.groundY shouldBe 66
+        inner.platformShoulderFrom shouldBe CivPosition(6, 67, 24)
+        outer.groundY shouldBe 65
+        outer.platformShoulderFrom shouldBe CivPosition(7, 66, 24)
+
+        val cells = terraceCapture(prepared, surface)
+        val terrain = CivsAutonomousTerraform.materialize(prepared, cells)
+        checkTerrace(terrain, prepared, cells)
+        val innerTop = CivPosition(7, 66, 24)
+        terrain.blocks.filter { it.position.x == 7 && it.position.z == 24 } shouldBe listOf(
+            CivPlanBlock(innerTop.copy(y = 65), "minecraft:air", "minecraft:dirt"),
+            CivPlanBlock(innerTop, "minecraft:air", "minecraft:grass_block[snowy=false]"))
+        terrain.blocks.single { it.position == CivPosition(8, 65, 24) }.after shouldBe "minecraft:grass_block[snowy=false]"
+
+        val oneDenied = cells + (innerTop to cells.getValue(innerTop).copy(safe = false))
+        val fallback = CivsAutonomousTerraform.materialize(prepared, oneDenied)
+        fallback.blocks shouldBe terrain.blocks.filterNot { it.position.x in 7..8 && it.position.z == 24 }
+        val shoulderKeys = shoulders.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val denied = cells.mapValues { (point, cell) ->
+            if (civsTerrainKey(point.x, point.z) in shoulderKeys) cell.copy(safe = false) else cell
+        }
+        val mandatory = prepared.copy(columns = prepared.columns.filter { it.platformShoulderFrom == null })
+        CivsAutonomousTerraform.materialize(prepared, denied) shouldBe CivsAutonomousTerraform.materialize(mandatory, cells)
+    }
+
     test("a unanimous paid Hall lead-out keeps the source and shoulders while a new farm can use its actual grade") {
         val original = terraceCity()
         val entrance = CivPosition(0, 66, 0)
@@ -1260,7 +1304,7 @@ private fun terraceSurface(height: (Int, Int) -> Int): CivTerrainSurface = CivTe
 private fun terraceCapture(draft: CivTerraformDraft, surface: CivTerrainSurface): Map<CivPosition, CivTerraformCell> = buildMap {
     draft.columns.forEach { c ->
         val top = requireNotNull(surface.at(c.x, c.z)).groundY
-        for (y in maxOf(surface.minHeight, c.floorY - CivsAutonomousTerraform.MAXIMUM_CHANGE)..maxOf(c.groundY, c.surfaceY) + 2) {
+        for (y in maxOf(surface.minHeight, c.supportY)..maxOf(c.groundY, c.surfaceY) + 2) {
             val p = CivPosition(c.x, y, c.z)
             val data = when {
                 y == top -> "minecraft:grass_block[snowy=false]"

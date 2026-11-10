@@ -161,13 +161,13 @@ internal class CivsCitizenNap(
             it.location.distanceSquared(ground) <= 24.0 * 24.0 }
 
     private fun seatedBounds(ground: Location, yaw: Float, scale: Double): BoundingBox {
-        // Same padded seated torso/leg dimensions as dining seats, with standing clearance.
+        // Cover the seated body and the chair back, with standing clearance.
         val sin = sin(Math.toRadians(yaw.toDouble()))
         val cos = cos(Math.toRadians(yaw.toDouble()))
-        val centerX = ground.x - .235 * sin * scale
-        val centerZ = ground.z + .235 * cos * scale
-        val halfX = (.49 * abs(cos) + .525 * abs(sin)) * scale
-        val halfZ = (.49 * abs(sin) + .525 * abs(cos)) * scale
+        val centerX = ground.x - .16 * sin * scale
+        val centerZ = ground.z + .16 * cos * scale
+        val halfX = (.49 * abs(cos) + .60 * abs(sin)) * scale
+        val halfZ = (.49 * abs(sin) + .60 * abs(cos)) * scale
         return BoundingBox(centerX - halfX, ground.y + .001, centerZ - halfZ,
             centerX + halfX, ground.y + 1.799 * scale, centerZ + halfZ).union(diningStandingBounds(ground, scale))
     }

@@ -19,6 +19,18 @@ internal data class CitizenCampVisit(val fire: CitizenCampfire?, val seat: CivPo
                                     val partnerId: UUID? = null, var conversationAt: Int? = null,
                                     var gestureBeat: Int = -1)
 
+internal fun citizenConversationLine(workerId: UUID, visit: CitizenCampVisit, tick: Int): String? {
+    val partner = visit.partnerId ?: return null
+    val began = visit.conversationAt ?: return null
+    val age = tick - began
+    if (age !in 0 until 200) return null
+    val beat = age / 50
+    val turn = if (workerId < partner) 0 else 1
+    if (beat % 2 != turn || visit.gestureBeat != beat) return null
+    val topic = Math.floorMod(workerId.hashCode() xor partner.hashCode() xor began, 3)
+    return "workers.conversation.topic-$topic.line-$beat"
+}
+
 /** Transient social time never grants work, advances a delivery, or survives an actor's retirement. */
 internal class CitizenCampRoutine(private val workerId: UUID) {
     var visit: CitizenCampVisit? = null

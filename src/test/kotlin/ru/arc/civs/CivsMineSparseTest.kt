@@ -162,6 +162,53 @@ class CivsMineSparseTest : FunSpec({
         }
     }
 
+    test("the authored surface railing can be placed on its supported landing without overburden") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("surface-mine-railing").also(paper.server::addWorld)
+            val plugin = paper.createSimplePlugin("SurfaceMineRailing")
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            try {
+                val mine = spatialBuilding("nordic", "miner", 1, CivPosition(0, 75, 0), 180)
+                val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+                val ordinal = plan.sections.getValue("0/shaft/railing").first()
+                val step = plan.steps[ordinal]
+                val target = CivsWorksiteLayouts.point(mine, step.point)
+                val standing = CivsWorksiteLayouts.point(mine, requireNotNull(step.approach))
+                val after = plan.expectedAfter(ordinal, mine.rotation)
+                val access = plan.normalizedProgress(ordinal.toLong(),
+                    mapOf("spine" to plan.sections.getValue("spine").size.toLong()))
+                val completed = plan.normalizedProgress(access.first, plan.advanceSection(ordinal, access.second))
+                val worker = spatialWorker(mine, "IRON_PICKAXE")
+                val city = spatialCity(world.uid, listOf(mine), worker).copy(
+                    minePlans = mapOf(mine.id.toString() to CivMinePlanState(plan.version, access.first,
+                        sectionSteps = access.second)))
+                world.loadChunk(target.x shr 4, target.z shr 4)
+                val railing = world.getBlockAt(target.x, target.y, target.z)
+                val support = world.getBlockAt(target.x, target.y - 1, target.z)
+                railing.type = Material.AIR
+                support.type = Material.COBBLESTONE
+                CivsWorld(plugin, tasks) { listOf(city) }.use { worldAccess ->
+                    val runtime = CivsWorksites(plugin, worldAccess, { _, _ -> emptyMap() }, { _, _ -> false })
+                    val work = CivWorldWork(worker.id, 0, mine.id, standing,
+                        listOf(CivPlanBlock(target, "minecraft:air", after)), inputs = mapOf("SPRUCE_FENCE" to 1L),
+                        status = "digging-mine", focus = target, miningPlanVersion = plan.version,
+                        miningStep = completed.first, miningAccessStep = access.first,
+                        miningSections = completed.second, miningAccessSections = access.second, miningOrdinal = ordinal)
+
+                    runtime.validateMineReceiptNative(city, work)
+
+                    support.type = Material.AIR
+                    shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(city, work) }.reason shouldBe "mine-early-floor"
+
+                    support.type = Material.COBBLESTONE
+                    railing.type = Material.STONE
+                    val replacement = work.copy(changes = listOf(CivPlanBlock(target, "minecraft:stone", after)))
+                    shouldThrow<CivsRejection> { runtime.validateMineReceiptNative(city, replacement) }.reason shouldBe "mine-thin-cover"
+                }
+            } finally { tasks.close() }
+        }
+    }
+
     test("optional mine writes use native terrain cover and reject crafted basement blocks") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("mine-cover-authority").also(paper.server::addWorld)

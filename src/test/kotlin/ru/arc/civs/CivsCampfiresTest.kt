@@ -110,6 +110,26 @@ class CivsCampfiresTest : FunSpec({
         first.available(700, 0, evening = false) shouldBe false
     }
 
+    test("conversation bubbles alternate between arrived speakers using the same topic") {
+        val first = UUID(0, 7)
+        val second = UUID(0, 29)
+        val seat = CivPosition(0, 64, 0)
+        val a = CitizenCampVisit(null, seat, 300, partnerId = second)
+        val b = CitizenCampVisit(null, seat, 300, partnerId = first)
+        citizenConversationLine(first, a, 350) shouldBe null
+        a.conversationAt = 350
+        b.conversationAt = 350
+        citizenConversationLine(first, a, 350) shouldBe null
+        a.gestureBeat = 0
+        val greeting = requireNotNull(citizenConversationLine(first, a, 350))
+        greeting.endsWith(".line-0") shouldBe true
+        citizenConversationLine(second, b, 399) shouldBe null
+        citizenConversationLine(first, a, 400) shouldBe null
+        b.gestureBeat = 1
+        citizenConversationLine(second, b, 400) shouldBe greeting.replace(".line-0", ".line-1")
+        citizenConversationLine(first, a, 550) shouldBe null
+    }
+
     test("discovery reads one loaded chunk per pulse reuses its cache and invalidates extinguished fires") {
         MockBukkitTestRuntime.open().use {
             val worldId = UUID(0, 1)

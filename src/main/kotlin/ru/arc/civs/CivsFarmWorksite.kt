@@ -83,9 +83,13 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
         val expanded = building.farmFieldVersion == CivsFarmFields.VERSION
         val draining = if (expanded) CivsFarmFields.draining(building) else emptySet()
         var irrigationReady = true
+        val availableWater = ArrayList<CivPosition>()
         for (point in CivsWorksiteLayouts.irrigation(building)) {
             val block = read(point, true) ?: return Selection.Unavailable
-            if (block.type == Material.WATER) continue
+            if (block.type == Material.WATER) {
+                if (expanded) availableWater += point
+                continue
+            }
             irrigationReady = false
             if (expanded && claimed(point)) continue
             if (expanded && point in draining) {
@@ -124,8 +128,11 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
         val nearest = compareBy<CivPosition> { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
             .thenBy { val dx = from.x.toDouble() - it.x; val dz = from.z.toDouble() - it.z; dx * dx + dz * dz }
             .thenBy { it.x }.thenBy { it.z }
-        val canPlant = !harvestOnly && irrigationReady && examined == plots.size
-        val ground by lazy { unplanted.keys.sortedWith(nearest) }
+        // An immature plant on the planned channel delays only the soil it would water.
+        val canPlant = !harvestOnly && (irrigationReady || expanded) && examined == plots.size
+        fun watered(soil: CivPosition): Boolean =
+            irrigationReady || availableWater.any { CivsFarmFields.hydrates(it, soil) }
+        val ground by lazy { unplanted.keys.filter(::watered).sortedWith(nearest) }
         // Try one new plot on alternating completed cycles, leaving room for harvest if it cannot be worked.
         val firstAdded = if (canPlant && establishmentTurn(worker)) {
             val added = ground.asSequence().filter { it in addedColumns }
@@ -138,7 +145,7 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
             // Visit the next authored plot instead of repeatedly boosting the plant we just left.
             val after = plots.indexOfFirst { it == lastFocus || it.copy(y = it.y + 1) == lastFocus } + 1
             val care = plots.indices.map { plots[(after + it) % plots.size] }
-                .filter { it in immature }
+                .filter { it in immature && watered(it) }
                 .sortedBy { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
             yieldAll(ground.asSequence().filter { it != firstAdded })
             yieldAll(care)

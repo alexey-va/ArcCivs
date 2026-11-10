@@ -127,6 +127,28 @@ class CivsForestryTest : FunSpec({
         }
     }
 
+    test("an admitted forestry batch preserves the exact backing of a newly placed bee nest") {
+        forestryWorksite("forestry-nest-backing") { world, runtime, city ->
+            val worker = city.workers.single()
+            val root = CivPosition(-15, 64, -26)
+            forestrySmallOak(world, root)
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe "felling-tree"
+            work.focus shouldBe root
+            val backing = root.copy(y = 65)
+            work.changes.single { it.position == backing }.after shouldBe "minecraft:air"
+            val nest = world.getBlockAt(backing.x, backing.y, backing.z + 1)
+            nest.blockData = Bukkit.createBlockData("minecraft:bee_nest[facing=north,honey_level=5]")
+            runtime.validate(city, work)
+            val attached = "minecraft:bee_nest[facing=south,honey_level=5]"
+            nest.blockData = Bukkit.createBlockData(attached)
+            shouldThrow<CivsRejection> { runtime.validate(city, work) }.reason shouldBe "stale-worksite"
+            nest.blockData.asString shouldBe attached
+            world.getBlockAt(backing.x, backing.y, backing.z).type shouldBe Material.OAK_LOG
+        }
+    }
+
     test("a nearby tree and the forester's existing two-block stance precede a distant scan-order tree") {
         forestryWorksite("forestry-nearby-tree", nanoTime = { 0L }) { world, runtime, city ->
             val worker = city.workers.single()

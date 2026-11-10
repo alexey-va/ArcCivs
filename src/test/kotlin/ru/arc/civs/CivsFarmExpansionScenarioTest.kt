@@ -178,6 +178,36 @@ class CivsFarmExpansionScenarioTest : FunSpec({
         }
     }
 
+    test("one immature channel crop leaves adjacent watered beds available to till and plant") {
+        lateinit var immature: CivPosition
+        SettlementScenario.run("expanded-farm-partial-channel", CivPosition(0, 64, 0), setup = { world ->
+            val f = farmExpansionFixture(world)
+            sourceCity = CivsRules.expandFarmField(f.city, f.farm.id).copy(revision = 0)
+            val farm = sourceCity!!.building(f.farm.id)!!
+            buildings["farm"] = farm
+            buildings["hall"] = sourceCity!!.buildings.single { it.type == BuildingType.TOWN_HALL }
+            workers["Farmer"] = f.worker
+            val channelSoil = CivsFarmFields.draining(farm).first()
+            immature = channelSoil.copy(y = channelSoil.y + 1)
+            CivsFarmFields.water(farm).filter { it != channelSoil }.forEach {
+                world.getBlockAt(it.x, it.y + 1, it.z).type = Material.AIR
+                world.getBlockAt(it.x, it.y, it.z).type = Material.WATER
+            }
+        }) {
+            val crop = snapshot(listOf(immature))
+            val till = nextWork("Farmer")
+            val plot = till.changes.single().position
+            till.changes.single().after shouldBe "minecraft:farmland[moisture=7]"
+            complete(till)
+            val sow = nextWork("Farmer")
+            sow.changes.single().position shouldBe plot.copy(y = plot.y + 1)
+            sow.changes.single().after shouldBe "minecraft:wheat[age=0]"
+            sow.inputs shouldBe mapOf("WHEAT_SEEDS" to 1L)
+            complete(sow)
+            unchanged(crop)
+        }
+    }
+
     test("expanded physical farmer preserves immature channel crops harvests them once and pays all 48 new plantings through the journal") {
         SettlementScenario.run("expanded-farm-journal", CivPosition(0, 64, 0), setup = { world ->
             val f = farmExpansionFixture(world)

@@ -285,8 +285,10 @@ internal class CivsCitizenRoutes(
                     if (!permitted(CivPosition(x, y, z), allowed)) return false
             return true
         }
-        val heading = actor.wander.directions(actor.npc.bodyYaw).map { (dx, dz) -> departure.copy(
-            x = departure.x + dx, z = departure.z + dz) }
+        val withinArea = citizenWithinIdleArea(anchor, origin)
+        val freeWander = leaving == null && (!walk.outsideHome || outside) && withinArea
+        val heading = actor.wander.directions(actor.npc.bodyYaw, allowDiagonal = freeWander)
+            .map { (dx, dz) -> departure.copy(x = departure.x + dx, z = departure.z + dz) }
         val candidates = if (leaving != null) {
             val exit = anchor.point()
             val distance = departure.point().distanceSquared(exit)
@@ -294,15 +296,29 @@ internal class CivsCitizenRoutes(
         } else if (walk.outsideHome && !outside) {
             val depth = walk.distanceToExit(departure.x, departure.z)
             heading.filter { walk.distanceToExit(it.x, it.z) < depth }
-        } else if (!citizenWithinIdleArea(anchor, origin))
+        } else if (!withinArea) {
             heading.sortedBy { it.point().distanceSquared(anchor.point()) }
-        else heading
+        } else {
+            val previous = actor.route?.takeIf { it.wanderWalk === walk && it.motion.finished }?.from
+            if (previous == null) heading else {
+                val previousX = floor(previous.x).toInt()
+                val previousZ = floor(previous.z).toInt()
+                heading.sortedBy { it.x == previousX && it.z == previousZ }
+            }
+        }
         for (cell in candidates) {
             if (!permitted(cell, destinations)) continue
             val at = citizenWanderFeet(world, cell.x, cell.z, origin.y) ?: continue
             val point = cell.copy(y = floor(at.y + .001).toInt())
             if (!feetAllowed(point) || !sweepAllowed(origin, at) ||
                 at.y == origin.y && !citizenFlatSupportClear(origin, at) { citizenPacketSupported(world, it, false) }) continue
+            if (cell.x != departure.x && cell.z != departure.z) {
+                // A diagonal is optional. Require a level floor on both sides of its corner.
+                if (at.y != origin.y) continue
+                val sides = listOf(point.copy(x = departure.x), point.copy(z = departure.z))
+                if (sides.any { side -> !feetAllowed(side) ||
+                        !citizenPacketSupported(world, CitizenPoint(side.x + .5, origin.y, side.z + .5), false) }) continue
+            }
             val shapes = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
             if (!citizenPacketStepClear(world, origin, at, false) { x, y, z ->
                     shapes.getOrPut(CivPosition(x, y, z)) { citizenCollisionSnapshot(world, x, y, z) }

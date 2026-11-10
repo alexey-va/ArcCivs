@@ -96,6 +96,49 @@ class CivsHologramsTest : FunSpec({
         }
     }
 
+    test("only the current speaker gets an attached bubble above the ordinary label") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val plugin = paper.createSimplePlugin("CivsSpeechTest")
+            val player = paper.addPlayer("Viewer")
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            val budget = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0 })
+            val displays = mockk<PaperPacketDisplays>(relaxed = true)
+            val handles = mutableListOf<PacketTextDisplay>()
+            val messages = mutableListOf<Component>()
+            every { displays.spawnText(any(), any()) } answers {
+                messages += secondArg<Component>()
+                mockk<PacketTextDisplay>(relaxed = true).also { handles += it }
+            }
+            every { displays.closeAsync() } returns CompletableFuture.completedFuture(null)
+            val a = mockk<PacketPlayerNpc> { every { isValid } returns true }
+            val b = mockk<PacketPlayerNpc> { every { isValid } returns true }
+            val npc = CivsNpcHologramSnapshot(UUID(0, 1), player.world.uid, 2.0, 64.0, 3.0,
+                "Василий", "talking", 20.0, 20.0, actor = a)
+            val reply = npc.copy(workerId = UUID(0, 2), x = 5.0, name = "Ангелина", actor = b)
+            val first = "workers.conversation.topic-0.line-0"
+            val second = "workers.conversation.topic-0.line-1"
+            var values = listOf(npc.copy(speech = first), reply)
+            val text = CivsText.fromYaml(civsLocaleSource())
+            val renderer = CivsHolograms(plugin, tasks, text, { values }, displays, budget)
+            try {
+                renderer.pulse(); paper.performTicks(6)
+                handles.size shouldBe 3
+                val greeting = handles[messages.indexOf(text.render(first))]
+                verify { greeting.attachTo(a) }
+                verify { greeting.transformation = match { it.translation.y > CIVS_NPC_TEXT_GAP } }
+                values = listOf(npc, reply.copy(speech = second))
+                renderer.pulse(); paper.performTicks(6)
+                val answer = handles[messages.indexOf(text.render(second))]
+                verify(exactly = 1) { greeting.remove() }
+                verify { answer.attachTo(b) }
+                values = listOf(npc, reply)
+                renderer.pulse(); paper.performTicks(6)
+                verify(exactly = 1) { answer.remove() }
+                handles.size shouldBe 4
+            } finally { renderer.close(); budget.close(); tasks.close() }
+        }
+    }
+
     test("nameplates use literal actor name observed action and actual health without a percentage") {
         MockBukkitTestRuntime.open().use { paper ->
             val player = paper.addPlayer("Viewer").apply { setLocale(Locale.forLanguageTag("ru-RU")) }

@@ -1,10 +1,9 @@
 # Citizen skins
 
-`src/main/resources/citizen-skins.yml` contains five fixed, signed Java player
-skins for the settlement workforce. They reuse appearances already installed
-on reviewed RusCrafting Citizens NPCs. No current-account lookup or new signing
-request is needed. The pool is ordered; keep its keys and order stable when
-preserving deterministic worker appearances.
+`src/main/resources/citizen-skins.yml` contains 100 fixed, signed Java player
+skins for the settlement workforce, 50 per persisted sex. The original five are
+kept first. New entries are reviewed public MineSkin records. The runtime reads
+this fixed catalog at startup and makes no account lookup or signing request.
 
 ## Selected pool
 
@@ -105,3 +104,15 @@ reviewed asset mapping and these selections with both explicit and legacy sex.
 
 This is source and static asset verification. Runtime activation and native
 Minecraft client acceptance remain separate.
+
+## Expanded resident catalog — 2026-11-10
+
+The pool adds 47 male and 48 female appearances in work clothes, aprons, robes
+and ordinary village outfits. The MineSkin record UUID and classic/slim model
+are recorded alongside each added entry. The signed values retain their
+original Minecraft texture URLs and model metadata. For all 100 entries the
+signatures verify against Mojang's Minecraft Services profile property keys.
+The 100 texture URLs are distinct, and the 95 additions have distinct visible
+PNG pixels. Changing the pool size can change an existing resident's selected
+skin at the next spawn. Its sex and name stay tied to the saved resident, and
+selection is stable for an unchanged catalog.
