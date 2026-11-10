@@ -3814,29 +3814,101 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("an idle resident can leave a foreign plot without selecting another foot cell inside it") {
-        residentRuntime { h ->
-            val plot = CivBox(CivPosition(4, 64, -1), CivPosition(6, 68, 1))
-            val house = h.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
-                anchor = plot.min, entrance = plot.min, bounds = plot)
-            h.city = h.city.copy(buildings = h.city.buildings + house,
-                workers = h.city.workers.map { it.copy(homeId = h.city.buildings.first().id) })
+    for (tavern in listOf(false, true)) {
+        val example = if (tavern) "Auto4 tavern" else "Auto2 house"
+        test("a local idle step follows the authored exit from the $example and refuses an inward step") {
+            residentRuntime(workerId = UUID(0, 42)) { h ->
+                val hall = h.city.buildings.single()
+                val origin = Location(h.world, 20.5, 64.0, 5.5)
+                val target = if (tavern) CivPosition(21, 63, 5) else CivPosition(20, 63, 6)
+                val plot = if (tavern) CivBox(CivPosition(15, 57, -1), CivPosition(36, 75, 14))
+                    else CivBox(CivPosition(14, 58, -4), CivPosition(33, 86, 7))
+                val departure = hall.copy(id = UUID.randomUUID(), type = if (tavern) BuildingType.TAVERN else BuildingType.HOUSE,
+                    anchor = plot.min, bounds = plot,
+                    entrance = if (tavern) CivPosition(26, 63, -2) else CivPosition(20, 64, 8))
+                val workEntry = if (tavern) CivPosition(-1, 69, 70) else CivPosition(-53, 71, -34)
+                val work = hall.copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, anchor = workEntry,
+                    entrance = workEntry, bounds = CivBox(workEntry, workEntry))
+                h.city = h.city.copy(buildings = h.city.buildings + listOf(departure, work),
+                    workers = h.city.workers.map { it.copy(assignment = work.id) })
+                h.workIdleProvider = { _, _ -> "waiting" }
+                val actor = h.owner.collisionActors().single()
+                actor.teleport(origin)
+                if (tavern) {
+                    h.world.getBlockAt(20, 63, 5).blockData =
+                        Bukkit.createBlockData("minecraft:acacia_stairs[facing=south,half=bottom,shape=straight]")
+                    h.world.getBlockAt(20, 63, 4).type = Material.LIME_CARPET
+                    h.world.getBlockAt(20, 64, 4).type = Material.GREEN_WOOL
+                    h.world.getBlockAt(19, 63, 5).type = Material.LIME_CARPET
+                    h.world.getBlockAt(20, 63, 6).type = Material.LIME_CARPET
+                    for ((x, z) in listOf(20 to 5, 21 to 5, 20 to 4, 19 to 5, 20 to 6))
+                        h.world.getBlockAt(x, 66, z).blockData = Bukkit.createBlockData("minecraft:acacia_slab[type=top]")
+                } else h.world.getBlockAt(20, 64, 4).type = Material.GRASS_BLOCK
+                val body = h.world.getBlockAt(target.x, 64, target.z)
+                body.type = Material.STONE
+                h.world.getBlockAt(target.x, 65, target.z).type = Material.STONE
+                h.holdNavigation = true
+                h.navigationNow = 2_000
+                h.owner.pulse(2_000)
+                repeat(20) { h.navigate() }
+                h.owner.pulse(3_000)
+                h.routeIdentity() shouldBe null
+                actor.location.point() shouldBe origin.point()
+
+                body.type = Material.AIR
+                h.world.getBlockAt(target.x, 65, target.z).type = Material.AIR
+                h.world.getBlockAt(target.x, target.y, target.z).type = if (tavern) Material.CYAN_CARPET else Material.DIRT_PATH
+                val feet = CitizenPoint(target.x + .5, if (tavern) 63.0625 else 63.9375, target.z + .5)
+                h.navigationNow = 7_000
+                h.owner.pulse(7_000)
+                h.routeTarget()?.point() shouldBe feet
+                val local = requireNotNull(h.routeMotion(h.workerId))
+                local.preparationPhase shouldBe "local"
+                repeat(60) {
+                    if (!local.finished) {
+                        val before = actor.location
+                        h.navigate()
+                        (before.distance(actor.location) < .5) shouldBe true
+                    }
+                }
+                actor.location.point() shouldBe feet
+                h.pendingNavigationWorkers shouldBe 0
+                h.deliveries shouldBe 0
+                h.steps shouldBe emptyList()
+            }
+        }
+    }
+
+    test("a local outbound step cannot enter another private plot and loses its departure permission after exit") {
+        residentRuntime(workerId = UUID(0, 42)) { h ->
+            val hall = h.city.buildings.single()
+            val source = CivBox(CivPosition(4, 64, -1), CivPosition(6, 68, 1))
+            val exit = CivPosition(3, 64, 0)
+            val departure = hall.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+                anchor = source.min, entrance = exit, bounds = source)
+            val privateNeighbour = departure.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
+                anchor = exit, bounds = CivBox(exit, exit.copy(y = 68)))
+            h.city = h.city.copy(buildings = h.city.buildings + listOf(departure, privateNeighbour),
+                workers = h.city.workers.map { it.copy(homeId = hall.id) })
             val actor = h.owner.collisionActors().single()
-            actor.teleport(Location(h.world, 5.5, 64.0, .5))
+            val origin = Location(h.world, 4.5, 64.0, .5)
+            actor.teleport(origin)
             h.navigationNow = 2_000
             h.owner.pulse(2_000)
             repeat(20) { h.navigate() }
             h.owner.pulse(3_000)
             h.routeIdentity() shouldBe null
-            actor.location.point() shouldBe CitizenPoint(5.5, 64.0, .5)
+            actor.location.point() shouldBe origin.point()
 
-            actor.teleport(Location(h.world, 4.5, 64.0, .5))
+            h.city = h.city.copy(buildings = h.city.buildings.filter { it.id != privateNeighbour.id })
+            for ((x, z) in listOf(2 to 0, 3 to -1, 3 to 1)) for (y in 64..65)
+                h.world.getBlockAt(x, y, z).type = Material.STONE
             h.navigationNow = 7_000
             h.owner.pulse(7_000)
-            requireNotNull(h.routeTarget()).point() shouldBe CitizenPoint(3.5, 64.0, .5)
-            repeat(30) { if (actor.location.blockX == 4) h.navigate() }
-            actor.location.blockX shouldBe 3
-            h.deliveries shouldBe 0
+            h.routeTarget()?.point() shouldBe exit.point()
+            repeat(40) { h.navigate() }
+            actor.location.point() shouldBe exit.point()
+            h.routeIdentity() shouldBe null
         }
     }
 
@@ -5696,6 +5768,8 @@ internal open class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
                 }
                 type == Material.LADDER -> LADDER_SHAPE
                 type == Material.FARMLAND || type == Material.DIRT_PATH -> LOWERED_SHAPE
+                type == Material.LIME_CARPET || type == Material.CYAN_CARPET ->
+                    shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .0625, 1.0)))
                 blockData is Slab && (blockData as Slab).type == Slab.Type.BOTTOM ->
                     shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0)))
                 type == Material.CAMPFIRE -> shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .4375, 1.0)))

@@ -239,7 +239,14 @@ internal class CivsCitizenRoutes(
 
     fun startWander(actor: CitizenActor, city: Settlement, home: CivBuilding, outsideHome: Boolean, now: Long) {
         val territory = workFrame(city.id)?.territory?.takeIf { it.matches(city) } ?: return
-        val walk = CitizenWanderWalk(home, outsideHome, territory, actor.plan.token, now, actor.wander.legLimit())
+        val at = actor.npc.location
+        val departure = city.buildings.singleOrNull { building ->
+            building.id != home.id && building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure &&
+                building.type != BuildingType.DECORATION && city.construction?.buildingId != building.id &&
+                building.bounds.contains(at.blockX, at.blockY, at.blockZ) &&
+                !CivsAutonomousGeometry.horizontalContains(building.bounds, building.entrance)
+        }
+        val walk = CitizenWanderWalk(home, outsideHome, territory, actor.plan.token, now, actor.wander.legLimit(), departure)
         if (nextWanderLeg(actor, city, walk, now)) {
             CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
                 "mode" to "local", "outcome" to "started", "target" to actor.route?.authored)
@@ -251,17 +258,22 @@ internal class CivsCitizenRoutes(
         val world = actor.npc.world
         val origin = from.point()
         if (!citizenPacketSupported(world, origin, allowClimbable = false)) return false
-        val anchor = walk.home.entrance
         val departure = CivPosition(from.blockX, from.blockY, from.blockZ)
+        val leaving = walk.departureBuilding?.takeIf { it.bounds.contains(departure.x, departure.y, departure.z) }
+        val anchor = leaving?.entrance ?: walk.home.entrance
         val outside = walk.outsideHome && walk.outside(departure.x, departure.z)
-        val destinations = if (outside) emptySet() else setOf(walk.home.id)
-        val allowed = citizenRouteBuildings(city, actor.plan, anchor, departure).let {
+        val destinations = when {
+            leaving != null -> setOf(leaving.id)
+            outside -> emptySet()
+            else -> setOf(walk.home.id)
+        }
+        val allowed = if (leaving != null) destinations else citizenRouteBuildings(city, actor.plan, anchor, departure).let {
             if (outside) it - walk.home.id else it + walk.home.id
         }
         val territory = walk.territory
         fun permitted(point: CivPosition, buildings: Set<UUID>): Boolean =
             territory.allows(point, buildings, null) && (!outside || walk.outside(point.x, point.z))
-        // A departure plot may be crossed while leaving it. It is not an optional destination.
+        // A private departure plot may supply intermediate feet only on a leg toward its own exit.
         fun feetAllowed(point: CivPosition): Boolean = permitted(point, destinations) && territory.controls.clear(point) &&
             citizenIdleRouteAllowed(anchor, origin, point) && citizenIdleTerrain(world, point, city.buildings)
         fun sweepAllowed(first: CitizenPoint, second: CitizenPoint): Boolean {
@@ -275,7 +287,11 @@ internal class CivsCitizenRoutes(
         }
         val heading = actor.wander.directions(actor.npc.bodyYaw).map { (dx, dz) -> departure.copy(
             x = departure.x + dx, z = departure.z + dz) }
-        val candidates = if (walk.outsideHome && !outside) {
+        val candidates = if (leaving != null) {
+            val exit = anchor.point()
+            val distance = departure.point().distanceSquared(exit)
+            heading.filter { it.point().distanceSquared(exit) < distance }
+        } else if (walk.outsideHome && !outside) {
             val depth = walk.distanceToExit(departure.x, departure.z)
             heading.filter { walk.distanceToExit(it.x, it.z) < depth }
         } else if (!citizenWithinIdleArea(anchor, origin))
@@ -298,7 +314,7 @@ internal class CivsCitizenRoutes(
             val chunks = CitizenChunks(minOf(from.blockX, point.x) shr 4, maxOf(from.blockX, point.x) shr 4,
                 minOf(from.blockZ, point.z) shr 4, maxOf(from.blockZ, point.z) shr 4)
             actor.route = CitizenRoute(origin, to, chunks, now, 3_000, allowed, motion, null, point,
-                idleAnchor = anchor, wanderWalk = walk).also { it.progressTick = runtime.navigationTick }
+                idleAnchor = walk.home.entrance, wanderWalk = walk).also { it.progressTick = runtime.navigationTick }
             return true
         }
         return false

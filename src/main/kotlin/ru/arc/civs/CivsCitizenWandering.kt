@@ -39,7 +39,7 @@ internal class CitizenWander(workerId: UUID) {
 }
 
 internal class CitizenWanderWalk(val home: CivBuilding, val outsideHome: Boolean, val territory: CivRouteTerritory,
-    val token: CitizenToken, val startedAt: Long, val legLimit: Int) {
+    val token: CitizenToken, val startedAt: Long, val legLimit: Int, val departureBuilding: CivBuilding?) {
     var legs = 0
     var reachedAt: Long? = null
     var maxHandoffMillis = 0L
