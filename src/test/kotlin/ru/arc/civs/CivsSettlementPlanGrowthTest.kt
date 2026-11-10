@@ -207,6 +207,63 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         CivsSettlementPlans.next(city, BuildingType.WAREHOUSE) shouldBe null
     }
 
+    test("a late gate budget keeps one drafted quarry and every retained approach") {
+        val source = requireNotNull(CivsSettlementPlans.current(legacy))
+        val plots = listOf(BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY)
+            .map { type -> source.plots.first { it.building.type == type } }
+        val actual = plots.dropLast(1)
+        val quarry = plots.last()
+        val previousRoutes = source.routes.filterKeys { id -> actual.any { it.building.id.toString() == id } }
+        val prior = source.copy(revision = 7, plots = actual, routes = previousRoutes)
+        val city = legacy.copy(buildings = actual.map { plot -> plot.building.copy(phase = BuildingPhase.ACTIVE) },
+            autonomy = requireNotNull(legacy.autonomy).copy(plan = prior))
+        val route = source.routes.getValue(quarry.building.id.toString())
+        val forecast = prior.copy(revision = 0, plots = plots, routes = previousRoutes + (quarry.building.id.toString() to route))
+        val retained = CivAutonomousAccess(previousRoutes.mapKeys { UUID.fromString(it.key) })
+        val profile = CivsSettlementGrowth.profile(city)
+        profile.last() shouldBe BuildingType.QUARRY
+        val details = mapOf("stage" to "gate-connection", "fully_loaded" to "true", "type" to "QUARRY",
+            "plot" to quarry.building.id.toString(), "route-budget" to "1")
+        val surface = settlementPlanSurface(city)
+        var calls = 0
+        mockkObject(CivsSettlementPlans)
+        try {
+            fun refuse(plan: CivSettlementPlan, values: Map<String, String>) {
+                every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                    calls++
+                    arg<((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)?>(8)
+                        ?.invoke(plan, CivSettlementInfrastructure(emptyList(), mapOf("gate-connection-failed" to 1), false))
+                    throw CivsRejection("autonomy-no-path", values)
+                }
+            }
+            refuse(forecast, details)
+            val pending = CivsSettlementPlans.prepareGrowth(city, emptyMap(), surface, retained, profile)
+            calls shouldBe 1
+            pending shouldBe forecast.copy(revision = 8,
+                deferredPerimeter = CivDeferredPerimeter("infrastructure", quarry.building.id, quarry.building.anchor))
+            val adopted = city.copy(autonomy = requireNotNull(city.autonomy).copy(plan = pending, layoutHalfWidth = pending.halfWidth))
+            CivsSettlementPlans.next(adopted, BuildingType.QUARRY) shouldBe quarry
+
+            val olderMarker = CivDeferredPerimeter("infrastructure", actual.last().building.id, actual.last().building.anchor)
+            val alreadyDeferred = city.copy(autonomy = requireNotNull(city.autonomy).copy(plan = prior.copy(deferredPerimeter = olderMarker)))
+            shouldThrow<CivsRejection> {
+                CivsSettlementPlans.prepareGrowth(alreadyDeferred, emptyMap(), surface, retained, profile)
+            }.values shouldBe details
+
+            val firstStep = route[1]
+            refuse(forecast.copy(walls = forecast.walls + CivBox(firstStep, firstStep)), details)
+            shouldThrow<CivsRejection> { CivsSettlementPlans.prepareGrowth(city, emptyMap(), surface, retained, profile) }
+                .values shouldBe details
+
+            val ordinaryBudget = details + ("stage" to "ordinary-route")
+            refuse(forecast, ordinaryBudget)
+            shouldThrow<CivsRejection> { CivsSettlementPlans.prepareGrowth(city, emptyMap(), surface, retained, profile) }
+                .values shouldBe ordinaryBudget
+        } finally {
+            unmockkObject(CivsSettlementPlans)
+        }
+    }
+
     test("a blocked perimeter can defer after a paid gate and still admit the next house") {
         val (base, warehousePlan, _) = deferredWarehouseFixture()
         val plan = warehousePlan.copy(halfWidth = 72)

@@ -415,6 +415,14 @@ internal object CivsSettlementPlans {
         val actual = city.buildings.filter { !it.type.isInfrastructure && it.type != BuildingType.DECORATION }.map { it.type }
         val paidInfrastructure = city.buildings.filter { it.type.isInfrastructure }.mapTo(hashSetOf()) { it.id }
         val recoverCivic = paidCivicStage(city, surface, retained, profile) != null
+        val exteriorTarget = profile.lastOrNull()?.takeIf { type ->
+            prior != null && type in CivsSettlementLayout.exteriorTypes && profile.dropLast(1) == actual &&
+                paidInfrastructure.isEmpty() && retained.infrastructure.isEmpty() &&
+                prior.deferredPerimeter == null && prior.perimeterEntrances == null &&
+                prior.completedPerimeters.isNullOrEmpty() && prior.plots.none { it.fortification != null } &&
+                city.constructionQueue.orEmpty().isEmpty() && city.pendingControls.orEmpty().isEmpty() &&
+                CivsAutonomy.nextGoal(city)?.let { it.type == type && it.targetLevel == 1 && it.buildingId == null } == true
+        }
         val civicTarget = profile.lastOrNull()?.takeIf {
             profile.dropLast(1) == actual && !it.isInfrastructure && it !in CivsSettlementLayout.exteriorTypes && it != BuildingType.DECORATION &&
                 city.buildings.all { building -> building.phase == BuildingPhase.ACTIVE } &&
@@ -444,8 +452,13 @@ internal object CivsSettlementPlans {
             var routeBudget = false
             val inspectRoute: (CivRouteSearchStats) -> Unit = { if (it.outcome == "route-budget") routeBudget = true }
             var forecast: CivSettlementPlan? = null
-            val inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? =
-                if (civicTarget == null || ordinaryWithoutNewPerimeter != null) null else { plan, _ -> forecast = plan }
+            val inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? = when {
+                exteriorTarget != null -> { plan, layout ->
+                    if ("gate-connection-failed" in layout.rejected) forecast = plan
+                }
+                civicTarget != null && ordinaryWithoutNewPerimeter == null -> { plan, _ -> forecast = plan }
+                else -> null
+            }
             try { return prepare(city, templates, surface, retained, fortification, profile, width, inspectRoute, inspect) }
             catch (failure: CivsRejection) {
                 if (failure.values["stage"] == "retained-growth-old-incomplete" ||
@@ -455,6 +468,9 @@ internal object CivsSettlementPlans {
                 if (compactFounding && deferredRoadPerimeter == null && initialRoadPerimeterMayWait(city, failure))
                     deferredRoadPerimeter = failure
                 last = failure
+                val original = forecast
+                if (prior != null && exteriorTarget != null && original != null)
+                    deferExteriorGate(city, prior, original, retained, exteriorTarget, failure)?.let { return it }
                 if (recoverCivic && !routeBudget && civicObstruction(failure)) civicRefusal = failure
                 if (ordinaryWithoutNewPerimeter == null)
                     ordinaryWithoutNewPerimeter = deferredForecast(forecast, failure, routeBudget)
@@ -567,6 +583,28 @@ internal object CivsSettlementPlans {
             return candidate
         }
         return null
+    }
+
+    /** A successful ordinary draft can outlive the optional gate search on an unbuilt ring. */
+    private fun deferExteriorGate(city: Settlement, prior: CivSettlementPlan, forecast: CivSettlementPlan,
+        retained: CivAutonomousAccess, target: BuildingType, failure: CivsRejection): CivSettlementPlan? {
+        val details = failure.values
+        val exhausted = details["route-budget"]?.toIntOrNull() ?: 0
+        if (failure.reason != "autonomy-no-path" || details["stage"] != "gate-connection" ||
+            details["fully_loaded"] != "true" || details["type"] != target.name || exhausted <= 0 ||
+            forecast.plots.any { it.fortification != null }) return null
+        val plot = forecast.plots.singleOrNull { it.building.id.toString() == details["plot"] } ?: return null
+        if ((forecast.walls + forecast.gates).any { CivsAutonomousGeometry.overlaps(it, plot.envelope) } ||
+            prior.routes.any { (id, route) -> UUID.fromString(id) !in retained.routes && forecast.routes[id] != route })
+            return null
+        val reason = CivsRejection(failure.reason, mapOf("stage" to "infrastructure"))
+        val pending = ordinaryGrowth(city, forecast.copy(revision = Math.addExact(prior.revision, 1L)),
+            retained, target, reason)?.takeIf { it.deferredPerimeter?.plotId == plot.building.id } ?: return null
+        val autonomy = requireNotNull(city.autonomy).copy(layoutHalfWidth = pending.halfWidth, plan = pending)
+        if (next(city.copy(autonomy = autonomy), target)?.building?.id != plot.building.id) return null
+        CivsDiagnostics.event("autonomous_exterior_perimeter_candidate", "city" to city.id, "plot" to plot.building.id,
+            "stage" to "gate-connection", "reason" to "route-budget", "attempts" to exhausted, "half_width" to pending.halfWidth)
+        return pending
     }
 
     private fun ordinaryGrowth(city: Settlement, forecast: CivSettlementPlan, retained: CivAutonomousAccess,
