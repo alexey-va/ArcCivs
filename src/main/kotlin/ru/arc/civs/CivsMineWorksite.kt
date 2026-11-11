@@ -1229,6 +1229,20 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         return !safe && (block.type.isAir || block.isLiquid || block.type in WEEDS)
     }
 
+    private fun cappedSurfaceRailingHeadroom(city: Settlement, building: CivBuilding, world: World,
+        geometry: CivsMinePlan, task: MineProtection): Boolean {
+        val headroom = task.block
+        if (headroom.y != geometry.transferFeetY + 1 || task.exposed.y != headroom.y) return false
+        val saved = city.minePlans?.get(building.id.toString())?.takeIf { it.version == geometry.version } ?: return false
+        val feet = headroom.copy(y = headroom.y - 1)
+        val ordinal = geometry.sections.getValue(SURFACE_RAILING).firstOrNull { geometry.steps[it].point == feet } ?: return false
+        if (!geometry.completed(ordinal, saved.nextStep, saved.sectionSteps.orEmpty())) return false
+        val fence = observeMineHazard(world, CivsWorksiteLayouts.point(building, feet)) ?: return false
+        if (fence.blockData.asString != geometry.expectedAfter(ordinal, building.rotation)) return false
+        val cap = CivsWorksiteLayouts.point(building, headroom.copy(y = headroom.y + 1))
+        return observeMineHazard(world, cap)?.let(::soundMineFloor) == true
+    }
+
     private fun clearMineLava(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         geometry: CivsMinePlan, step: CivsMinePlan.Step, block: Block): CivWorldWork? {
         val point = position(block)
@@ -1280,6 +1294,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 .also { mineSafety[worker.id] = it }
         }
         val tasks = scan.frontier
+        val surfaceRailing = geometry.version == 7 && step.stage == "shaft" && step.floor == 0 &&
+            step.branch == "railing" && excavations.isEmpty()
         repeat(context.mineChecksRemaining) {
             val task = tasks.getOrNull(scan.next) ?: return null
             if (context.nanoTime() >= context.discoveryBudget.deadline) {
@@ -1299,6 +1315,14 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             }
             if (task.transferFooting && !block.type.isAir) { scan.next++; return@repeat }
             if (!mineProtectionNeeded(block, task.material)) { scan.next++; return@repeat }
+            // The paid fence removes this stance while its capped headroom remains part of the entrance.
+            if (surfaceRailing && task.material == Material.COBBLESTONE && (block.type.isAir || block.isLiquid) &&
+                cappedSurfaceRailingHeadroom(city, building, world, geometry, task)) {
+                if (block.isLiquid) return context.blocked(worker, "worksite-liquid", point = point,
+                    reason = "adjacent-liquid", blockMaterial = block.type.name)
+                scan.next++
+                return@repeat
+            }
             if (task.material == null) {
                 if (block.type == Material.LAVA) return clearMineLava(city, worker, building, world, geometry, step, block)
                 return context.blocked(worker, "worksite-liquid", point = point, reason = "adjacent-liquid", blockMaterial = block.type.name)
