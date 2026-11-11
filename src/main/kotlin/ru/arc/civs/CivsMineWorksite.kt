@@ -246,7 +246,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             .copy(equipmentAfter = CivsEquipment.slots(supplied))
     }
 
-    private fun mineOwnedBlock(city: Settlement, building: CivBuilding, local: CivPosition, data: String): Boolean {
+    private fun mineOwnedBlock(city: Settlement, building: CivBuilding, local: CivPosition, data: String,
+        surfaceRailingOnly: Boolean = false): Boolean {
         val state = city.minePlans?.get(building.id.toString())
         val fence = Bukkit.createBlockData(data) as? Fence
         fun matches(expected: String?): Boolean {
@@ -259,8 +260,9 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             return paid.asString == fence.asString
         }
         fun owned(mine: CivBuilding, proof: CivMinePlanState?, legacyProgress: Long?, at: CivPosition): Boolean {
-            if (matches(proof?.seals?.get(CivsMineProgress.key(at)))) return true
             val current = CivsMinePlan.forBuilding(mine, proof?.version ?: CivsMinePlan.VERSION)
+            if (surfaceRailingOnly && (current == null || current.sections[SURFACE_RAILING].orEmpty().none { current.steps[it].point == at })) return false
+            if (matches(proof?.seals?.get(CivsMineProgress.key(at)))) return true
             if (proof != null && matches(current?.expectedAt(at, proof.nextStep,
                     proof.sectionSteps.orEmpty(), mine.rotation))) return true
             CivsMineProgress.v5State(proof)?.let { old ->
@@ -1219,7 +1221,11 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                     if (none { it.block == adjacent && !it.transferFooting }) add(MineProtection(excavated, adjacent, null))
                 }
             }
-        }.distinct().also { check(it.size <= 54 + geometry.transferFloor.size) }
+        }.distinct().map { task ->
+            // A paid surface fence preserves its capped headroom across upgrades; liquid still blocks.
+            if (geometry.version == 7 && task.material == Material.COBBLESTONE &&
+                cappedSurfaceRailingHeadroom(city, building, world, geometry, task)) task.copy(material = null) else task
+        }.also { check(it.size <= 54 + geometry.transferFloor.size) }
     }
 
     fun mineExposed(task: MineProtection, excavations: Set<CivPosition>, opening: Block): Boolean {
@@ -1238,13 +1244,16 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
     private fun cappedSurfaceRailingHeadroom(city: Settlement, building: CivBuilding, world: World,
         geometry: CivsMinePlan, task: MineProtection): Boolean {
         val headroom = task.block
-        if (headroom.y != geometry.transferFeetY + 1 || task.exposed.y != headroom.y) return false
-        val saved = city.minePlans?.get(building.id.toString())?.takeIf { it.version == geometry.version } ?: return false
+        if (task.exposed.y != headroom.y) return false
         val feet = headroom.copy(y = headroom.y - 1)
-        val ordinal = geometry.sections.getValue(SURFACE_RAILING).firstOrNull { geometry.steps[it].point == feet } ?: return false
-        if (!geometry.completed(ordinal, saved.nextStep, saved.sectionSteps.orEmpty())) return false
         val fence = observeMineHazard(world, CivsWorksiteLayouts.point(building, feet)) ?: return false
-        if (fence.blockData.asString != geometry.expectedAfter(ordinal, building.rotation)) return false
+        if (!fence.type.name.endsWith("_FENCE")) return false
+        if (city.minePlans?.get(building.id.toString())?.let {
+            it.version == geometry.version && CivsMineProgress.validLevels(building, it)
+        } != true) return false
+        val air = observeMineHazard(world, CivsWorksiteLayouts.point(building, headroom)) ?: return false
+        if (!air.type.isAir && !air.isLiquid) return false
+        if (!mineOwnedBlock(city, building, feet, fence.blockData.asString, surfaceRailingOnly = true)) return false
         val cap = CivsWorksiteLayouts.point(building, headroom.copy(y = headroom.y + 1))
         return observeMineHazard(world, cap)?.let(::soundMineFloor) == true
     }
@@ -1300,8 +1309,6 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 .also { mineSafety[worker.id] = it }
         }
         val tasks = scan.frontier
-        val surfaceRailing = geometry.version == 7 && step.stage == "shaft" && step.floor == 0 &&
-            step.branch == "railing" && excavations.isEmpty()
         repeat(context.mineChecksRemaining) {
             val task = tasks.getOrNull(scan.next) ?: return null
             if (context.nanoTime() >= context.discoveryBudget.deadline) {
@@ -1321,14 +1328,6 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             }
             if (task.transferFooting && !block.type.isAir) { scan.next++; return@repeat }
             if (!mineProtectionNeeded(block, task.material)) { scan.next++; return@repeat }
-            // The paid fence removes this stance while its capped headroom remains part of the entrance.
-            if (surfaceRailing && task.material == Material.COBBLESTONE && (block.type.isAir || block.isLiquid) &&
-                cappedSurfaceRailingHeadroom(city, building, world, geometry, task)) {
-                if (block.isLiquid) return context.blocked(worker, "worksite-liquid", point = point,
-                    reason = "adjacent-liquid", blockMaterial = block.type.name)
-                scan.next++
-                return@repeat
-            }
             if (task.material == null) {
                 if (block.type == Material.LAVA) return clearMineLava(city, worker, building, world, geometry, step, block)
                 return context.blocked(worker, "worksite-liquid", point = point, reason = "adjacent-liquid", blockMaterial = block.type.name)
