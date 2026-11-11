@@ -1225,6 +1225,8 @@ are diagnostics only and are not drawn as an accepted future village.
 For paid civic growth, an exhausted wider dry-perimeter calculation may reuse an
 earlier geometric refusal through the existing guarded parcel fallback. Exhausting
 the budget alone grants no such authority; native parcel and route admission remain required.
+A checked ordinary forecast from an earlier width also survives that same later
+budget failure, preserving its deferred boundary, existing buildings and paid approaches.
 
 After an exact site refusal, ordinary growth first tries the other unpaid adopted
 plots of the same type in their saved order, under the same request and layout

@@ -475,6 +475,7 @@ internal object CivsSettlementPlans {
                     civicRefusal?.let { previous ->
                         deferCivicParcel(city, templates, surface, retained, profile, previous)?.let { return it }
                     }
+                    ordinaryWithoutNewPerimeter?.let { return it }
                 }
                 if (failure.values["stage"] == "retained-growth-old-incomplete" ||
                     failure.reason !in setOf("autonomy-no-site", "autonomy-layout-obstructed", "autonomy-no-path")) throw failure

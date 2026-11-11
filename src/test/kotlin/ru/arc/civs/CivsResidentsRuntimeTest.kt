@@ -2979,9 +2979,10 @@ class CivsResidentsRuntimeTest : FunSpec({
             for (x in -2..3) for (z in -2..1) h.world.loadChunk(x, z)
             h.city = h.city.copy(workers = h.city.workers +
                 List(8) { CivWorker(UUID.randomUUID(), "Neighbour$it", null) })
-            repeat(4) { h.owner.pulse(2_000 + it * 1_000L) }
+            // Drain admission batches without advancing idle wander timers during fixture setup.
+            repeat(4) { h.owner.pulse(2_000) }
             val actors = h.owner.collisionActors().toList()
-            actors.size shouldBe 9
+            withClue("admission=${h.navigationState()}") { actors.size shouldBe 9 }
             val unavailable = h.city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
                 entrance = CivPosition(40, 64, 0), control = null,
                 bounds = CivBox(CivPosition(40, 64, 0), CivPosition(40, 64, 0)))

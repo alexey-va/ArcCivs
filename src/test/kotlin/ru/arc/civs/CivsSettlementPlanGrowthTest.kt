@@ -207,6 +207,50 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         CivsSettlementPlans.next(city, BuildingType.WAREHOUSE) shouldBe null
     }
 
+    test("a later dry perimeter budget preserves an already checked warehouse forecast") {
+        val (city, forecast, access) = deferredWarehouseFixture()
+        val warehouse = forecast.plots.single { it.building.type == BuildingType.WAREHOUSE }.building
+        val budget = CivsRejection("autonomy-search-budget", mapOf("stage" to "dry-perimeter"))
+        val pending = forecastWithRejectedGate(city, forecast, access, laterFailure = budget)
+
+        pending.deferredPerimeter shouldBe CivDeferredPerimeter("gate-junction", warehouse.id, warehouse.anchor, city.center)
+        pending.halfWidth shouldBe forecast.halfWidth
+        pending.plots shouldBe forecast.plots
+        pending.routes shouldBe forecast.routes
+        access.routes.forEach { (id, route) -> pending.routes[id.toString()] shouldBe route }
+        pending.walls shouldBe forecast.walls
+        pending.gates shouldBe forecast.gates
+        pending.gateSides shouldBe forecast.gateSides
+    }
+
+    test("a checked forecast cannot hide a later budget from another stage") {
+        val (city, forecast, access) = deferredWarehouseFixture()
+        val budget = CivsRejection("autonomy-search-budget", mapOf("stage" to "ordinary-route"))
+        val failure = shouldThrow<CivsRejection> {
+            forecastWithRejectedGate(city, forecast, access, laterFailure = budget)
+        }
+        failure.reason shouldBe budget.reason
+        failure.values shouldBe budget.values
+    }
+
+    for (invalid in listOf("missing warehouse approach", "changed paid approach"))
+    test("a late dry perimeter budget cannot admit a forecast with $invalid") {
+        val (city, forecast, access) = deferredWarehouseFixture()
+        val warehouse = forecast.plots.single { it.building.type == BuildingType.WAREHOUSE }.building
+        val altered = if (invalid == "missing warehouse approach")
+            forecast.copy(routes = forecast.routes - warehouse.id.toString())
+        else {
+            val (id, route) = access.routes.entries.first()
+            forecast.copy(routes = forecast.routes + (id.toString() to route.map { it.copy(y = it.y + 1) }))
+        }
+        val budget = CivsRejection("autonomy-search-budget", mapOf("stage" to "dry-perimeter"))
+        val failure = shouldThrow<CivsRejection> {
+            forecastWithRejectedGate(city, altered, access, laterFailure = budget)
+        }
+        failure.reason shouldBe budget.reason
+        failure.values shouldBe budget.values
+    }
+
     test("a late gate budget keeps one drafted quarry and every retained approach") {
         val source = requireNotNull(CivsSettlementPlans.current(legacy))
         val plots = listOf(BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY)
@@ -397,11 +441,12 @@ private fun deferredWarehouseFixture(): Triple<Settlement, CivSettlementPlan, Ci
 }
 
 private fun forecastWithRejectedGate(city: Settlement, forecast: CivSettlementPlan, access: CivAutonomousAccess,
-    laterClosed: Boolean = false): CivSettlementPlan {
+    laterClosed: Boolean = false, laterFailure: CivsRejection? = null): CivSettlementPlan {
     mockkObject(CivsSettlementPlans)
     return try {
         every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
             val width = arg<Int>(6)
+            if (laterFailure != null && width > forecast.halfWidth) throw laterFailure
             val candidate = forecast.copy(halfWidth = width)
             if (laterClosed && width > forecast.halfWidth) candidate else {
                 arg<((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)?>(8)
