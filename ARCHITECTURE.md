@@ -408,6 +408,10 @@ Capacity, capture and search-budget failures back off and retry without safe
 teleport recovery. Work checks the actual position independently of planner
 completion. A physically failed or stuck route may recover to a validated loaded
 safe endpoint, resetting footsteps.
+Admitted physical cargo recovery in the isolated lab uses the ordinary native
+storage feet height for both repeated unloaded-chunk and capture-budget failures.
+A thin carpet changes the supported height, while cargo ownership, protection,
+body clearance, retry timing and native unload checks remain authoritative.
 The same arrival, work and cycle-token checks still apply. Actual work-route
 crossings use Trails 2.3.20's `TrailsFootTrafficActor` entry point; Trails retains
 the ordinary permission, protection, terrain progression and persistence pipeline.

@@ -1023,7 +1023,7 @@ internal class CivsCitizenRoutes(
                 !citizenChunkReady(entity.world, previous.blockX shr 4, previous.blockZ shr 4) ||
                 !labCourierRecoveryAllowed(city, worker, recoveryTrip, originPoints))) return false
         val safe: (CivPosition) -> Boolean = { candidate ->
-            val feet = if (capture) storageFeet(entity.world, candidate) else candidate.location(entity.world)
+            val feet = if (labStorage != null) storageFeet(entity.world, candidate) else candidate.location(entity.world)
             collisions.recoveryPointSafe(actor, city, candidate, failed.allowedBuildings,
                 routeMine(actor, city).takeIf { recoveryAnchor == null }, feet) &&
                 (waitingMine == null || outside(waitingMine, candidate.x, candidate.z)) &&
@@ -1057,7 +1057,7 @@ internal class CivsCitizenRoutes(
             storage != null -> citizenStorageTarget(city, storage, entity.world, safe)
             else -> citizenRecoveryTarget(city, authored, safe)
         }) ?: return false
-        val destination = if (capture) storageFeet(entity.world, point) else point.location(entity.world)
+        val destination = if (labStorage != null) storageFeet(entity.world, point) else point.location(entity.world)
         if (!collisions.residentMoveAllowed(actor, destination, destination)) return false
         destination.yaw = previous.yaw
         cancelRoute(actor, destination)

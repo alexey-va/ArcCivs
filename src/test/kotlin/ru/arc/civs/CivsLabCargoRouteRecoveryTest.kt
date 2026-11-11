@@ -147,8 +147,10 @@ class CivsLabCargoRouteRecoveryTest : FunSpec({
         }
     }
 
-    for (outcome in listOf("dropoff", "outside-lab", "outside-lab-integer", "occupied", "protected-floor", "protected-origin", "stale", "moved", "same-attempt")) {
-        test("lab nearby carried cargo after terminal capture exhaustion: $outcome") {
+    for (outcome in listOf("dropoff", "outside-lab", "outside-lab-integer", "occupied", "protected-floor", "protected-origin", "stale", "moved", "same-attempt", "chunk-unloaded-dropoff")) {
+        val chunkFailure = outcome == "chunk-unloaded-dropoff"
+        test(if (chunkFailure) "lab nearby carried cargo recovers onto native carpet after repeated chunk-unloaded"
+            else "lab nearby carried cargo after terminal capture exhaustion: $outcome") {
             val carpeted = outcome != "outside-lab-integer"
             residentRuntime(worldFactory = { CargoRecoveryCarpetWorld(carpeted) }, server = CivsWorksiteServerFixture()) { h ->
                 h.navigationNow = 2_000
@@ -204,8 +206,9 @@ class CivsLabCargoRouteRecoveryTest : FunSpec({
                         13_000, setOf(destination.id), motion, null, control)
                 }
                 fun exhaust(route: CitizenRoute) {
-                    route.motion.planningFailed("capture-budget")
-                    route.completion = CitizenNavigationCompletion("capture-budget")
+                    val reason = if (chunkFailure) "chunk-unloaded" else "capture-budget"
+                    route.motion.planningFailed(reason)
+                    route.completion = CitizenNavigationCompletion(reason)
                 }
 
                 citizenAtStorage(h.world, origin.point(), control) shouldBe false
@@ -263,11 +266,12 @@ class CivsLabCargoRouteRecoveryTest : FunSpec({
                     h.unloads shouldBe 0
                     h.city shouldBe current
                     actor.plan.token shouldBe token
-                    if (outcome == "dropoff") {
-                        actor.route shouldBe null
+                    if (outcome == "dropoff" || chunkFailure) {
                         actor.npc.location.point() shouldBe landing.point()
+                        actor.route shouldBe null
                         actor.cycle.phase shouldBe CitizenPhase.RETURNING
-                        approved.containsAll(listOf(control, standing, floor, originHead)) shouldBe true
+                        approved.containsAll(listOf(control, standing, floor)) shouldBe true
+                        if (!chunkFailure) approved.contains(originHead) shouldBe true
                         repeat(4) { h.owner.pulse(9_000L + it * 1_000) }
                         h.unloads shouldBe 1
                         h.city shouldBe before
