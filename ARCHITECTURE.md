@@ -1218,6 +1218,9 @@ defers that unchanged layout check so the upgrade can retain ordinary priority.
 Required plans for new parcels keep their admission rules. Paid work and
 production never depend on completing a distant reservation. Unadopted candidates
 are diagnostics only and are not drawn as an accepted future village.
+For paid civic growth, an exhausted wider dry-perimeter calculation may reuse an
+earlier geometric refusal through the existing guarded parcel fallback. Exhausting
+the budget alone grants no such authority; native parcel and route admission remain required.
 
 After an exact site refusal, ordinary growth first tries the other unpaid adopted
 plots of the same type in their saved order, under the same request and layout
@@ -1344,6 +1347,11 @@ Inside its mine plan the worker may clear an interfering LAVA cell through a
 single-cell securing receipt. That receipt grants no items, equipment changes or
 excavation ordinal; owner/Lands, loaded chunks, reach and native receipt checks
 remain required. WATER remains an ordinary hazard boundary.
+
+Natural dripstone blocks provide rock and terrain cover. Dry pointed dripstone can be
+cleared or replaced by the required mine shell, but never supplies cover. Waterlogged
+pointed dripstone stops the action. Physical mining preserves native tool drops once;
+autonomous terrain work retains its existing empty item outputs.
 
 ## Settlement commerce
 

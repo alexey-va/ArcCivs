@@ -5,6 +5,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.block.data.Waterlogged
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -39,10 +40,13 @@ class CivsMineHistoricalLandingTest : FunSpec({
 
     for ((material, outputs) in listOf(
         Material.SMOOTH_BASALT to mapOf("SMOOTH_BASALT" to 1L),
+        Material.DRIPSTONE_BLOCK to mapOf("DRIPSTONE_BLOCK" to 1L),
+        Material.POINTED_DRIPSTONE to mapOf("POINTED_DRIPSTONE" to 1L),
         Material.GLOW_LICHEN to emptyMap(),
     )) test("native $material excavation preserves its exact cut and pickaxe item receipt") {
         historicalLandingFixture { f ->
-            if (material == Material.GLOW_LICHEN) f.block(f.point).blockData = Bukkit.createBlockData(
+            if (material == Material.POINTED_DRIPSTONE) f.block(f.point).blockData = pointedMineData(false)
+            else if (material == Material.GLOW_LICHEN) f.block(f.point).blockData = Bukkit.createBlockData(
                 "minecraft:glow_lichen[down=false,east=false,north=false,south=true,up=false,waterlogged=false,west=false]")
             else f.block(f.point).type = material
             val before = f.block(f.point).blockData.asString
@@ -60,6 +64,10 @@ class CivsMineHistoricalLandingTest : FunSpec({
                 CivsEquipment.slots(worker).take(CivsEquipment.BAG)
             CivsEquipment.plainCount(after.workers.single(), "SMOOTH_BASALT") shouldBe
                 CivsEquipment.plainCount(worker, "SMOOTH_BASALT") + outputs.getOrDefault("SMOOTH_BASALT", 0L).toInt()
+            CivsEquipment.plainCount(after.workers.single(), "DRIPSTONE_BLOCK") shouldBe
+                CivsEquipment.plainCount(worker, "DRIPSTONE_BLOCK") + outputs.getOrDefault("DRIPSTONE_BLOCK", 0L)
+            CivsEquipment.plainCount(after.workers.single(), "POINTED_DRIPSTONE") shouldBe
+                CivsEquipment.plainCount(worker, "POINTED_DRIPSTONE") + outputs.getOrDefault("POINTED_DRIPSTONE", 0L)
             CivsEquipment.plainCount(after.workers.single(), "GLOW_LICHEN") shouldBe
                 CivsEquipment.plainCount(worker, "GLOW_LICHEN")
             after.minePlans!!.getValue(f.mine.id.toString()).levels shouldBe f.state.levels
@@ -68,24 +76,125 @@ class CivsMineHistoricalLandingTest : FunSpec({
             f.runtime.validateMineReceiptNative(after, work)
             CivsEquipment.plainCount(after.workers.single(), "SMOOTH_BASALT") shouldBe
                 CivsEquipment.plainCount(worker, "SMOOTH_BASALT") + outputs.getOrDefault("SMOOTH_BASALT", 0L).toInt()
+            CivsEquipment.plainCount(after.workers.single(), "DRIPSTONE_BLOCK") shouldBe
+                CivsEquipment.plainCount(worker, "DRIPSTONE_BLOCK") + outputs.getOrDefault("DRIPSTONE_BLOCK", 0L)
+            CivsEquipment.plainCount(after.workers.single(), "POINTED_DRIPSTONE") shouldBe
+                CivsEquipment.plainCount(worker, "POINTED_DRIPSTONE") + outputs.getOrDefault("POINTED_DRIPSTONE", 0L)
         }
     }
 
-    test("smooth basalt provides real rock cover while glow lichen and unowned cobblestone do not") {
+    for (material in listOf(Material.SMOOTH_BASALT, Material.DRIPSTONE_BLOCK))
+    test("$material provides real rock cover while glow lichen and unowned cobblestone do not") {
         historicalLandingFixture { f ->
             val roof = f.point.copy(y = 58)
-            f.block(roof).type = Material.SMOOTH_BASALT
+            f.block(roof).type = material
             f.runtime.validateMineReceiptNative(f.city, f.cut())
-            CivsMineSafety.natural(Material.SMOOTH_BASALT) shouldBe true
+            CivsMineSafety.natural(material) shouldBe true
             CivsMineSafety.natural(Material.GLOW_LICHEN) shouldBe false
             CivsMineSafety.natural(Material.COBBLESTONE) shouldBe false
-            for (uncovered in listOf(Material.GLOW_LICHEN, Material.COBBLESTONE)) {
-                f.block(roof).type = uncovered
+            CivsMineSafety.natural(Material.POINTED_DRIPSTONE) shouldBe false
+            for (uncovered in listOf(Material.GLOW_LICHEN, Material.COBBLESTONE, Material.POINTED_DRIPSTONE)) {
+                if (uncovered == Material.POINTED_DRIPSTONE) f.block(roof).blockData = pointedMineData(false)
+                else f.block(roof).type = uncovered
                 val city = f.city.copy(minePlans = mapOf(f.mine.id.toString() to f.state.copy(levels = null)))
                 shouldThrow<CivsRejection> { f.runtime.validateMineReceiptNative(city, f.cut()) }
                     .reason shouldBe "mine-thin-cover"
                 f.block(f.point).type shouldBe Material.STONE
                 f.block(roof).type shouldBe uncovered
+            }
+        }
+    }
+
+    test("planned mine openings keep dry pointed clearance but stop trapped water") {
+        historicalLandingFixture { f ->
+            f.block(f.point).blockData = pointedMineData(false)
+            f.owner.mineProtectionNeeded(f.block(f.point), null) shouldBe false
+            f.block(f.point).blockData = pointedMineData(true)
+            f.owner.mineProtectionNeeded(f.block(f.point), null) shouldBe true
+        }
+    }
+
+    test("waterlogged pointed dripstone cannot be cleared by an ordinary mine receipt") {
+        historicalLandingFixture { f ->
+            f.block(f.point).blockData = pointedMineData(true)
+            val before = f.block(f.point).blockData.asString
+            shouldThrow<CivsRejection> { f.runtime.validateMineReceiptNative(f.city, f.cut()) }
+                .reason shouldBe "mine-foreign-block"
+            f.block(f.point).blockData.asString shouldBe before
+            f.city.workers.single() shouldBe f.worker
+            f.city.minePlans!!.getValue(f.mine.id.toString()) shouldBe f.state
+        }
+    }
+
+    for (autonomous in listOf(false, true)) for (wet in listOf(false, true))
+    test("pointed side frontier preserves native receipts with autonomous=$autonomous waterlogged=$wet") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("pointed-mine-frontier").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("PointedMineFrontier")
+                LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                    val mine = spatialBuilding("nordic", "miner", 1, CivPosition(0, 69, 0), 180)
+                    val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+                    val worker = spatialWorker(mine, "IRON_PICKAXE")
+                    var city = spatialCity(world.uid, listOf(mine), worker).copy(
+                        inventory = if (autonomous) null else CivInventory(CivStorageMode.PHYSICAL),
+                        autonomy = if (autonomous) CivAutonomy() else null,
+                        minePlans = mapOf(mine.id.toString() to CivMinePlanState(plan.version, 0, sectionSteps = emptyMap())))
+                    CivsRules.validate(city) shouldBe city
+                    for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
+                    fun native(local: CivPosition) = CivsWorksiteLayouts.point(mine, local).let { world.getBlockAt(it.x, it.y, it.z) }
+                    for ((x, z) in plan.shaftColumns) for (dx in -1..1) for (dz in -1..1)
+                        for (y in plan.transferFeetY - 1..16) native(CivPosition(x + dx, y, z + dz)).type = Material.STONE
+                    val first = plan.steps.first()
+                    val rung = plan.sections.getValue("spine").first { plan.steps[it].after?.startsWith("minecraft:ladder[") == true }
+                    for (y in first.point.y..plan.bottom.y + 3) {
+                        native(plan.bottom.copy(y = y)).blockData = Bukkit.createBlockData(plan.expectedAfter(rung, mine.rotation))
+                        native(plan.backing.copy(y = y)).type = Material.COBBLESTONE
+                    }
+                    val side = plan.bottom.copy(x = plan.bottom.x + 1, y = first.point.y)
+                    for (dy in 0..2) native(side.copy(y = side.y + dy)).type = Material.AIR
+                    val pointed = side.copy(x = side.x + 1)
+                    native(pointed).blockData = pointedMineData(wet)
+                    val before = native(pointed).blockData.asString
+                    val target = CivsWorksiteLayouts.point(mine, pointed)
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+                        val owner = CivsWorksites::class.java.getDeclaredField("mine").also { it.isAccessible = true }
+                            .get(runtime) as CivsMineWorksite
+                        var selected: CivWorldWork? = null
+                        for (pulse in 0 until 512) {
+                            runtime.pulse(listOf(city))
+                            selected = runtime.plan(city, city.workers.single())
+                            if (selected != null || owner.mineExecutions[mine.id]?.blockedSections?.containsKey("spine") == true) break
+                        }
+                        if (wet) {
+                            selected shouldBe null
+                            requireNotNull(owner.mineExecutions[mine.id]?.blockedSections?.get("spine")).reason shouldBe "mine-foreign-block"
+                            native(pointed).blockData.asString shouldBe before
+                            city.workers.single() shouldBe worker
+                        } else {
+                            val work = requireNotNull(selected) { runtime.debug().toString() }
+                            work.status shouldBe "securing-mine"
+                            work.changes shouldBe listOf(CivPlanBlock(target, before, "minecraft:cobblestone"))
+                            work.inputs shouldBe if (autonomous) emptyMap() else mapOf("COBBLESTONE" to 1L)
+                            work.outputs shouldBe if (autonomous) emptyMap() else mapOf("POINTED_DRIPSTONE" to 1L)
+                            work.autonomousVisual shouldBe autonomous
+                            runtime.validate(city, work)
+                            city = if (autonomous) CivsRules.finishAutonomousVisual(city, work)
+                                else CivsRules.finishWorldWork(city, work, 100_000)
+                            native(pointed).blockData.asString shouldBe before
+                            native(pointed).blockData = Bukkit.createBlockData(work.changes.single().after)
+                            CivsEquipment.plainCount(city.workers.single(), "POINTED_DRIPSTONE") shouldBe
+                                CivsEquipment.plainCount(worker, "POINTED_DRIPSTONE") + if (autonomous) 0L else 1L
+                            CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe
+                                CivsEquipment.plainCount(worker, "COBBLESTONE") - if (autonomous) 0L else 1L
+                            shouldThrow<CivsRejection> { runtime.validate(city, work) }
+                            runtime.validateMineReceiptNative(city, work)
+                            runtime.invalidate(worker.id, completedWork = work)
+                            native(pointed).type shouldBe Material.COBBLESTONE
+                        }
+                    }
+                }
             }
         }
     }
@@ -180,6 +289,16 @@ class CivsMineHistoricalLandingTest : FunSpec({
     }
 })
 
+private fun pointedMineData(waterlogged: Boolean): org.bukkit.block.data.BlockData {
+    // The pinned SDK represents default tip/up only; native frustum/down acceptance is checked separately.
+    val expected = "minecraft:pointed_dripstone[thickness=tip,vertical_direction=up,waterlogged=$waterlogged]"
+    return Bukkit.createBlockData(expected).also { data ->
+        (data is Waterlogged) shouldBe true
+        (data as Waterlogged).isWaterlogged shouldBe waterlogged
+        data.asString shouldBe expected
+    }
+}
+
 private class HistoricalLandingFixture(val paper: MockBukkitTestRuntime, val world: CivsWorksiteWorldFixture,
     val mine: CivBuilding, val state: CivMinePlanState, val city: Settlement, val runtime: CivsWorksites) {
     val point = CivPosition(-1842, 49, -2686)
@@ -205,6 +324,8 @@ private class HistoricalLandingFixture(val paper: MockBukkitTestRuntime, val wor
             outputs = when (native.type) {
                 Material.STONE -> mapOf("COBBLESTONE" to 1L)
                 Material.SMOOTH_BASALT -> mapOf("SMOOTH_BASALT" to 1L)
+                Material.DRIPSTONE_BLOCK -> mapOf("DRIPSTONE_BLOCK" to 1L)
+                Material.POINTED_DRIPSTONE -> mapOf("POINTED_DRIPSTONE" to 1L)
                 else -> emptyMap() // A pickaxe clears lichen without the shears-only item.
             },
             status = "digging-mine", durationMillis = 2_000, focus = point, miningPlanVersion = 7,

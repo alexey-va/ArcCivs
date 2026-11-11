@@ -469,6 +469,13 @@ internal object CivsSettlementPlans {
             }
             try { return prepare(city, templates, surface, retained, fortification, profile, width, inspectRoute, inspect) }
             catch (failure: CivsRejection) {
+                if (!routeBudget && failure.reason == "autonomy-search-budget" && failure.values["stage"] == "dry-perimeter") {
+                    // A wider cut exhausting its budget does not revoke an earlier geometric refusal.
+                    // Reuse only the existing paid civic fallback, with all of its native admission guards.
+                    civicRefusal?.let { previous ->
+                        deferCivicParcel(city, templates, surface, retained, profile, previous)?.let { return it }
+                    }
+                }
                 if (failure.values["stage"] == "retained-growth-old-incomplete" ||
                     failure.reason !in setOf("autonomy-no-site", "autonomy-layout-obstructed", "autonomy-no-path")) throw failure
                 if (compactFounding && deferredInfrastructure == null && failure.reason == "autonomy-layout-obstructed" &&

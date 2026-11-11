@@ -132,7 +132,7 @@ internal open class CivsWorksiteWorldFixture(name: String, private val ground: M
                 // A valid zero-drop native sample; physical forestry still samples every admitted leaf.
                 type.name.endsWith("_LEAVES") -> emptyList()
                 type in setOf(
-                    Material.COBBLESTONE, Material.LADDER, Material.TORCH,
+                    Material.COBBLESTONE, Material.LADDER, Material.TORCH, Material.POINTED_DRIPSTONE,
                     Material.OAK_PLANKS, Material.SPRUCE_PLANKS, Material.DARK_OAK_PLANKS,
                     Material.OAK_FENCE, Material.SPRUCE_FENCE, Material.DARK_OAK_FENCE,
                 ) || type.name.endsWith("_LOG") -> listOf(ItemStack(type))
@@ -195,6 +195,24 @@ internal open class CivsWorksiteWorldFixture(name: String, private val ground: M
  * Supply known mine states and captured static states; unknown states still use its strict parser. */
 internal open class CivsWorksiteServerFixture : ServerMock() {
     override fun createBlockData(data: String): BlockData {
+        if (data.substringBefore('[') == "minecraft:pointed_dripstone") {
+            // Pinned MockBukkit lacks pointed shape keys and its typed Waterlogged factory.
+            // Only registry-default tip/up is represented here; non-default native shapes stay unsupported.
+            val properties = data.substringAfter('[', "").removeSuffix("]").split(',').filter(String::isNotEmpty)
+            val defaults = mapOf("thickness" to "tip", "vertical_direction" to "up")
+            for (property in properties) defaults[property.substringBefore('=')]?.let { expected ->
+                if (property.substringAfter('=') != expected)
+                    throw UnsupportedOperationException("Pinned pointed fixture supports only thickness=tip,vertical_direction=up: $data")
+            }
+            val supported = properties.filter { it.substringBefore('=') !in defaults }
+            val waterlogged = if (supported.isEmpty()) false else when (supported.singleOrNull()) {
+                "waterlogged=false" -> false
+                "waterlogged=true" -> true
+                else -> throw UnsupportedOperationException("Unsupported pointed fixture properties: $data")
+            }
+            return org.mockbukkit.mockbukkit.block.data.WaterloggedDataMock(Material.POINTED_DRIPSTONE)
+                .apply { isWaterlogged = waterlogged }
+        }
         val timberState = TIMBER_LOG_STATE.matchEntire(data)
             ?: TIMBER_PLANKS_STATE.matchEntire(data)
             ?: MINE_TIMBER_FENCE_STATE.matchEntire(data)

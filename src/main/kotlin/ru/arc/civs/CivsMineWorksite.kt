@@ -5,6 +5,7 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.block.Block
+import org.bukkit.block.data.Waterlogged
 import org.bukkit.block.data.type.Fence
 import org.bukkit.inventory.ItemStack
 import java.util.UUID
@@ -344,7 +345,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val block = world.getBlockAt(point.x, point.y, point.z)
         if (!context.worldAccess.canMine(block)) return denied("mine-claimed")
         val local = CivsMinePlan.localPoint(building, point)
-        val before = Bukkit.createBlockData(cell.before).material
+        val beforeData = Bukkit.createBlockData(cell.before)
+        val before = beforeData.material
         val generatorFace = generator && local == plan.generator &&
             city.minePlans?.get(building.id.toString())?.nextStep == plan.steps.size.toLong() &&
             before in setOf(Material.STONE, Material.COBBLESTONE)
@@ -354,7 +356,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val initialCut = !block.isLiquid && plan.version == 7 && plan.section(ordinal) == "0/shaft/opening" &&
             plan.steps[ordinal].point == local && plan.steps[ordinal].after == null && cell.after == "minecraft:air" &&
             initialMineBlock(city, building, point, cell.before)
-        if (!before.isAir && before !in WEEDS && !CivsMineSafety.natural(before) && !generatorFace && !paidLiquidSeal && !lavaClearance &&
+        if (!before.isAir && !mineClearance(beforeData) && !CivsMineSafety.natural(before) && !generatorFace && !paidLiquidSeal && !lavaClearance &&
             !ownedBefore && !initialCut) return denied("mine-foreign-block")
         val saved = city.minePlans?.get(building.id.toString())
         val after = Bukkit.createBlockData(cell.after).material
@@ -1235,11 +1237,15 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
     }
 
     fun mineProtectionNeeded(block: Block, material: Material?): Boolean {
-        if (material == null) return block.isLiquid
+        if (material == null) return block.isLiquid ||
+            block.type == Material.POINTED_DRIPSTONE && !mineClearance(block.blockData)
         val safe = if (material == Material.TORCH) block.type == Material.TORCH
             else block.type.isOccluding && !block.type.hasGravity()
-        return !safe && (block.type.isAir || block.isLiquid || block.type in WEEDS)
+        return !safe && (block.type.isAir || block.isLiquid || block.type in WEEDS || block.type == Material.POINTED_DRIPSTONE)
     }
+
+    private fun mineClearance(data: org.bukkit.block.data.BlockData): Boolean = data.material in WEEDS ||
+        data.material == Material.POINTED_DRIPSTONE && data is Waterlogged && !data.isWaterlogged
 
     private fun cappedSurfaceRailingHeadroom(city: Settlement, building: CivBuilding, world: World,
         geometry: CivsMinePlan, task: MineProtection): Boolean {
@@ -1368,6 +1374,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             }
             return work(worker, building, standing, listOf(change(block, task.material.createBlockData().asString)),
                 inputs = mapOf(task.material.name to 1L), status = "securing-mine", duration = 2_000,
+                outputs = if (block.type == Material.POINTED_DRIPSTONE && !CivsAutonomousWorksites.supports(city, building))
+                    drops(block, tool(worker)) else emptyMap(),
                 miningStep = miningStep, miningAccessStep = effectiveProgress)
         }
         if (scan.next < tasks.size) { context.spotSearchPending = true; context.blocked(worker, "searching-work") }
