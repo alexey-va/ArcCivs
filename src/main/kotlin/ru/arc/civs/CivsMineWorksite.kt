@@ -388,7 +388,9 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             .flatMap { plan.sections[it].orEmpty().asSequence() }.firstOrNull {
                 plan.steps[it].point == local && plan.expectedAfter(it, building.rotation) == cell.after
             } ?: ordinal else ordinal
-        val required = CivsMineSafety.requiredCover(plan, coverOrdinal, local)
+        val required = if (!sealing && cell.after == plan.expectedAfter(ordinal, building.rotation) &&
+            CivsMineSafety.paidShaftAccess(plan, ordinal, local, saved)) 0
+            else CivsMineSafety.requiredCover(plan, coverOrdinal, local)
         if (required == 0) return true
         val cap = civsProtectedBuildings(city).filter { it.id != building.id && CivsAutonomousGeometry.horizontalContains(it.bounds, point) }
             .minOfOrNull { it.bounds.min.y - 1 } ?: world.maxHeight - 1
@@ -894,19 +896,23 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             }
         }
         // A long sparse section can keep advancing without closing the upper shaft. Reconsider
-        // the surface guard only after the previous cut's native safety and dependencies finish.
+        // upper access only after the previous cut's native safety and dependencies finish.
         if (originalSection != null && steps.getOrNull(scanStart)?.floor?.let { it > 0 } == true &&
-            execution.lowerWorkSinceRailCheck >= LOWER_WORK_BEFORE_RAIL_CHECK && execution.unsealedExcavation == null &&
-            available(SURFACE_RAILING) && geometry.sectionReady(SURFACE_RAILING, execution.prefix, execution.sections)) {
-            execution.lowerWorkSinceRailCheck = 0
+            execution.lowerWorkSinceRailCheck >= LOWER_WORK_BEFORE_RAIL_CHECK && execution.unsealedExcavation == null) {
+            val reconsider = if (available(SURFACE_RAILING) && geometry.sectionReady(SURFACE_RAILING, execution.prefix, execution.sections))
+                SURFACE_RAILING else sectionKeys.firstOrNull { key -> available(key) && nextOrdinal(key)?.let { ordinal ->
+                    CivsMineSafety.paidShaftAccess(geometry, ordinal, steps[ordinal].point, state)
+                } == true }
             val fence = geometry.structuralMaterials.first { it.endsWith("_FENCE") }
-            if (autonomous || CivsEquipment.plainCount(worker, fence) > 0) {
+            if (reconsider != null) execution.lowerWorkSinceRailCheck = 0
+            if (reconsider != null && (reconsider != SURFACE_RAILING || autonomous || CivsEquipment.plainCount(worker, fence) > 0)) {
                 execution.cursor = sectionKeys.indexOf(originalSection)
-                execution.selected = SURFACE_RAILING
-                scanStart = requireNotNull(nextOrdinal(SURFACE_RAILING))
+                execution.selected = reconsider
+                scanStart = requireNotNull(nextOrdinal(reconsider))
                 execution.ordinal = scanStart
                 mineCursors[building.id] = Triple(building.level, progress, scanStart)
-                CivsDiagnostics.event("mine_surface_railing_reconsidered", "city" to city.id, "worker" to worker.id,
+                CivsDiagnostics.event(if (reconsider == SURFACE_RAILING) "mine_surface_railing_reconsidered" else "mine_shaft_access_reconsidered",
+                    "city" to city.id, "worker" to worker.id,
                     "building" to building.id, "previous_section" to originalSection, "ordinal" to scanStart,
                     "point" to CivsWorksiteLayouts.point(building, steps[scanStart].point))
             }

@@ -54,6 +54,21 @@ internal object CivsMineSafety {
 
     fun natural(material: Material): Boolean = material in GROUND || material.name.endsWith("_ORE")
 
+    /** Only the exact shaft continuation may reuse its paid, guarded upper mouth instead of natural overburden. */
+    fun paidShaftAccess(plan: CivsMinePlan, ordinal: Int, local: CivPosition, saved: CivMinePlanState?): Boolean {
+        if (plan.version != 7 || saved?.version != 7) return false
+        val step = plan.steps[ordinal]
+        val floor = step.floor?.takeIf { it > 0 } ?: return false
+        if (step.stage != "shaft" || step.point != local ||
+            !(step.branch == "opening" && (local.x to local.z) in plan.openingColumns ||
+                ordinal in plan.openingAccess[floor].orEmpty())) return false
+        val sections = saved.sectionSteps.orEmpty()
+        fun done(key: String) = plan.sections[key]?.let { plan.sectionCount(key, saved.nextStep, sections) == it.size.toLong() } == true
+        return done("spine") && done("0/shaft/opening") && done("0/shaft/railing") &&
+            done("${floor - 1}/shaft/opening") && done("${floor - 1}/shaft/railing") &&
+            plan.sectionReady(plan.section(ordinal), saved.nextStep, sections)
+    }
+
     /** V7's exact authored surface mouth needs no overburden; lower landings and arms keep their cover. */
     fun requiredCover(plan: CivsMinePlan, ordinal: Int, local: CivPosition): Int {
         val section = plan.section(ordinal)

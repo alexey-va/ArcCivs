@@ -219,6 +219,13 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
         else "${step.floor ?: 0}/${step.stage}/${step.branch ?: "access"}"
     }
     val upperSpine = sections["spine"].orEmpty().takeWhile { steps[it].point.y >= transferFeetY }
+    /** The first complete landing cell connects its ladder to the central opening; no ordinal is reordered. */
+    val openingAccess: Map<Int, List<Int>> = if (version == 7) floors.associate { floor ->
+        val approach = requireNotNull(steps[sections.getValue("${floor.index}/shaft/opening").first()].approach)
+        floor.index to sections.getValue("${floor.index}/shaft/landing").takeWhile { ordinal ->
+            steps[ordinal].point.let { it.x == approach.x && it.z == approach.z }
+        }
+    } else emptyMap()
     private val sectionAt = Array(steps.size) { "" }.also { keys ->
         sections.forEach { (key, indices) -> indices.forEach { keys[it] = key } }
     }
@@ -277,7 +284,8 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
         val landing = if (floor == 0) "entrance" else "landing"
         return when {
             first.stage == "shaft" && first.branch == landing -> true
-            first.branch == "opening" -> done("$floor/shaft/$landing") &&
+            first.branch == "opening" -> (done("$floor/shaft/$landing") ||
+                openingAccess[floor]?.let { access -> access.isNotEmpty() && access.all { completed(it, prefix, saved) } } == true) &&
                 (floor == 0 || done("${floor - 1}/shaft/railing"))
             first.stage == "shaft" && first.branch in setOf("railing", "lining", "frame") -> done("$floor/shaft/opening") &&
                 (first.branch != "railing" || floor != floors.last().index || done("$floor/shaft/bottom"))
