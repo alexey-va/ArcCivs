@@ -167,13 +167,14 @@ internal class CivsAutonomousPlacement(
             CompletableFuture.allOf(*templates.values.toTypedArray()).thenCombineAsync(inputs, { _, input ->
                 if (result.isDone || closed) throw CivsRejection("world-closed")
                 val loaded = templates.mapValues { it.value.join() }
+                val retained = input.first.withSurveyedHallApron(city, input.second)
                 val envelope = seed?.let { candidate ->
                     CivsAutonomousGeometry.union(CivsAutonomousGeometry.futureBounds(city, candidate),
                         CivsSettlementPlans.at(loaded.getValue(candidate.type).second, candidate.anchor, candidate.rotation, candidate.id).bounds)
                 }
                 if (seed != null && oldPlan?.deferredPerimeter?.plotId == seed.id) {
                     return@thenCombineAsync CompletableFuture.completedFuture(replaceDeferredParcel(city, oldPlan, seed,
-                        requireNotNull(envelope), requireNotNull(unpaidSite.terrain), input.first))
+                        requireNotNull(envelope), requireNotNull(unpaidSite.terrain), retained))
                 }
                 val kept = sameSlotPlan ?: oldPlan?.takeIf { intent ->
                     seed != null && seed.type in CivsSettlementLayout.exteriorTypes &&
@@ -183,8 +184,8 @@ internal class CivsAutonomousPlacement(
                 if (oldPlan?.perimeterEntrances != null && kept == null)
                     throw CivsRejection("autonomy-no-site", mapOf("stage" to "retained-perimeter-parcel"))
                 val projected = if (seed == null) city else surveyCity.copy(autonomy = requireNotNull(surveyCity.autonomy).copy(plan = kept))
-                val access = if (seed == null) input.first else input.first.copy(
-                    routes = input.first.routes + (seed.id to requireNotNull(seedRoute)), reservedFortificationPorts = emptyList())
+                val access = if (seed == null) retained else retained.copy(
+                    routes = retained.routes + (seed.id to requireNotNull(seedRoute)), reservedFortificationPorts = emptyList())
                 // Replacing one declined reservation preserves its existing forecast and sibling plots.
                 val profile = if (seed == null) CivsSettlementGrowth.profile(city) else requireNotNull(oldPlan).plots
                     .filter { !it.building.type.isInfrastructure && it.building.type != BuildingType.DECORATION }
@@ -211,7 +212,7 @@ internal class CivsAutonomousPlacement(
                 } catch (failure: CivsRejection) {
                     if (kept == null || input.second.columns.values.any { !it.loaded }) throw failure
                     val deferred = deferExteriorPerimeter(city, requireNotNull(oldPlan), seed, requireNotNull(envelope),
-                        requireNotNull(unpaidSite.terrain), input.first, failure) ?: throw failure
+                        requireNotNull(unpaidSite.terrain), retained, failure) ?: throw failure
                     return@thenCombineAsync CompletableFuture.completedFuture(deferred)
                 }
                 if (!CivsSettlementGrowth.covers(city, plan) ||
@@ -707,6 +708,7 @@ internal class CivsAutonomousPlacement(
             await(world.autonomousHeightField(nativeCity, first.building, previous, waterColumns)) { field ->
                 surface = if (infrastructure && pinned != null) CivsWallInfill.acceptedSurface(city, pinned.building, field, access) else field
                 columns = field.columns.size
+                if (!infrastructure) access = access.withSurveyedHallApron(city, field)
                 gradeSurface()
             }
         }

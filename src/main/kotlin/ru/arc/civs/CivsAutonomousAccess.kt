@@ -10,7 +10,32 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     val reservedFortificationPorts: List<CivBox> = emptyList(),
     val paidHallLeadOut: List<CivPosition> = emptyList(),
     val wallApproachWrites: Map<UUID, Set<Long>> = emptyMap(),
-    val perimeterCaptures: Map<UUID, CivPerimeterCapture> = emptyMap()) {
+    val perimeterCaptures: Map<UUID, CivPerimeterCapture> = emptyMap(),
+    private val surveyedHallApron: Map<Long, CivPosition> = emptyMap()) {
+    /** A paid route and the fresh surface can correct the Hall's nominal apron grade. */
+    fun withSurveyedHallApron(city: Settlement, surface: CivTerrainSurface): CivAutonomousAccess {
+        val hall = city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.ACTIVE }
+            ?: return this
+        val fixed = city.buildings.asSequence().filter { it.phase == BuildingPhase.ACTIVE }
+            .flatMap { sequenceOf(it.entrance) + it.transit.orEmpty().asSequence() }
+            .mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val apron = CivsAutonomousGeometry.approach(hall).associateBy { civsTerrainKey(it.x, it.z) } - fixed
+        val paid = routes.filterKeys { city.building(it)?.phase == BuildingPhase.ACTIVE }
+        val candidates = paid.values.asSequence().flatten().filter { civsTerrainKey(it.x, it.z) in apron }
+            .groupBy { civsTerrainKey(it.x, it.z) }
+        val grades = buildMap {
+            for ((key, points) in candidates) {
+                val nominal = apron.getValue(key)
+                val observed = surface.columns[key] ?: continue
+                val point = points.distinct().singleOrNull() ?: continue
+                if (abs(point.y.toLong() - nominal.y) == 1L &&
+                    observed.loaded && (observed.natural || observed.dirtPath) && observed.waterTopY == null &&
+                    observed.groundY == point.y - 1 && observed.topY == observed.groundY) put(key, point)
+            }
+        }
+        return copy(surveyedHallApron = grades)
+    }
+
     /** Preserve the full public surface when a civic parcel must borrow an existing street. */
     fun roadColumns(city: Settlement): Set<Long> = buildSet {
         routes.values.forEach { addAll(CivsAutonomousTerraform.roadProfile(it).keys) }
@@ -32,10 +57,11 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
             // A pinned SITE prepares only its entrance column; its wider terrace does not exist yet.
             val approach = if (building.phase == BuildingPhase.ACTIVE) CivsAutonomousGeometry.approach(building)
                 else listOf(building.entrance)
-            val graded = if (building.type == BuildingType.TOWN_HALL && building.phase == BuildingPhase.ACTIVE &&
-                paidHallLeadOut.firstOrNull() == building.entrance)
-                approach.map { nominal -> paidHallLeadOut.firstOrNull { it.x == nominal.x && it.z == nominal.z } ?: nominal }
-            else approach
+            val graded = if (building.type == BuildingType.TOWN_HALL && building.phase == BuildingPhase.ACTIVE) {
+                val leadOut = paidHallLeadOut.takeIf { it.firstOrNull() == building.entrance }.orEmpty()
+                approach.map { nominal -> surveyedHallApron[civsTerrainKey(nominal.x, nominal.z)] ?:
+                    leadOut.firstOrNull { it.x == nominal.x && it.z == nominal.z } ?: nominal }
+            } else approach
             (graded + routes[building.id].orEmpty() +
                 building.transit.orEmpty().takeIf { building.phase == BuildingPhase.ACTIVE }.orEmpty()).forEach { feet ->
                 putIfAbsent(civsTerrainKey(feet.x, feet.z), feet)
