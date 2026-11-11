@@ -8,16 +8,23 @@ import io.mockk.unmockkObject
 import java.util.UUID
 
 class CivsDeferredExteriorGrowthTest : FunSpec({
-    test("a paid quarry crossing can keep the deferred outline while admitting the next farm") {
+    test("a paid quarry crossing can admit the next farm after retained controls move") {
         val legacy = legacyGrowthCity()
         val complete = requireNotNull(CivsSettlementPlans.current(legacy))
         val types = listOf(BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY)
-        val plots = types.map { type -> complete.plots.first { it.building.type == type } }
+        val movedControls = setOf(BuildingType.TOWN_HALL, BuildingType.QUARRY)
+        val plots = types.map { type ->
+            val plot = complete.plots.first { it.building.type == type }
+            if (type in movedControls) plot.copy(building = plot.building.copy(control = plot.building.bounds.min)) else plot
+        }
         val quarry = plots.last().building
         val routes = complete.routes.filterKeys { id -> plots.any { it.building.id.toString() == id } }
         val prior = complete.copy(revision = 3, plots = plots, routes = routes,
             deferredPerimeter = CivDeferredPerimeter("infrastructure", quarry.id, quarry.anchor))
-        val city = legacy.copy(buildings = plots.map { it.building.copy(phase = BuildingPhase.ACTIVE) },
+        val active = plots.map { plot ->
+            plot.building.copy(phase = BuildingPhase.ACTIVE, control = plot.building.control?.let { it.copy(y = it.y + 1) })
+        }
+        val city = legacy.copy(buildings = active,
             autonomy = requireNotNull(legacy.autonomy).copy(plan = prior))
         val access = CivAutonomousAccess(routes.mapKeys { UUID.fromString(it.key) })
         val surface = settlementPlanSurface(city)
@@ -32,7 +39,8 @@ class CivsDeferredExteriorGrowthTest : FunSpec({
             val pending = CivsSettlementPlans.prepareGrowth(city, settlementPlanTemplates(), surface, access, profile)
             val farm = pending.plots.single { it.building.type == BuildingType.FARM }
             val approach = pending.routes.getValue(farm.building.id.toString())
-            pending shouldBe prior.copy(revision = 4, plots = plots + farm,
+            val retained = plots.zip(active) { old, current -> old.copy(building = old.building.copy(control = current.control)) }
+            pending shouldBe prior.copy(revision = 4, plots = retained + farm,
                 routes = routes + (farm.building.id.toString() to approach),
                 deferredPerimeter = CivDeferredPerimeter("infrastructure", farm.building.id, farm.building.anchor))
             approach.first() shouldBe city.buildings.first().entrance

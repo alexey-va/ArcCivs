@@ -609,8 +609,12 @@ internal object CivsSettlementPlans {
     private fun continueDeferredExterior(city: Settlement, prior: CivSettlementPlan,
         templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>, surface: CivTerrainSurface,
         retained: CivAutonomousAccess, profile: List<BuildingType>, failure: CivsRejection): CivSettlementPlan? {
-        if (!fullyLoadedSurvey(city, surface) || prior.plots.any { city.building(it.building.id)?.phase != BuildingPhase.ACTIVE })
-            return null
+        if (!fullyLoadedSurvey(city, surface)) return null
+        val retainedPlots = prior.plots.map { old ->
+            val active = city.building(old.building.id)?.takeIf { it.phase == BuildingPhase.ACTIVE } ?: return null
+            // A completed control relocation updates the active building before its adopted parcel.
+            old.copy(building = old.building.copy(control = active.control))
+        }
         val reason = CivsRejection(failure.reason, mapOf("stage" to "infrastructure"))
         val prepared = try {
             prepareOnce(city, templates, surface, retained, null, 0, profile, prior.halfWidth,
@@ -622,7 +626,7 @@ internal object CivsSettlementPlans {
         val marker = requireNotNull(prepared.deferredPerimeter)
         val plot = prepared.plots.single { it.building.id == marker.plotId }
         if (prepared.halfWidth != prior.halfWidth || prepared.walls != prior.walls || prepared.gates != prior.gates ||
-            prepared.plots.filterNot { it == plot } != prior.plots || prepared.routes - marker.plotId.toString() != prior.routes ||
+            prepared.plots.filterNot { it == plot } != retainedPlots || prepared.routes - marker.plotId.toString() != prior.routes ||
             (prior.walls + prior.gates).any { CivsAutonomousGeometry.overlaps(it, plot.envelope) }) return null
         val pending = prepared.copy(gateSides = prior.gateSides)
         val adopted = city.copy(autonomy = requireNotNull(city.autonomy).copy(plan = pending))
