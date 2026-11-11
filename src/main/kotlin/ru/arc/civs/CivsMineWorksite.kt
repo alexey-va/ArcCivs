@@ -24,7 +24,7 @@ internal data class CivMineExecution(val building: CivBuilding, val saved: CivMi
     val blockedSections: MutableMap<String, Need> = linkedMapOf(),
     var discoveryAdmissions: Int = 0,
     var unsealedExcavation: CivPosition? = null,
-    val legacyBlocks: Map<CivPosition, String?> = emptyMap())
+    val legacyBlocks: Map<CivPosition, String?> = emptyMap(), var lowerWorkSinceRailCheck: Int = 0)
 internal data class CivMineSafetyScan(val building: CivBuilding, val target: CivPosition, val progress: Long,
     val excavation: CivPosition?, val accessProgress: Long, val frontier: List<MineProtection>,
     val sections: Map<String, Long> = emptyMap(),
@@ -169,6 +169,15 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 maxOf(cursor.third, completedWork.miningStep.toInt()))
         }
         if (completedWork.status != "securing-mine") { mineFrontierDirty += workerId; mineSafety.remove(workerId) }
+        if (completedWork.status != "digging-mine" || completedWork.miningPlanVersion != CivsMinePlan.VERSION) return
+        val ordinal = completedWork.miningOrdinal ?: return
+        val access = completedWork.miningAccessStep ?: return
+        val execution = mineExecutions[building.id] ?: return
+        val plan = CivsMinePlan.forBuilding(building) ?: return
+        if (plan.steps.getOrNull(ordinal)?.floor?.let { it > 0 } != true ||
+            plan.completed(ordinal, access, completedWork.miningAccessSections.orEmpty()) ||
+            !plan.completed(ordinal, completedWork.miningStep, completedWork.miningSections.orEmpty())) return
+        execution.lowerWorkSinceRailCheck = (execution.lowerWorkSinceRailCheck + 1).coerceAtMost(LOWER_WORK_BEFORE_RAIL_CHECK)
     }
     fun changedCover(worldId: UUID, point: CivPosition) {
         mineCovers.entries.removeIf { (_, cover) -> cover.world == worldId && cover.x == point.x && cover.z == point.z &&
@@ -348,7 +357,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val saved = city.minePlans?.get(building.id.toString())
         val after = Bukkit.createBlockData(cell.after).material
         // The authored surface guard can stand in open air on its existing landing floor.
-        if (plan.version == 7 && plan.section(ordinal) == "0/shaft/railing" && before.isAir && block.type.isAir &&
+        if (plan.version == 7 && plan.section(ordinal) == SURFACE_RAILING && before.isAir && block.type.isAir &&
             local == plan.steps[ordinal].point && cell.after == plan.expectedAfter(ordinal, building.rotation)) {
             val support = observeMineHazard(world, point.copy(y = point.y - 1)) ?: return denied("chunks-unloaded")
             if (!soundMineFloor(support)) return denied("mine-early-floor")
@@ -802,7 +811,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 initial.second.toMutableMap(),
                 selected = previous?.selected, cursor = previous?.cursor ?: 0,
                 retryAt = previous?.retryAt?.toMutableMap() ?: hashMapOf(), lastDenial = previous?.lastDenial,
-                lastDeniedSection = previous?.lastDeniedSection, legacyBlocks = v1 + v2 + v3 + v4 + v5 + v6)
+                lastDeniedSection = previous?.lastDeniedSection, legacyBlocks = v1 + v2 + v3 + v4 + v5 + v6,
+                lowerWorkSinceRailCheck = previous?.lowerWorkSinceRailCheck ?: 0)
                 .also { mineExecutions[building.id] = it }
         }
         val legacy = execution.legacyBlocks
@@ -837,8 +847,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 break
             }
         }
-        val selected = execution.selected
-        val scanStart = selected?.let(::nextOrdinal) ?: steps.size
+        val originalSection = execution.selected
+        var scanStart = originalSection?.let(::nextOrdinal) ?: steps.size
         execution.ordinal = if (early != null && previousBelow && checkPrevious) requireNotNull(spineNext)
             else minOf(scanStart, steps.lastIndex)
         mineCursors[building.id] = Triple(building.level, progress, scanStart)
@@ -883,13 +893,32 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 return context.blocked(worker, "searching-work")
             }
         }
+        // A long sparse section can keep advancing without closing the upper shaft. Reconsider
+        // the surface guard only after the previous cut's native safety and dependencies finish.
+        if (originalSection != null && steps.getOrNull(scanStart)?.floor?.let { it > 0 } == true &&
+            execution.lowerWorkSinceRailCheck >= LOWER_WORK_BEFORE_RAIL_CHECK && execution.unsealedExcavation == null &&
+            available(SURFACE_RAILING) && geometry.sectionReady(SURFACE_RAILING, execution.prefix, execution.sections)) {
+            execution.lowerWorkSinceRailCheck = 0
+            val fence = geometry.structuralMaterials.first { it.endsWith("_FENCE") }
+            if (autonomous || CivsEquipment.plainCount(worker, fence) > 0) {
+                execution.cursor = sectionKeys.indexOf(originalSection)
+                execution.selected = SURFACE_RAILING
+                scanStart = requireNotNull(nextOrdinal(SURFACE_RAILING))
+                execution.ordinal = scanStart
+                mineCursors[building.id] = Triple(building.level, progress, scanStart)
+                CivsDiagnostics.event("mine_surface_railing_reconsidered", "city" to city.id, "worker" to worker.id,
+                    "building" to building.id, "previous_section" to originalSection, "ordinal" to scanStart,
+                    "point" to CivsWorksiteLayouts.point(building, steps[scanStart].point))
+            }
+        }
         if (scanStart == steps.size) return if (execution.prefix == steps.size.toLong())
             generateStone(city, worker, building, world, geometry, execution.prefix) else {
                 val denial = execution.lastDenial
                 context.blocked(worker, denial?.status ?: "worksite-protected", point = denial?.point,
                     reason = denial?.reason ?: "mine-sections-blocked", blockMaterial = denial?.blockMaterial)
             }
-        val indices = geometry.sections.getValue(requireNotNull(selected))
+        val selected = requireNotNull(execution.selected)
+        val indices = geometry.sections.getValue(selected)
         val startOffset = geometry.sectionCount(selected, execution.prefix, execution.sections).toInt()
         for (offset in startOffset until minOf(indices.size, startOffset + context.discoveryBudget.columns)) {
             if (context.nanoTime() >= context.discoveryBudget.deadline) return context.blocked(worker, "searching-work")
@@ -1353,6 +1382,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
     private fun position(block: Block) = CivPosition(block.x, block.y, block.z)
 
     companion object {
+        private const val SURFACE_RAILING = "0/shaft/railing"
+        private const val LOWER_WORK_BEFORE_RAIL_CHECK = 8
         private val EARLY_SURFACE_SECTIONS = listOf("0/shaft/entrance", "0/shaft/opening")
         private val WEEDS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN, Material.LARGE_FERN, Material.GLOW_LICHEN)
         private val UNBREAKABLE = setOf(Material.BEDROCK, Material.BARRIER, Material.END_PORTAL_FRAME, Material.END_PORTAL, Material.NETHER_PORTAL)

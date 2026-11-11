@@ -209,6 +209,102 @@ class CivsMineSparseTest : FunSpec({
         }
     }
 
+    for (hasFence in listOf(true, false))
+    test("committed lower sections reconsider the surface railing after checking the previous cut with fence=$hasFence") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("mine-surface-revisit").also(paper.server::addWorld)
+            val plugin = paper.createSimplePlugin("MineSurfaceRevisit")
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            try {
+                val mine = spatialBuilding("nordic", "miner", 1, CivPosition(0, 75, 0), 180)
+                val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                val rail = geometry.sections.getValue("0/shaft/railing").first()
+                val lower = "${geometry.floors.last().index}/shaft/landing"
+                val lowerSteps = geometry.sections.getValue(lower)
+                for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
+                fun native(index: Int) = CivsWorksiteLayouts.point(mine, geometry.steps[index].point).let { point ->
+                    world.getBlockAt(point.x, point.y, point.z)
+                }
+                for (index in 0 until rail) native(index).blockData = Bukkit.createBlockData(geometry.expectedAfter(index, mine.rotation))
+                var state = seedMinePaidSpine(world, mine, CivMinePlanState(geometry.version, rail.toLong(), sectionSteps = emptyMap()))
+                val top = CivsWorksiteLayouts.point(mine, geometry.bottom)
+                val backing = CivsWorksiteLayouts.point(mine, geometry.backing)
+                val ladder = geometry.steps.indexOfFirst { it.after?.startsWith("minecraft:ladder[") == true }
+                world.getBlockAt(top.x, top.y, top.z).blockData = Bukkit.createBlockData(geometry.expectedAfter(ladder, mine.rotation))
+                world.getBlockAt(backing.x, backing.y, backing.z).type = Material.COBBLESTONE
+                val supplied = spatialWorker(mine, "IRON_PICKAXE")
+                val worker = if (!hasFence) supplied else supplied.copy(items = CivsEquipment.slots(supplied).toMutableList().also {
+                    it[CivsEquipment.BAG + 3] = CivResidentItem("SPRUCE_FENCE", 16)
+                })
+                var city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans = mapOf(mine.id.toString() to state))
+                geometry.sectionReady("0/shaft/railing", state.nextStep, state.sectionSteps.orEmpty()) shouldBe true
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+                    val owner = CivsWorksites::class.java.getDeclaredField("mine").also { it.isAccessible = true }.get(runtime) as CivsMineWorksite
+                    val execution = CivMineExecution(mine, state, null, state.nextStep, state.nextStep,
+                        state.sectionSteps.orEmpty().toMutableMap(), selected = lower)
+                    owner.mineExecutions[mine.id] = execution
+                    for ((cycle, index) in lowerSteps.take(8).withIndex()) {
+                        val block = native(index)
+                        val after = geometry.expectedAfter(index, mine.rotation)
+                        val sections = geometry.advanceSection(index, state.sectionSteps.orEmpty())
+                        val work = CivWorldWork(worker.id, cycle.toLong(), mine.id, mine.entrance,
+                            listOf(CivPlanBlock(CivPosition(block.x, block.y, block.z), block.blockData.asString, after)),
+                            status = "digging-mine", miningPlanVersion = geometry.version, miningStep = state.nextStep,
+                            miningAccessStep = state.nextStep, miningAccessSections = state.sectionSteps, miningSections = sections,
+                            miningOrdinal = index)
+                        owner.completed(worker.id, mine, work.copy(status = "securing-mine"))
+                        execution.lowerWorkSinceRailCheck shouldBe cycle
+                        state = CivsMineProgress.after(mine, state, null, work)
+                        block.blockData = Bukkit.createBlockData(after)
+                        owner.completed(worker.id, mine, work)
+                        execution.lowerWorkSinceRailCheck shouldBe cycle + 1
+                        execution.selected shouldBe lower
+                    }
+                    city = city.copy(minePlans = mapOf(mine.id.toString() to state))
+                    for (index in geometry.sections.getValue("0/shaft/railing")) {
+                        val railBlock = native(index)
+                        val nativeColumn = listOf(Material.STONE, Material.COBBLESTONE, Material.AIR, Material.AIR,
+                            Material.COBBLESTONE, Material.AIR, Material.AIR)
+                        for ((offset, material) in nativeColumn.withIndex())
+                            world.getBlockAt(railBlock.x, railBlock.y + offset - 2, railBlock.z).type = material
+                    }
+                    repeat(128) {
+                        if (owner.mineExecutions[mine.id]?.lowerWorkSinceRailCheck != 0) runtime.pulse(listOf(city))
+                    }
+                    withClue(runtime.debug()) {
+                        val cursor = requireNotNull(owner.mineCursors[mine.id]).third
+                        geometry.section(cursor) shouldBe if (hasFence) "0/shaft/railing" else lower
+                        owner.mineExecutions[mine.id]?.lowerWorkSinceRailCheck shouldBe 0
+                    }
+                    if (hasFence) {
+                        val ring = geometry.sections.getValue("0/shaft/railing")
+                        for (index in ring.take(2)) {
+                            val currentWorker = city.workers.single()
+                            repeat(128) {
+                                if (runtime.plan(city, currentWorker) == null) runtime.pulse(listOf(city))
+                            }
+                            val work = requireNotNull(runtime.plan(city, currentWorker)) { runtime.debug().toString() }
+                            val target = native(index)
+                            work.miningOrdinal shouldBe index
+                            work.inputs shouldBe mapOf("SPRUCE_FENCE" to 1L)
+                            work.changes shouldBe listOf(CivPlanBlock(CivPosition(target.x, target.y, target.z), "minecraft:air",
+                                geometry.expectedAfter(index, mine.rotation)))
+                            runtime.validate(city, work)
+                            val committed = CivsRules.finishWorldWork(city, work, 100_000L + index)
+                            committed.minePlans!!.getValue(mine.id.toString()).excavation shouldBe state.excavation
+                            CivsEquipment.plainCount(committed.workers.single(), "SPRUCE_FENCE") shouldBe
+                                CivsEquipment.plainCount(currentWorker, "SPRUCE_FENCE") - 1
+                            target.blockData = Bukkit.createBlockData(work.changes.single().after)
+                            runtime.invalidate(currentWorker.id, work)
+                            city = committed
+                        }
+                    }
+                }
+            } finally { tasks.close() }
+        }
+    }
+
     test("optional mine writes use native terrain cover and reject crafted basement blocks") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("mine-cover-authority").also(paper.server::addWorld)
