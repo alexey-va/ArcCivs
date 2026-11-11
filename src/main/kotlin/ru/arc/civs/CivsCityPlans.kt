@@ -24,15 +24,27 @@ internal class CivsCityPlans(
     private val retainedRoutes = mutableMapOf<UUID, RetainedRoutes>()
     private val routeChunkPositions = mutableMapOf<UUID, List<CivPosition>>()
 
-    internal data class InitialMineKey(val city: UUID, val owner: UUID, val world: UUID, val plan: UUID,
-        val building: UUID, val type: BuildingType, val level: Int, val schematic: String,
+    internal data class InitialMineBuildingIdentity(val building: UUID, val type: BuildingType, val level: Int, val schematic: String,
         val anchor: CivPosition, val rotation: Int, val bounds: CivBox, val entrance: CivPosition)
+    internal data class InitialMineKey(val city: UUID, val owner: UUID, val world: UUID, val plan: UUID,
+        val current: InitialMineBuildingIdentity, val sources: List<InitialMineBuildingIdentity>)
     internal data class InitialMineProof(val key: InitialMineKey, val cuts: Map<CivPosition, String>)
     private val initialMines = mutableMapOf<UUID, List<InitialMineProof>>()
 
-    private fun initialMineKey(city: Settlement, building: CivBuilding) = InitialMineKey(city.id, city.owner,
-        city.worldId, CivsWarehouseRefit.retainedPlanId(building), building.id, building.type, building.level,
-        building.schematicId, building.anchor, building.rotation, building.bounds, building.entrance)
+    private fun initialMineIdentity(building: CivBuilding) = InitialMineBuildingIdentity(building.id, building.type,
+        building.level, building.schematicId, building.anchor, building.rotation, building.bounds, building.entrance)
+
+    private fun initialMineKey(city: Settlement, building: CivBuilding): InitialMineKey {
+        val current = initialMineIdentity(building)
+        // The retained construction capture may predate an upgrade. Only accepted ACTIVE predecessors are source owners;
+        // their procedural cursor is not construction authority and ordinary mining does not change this cache key.
+        val saved = city.minePlans?.get(building.id.toString())
+        val historical = saved?.takeIf { CivsMineProgress.validLevels(building, it) }?.levels.orEmpty()
+            .filter { it.building.phase == BuildingPhase.ACTIVE }.sortedBy { it.building.level }
+            .map { initialMineIdentity(it.building) }
+        return InitialMineKey(city.id, city.owner, city.worldId, CivsWarehouseRefit.retainedPlanId(building),
+            current, listOf(current) + historical)
+    }
 
     private fun initialMineBuildings(city: Settlement) = city.buildings.filter {
         it.phase == BuildingPhase.ACTIVE && it.type == BuildingType.QUARRY &&
@@ -44,7 +56,7 @@ internal class CivsCityPlans(
     fun initialMinesUnchanged(before: Settlement?, after: Settlement): Boolean =
         before != null && initialMineKeys(before) == initialMineKeys(after)
 
-    /** Only the original 27 mouth cuts; control/production changes never rewrite the retained capture. */
+    /** Only the current 27 mouth cuts; control/production changes never rewrite the retained capture. */
     fun initialMineBlock(city: Settlement, building: CivBuilding, point: CivPosition, before: String): Boolean {
         if (building.phase != BuildingPhase.ACTIVE || building.type != BuildingType.QUARRY) return false
         val key = initialMineKey(city, building)
@@ -60,7 +72,7 @@ internal class CivsCityPlans(
                 val key = initialMineKey(city, building)
                 if (plan == null || plan.id != key.plan || plan.cityId != city.id || plan.worldId != city.worldId ||
                     plan.building.phase !in setOf(BuildingPhase.CONSTRUCTING, BuildingPhase.ACTIVE) ||
-                    initialMineKey(city, plan.building) != key) return@thenApplyAsync null
+                    initialMineIdentity(plan.building) !in key.sources) return@thenApplyAsync null
                 val mine = CivsMinePlan.forBuilding(building) ?: return@thenApplyAsync null
                 if (mine.version != 7) return@thenApplyAsync null
                 val targets = mine.sections["0/shaft/opening"].orEmpty().asSequence()

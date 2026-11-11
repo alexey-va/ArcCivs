@@ -8,6 +8,7 @@ import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Files
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
@@ -99,6 +100,91 @@ class CivsInitialMineProjectionTest : FunSpec({
                     owner.prepareInitialMines(city).join() shouldBe emptyList()
                     Files.writeString(root.resolve("plans").resolve("${mine.id}.json"), "{broken")
                     shouldThrow<CompletionException> { owner.prepareInitialMines(city).join() }
+                }
+            } finally { tasks.close(); root.toFile().deleteRecursively() }
+        }
+    }
+
+    test("an upgraded mouth retains exact historical placement authority without using old procedural progress") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val plugin = paper.createSimplePlugin("UpgradedMineProjection")
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            val root = Files.createTempDirectory("upgraded-mine-projection-")
+            try {
+                CivsStore(root, Executor(Runnable::run)).use { store ->
+                    val previous = spatialBuilding("nordic", "miner", 1, CivPosition(0, 75, 0), 90)
+                    val mine = spatialBuilding("nordic", "miner", 2, previous.anchor, previous.rotation)
+                        .copy(id = previous.id, entrance = previous.entrance)
+                    val old = CivMinePlanState(CivsMinePlan.VERSION, 0, sectionSteps = emptyMap())
+                    val upgraded = requireNotNull(CivsMineProgress.upgraded(previous, mine, old, null))
+                    CivsMineProgress.validLevels(mine, upgraded) shouldBe true
+                    val city = CivsRules.validate(spatialCity(UUID.randomUUID(), listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+                        .copy(minePlans = mapOf(mine.id.toString() to upgraded)))
+                    val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                    val targets = geometry.sections.getValue("0/shaft/opening")
+                        .map { CivsWorksiteLayouts.point(mine, geometry.steps[it].point) }.toSet()
+                    targets.size shouldBe 27
+                    val point = targets.first { it.y == CivsWorksiteLayouts.point(mine, geometry.bottom).y }
+                    val neighbour = point.copy(x = point.x + 4)
+                    (neighbour in targets) shouldBe false
+                    val retained = CivPlacementPlan(previous.id, city.id, city.worldId,
+                        previous.copy(phase = BuildingPhase.CONSTRUCTING), listOf(
+                            CivPlanBlock(point, "minecraft:dirt", "minecraft:cobblestone"),
+                            CivPlanBlock(neighbour, "minecraft:air", "minecraft:cobblestone")), "a".repeat(64))
+                    store.savePlan(retained).join() shouldBe retained
+                    val captureFile = root.resolve("plans").resolve("${previous.id}.json")
+                    val bytes = Files.readAllBytes(captureFile)
+                    val hash = MessageDigest.getInstance("SHA-256").digest(bytes)
+                    val owner = CivsCityPlans(mockk(), mockk(), tasks, store, Executor(Runnable::run), mockk())
+                    val prepared = owner.prepareInitialMines(city).join()
+                    prepared.size shouldBe 1
+                    prepared.single().cuts shouldBe mapOf(point to "minecraft:cobblestone")
+                    owner.initialMineBlock(city, mine, point, "minecraft:cobblestone") shouldBe false
+                    owner.publishInitialMines(city.id, prepared)
+                    owner.initialMineBlock(city, mine, point, "minecraft:cobblestone") shouldBe true
+                    owner.initialMineBlock(city, mine, point, "minecraft:stone") shouldBe false
+                    owner.initialMineBlock(city, mine, neighbour, "minecraft:cobblestone") shouldBe false
+                    store.loadPlan(previous.id).join() shouldBe retained
+                    Files.readAllBytes(captureFile).contentEquals(bytes) shouldBe true
+                    MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(captureFile)).contentEquals(hash) shouldBe true
+
+                    val witness = upgraded.levels!!.single()
+                    for (changed in listOf(
+                        upgraded.copy(levels = null),
+                        upgraded.copy(levels = listOf(witness.copy(building = witness.building.copy(
+                            anchor = witness.building.anchor.copy(x = witness.building.anchor.x + 1))))),
+                        upgraded.copy(levels = listOf(witness.copy(building = witness.building.copy(phase = BuildingPhase.CONSTRUCTING)))),
+                        upgraded.copy(levels = listOf(witness.copy(nextStep = Long.MAX_VALUE))),
+                    )) {
+                        val candidate = city.copy(minePlans = mapOf(mine.id.toString() to changed))
+                        owner.initialMinesUnchanged(city, candidate) shouldBe false
+                        owner.initialMineBlock(candidate, mine, point, "minecraft:cobblestone") shouldBe false
+                        owner.prepareInitialMines(candidate).join() shouldBe emptyList()
+                    }
+                    for (candidate in listOf(city.copy(id = UUID.randomUUID()), city.copy(worldId = UUID.randomUUID()),
+                        city.copy(owner = UUID.randomUUID()))) {
+                        owner.initialMinesUnchanged(city, candidate) shouldBe false
+                        owner.initialMineBlock(candidate, mine, point, "minecraft:cobblestone") shouldBe false
+                        if (candidate.owner == city.owner) owner.prepareInitialMines(candidate).join() shouldBe emptyList()
+                    }
+                    for (changed in listOf(
+                        retained.copy(cityId = UUID.randomUUID()),
+                        retained.copy(worldId = UUID.randomUUID()),
+                        retained.copy(building = retained.building.copy(schematicId = retained.building.schematicId + "-other")),
+                        retained.copy(building = retained.building.copy(phase = BuildingPhase.SITE)),
+                    )) {
+                        store.savePlan(changed).join()
+                        val rejected = owner.prepareInitialMines(city).join()
+                        rejected shouldBe emptyList()
+                        owner.publishInitialMines(city.id, rejected)
+                        owner.initialMineBlock(city, mine, point, "minecraft:cobblestone") shouldBe false
+                    }
+                    store.savePlan(retained).join() shouldBe retained
+                    Files.readAllBytes(captureFile).contentEquals(bytes) shouldBe true
+                    MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(captureFile)).contentEquals(hash) shouldBe true
+                    owner.publishInitialMines(city.id, owner.prepareInitialMines(city).join())
+                    owner.initialMineBlock(city, mine, point, "minecraft:cobblestone") shouldBe true
+                    store.loadPlan(previous.id).join() shouldBe retained
                 }
             } finally { tasks.close(); root.toFile().deleteRecursively() }
         }

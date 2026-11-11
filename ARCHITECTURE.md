@@ -1352,6 +1352,9 @@ Natural dripstone blocks provide rock and terrain cover. Dry pointed dripstone c
 cleared or replaced by the required mine shell, but never supplies cover. Waterlogged
 pointed dripstone stops the action. Physical mining preserves native tool drops once;
 autonomous terrain work retains its existing empty item outputs.
+An upgraded V7 mouth may reuse the original placement capture only when it matches
+a validated historical active mine. Its projection targets the current mouth, checks
+the exact native before-state, and expires when the building identities, owner or world change.
 
 ## Settlement commerce
 
