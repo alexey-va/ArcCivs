@@ -226,8 +226,8 @@ internal class CitizenPacketRoute(
         path.clear()
     }
 
-    fun replan(from: Location, bodies: List<BoundingBox>): CitizenPacketRoute =
-        CitizenPacketRoute(world, from, target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings,
+    fun replan(from: Location, bodies: List<BoundingBox>, destination: Location? = null): CitizenPacketRoute =
+        CitizenPacketRoute(world, from, destination ?: target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings,
             snapshotPolicy = snapshotPolicy)
 
     private fun permits(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to) &&

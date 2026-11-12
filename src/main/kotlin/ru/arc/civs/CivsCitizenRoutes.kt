@@ -748,7 +748,8 @@ internal class CivsCitizenRoutes(
     }
 
     /** Retry changed geometry from observed feet; a bounded person snapshot allows a real detour. */
-    fun replanNavigation(actor: CitizenActor, route: CitizenRoute, reason: String, now: Long): Boolean {
+    fun replanNavigation(actor: CitizenActor, route: CitizenRoute, reason: String, now: Long,
+        destination: Location? = null): Boolean {
         if (route.wanderWalk != null) return false
         if (route.previousMotion != null) return true
         if (reason !in setOf("movement-blocked", "path-changed", "no-progress", "turn-loop", "player-blocked", "resident-blocked") ||
@@ -766,7 +767,15 @@ internal class CivsCitizenRoutes(
         route.timing.prepare(now)
         route.preparationReportAfter = now + 2_000
         route.previousMotion = route.motion
-        route.motion = navigation.replan(route.motion, from, bodies)
+        route.motion = navigation.replan(route.motion, from, bodies, destination = destination)
+        if (destination != null) {
+            route.bodyBlockedSince = null
+            route.nativeCollisionTicks = 0
+            route.bodyPassUntil = 0
+            route.bodyDetourStarted = true
+            route.bodyDetourFailed = false
+            actor.collisionResident = null
+        }
         route.completion = null
         route.path = null
         route.progressTick = runtime.navigationTick

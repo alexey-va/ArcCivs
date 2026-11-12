@@ -9,7 +9,9 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsCitizenArrivalBodyTest : FunSpec({
-    test("a builder reaches a clear adjacent stance when its full step meets the arrived builder") {
+    for ((case, distance, blockerOffset) in listOf(Triple("centre", .73821356237, 0.0),
+        Triple("offset", .9703200338972238, -.282320033895)))
+    test("a builder reaches a clear adjacent stance when its full step meets the arrived builder case=$case") {
         val blockedId = UUID.fromString("462109b1-0313-4d22-962e-97c52d63a826")
         val blockerId = UUID.fromString("eab4f712-162d-440f-baa7-cc7bdcf0fbc2")
         residentRuntime(workerId = blockedId) { h ->
@@ -25,9 +27,21 @@ class CivsCitizenArrivalBodyTest : FunSpec({
             for (x in -1..2) for (z in -2..1) h.world.loadChunk(x, z)
             h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first().copy(level = 2), hut, house),
                 construction = order, workers = listOf(h.city.workers.single().copy(assignment = hut.id,
-                    completedCycles = 156, nextDeliveryAt = 1),
+                    completedCycles = if (case == "centre") 156 else 161, nextDeliveryAt = 1),
                     CivWorker(blockerId, "OtherBuilder", hut.id, completedCycles = 681, nextDeliveryAt = 1))))
+            if (case == "offset") {
+                // Fresh .293 native selection: north grass and current full floors are clear; the south approach has a barrel.
+                val stance = h.constructionTarget()
+                for (x in stance.x - 1..stance.x + 1) {
+                    h.world.getBlockAt(x, stance.y - 1, stance.z - 1).type = Material.GRASS_BLOCK
+                    h.world.getBlockAt(x, stance.y - 1, stance.z).type =
+                        if (x < stance.x + 1) Material.COARSE_DIRT else Material.GRASS_BLOCK
+                }
+                h.world.getBlockAt(stance.x - 1, stance.y, stance.z + 1).type = Material.BARREL
+                h.world.getBlockAt(stance.x, stance.y - 1, stance.z + 1).type = Material.DIRT_PATH
+            }
             h.world.time = 1_000
+            if (case == "offset") h.recoveryMillis = 1_000
             h.holdNavigation = true
             h.navigationNow = 2_000
             h.owner.pulse(2_000)
@@ -41,8 +55,8 @@ class CivsCitizenArrivalBodyTest : FunSpec({
             }
             val goal = h.constructionTarget()
             // Auto1's observed offset is translated to the fixture's validated exterior stance.
-            val from = Location(h.world, goal.x + .5 - .73821356237, goal.y.toDouble(), goal.z + .5).also { it.yaw = 270f }
-            val occupied = Location(h.world, goal.x + .5, goal.y.toDouble(), goal.z + .5).also { it.yaw = 270f }
+            val from = Location(h.world, goal.x + .5 - distance, goal.y.toDouble(), goal.z + .5).also { it.yaw = 270f }
+            val occupied = Location(h.world, goal.x + .5 + blockerOffset, goal.y.toDouble(), goal.z + .5).also { it.yaw = 270f }
             routes.cancelRoute(actor)
             routes.cancelRoute(other)
             actor.npc.teleport(from)
@@ -69,14 +83,29 @@ class CivsCitizenArrivalBodyTest : FunSpec({
                     { _, _ -> h.passageLocked }) }) shouldBe null
                 proposals.size shouldBe 1
                 (actual.distance(proposals.single()) > .05) shouldBe true
-                val first = actual.clone().add(.05, 0.0, 0.0)
-                val second = first.clone().add(.05, 0.0, 0.0)
+                val first = actual.clone().add(if (case == "centre") .05 else 0.0, 0.0, if (case == "centre") 0.0 else -.05)
+                val second = first.clone().add(if (case == "centre") .05 else 0.0, 0.0, if (case == "centre") 0.0 else -.05)
                 for ((start, end) in listOf(actual to first, first to second)) {
                     citizenResidentNudgeClear(actor.npc, start, end) shouldBe true
                     collisions.residentMoveAllowed(actor, start, end) shouldBe true
                     citizenPacketSupported(h.world, end.point()) shouldBe true
                 }
-                citizenAtSupportedEndpoint(h.world, second.point(), goal) shouldBe true
+                if (case == "centre") citizenAtSupportedEndpoint(h.world, second.point(), goal) shouldBe true
+                else {
+                    val centre = goal.location(h.world)
+                    val west = centre.clone().add(-.625, 0.0, 0.0)
+                    val north = centre.clone().add(0.0, 0.0, -.625)
+                    val corner = actual.clone().add(0.0, 0.0, -.625)
+                    collisions.residentMoveAllowed(actor, west, west) shouldBe false
+                    collisions.residentMoveAllowed(actor, north, north) shouldBe true
+                    collisions.residentMoveAllowed(actor, actual, north) shouldBe false
+                    citizenAtSupportedEndpoint(h.world, north.point(), goal) shouldBe true
+                    for ((start, end) in listOf(actual to corner, corner to north)) {
+                        collisions.residentMoveAllowed(actor, start, end) shouldBe true
+                        citizenFlatSupportClear(start.point(), end.point()) { citizenPacketSupported(h.world, it) } shouldBe true
+                        citizenPacketStepClear(h.world, start.point(), end.point(), false) shouldBe true
+                    }
+                }
                 val player = h.playerAt(second)
                 collisions.residentMoveAllowed(actor, first, second) shouldBe false
                 player.teleport(Location(h.world, 45.5, 64.0, 20.5))
@@ -96,7 +125,7 @@ class CivsCitizenArrivalBodyTest : FunSpec({
                     val currentCity = h.city
                     val currentPlan = actor.plan
                     if (invalid == "order") h.city = h.city.copy(construction = order.copy(id = UUID.randomUUID()))
-                    else actor.plan = actor.plan.copy(token = actor.plan.token.copy(completedCycles = 157))
+                    else actor.plan = actor.plan.copy(token = actor.plan.token.copy(completedCycles = actor.plan.token.completedCycles + 1))
                     repeat(20) { h.navigate() }
                     withClue("stale $invalid") { actor.npc.location shouldBe actual }
                     h.observedWork(blockedId) shouldBe 0L
@@ -109,6 +138,19 @@ class CivsCitizenArrivalBodyTest : FunSpec({
                     requireNotNull(actor.route).motion.waitingForCollision shouldBe true
                 }
 
+                if (case == "offset") {
+                    h.holdNavigation = true
+                    repeat(20) { if (actor.route?.previousMotion == null) h.navigate() }
+                    val detour = requireNotNull(actor.route)
+                    (detour.previousMotion != null) shouldBe true
+                    detour.motion.searching shouldBe true
+                    val now = requireNotNull(h.navigationNow)
+                    withClue("detour navigation clock=$now recovery clock=${h.recoveryMillis}") {
+                        (detour.timing.preparationElapsed(now) in 0L..1_000L) shouldBe true
+                        (detour.preparationReportAfter > now) shouldBe true
+                    }
+                    h.releaseNavigation()
+                }
                 repeat(240) { tick ->
                     h.navigate()
                     if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))

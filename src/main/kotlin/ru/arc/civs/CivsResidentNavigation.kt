@@ -148,11 +148,12 @@ internal class CivsResidentNavigation(
             corridor = corridor, snapshotPolicy = snapshotPolicy))
 
     fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList(),
-        refreshSnapshots: Boolean = bodies.isEmpty()): CitizenPacketRoute {
+        refreshSnapshots: Boolean = bodies.isEmpty(), destination: Location? = null): CitizenPacketRoute {
         checkOwner()
         from.world?.let { world ->
             val points = listOf(CivPosition(from.blockX, from.blockY, from.blockZ)) +
-                listOfNotNull(route.destination?.let { CivPosition(it.blockX, it.blockY, it.blockZ) })
+                listOfNotNull(route.destination?.let { CivPosition(it.blockX, it.blockY, it.blockZ) },
+                    destination?.let { CivPosition(it.blockX, it.blockY, it.blockZ) })
             points.forEach { terrain.changed(world.uid, it) }
             // Resident bodies belong to this search, not to the shared native chunk generation.
             if (refreshSnapshots) points.forEach { snapshots.changed(world.uid, it); invalidateShared(world.uid, it) }
@@ -160,7 +161,7 @@ internal class CivsResidentNavigation(
         // Replacing an unfinished search releases its admission slot. A ready previous path
         // remains with the caller so a blocked-person detour can fall back to waiting on it.
         if (route.searching) route.cancel()
-        return admit(route.replan(from, bodies))
+        return admit(route.replan(from, bodies, destination))
     }
 
     private fun admit(route: CitizenPacketRoute): CitizenPacketRoute {

@@ -411,7 +411,7 @@ internal class CivsCitizenCollisions(
     }
 
     /** An occupied endpoint still requires walking to a clear, supported side before accepting arrival. */
-    fun stepPendingEndpointArrival(actor: CitizenActor, route: CitizenRoute): Boolean {
+    fun stepPendingEndpointArrival(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
         val pending = actor.plan.pendingStockDelivery
         val depot = pending != null && actor.cycle.phase == CitizenPhase.RETURNING && route.authored == actor.plan.storage
         val builder = actor.plan.type == BuildingType.BUILDER_HUT && actor.plan.token.constructionId != null &&
@@ -441,18 +441,26 @@ internal class CivsCitizenCollisions(
         if (routes.arrivedAt(actor, city, world, route.authored)) return false
 
         val occupied = shelterOccupied(actor)
+        var detour: Location? = null
         for ((dx, dz) in listOf(-.625 to 0.0, .625 to 0.0, 0.0 to -.625, 0.0 to .625)) {
             val stance = Location(world, entrance.x + dx, from.y, entrance.z + dz)
-            if (!citizenArrived(stance, entrance) || !residentRouteStepAllowed(actor, city, from, stance) ||
-                !citizenResidentStepClear(npc, stance, stance, occupied) || !residentStepAllowed(npc, stance, stance) ||
-                !citizenResidentStepClear(npc, from, stance, occupied) || !yieldPlayerClear(actor, from, stance) ||
-                !citizenFlatSupportClear(from.point(), stance.point()) { citizenPacketSupported(world, it) } ||
-                !citizenPacketStepClear(world, from.point(), stance.point(), false)) continue
-            val step = stance.toVector().subtract(from.toVector())
-            val length = step.length()
-            if (length > .000001 && nudgeResident(npc, step.multiply(minOf(1.0, .05 / length)))) return true
+            if (citizenArrived(stance, entrance) && residentRouteStepAllowed(actor, city, from, stance) &&
+                citizenResidentStepClear(npc, stance, stance, occupied) && residentStepAllowed(npc, stance, stance) &&
+                citizenResidentStepClear(npc, from, stance, occupied) && yieldPlayerClear(actor, from, stance) &&
+                citizenFlatSupportClear(from.point(), stance.point()) { citizenPacketSupported(world, it) } &&
+                citizenPacketStepClear(world, from.point(), stance.point(), false)) {
+                val step = stance.toVector().subtract(from.toVector())
+                val length = step.length()
+                if (length > .000001 && nudgeResident(npc, step.multiply(minOf(1.0, .05 / length)))) return true
+            }
+            // A clear side can require walking around the occupant, rather than cutting through its body.
+            if (builder && citizenAtSupportedEndpoint(world, stance.point(), route.authored) &&
+                residentRouteStepAllowed(actor, city, stance, stance) && citizenPacketBodyClear(world, stance.point(), false) &&
+                citizenResidentStepClear(npc, stance, stance, occupied) && residentStepAllowed(npc, stance, stance) &&
+                yieldPlayerClear(actor, stance, stance) &&
+                (detour == null || from.distanceSquared(stance) < from.distanceSquared(requireNotNull(detour)))) detour = stance
         }
-        return false
+        return detour?.let { routes.replanNavigation(actor, route, "resident-blocked", now, it) } ?: false
     }
 
     /** A finished food route can have no normal body-separation step even though its terrain is passable. */
