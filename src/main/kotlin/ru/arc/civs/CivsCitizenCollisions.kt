@@ -410,10 +410,14 @@ internal class CivsCitizenCollisions(
         return routes.retryDeliveryStanding(actor, route, courier, blocker.workerId, now)
     }
 
-    /** A saved-stock return still earns its own depot arrival after walking to a clear side of the entrance. */
-    fun stepPendingDepotArrival(actor: CitizenActor, route: CitizenRoute): Boolean {
-        val pending = actor.plan.pendingStockDelivery ?: return false
-        if (actor.cycle.phase != CitizenPhase.RETURNING || route.authored != actor.plan.storage ||
+    /** An occupied endpoint still requires walking to a clear, supported side before accepting arrival. */
+    fun stepPendingEndpointArrival(actor: CitizenActor, route: CitizenRoute): Boolean {
+        val pending = actor.plan.pendingStockDelivery
+        val depot = pending != null && actor.cycle.phase == CitizenPhase.RETURNING && route.authored == actor.plan.storage
+        val builder = actor.plan.type == BuildingType.BUILDER_HUT && actor.plan.token.constructionId != null &&
+            actor.cycle.phase == CitizenPhase.TO_WORK && route.authored == actor.plan.workplace &&
+            actor.plan.idleReason in listOf(null, "placing") && !actor.plan.suppliesNeeded
+        if ((!depot && !builder) ||
             route.completion != null || route.intermediate || route.motion.continuation || route.motion.failure != null) return false
         val npc = actor.npc
         val world = npc.world
@@ -421,10 +425,20 @@ internal class CivsCitizenCollisions(
         val entrance = route.authored.location(world)
         if (from.distanceSquared(entrance) > 4.0 || abs(from.y - entrance.y) > .5) return false
         val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.worldId == world.uid &&
-            it.pendingDeletion == null && it.autonomy?.paused == false && it.inventory == null } ?: return false
-        if (city.workers.firstOrNull { it.id == actor.workerId }?.pendingStock != pending ||
-            city.buildings.none { CivsRules.isDepot(it) && it.entrance == route.authored } ||
-            routes.arrivedAt(actor, city, world, route.authored)) return false
+            it.pendingDeletion == null && it.autonomy?.paused != true } ?: return false
+        val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
+        if (depot) {
+            if (city.inventory != null || city.autonomy?.paused != false || worker.pendingStock != pending ||
+                city.buildings.none { CivsRules.isDepot(it) && it.entrance == route.authored }) return false
+        } else {
+            val orderId = actor.plan.token.constructionId ?: return false
+            val assignment = worker.assignment?.let(city::building) ?: return false
+            if (city.construction?.id != orderId || actor.plan.token !=
+                CitizenToken(worker.assignment, worker.completedCycles, worker.nextDeliveryAt, orderId) ||
+                !CivsRules.isBuilder(city, assignment) || !CivsRules.builderCanWork(city, assignment) ||
+                workRuntime.constructionWorkplace(city, orderId) != route.authored) return false
+        }
+        if (routes.arrivedAt(actor, city, world, route.authored)) return false
 
         val occupied = shelterOccupied(actor)
         for ((dx, dz) in listOf(-.625 to 0.0, .625 to 0.0, 0.0 to -.625, 0.0 to .625)) {
