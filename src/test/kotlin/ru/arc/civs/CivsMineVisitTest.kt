@@ -14,6 +14,70 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsMineVisitTest : FunSpec({
+    test("an upgraded miner arrives from its paid prior-level stance before rebuilding the current prefix") {
+        mineVisitFixture { h ->
+            val previous = h.mine
+            val oldPlan = requireNotNull(CivsMinePlan.forBuilding(previous))
+            val paid = oldPlan.normalizedProgress(0,
+                mapOf("spine" to oldPlan.sections.getValue("spine").size.toLong()))
+            val oldState = CivMinePlanState(CivsMinePlan.VERSION, paid.first, sectionSteps = paid.second)
+            val mine = previous.copy(level = 2, schematicId = previous.schematicId.dropLast(1) + "2")
+            val state = requireNotNull(CivsMineProgress.upgraded(previous, mine, oldState, null))
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map { if (it.id == mine.id) mine else it },
+                minePlans = mapOf(mine.id.toString() to state)))
+            val before = h.city
+            val standing = h.standing.copy(y = 60)
+            val focus = standing.copy(x = standing.x + 3)
+            for (x in standing.x + 1..focus.x) for (y in standing.y..standing.y + 2)
+                h.world.getBlockAt(x, y, standing.z).type = Material.AIR
+            h.world.getBlockAt(focus.x, focus.y, focus.z).type = Material.STONE
+            h.at = standing.location(h.world)
+            h.world.time = 0
+            val action = CivWorldWork(h.worker.id, h.worker.completedCycles, mine.id, standing,
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")), durationMillis = 2_000,
+                status = "digging-mine", focus = focus, miningPlanVersion = CivsMinePlan.VERSION,
+                miningStep = 0, miningAccessStep = 0, miningAccessSections = emptyMap())
+            h.actor.plan = h.actor.plan.copy(workplace = standing, workMillis = action.durationMillis, worldWork = action)
+            h.actor.cycle = h.actor.plan.cycle().also { it.start() }
+            h.runtime.actors[h.worker.id] = h.actor
+            val (owner, routes) = h.nativeWorkOwner()
+            val current = requireNotNull(CivsMinePlan.forBuilding(mine))
+            state.nextStep shouldBe 0L
+            state.sectionSteps shouldBe emptyMap()
+            CivsMineProgress.validLevels(mine, state) shouldBe true
+            current.builtStanding(CivsMinePlan.localPoint(mine, standing), 0) shouldBe false
+            CivsMineProgress.priorStanding(mine, state, standing) shouldBe true
+            citizenMineWorkRouteAllowed(mine, h.at.point(), 0, state, emptyMap()) shouldBe true
+            citizenPacketSupported(h.world, h.at.point()) shouldBe true
+            citizenCanReachBlock(h.npc, focus, CITIZEN_MINE_REACH) shouldBe true
+
+            h.city = before.copy(minePlans = mapOf(mine.id.toString() to state.copy(levels = null)))
+            routes.canWorkFrom(h.actor, action) shouldBe false
+            val unpaid = state.copy(levels = listOf(state.levels!!.single().copy(nextStep = 0, sectionSteps = emptyMap())))
+            CivsMineProgress.validLevels(mine, unpaid) shouldBe true
+            h.city = before.copy(minePlans = mapOf(mine.id.toString() to unpaid))
+            routes.canWorkFrom(h.actor, action) shouldBe false
+            h.city = before
+            val support = (standing.y - 1..standing.y + 1).map { h.world.getBlockAt(standing.x, it, standing.z) }
+            val supported = support.map { it.blockData }
+            support.forEach { it.type = Material.AIR }
+            routes.canWorkFrom(h.actor, action) shouldBe false
+            support.zip(supported).forEach { (block, data) -> block.blockData = data }
+            val wall = (standing.y..standing.y + 2).map { h.world.getBlockAt(standing.x + 1, it, standing.z) }
+            wall.forEach { it.type = Material.STONE }
+            routes.canWorkFrom(h.actor, action) shouldBe false
+            wall.forEach { it.type = Material.AIR }
+
+            routes.canWorkFrom(h.actor, action) shouldBe true
+            routes.arrivedAt(h.actor, h.city, h.world, standing) shouldBe true
+            owner.update(h.actor, h.city, h.world, h.now)
+            h.actor.cycle.phase shouldBe CitizenPhase.WORKING
+            h.actor.cycle.observedWorkMillis shouldBe 0L
+            h.city shouldBe before
+            h.world.getBlockAt(focus.x, focus.y, focus.z).type shouldBe Material.STONE
+        }
+    }
+
     test("a paid native ladder visit walks down and back without work mining progress items or delivery") {
         mineVisitFixture { h ->
             val before = h.city

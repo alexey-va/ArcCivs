@@ -847,10 +847,11 @@ internal class CivsCitizenRoutes(
             val feet = actor.npc.location
             val standing = CivPosition(feet.blockX, feet.y.roundToInt(), feet.blockZ)
             val geometry = CivsMinePlan.forBuilding(mine, work.miningPlanVersion ?: CivsMinePlan.VERSION) ?: return false
-            if (!geometry.builtStanding(CivsMinePlan.localPoint(mine, standing), work.miningAccessStep ?: work.miningStep,
-                    work.miningAccessSections.orEmpty()) ||
+            val state = city.minePlans?.get(mine.id.toString())
+            if ((!geometry.builtStanding(CivsMinePlan.localPoint(mine, standing), work.miningAccessStep ?: work.miningStep,
+                    work.miningAccessSections.orEmpty()) && !CivsMineProgress.priorStanding(mine, state, standing)) ||
                 !citizenMineWorkRouteAllowed(mine, feet.point(), work.miningAccessStep ?: work.miningStep,
-                    city.minePlans?.get(mine.id.toString()), work.miningAccessSections)) return false
+                    state, work.miningAccessSections)) return false
         }
         val eye = actor.npc.location.clone().add(0.0, actor.npc.eyeHeight, 0.0)
         return citizenWorkFocus(work)?.let { citizenReachableBlockPoint(actor.npc.world, eye, it,
