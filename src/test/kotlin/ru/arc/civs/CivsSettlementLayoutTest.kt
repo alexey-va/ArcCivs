@@ -37,6 +37,46 @@ class CivsSettlementLayoutTest : FunSpec({
         route.zipWithNext().all { (a, b) -> kotlin.math.abs(a.y - b.y) <= 1 } shouldBe true
     }
 
+    for ((step, water) in listOf(1 to false, 2 to false, 1 to true))
+    test("new road respects the paid gate standing grade step=$step water=$water") {
+        val base = layoutFixtureCity()
+        val feet = CivPosition(12, 66, 12)
+        val gateFloor = CivPosition(12, 65 + step, 13)
+        val paid = CivSettlementPiece(layoutId("retained-gate-grade-$step-$water"), BuildingType.GATE,
+            CivBox(gateFloor.copy(y = if (water) 64 else gateFloor.y), gateFloor.copy(y = gateFloor.y + 5)),
+            gateFloor.copy(y = gateFloor.y + 1, x = gateFloor.x + 1), buildList {
+                if (water) for (y in 64..gateFloor.y)
+                    add(CivSettlementBlock(gateFloor.copy(y = y), "minecraft:cobblestone"))
+                // An unchanged paid floor need not appear in the capture; its first authored cell is AIR.
+                for (y in gateFloor.y + 1..gateFloor.y + 5)
+                    add(CivSettlementBlock(gateFloor.copy(y = y), "minecraft:air"))
+            }, listOf(gateFloor.copy(y = gateFloor.y + 1)),
+            waterFoundations = if (water) listOf(CivWaterFoundation(gateFloor.x, gateFloor.z, gateFloor.y, gateFloor.y, 63)) else emptyList(),
+            paidGateFloors = if (water) listOf(gateFloor) else emptyList())
+        val before = Gson().toJson(paid)
+        val city = base.copy(buildings = base.buildings + CivsInfrastructure.building(paid).copy(phase = BuildingPhase.ACTIVE))
+        val surface = layoutSurface(city, "flat").let { flat -> flat.copy(columns = flat.columns + mapOf(
+            civsTerrainKey(feet.x, feet.z) to CivTerrainSurfaceColumn(feet.y - 1, true),
+            civsTerrainKey(gateFloor.x, gateFloor.z) to if (water)
+                CivTerrainSurfaceColumn(gateFloor.y, false, waterTopY = gateFloor.y, waterBottomY = 63)
+            else CivTerrainSurfaceColumn(gateFloor.y, false))) }
+        val frame = CivsSettlementLayout.frame(city).copy(wallObstacles = emptyList(), gates = emptyList())
+        val result = CivsSettlementLayout.infrastructure(city, frame, surface, listOf(listOf(feet)), listOf(paid))
+        if (step == 1) {
+            result.rejected shouldBe emptyMap()
+            val road = result.pieces.single { it.type == BuildingType.ROAD }
+            road.transit shouldBe listOf(feet)
+            road.blocks.map { civsTerrainKey(it.position.x, it.position.z) }.toSet() shouldBe
+                setOf(civsTerrainKey(feet.x, feet.z))
+        } else {
+            result.rejected shouldBe mapOf("infrastructure-slope" to 1)
+            result.rejectionSamples shouldBe mapOf("infrastructure-slope" to listOf(feet.copy(y = feet.y - 1)))
+            result.pieces shouldBe listOf(paid)
+        }
+        result.pieces.single { it.id == paid.id } shouldBe paid
+        Gson().toJson(paid) shouldBe before
+    }
+
     for (retainedGrade in listOf<Int?>(null, 65))
     test("road paving ignores a downhill hint outside the final floor domain retainedGrade=$retainedGrade") {
         val baseCity = layoutFixtureCity()

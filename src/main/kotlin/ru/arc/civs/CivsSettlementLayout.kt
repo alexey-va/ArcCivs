@@ -461,8 +461,8 @@ internal object CivsSettlementLayout {
                 }
             }
         }
-        val retainedFloors = accepted.flatMap { it.blocks }.groupBy { key(it.position) }
-            .mapValues { (_, cells) -> cells.minOf { it.position.y } } +
+        val retainedFloors = accepted.flatMap { it.floorGrades().entries }
+            .groupBy({ it.key }, { it.value }).mapValues { (_, grades) -> grades.min() } +
             accepted.flatMap(CivSettlementPiece::waterFloors).associate { key(it) to it.y } +
             accepted.flatMap { it.paidGateFloors }.associate { key(it) to it.y } +
             fortificationGround.mapValues { it.value.y }
