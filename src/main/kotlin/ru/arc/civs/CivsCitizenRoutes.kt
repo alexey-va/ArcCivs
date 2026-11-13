@@ -122,15 +122,17 @@ internal class CivsCitizenRoutes(
         }
         val entrance = workMine?.let { citizenMineEntranceWaypoint(it, from.point(), resolved, requireNotNull(minePassage)) }
         val waypoint = entrance ?: citizenMineWaypoint(city, world, from, resolved)
-        val readyStorage = storage != null && waypoint == null &&
+        val readyStorage = storage != null &&
             storage.control?.let { citizenStorageReady(world, it) } == true
         val nightFeet = if (actor.sheltering && target == actor.shelter && waypoint == null)
             shelter.routeFeet(actor, city, world, target) ?: return false else null
-        val to = if (nightFeet != null) nightFeet else if (readyStorage) storageFeet(world, resolved) ?: run {
+        // Final storage admission keeps its native feet while the current leg may still leave a mine.
+        val finalStorageFeet = if (nightFeet == null && readyStorage) storageFeet(world, resolved) ?: run {
             actor.targets.remove(target)
             pause(actor, "storage-unavailable", now)
             return false
-        } else (waypoint ?: resolved).location(world)
+        } else null
+        val to = nightFeet ?: waypoint?.location(world) ?: finalStorageFeet ?: resolved.location(world)
         if (idleAnchor != null && !collisions.idleDestinationFree(actor, to)) return false
         val distance = from.distance(to)
         if (!citizenRouteWithinReach(from.point(), to.point(), CivsLogistics.maximumTransferDistance(city))) {
@@ -142,8 +144,8 @@ internal class CivsCitizenRoutes(
             actor.pendingChunkTarget = resolved
             return true
         }
-        val standable = if (nightFeet != null) true else if (readyStorage)
-            storagePointClear(actor, city, world, resolved, to)
+        val standable = if (nightFeet != null) true else if (finalStorageFeet != null)
+            storagePointClear(actor, city, world, resolved, finalStorageFeet)
         else citizenStandable(world, resolved)
         if (!citizenControlClear(city, resolved) || !standable ||
             idleAnchor != null && !citizenIdleTerrain(world, resolved, city.buildings)) {

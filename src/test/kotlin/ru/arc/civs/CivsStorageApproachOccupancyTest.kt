@@ -15,6 +15,79 @@ import org.mockbukkit.mockbukkit.world.Coordinate
 import java.util.UUID
 
 class CivsStorageApproachOccupancyTest : FunSpec({
+    for (surface in listOf(Material.STONE, Material.ACACIA_SLAB, Material.DIRT_PATH))
+    test("a carrying courier leaves a mine before its exact storage approach surface=$surface") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            val fixture = mineExitStorageFixture(h, surface)
+            val actor = fixture.actor
+            val mine = h.city.buildings.single { it.type == BuildingType.QUARRY }
+            val target = fixture.control
+            val expectedY = when (surface) { Material.ACACIA_SLAB -> 63.5; Material.DIRT_PATH -> 63.9375; else -> 64.0 }
+            val expected = Location(h.world, target.x + .5, expectedY, target.z - .5)
+            val before = h.city
+            val token = actor.plan.token
+            val cargo = requireNotNull(h.city.workers.single().cargo)
+            actor.cycle.phase shouldBe CitizenPhase.RETURNING
+            citizenPacketSupported(h.world, expected.point(), false) shouldBe true
+            citizenPacketBodyClear(h.world, expected.point(), false) shouldBe true
+            citizenAtStorage(h.world, expected.point(), target) shouldBe true
+            citizenMineWaypoint(h.city, h.world, actor.npc.location, target) shouldBe mine.entrance
+
+            fixture.routes.startRoute(actor, h.world, target, 6_000) shouldBe true
+            requireNotNull(actor.route).let { route ->
+                route.authored shouldBe target
+                route.target shouldBe mine.entrance.location(h.world)
+                route.intermediate shouldBe true
+            }
+            for (tick in 0 until 480) {
+                h.navigate()
+                if (citizenArrived(actor.npc.location, mine.entrance.location(h.world))) break
+            }
+            citizenArrived(actor.npc.location, mine.entrance.location(h.world)) shouldBe true
+            fixture.routes.cancelRoute(actor)
+            fixture.routes.startRoute(actor, h.world, target, requireNotNull(h.navigationNow)) shouldBe true
+            requireNotNull(actor.route).let { route ->
+                route.authored shouldBe target
+                route.target shouldBe expected
+                route.intermediate shouldBe false
+            }
+            for (tick in 0 until 640) {
+                h.navigate()
+                if (fixture.routes.arrivedAt(actor, h.city, h.world, target)) break
+            }
+            fixture.routes.arrivedAt(actor, h.city, h.world, target) shouldBe true
+            actor.npc.location.y shouldBe expectedY
+            actor.plan.token shouldBe token
+            h.city.workers.single().cargo shouldBe cargo
+            h.city shouldBe before
+            h.pickups shouldBe 0
+            h.unloads shouldBe 0
+            h.deliveries shouldBe 0
+        }
+    }
+
+    for (obstruction in listOf("headroom", "support"))
+    test("a mine exit never admits an unsafe final storage approach obstruction=$obstruction") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            val fixture = mineExitStorageFixture(h, Material.ACACIA_SLAB)
+            val actor = fixture.actor
+            val mine = h.city.buildings.single { it.type == BuildingType.QUARRY }
+            val standing = fixture.control.copy(z = fixture.control.z - 1)
+            if (obstruction == "headroom") h.world.getBlockAt(standing.x, 65, standing.z).type = Material.STONE
+            else for (y in 60..63) h.world.getBlockAt(standing.x, y, standing.z).type = Material.AIR
+            val before = h.city
+            val token = actor.plan.token
+            citizenMineWaypoint(h.city, h.world, actor.npc.location, fixture.control) shouldBe mine.entrance
+            fixture.routes.startRoute(actor, h.world, fixture.control, 6_000) shouldBe false
+            actor.route shouldBe null
+            actor.plan.token shouldBe token
+            h.city shouldBe before
+            h.pickups shouldBe 0
+            h.unloads shouldBe 0
+            h.deliveries shouldBe 0
+        }
+    }
+
     for (rise in listOf(1.0) + (1..15).map { it / 16.0 })
     test("storage routes preserve the actual native support top rise=$rise") {
         residentRuntime(worldFactory = ::FractionalStorageWorld, server = CivsWorksiteServerFixture()) { h ->
@@ -420,6 +493,49 @@ private class FractionalStorageWorld : ResidentRuntimeWorld() {
 
 private data class StorageApproachFixture(val building: CivBuilding, val control: CivPosition,
     val actor: CitizenActor, val neighbours: List<CitizenActor>, val routes: CivsCitizenRoutes)
+
+private fun mineExitStorageFixture(h: ResidentRuntime, surface: Material): StorageApproachFixture {
+    val mine = spatialBuilding("nordic", "miner", 1, CivPosition(20, 63, 0)).copy(production = "COBBLESTONE")
+    val control = CivPosition(mine.bounds.max.x + 12, 64, mine.entrance.z)
+    val warehouse = CivBuilding(UUID(297, 1), BuildingType.WAREHOUSE, 1, control, 0, "warehouse1",
+        CivBox(control.copy(x = control.x - 2, y = 63, z = control.z - 2),
+            control.copy(x = control.x + 2, y = 68, z = control.z + 2)), control.copy(z = control.z - 3),
+        BuildingPhase.ACTIVE, control = control)
+    val cargo = CivCargo(UUID(297, 2), warehouse.id, mine.id, warehouse.id, mine.entrance, "COBBLESTONE", 2,
+        inventoryBacked = true)
+    h.courier = CivCourierPlan(cargo, warehouse.id, warehouse.entrance, true)
+    h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + listOf(mine, warehouse),
+        inventory = CivInventory(CivStorageMode.PHYSICAL), workers = h.city.workers.map { worker ->
+            worker.copy(assignment = warehouse.id, nextDeliveryAt = 1, cargo = cargo, items = List(CivsEquipment.SLOTS) { slot ->
+                if (slot == CivsEquipment.BAG) CivResidentItem("COBBLESTONE", 2) else null
+            })
+        }))
+    val from = CivPosition((mine.bounds.min.x + mine.bounds.max.x) / 2, 64,
+        (mine.bounds.min.z + mine.bounds.max.z) / 2)
+    mine.bounds.contains(from.x, from.y, from.z) shouldBe true
+    val chunks = CitizenChunks.between(from.x, from.z, control.x, control.z)
+    for (x in chunks.minX..chunks.maxX) for (z in chunks.minZ..chunks.maxZ) h.world.loadChunk(x, z)
+    h.world.time = 1_000
+    h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+    val support = if (surface == Material.ACACIA_SLAB)
+        Bukkit.createBlockData("minecraft:acacia_slab[type=bottom,waterlogged=false]") else Bukkit.createBlockData(surface)
+    for (distance in 1..3) h.world.getBlockAt(control.x, 63, control.z - distance).blockData = support.clone()
+    for (x in control.x - 1..control.x + 1) for (z in control.z - 1..control.z + 1) {
+        if (x == control.x && z in control.z - 1..control.z) continue
+        for (y in 62..66) h.world.getBlockAt(x, y, z).type = Material.STONE
+    }
+    h.navigationNow = 2_000
+    h.owner.pulse(2_000)
+    val actor = storageActors(h).getValue(h.workerId)
+    val routes = h.owner.javaClass.getDeclaredField("routes").run { isAccessible = true; get(h.owner) as CivsCitizenRoutes }
+    routes.cancelRoute(actor)
+    actor.targets.clear()
+    actor.plan = requireNotNull(citizenPlan(h.city, h.city.workers.single(), h.courier))
+    actor.cycle = actor.plan.cycle().also { it.start() }
+    actor.npc.teleport(from.location(h.world))
+    h.navigationNow = 6_000
+    return StorageApproachFixture(warehouse, control, actor, emptyList(), routes)
+}
 
 private fun storageApproachFixture(h: ResidentRuntime, cached: Boolean, neighbours: Int): StorageApproachFixture {
     for (x in -1..2) for (z in -2..1) h.world.loadChunk(x, z)

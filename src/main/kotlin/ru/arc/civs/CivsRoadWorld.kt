@@ -415,7 +415,7 @@ internal class CivsRoadWorld(
     /** These ordinary plants attach below, never to the side of the changed column. */
     private fun roadUpkeepSideSafe(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||
         civsRetainedRouteStep(block.blockData) || CivsRoadMaintenance.landing(block.blockData.asString) ||
-        block.type == Material.SHORT_GRASS || block.type == Material.FERN
+        block.type == Material.SHORT_GRASS || block.type == Material.FERN || block.type == Material.WILDFLOWERS
 
     private fun roadUpkeepReplaceable(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||
         CivsRoadMaintenance.surface(block.blockData.asString) && civsRetainedRouteStep(block.blockData)

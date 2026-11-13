@@ -1090,7 +1090,11 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     junction = retainedJunctions.firstOrNull { key in it.columns() && it.owners.any { owner -> owner.source == source } })
                     .also { it.validated(city) }
             }
-            return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(), gradeTargets + targets,
+            // Finish walking entrances before spending builder trips on the distant shoulders of long routes.
+            val entryFirst = targets.sortedBy { target ->
+                abs(target.floor.x.toLong() - target.source.entrance.x) + abs(target.floor.z.toLong() - target.source.entrance.z)
+            }
+            return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(), gradeTargets + entryFirst,
                 city.roadRouteOverrides, deferredDescent)
         }
     }

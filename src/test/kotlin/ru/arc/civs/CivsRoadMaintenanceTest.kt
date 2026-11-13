@@ -18,6 +18,7 @@ import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.type.Slab
 import org.bukkit.block.data.type.Stairs
 import org.bukkit.util.BoundingBox
+import org.mockbukkit.mockbukkit.block.data.BlockDataMock
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -26,6 +27,25 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class CivsRoadMaintenanceTest : FunSpec({
+    test("ordinary road repair reaches a building entrance before distant damaged approach columns") {
+        val (city, plans) = upkeepShoulderCrossing()
+        val worker = city.workers.single()
+        val native = mockk<CivsWorld>()
+        val maintenance = CivsRoadMaintenance(native, currentTick = { 0 })
+        maintenance.publish(city, CivsRoadMaintenance.prepare(city, plans))
+        every { native.captureRoadUpkeep(any(), any(), any()) } answers {
+            val target = thirdArg<CivRoadUpkeep>()
+            CivWorldWork(worker.id, worker.completedCycles, requireNotNull(worker.assignment),
+                target.floor.copy(x = target.floor.x + 1, y = target.floor.y + 1),
+                listOf(CivPlanBlock(target.floor, "minecraft:grass_block[snowy=false]", target.after)),
+                status = "repairing-road", focus = target.floor, upkeep = target)
+        }
+
+        val entry = city.buildings[1].entrance.let { it.copy(y = it.y - 1) }
+        requireNotNull(maintenance.plan(city, worker)).upkeep?.floor shouldBe entry
+        verify(exactly = 1) { native.captureRoadUpkeep(any(), any(), any()) }
+    }
+
     test("an Auto1 crossing shoulder keeps its owner's straight descent despite a second lower neighbour") {
         val (city, plans, floor) = upkeepShoulderCrossing()
         val before = Gson().toJson(city to plans)
@@ -678,6 +698,25 @@ class CivsRoadMaintenanceTest : FunSpec({
                     shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, step) }.reason shouldBe "protected-terrain"
                     attachment.type = Material.STONE
                     native.validateRoadUpkeep(city, step)
+                    val flowerBefore = "minecraft:wildflowers[flower_amount=4,facing=north]"
+                    // Pinned MockBukkit lacks these 1.21.11 properties; keep the real material and state.
+                    fun flowers(): BlockDataMock = object : BlockDataMock(Material.WILDFLOWERS) {
+                        override fun getAsString(): String = flowerBefore
+                        override fun getAsString(hideUnspecified: Boolean): String = flowerBefore
+                        override fun clone(): BlockDataMock = flowers()
+                    }
+                    attachment.blockData = flowers()
+                    val floorBefore = floor.blockData.asString
+                    val captured = requireNotNull(native.captureRoadUpkeep(city, city.workers.single(), target))
+                    captured.changes shouldBe listOf(CivPlanBlock(p, floorBefore, target.after))
+                    native.validateRoadUpkeep(city, captured)
+                    val after = CivsRoadMaintenance.complete(city, captured, 3_000)
+                    CivRoadUpkeepReceipt(city.workers.single(), city.stock, captured, 3_000).validated(after)
+                    captured.changes.forEach { change ->
+                        world.getBlockAt(change.position.x, change.position.y, change.position.z).blockData = Bukkit.createBlockData(change.after)
+                    }
+                    attachment.blockData.asString shouldBe flowerBefore
+                    floor.blockData.asString shouldBe target.after
                     floor.type = Material.DIRT_PATH
                     native.roadUpkeepPending(city, work) shouldBe false
                     native.validateRoadUpkeep(city, work) // Recovery accepts its already written endpoint.
