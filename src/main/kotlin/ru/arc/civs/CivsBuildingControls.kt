@@ -18,6 +18,20 @@ internal object CivsBuildingControls {
     fun authored(building: CivBuilding, snapshot: ArcSchematicSnapshot): List<CivControlCandidate> =
         inspectSource(building, snapshot).candidates
 
+    /** A detached floor mask, not control placement's covered/open-work fallback. */
+    internal fun sleepingFloors(building: CivBuilding, snapshot: ArcSchematicSnapshot): Set<CivPosition> {
+        if (!building.type.isResidence && building.type != BuildingType.TOWN_HALL) return emptySet()
+        val interior = CivsAuthoredInterior(building, snapshot, furniture, retainedGround = true)
+        val space = ControlSpace(interior) { true }
+        return interior.reachable.asSequence().filter { point ->
+            interior.operatingFloor(point) && space.room(point) && interior.name(point).let {
+                it in setOf("air", "cave_air", "void_air", "barrier", "structure_void") || it.endsWith("_carpet")
+            }
+        }.map(interior::world).sortedWith(compareBy({ kotlin.math.abs(it.y - building.entrance.y) },
+            { kotlin.math.abs(it.x - building.entrance.x) + kotlin.math.abs(it.z - building.entrance.z) },
+            { it.y }, { it.x }, { it.z })).toCollection(linkedSetOf())
+    }
+
     internal data class Source(val geometry: String, val candidates: List<CivControlCandidate>)
     internal fun inspectSource(building: CivBuilding, snapshot: ArcSchematicSnapshot): Source {
         if (!supported(building.type)) return Source("DEDICATED", emptyList())
@@ -124,6 +138,9 @@ internal object CivsBuildingControls {
                 else -> openWork && inherentlyOpen && at.floor[index] >= maxOf(2, (floorDepth[p.y] ?: 0) - 1)
             }
         }
+
+        fun room(p: ArcSchematicPoint): Boolean = inside(p) && p.y < source.maximum.y &&
+            open(p.copy(y = p.y + 1)) && plane(p.y).rooms[index(p)]
 
         private data class Plane(val rooms: BooleanArray, val cover: IntArray, val floor: IntArray)
         private fun index(p: ArcSchematicPoint) = (p.z - source.minimum.z) * width + p.x - source.minimum.x

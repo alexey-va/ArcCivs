@@ -635,12 +635,19 @@ class CivsNavigationSnapshotsTest : FunSpec({
                     capture.blocks shouldBe expected
                     capture.blocks.keys.toList() shouldBe expected.keys.toList()
                     capture.blocks.size shouldBe 63
-                    for ((point, block) in expected) capture.blocks[point] shouldBeSameInstanceAs block
+                    val fallback = capture.blocks.toMap()
+                    for ((point, block) in expected) {
+                        capture.blocks[point] shouldBeSameInstanceAs block
+                        capture.blocks[point.x, point.y, point.z] shouldBeSameInstanceAs block
+                        fallback[point.x, point.y, point.z] shouldBeSameInstanceAs block
+                    }
                     for (point in listOf(CivPosition(node.x - 2, 64, node.z), CivPosition(node.x + 2, 64, node.z),
                         CivPosition(node.x, 60, node.z), CivPosition(node.x, 68, node.z),
                         CivPosition(node.x, 64, node.z - 2), CivPosition(node.x, 64, node.z + 2),
                         CivPosition(Int.MIN_VALUE, 64, node.z), CivPosition(Int.MAX_VALUE, 64, node.z))) {
                         capture.blocks[point] shouldBe null
+                        capture.blocks[point.x, point.y, point.z] shouldBe null
+                        fallback[point.x, point.y, point.z] shouldBe null
                         capture.blocks.containsKey(point) shouldBe false
                     }
                 }
@@ -667,6 +674,9 @@ class CivsNavigationSnapshotsTest : FunSpec({
             requireNotNull(next.captures).first().blocks.getValue(newlyCosted).cost shouldBe Double.POSITIVE_INFINITY
             captures.map { it.blocks } shouldBe oldValues
             captures.first().blocks.getValue(newlyCosted).cost shouldBe 1.0
+            captures.first().blocks[newlyCosted.x, newlyCosted.y, newlyCosted.z]?.cost shouldBe 1.0
+            requireNotNull(next.captures).first().blocks[newlyCosted.x, newlyCosted.y, newlyCosted.z]?.cost shouldBe
+                Double.POSITIVE_INFINITY
         }
     }
 

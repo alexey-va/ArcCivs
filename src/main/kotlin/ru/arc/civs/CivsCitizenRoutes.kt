@@ -122,7 +122,11 @@ internal class CivsCitizenRoutes(
         }
         val entrance = workMine?.let { citizenMineEntranceWaypoint(it, from.point(), resolved, requireNotNull(minePassage)) }
         val waypoint = entrance ?: citizenMineWaypoint(city, world, from, resolved)
-        val to = if (storage != null && waypoint == null) storageFeet(world, resolved) ?: run {
+        val readyStorage = storage != null && waypoint == null &&
+            storage.control?.let { citizenStorageReady(world, it) } == true
+        val nightFeet = if (actor.sheltering && target == actor.shelter && waypoint == null)
+            shelter.routeFeet(actor, city, world, target) ?: return false else null
+        val to = if (nightFeet != null) nightFeet else if (readyStorage) storageFeet(world, resolved) ?: run {
             actor.targets.remove(target)
             pause(actor, "storage-unavailable", now)
             return false
@@ -138,7 +142,7 @@ internal class CivsCitizenRoutes(
             actor.pendingChunkTarget = resolved
             return true
         }
-        val standable = if (storage != null && waypoint == null)
+        val standable = if (nightFeet != null) true else if (readyStorage)
             storagePointClear(actor, city, world, resolved, to)
         else citizenStandable(world, resolved)
         if (!citizenControlClear(city, resolved) || !standable ||

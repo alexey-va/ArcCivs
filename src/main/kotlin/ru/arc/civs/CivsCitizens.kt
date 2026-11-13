@@ -95,6 +95,8 @@ class CivsCitizens(
     labCourierRecoveryAllowed: (Settlement, CivWorker, CivCourierPlan, List<CivPosition>) -> Boolean = { _, _, _, _ -> false },
     foodRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
     nightShelterRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
+    sleepingFloors: (CivBuilding) -> CompletableFuture<CivSleepingFloorMask> = {
+        CompletableFuture.completedFuture(CivSleepingFloorMask(emptyList())) },
 ) : Listener, AutoCloseable {
     private val runtime = CitizenRuntime(plugin, cityProvider)
     internal var residentLifeEnabled: Boolean
@@ -277,7 +279,8 @@ class CivsCitizens(
         shelter = CivsCitizenShelters(runtime,
             collisionsOwner = { collisions },
             routesOwner = { routes },
-            lifeOwner = { life })
+            lifeOwner = { life },
+            loadFloors = sleepingFloors)
         couriers = CivsCitizenCouriers(runtime,
             routesOwner = { routes },
             leisureOwner = { leisure },
@@ -691,6 +694,8 @@ class CivsCitizens(
         actor.sheltering = false
         actor.shelter = null
         actor.shelterPose = null
+        actor.shelterHome = null
+        actor.shelterFeet = null
         actor.wander = CitizenWander(actor.workerId)
         actor.footsteps.reset()
         npc.teleport(destination)
@@ -1008,6 +1013,7 @@ class CivsCitizens(
         standaloneFrames.clear()
         combat.clear()
         life.close()
+        shelter.close()
         logistics.close()
         pendingHarm.clear()
         admission.clear()

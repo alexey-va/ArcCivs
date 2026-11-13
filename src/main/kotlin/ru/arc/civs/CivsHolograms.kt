@@ -42,6 +42,7 @@ data class CivsNpcHologramSnapshot(
     val child: Boolean = false,
     val statusInputs: List<String> = emptyList(),
     val speech: String? = null,
+    val sleep: CivSleepPresentation? = null,
 )
 
 /** Nearby public nameplates. No Bukkit entities, block reads, routing or gameplay state changes. */
@@ -68,12 +69,13 @@ class CivsHolograms internal constructor(
                 snapshot.health.toBits() == next.health.toBits() && snapshot.maxHealth.toBits() == next.maxHealth.toBits()
     }
     private data class Rendered(val handle: PacketTextDisplay, var value: Desired?,
-        var speech: PacketTextDisplay? = null)
+        var speech: PacketTextDisplay? = null, var bedroll: AutoCloseable? = null)
     private val work = nativeWork ?: BudgetedTaskQueue(tasks)
     private val epoch = tasks.token()
     private val rendered = linkedMapOf<UUID, Rendered>()
     private val carts = CivsCourierCart(displays)
     internal val idleNap = CivsIdleNapRenderer(displays)
+    private val bedroll = CivsSleepBedrollRenderer(displays)
     private val decor = CivsWorkplaceDecor(displays)
     private var desired = emptyMap<UUID, Desired>()
     private var pending = false
@@ -89,7 +91,7 @@ class CivsHolograms internal constructor(
         desired = snapshots().asSequence().filter { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() &&
             it.health.isFinite() && it.maxHealth.isFinite() && it.health >= 0 && it.maxHealth > 0 &&
             it.health <= it.maxHealth && it.hunger in 0..20 && it.nativeHeight.isFinite() && it.nativeHeight > 0 &&
-            Bukkit.getWorld(it.worldId) != null && (it.actor == null || it.actor.isValid) }
+            Bukkit.getWorld(it.worldId) != null && (it.actor == null || it.actor.isValid) && it.sleep?.valid() != false }
             .associate { npc ->
                 // The locale catalog is fixed for this owner; the snapshot still tracks pose and cargo every pulse.
                 val last = previous[npc.workerId]
@@ -112,6 +114,7 @@ class CivsHolograms internal constructor(
             val expired = rendered.remove(it)!!
             expired.handle.remove()
             expired.speech?.remove()
+            expired.bedroll?.close()
             carts.remove(it)
             return false
         }
@@ -128,8 +131,9 @@ class CivsHolograms internal constructor(
             desired = desired - changed.key
             return false
         }
-        val location = Location(world, npc.x,
-            npc.y + npc.nativeHeight + if (npc.actor == null) CIVS_NPC_TEXT_GAP else 0.0, npc.z)
+        val sleeping = npc.sleep
+        val location = if (sleeping != null) Location(world, sleeping.centreX, sleeping.topY + CIVS_NPC_TEXT_GAP, sleeping.centreZ)
+            else Location(world, npc.x, npc.y + npc.nativeHeight + if (npc.actor == null) CIVS_NPC_TEXT_GAP else 0.0, npc.z)
         val shown = rendered[changed.key] ?: Rendered(displays.spawnText(location, value.text), null).also {
             rendered[changed.key] = it
             it.handle.billboard = Display.Billboard.CENTER
@@ -147,7 +151,7 @@ class CivsHolograms internal constructor(
             it.handle.teleportDuration = 0
         }
         val before = shown.value
-        if (npc.actor != null) {
+        if (npc.actor != null && sleeping == null) {
             shown.handle.attachTo(npc.actor)
         } else {
             // Static export/fixture support. Spawned residents always supply the packet carrier.
@@ -155,9 +159,15 @@ class CivsHolograms internal constructor(
             if (before != null) shown.handle.teleport(location)
         }
         shown.handle.transformation = Transformation(
-            Vector3f(0f, if (npc.actor == null) 0f else CIVS_NPC_TEXT_GAP.toFloat(), 0f),
+            Vector3f(0f, if (npc.actor == null || sleeping != null) 0f else CIVS_NPC_TEXT_GAP.toFloat(), 0f),
             Quaternionf(), Vector3f(CIVS_NPC_TEXT_SCALE), Quaternionf())
         if (before != null && before.text != value.text) shown.handle.text(value.text)
+        if (before?.snapshot?.sleep != sleeping || before?.snapshot?.worldId != npc.worldId) {
+            shown.bedroll?.close()
+            shown.bedroll = sleeping?.let {
+                bedroll.show(Location(world, it.groundX, it.groundY, it.groundZ), it.yaw, it.scale)
+            }
+        }
         syncSpeech(shown, npc, location)
         carts.sync(npc)
         shown.value = value
@@ -200,6 +210,7 @@ class CivsHolograms internal constructor(
         poseTask?.cancel()
         carts.close()
         decor.close()
+        rendered.values.forEach { it.bedroll?.close() }
         desired = emptyMap()
         rendered.clear()
         if (nativeWork == null) work.close()
@@ -213,7 +224,8 @@ class CivsHolograms internal constructor(
         val a = first.snapshot
         val b = second.snapshot
         return first.text == second.text && a.actor === b.actor && a.nativeHeight == b.nativeHeight && a.speech == b.speech &&
-            a.courierCart == b.courierCart && a.cargo == b.cargo &&
+            a.courierCart == b.courierCart && a.cargo == b.cargo && a.sleep == b.sleep &&
+            (a.sleep == null || a.worldId == b.worldId) &&
             (a.actor != null || a.worldId == b.worldId && a.x == b.x && a.y == b.y && a.z == b.z)
     }
 }

@@ -15,6 +15,22 @@ import java.util.UUID
 import java.util.zip.GZIPInputStream
 
 class CivsBuildingControlsTest : FunSpec({
+    test("sleep floor masks use strict rooms and exclude the roofed porch in every rotation") {
+        val snapshot = controlRoom()
+        for (turn in 0..3) {
+            val building = controlBuilding(snapshot, BuildingType.TAVERN, turn)
+            fun point(x: Int, y: Int, z: Int) = CivsWorksiteLayouts.point(building,
+                CivPosition(x - snapshot.origin.x, y - snapshot.origin.y, z - snapshot.origin.z))
+            val rooms = CivsBuildingControls.sleepingFloors(building, snapshot)
+            (point(4, 1, 4) in rooms) shouldBe true
+            (point(5, 1, 10) in rooms) shouldBe false // Roofed, but open to the exterior.
+            (point(4, 1, 9) in rooms) shouldBe false // Framed doorway is not a sleeping footprint.
+            rooms.isNotEmpty() shouldBe true
+            rooms.all { it.y == building.anchor.y + 1 } shouldBe true
+            CivsBuildingControls.sleepingFloors(building, controlRoom(roof = false)) shouldBe emptySet()
+        }
+    }
+
     test("a valid current half slab marker stays ahead of more than sixteen full support spares") {
         val size = listOf(19, 5, 21)
         val states = buildList {

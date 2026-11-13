@@ -425,10 +425,16 @@ internal fun citizenNavigationOutcome(completion: CitizenNavigationCompletion?, 
 internal const val CITIZEN_ROUTE_ARRIVAL_TOLERANCE = 1.0
 /** Packet routes use the actual standing cell centre at both intermediate and final nodes. */
 internal fun citizenNearEndpoint(from: CitizenPoint, target: CivPosition): Boolean =
-    abs(from.y - target.y) <= 0.5 && from.distanceSquared(target.point()) <= 0.65 * 0.65
+    citizenNearEndpoint(from, target.point())
+
+internal fun citizenNearEndpoint(from: CitizenPoint, target: CitizenPoint): Boolean =
+    abs(from.y - target.y) <= 0.5 && from.distanceSquared(target) <= 0.65 * 0.65
 
 /** Transient reach during a fall must not cancel the route before the real landing. */
 internal fun citizenAtSupportedEndpoint(world: World, from: CitizenPoint, target: CivPosition): Boolean =
+    citizenAtSupportedEndpoint(world, from, target.point())
+
+internal fun citizenAtSupportedEndpoint(world: World, from: CitizenPoint, target: CitizenPoint): Boolean =
     citizenNearEndpoint(from, target) && citizenPacketSupported(world, from)
 
 internal fun citizenRouteWithinReach(from: CitizenPoint, to: CitizenPoint,
@@ -451,7 +457,7 @@ internal fun citizenArrived(from: Location, to: Location): Boolean {
     if (from.world != to.world || abs(from.y - to.y) > 0.5) return false
     val offset = to.toVector().subtract(from.toVector())
     val distance = offset.length()
-    if (!citizenAtSupportedEndpoint(from.world!!, from.point(), CivPosition(to.blockX, to.blockY, to.blockZ))) return false
+    if (!citizenAtSupportedEndpoint(from.world!!, from.point(), to.point())) return false
     if (distance < 0.01) return true
     return from.world!!.rayTraceBlocks(from.clone().add(0.0, 0.8, 0.0), offset.normalize(), distance,
         FluidCollisionMode.ALWAYS, true) == null

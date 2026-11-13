@@ -16,8 +16,9 @@ internal data class CitizenTerrainBox(
     val minX: Double, val minY: Double, val minZ: Double,
     val maxX: Double, val maxY: Double, val maxZ: Double,
 ) {
-    fun at(point: CivPosition) = BoundingBox(minX + point.x, minY + point.y, minZ + point.z,
-        maxX + point.x, maxY + point.y, maxZ + point.z)
+    fun at(point: CivPosition) = at(point.x, point.y, point.z)
+    fun at(x: Int, y: Int, z: Int) = BoundingBox(minX + x, minY + y, minZ + z,
+        maxX + x, maxY + y, maxZ + z)
 }
 
 /** Planning boxes omit the leaf of a closed passage. Open leaves retain their native collision. */
@@ -263,7 +264,7 @@ internal class CitizenNavigationSearch(
             val point = next.point()
             if (abs(point.x - start.point().x) > 96 || abs(point.z - start.point().z) > 96 ||
                 abs(point.y - start.y) > 96) { clipped = true; continue }
-            val weight = capture.blocks[CivPosition(next.x, citizenSupportY(next.y), next.z)]?.cost
+            val weight = capture.blocks[next.x, citizenSupportY(next.y), next.z]?.cost
                 ?: Double.POSITIVE_INFINITY
             if (!weight.isFinite()) continue
             val cost = previous.cost + sqrt(from.distanceSquared(point)) * weight.coerceIn(1.0, CivsPaths.ORDINARY_COST)
@@ -321,7 +322,7 @@ internal class CitizenNavigationSearch(
                 val node = CitizenSearchNode(point.x, point.y + box.maxY, point.z)
                 val candidate = node.point()
                 if (atGoal(node) || candidate.distanceSquared(target) >= distance * distance ||
-                    blocks[CivPosition(node.x, floor(node.y + .001).toInt(), node.z)]?.allowed != true ||
+                    blocks[node.x, floor(node.y + .001).toInt(), node.z]?.allowed != true ||
                     !terrain.bodyClear(candidate)) continue
                 distance = sqrt(candidate.distanceSquared(target))
             }
@@ -356,7 +357,7 @@ internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivP
     fun standing(x: Int, z: Int) {
         for (by in base - 2..base + 1) {
             if (by < minimumY || by + 2 >= maximumY) continue
-            val block = blocks[CivPosition(x, by, z)] ?: continue
+            val block = blocks[x, by, z] ?: continue
             // Opening a passage must never remove the foothold selected by the planner.
             if (!block.loaded || block.liquid || block.door) continue
             if (block.climbable && block.allowed && citizenStepHeightAllowed(node.y, by.toDouble()))
@@ -365,12 +366,12 @@ internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivP
                 if (box.maxY <= 0 || box.minX > .5 || box.maxX < .5 || box.minZ > .5 || box.maxZ < .5) continue
                 val height = by + box.maxY
                 if (!citizenStepHeightAllowed(node.y, height)) continue
-                val feet = blocks[CivPosition(x, floor(height + .001).toInt(), z)] ?: continue
+                val feet = blocks[x, floor(height + .001).toInt(), z] ?: continue
                 if (!feet.loaded || !feet.allowed) continue
                 // Match packet movement's centre-support row using only captured geometry.
                 if (!feet.climbable) {
                     val supportY = citizenSupportY(height)
-                    val support = blocks[CivPosition(x, supportY, z)] ?: continue
+                    val support = blocks[x, supportY, z] ?: continue
                     if (!support.loaded || support.liquid || support.door || support.boxes.none {
                             abs(supportY + it.maxY - height) <= .13 &&
                                 .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ
@@ -382,9 +383,9 @@ internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivP
     }
     if (node.initial) standing(node.x, node.z)
     for (dx in -1..1) for (dz in -1..1) if (dx != 0 || dz != 0) standing(node.x + dx, node.z + dz)
-    val onLadder = blocks[CivPosition(node.x, base, node.z)]?.climbable == true
+    val onLadder = blocks[node.x, base, node.z]?.climbable == true
     if (onLadder) for (dy in -1..1) {
-        val next = blocks[CivPosition(node.x, base + dy, node.z)] ?: continue
+        val next = blocks[node.x, base + dy, node.z] ?: continue
         if (next.loaded && next.climbable && next.allowed && citizenStepHeightAllowed(node.y, (base + dy).toDouble()))
             result += CitizenSearchNode(node.x, (base + dy).toDouble(), node.z, climbing = true)
     }
@@ -406,21 +407,26 @@ private class CitizenSearchGeometry(
     private val maximumY: Int,
     avoiding: List<CitizenTerrainBox>,
 ) {
-    private val bodies = avoiding.map { it.at(CivPosition(0, 0, 0)) }
-    fun loaded(x: Int, y: Int, z: Int) = blocks[CivPosition(x, y, z)]?.loaded == true
+    private val bodies = avoiding.map { it.at(0, 0, 0) }
+    // Only bodyClear borrows these worker-owned boxes; segment/sweep bodies remain detached values.
+    private val bodyScratch = BoundingBox()
+    private val obstacleScratch = BoundingBox()
+    fun loaded(x: Int, y: Int, z: Int) = blocks[x, y, z]?.loaded == true
 
     fun bodyClear(point: CitizenPoint): Boolean {
-        val body = body(point)
+        val body = bodyScratch.resize(point.x - .299, point.y + .001, point.z - .299,
+            point.x + .299, point.y + 1.799, point.z + .299)
         val feetRow = floor(body.minY).toInt()
         if (feetRow < minimumY) return false
         for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
             for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt())
                 for (y in max(minimumY, feetRow - 1)..floor(body.maxY).toInt()) {
-                    val p = CivPosition(x, y, z)
-                    val block = blocks[p] ?: return false
+                    val block = blocks[x, y, z] ?: return false
                     if (y >= maximumY || !block.loaded) return false
-                    if (block.liquid && body.overlaps(BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0))) return false
-                    if (block.boxes.any { body.overlaps(it.at(p)) }) return false
+                    if (block.liquid && body.overlaps(obstacleScratch.resize(x.toDouble(), y.toDouble(), z.toDouble(),
+                            x + 1.0, y + 1.0, z + 1.0))) return false
+                    if (block.boxes.any { body.overlaps(obstacleScratch.resize(it.minX + x, it.minY + y, it.minZ + z,
+                            it.maxX + x, it.maxY + y, it.maxZ + z)) }) return false
                 }
         return true
     }
@@ -451,10 +457,10 @@ private class CitizenSearchGeometry(
         val z = floor(point.z).toInt()
         val y = floor(point.y + .001).toInt()
         if (y <= minimumY || y >= maximumY) return false
-        val feet = blocks[CivPosition(x, y, z)]?.takeIf { it.loaded } ?: return false
+        val feet = blocks[x, y, z]?.takeIf { it.loaded } ?: return false
         if (feet.climbable) return true
         val by = citizenSupportY(point.y)
-        val block = blocks[CivPosition(x, by, z)]?.takeIf { it.loaded && !it.liquid && !it.door } ?: return false
+        val block = blocks[x, by, z]?.takeIf { it.loaded && !it.liquid && !it.door } ?: return false
         return block.boxes.any {
             abs(by + it.maxY - point.y) <= .13 && point.x - x in it.minX..it.maxX && point.z - z in it.minZ..it.maxZ
         }
@@ -467,11 +473,10 @@ private class CitizenSearchGeometry(
         for (x in floor(min(from.x, to.x) - .299).toInt()..floor(max(from.x, to.x) + .299).toInt())
             for (z in floor(min(from.z, to.z) - .299).toInt()..floor(max(from.z, to.z) + .299).toInt())
                 for (y in max(minimumY, feetRow - 1)..floor(max(from.y, to.y) + 1.799).toInt()) {
-                    val p = CivPosition(x, y, z)
-                    val block = blocks[p] ?: return false
+                    val block = blocks[x, y, z] ?: return false
                     if (y !in minimumY until maximumY || !block.loaded) return false
                     if (block.liquid) obstacles += BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
-                    else block.boxes.forEach { obstacles += it.at(p) }
+                    else block.boxes.forEach { obstacles += it.at(x, y, z) }
                 }
         if (citizenSlideBody(Vector(from.x, from.y + .001, from.z), Vector(to.x, to.y + .001, to.z),
                 .299, 1.798, .299, obstacles) != null) return false
@@ -486,7 +491,7 @@ private class CitizenSearchGeometry(
             for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
                 for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt())
                     for (y in floor(body.minY).toInt()..floor(body.maxY).toInt()) {
-                        val block = blocks[CivPosition(x, y, z)] ?: return false
+                        val block = blocks[x, y, z] ?: return false
                         if (!block.loaded) return false
                         if (block.hot && !occupiedBody.overlaps(BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0))) return false
                     }

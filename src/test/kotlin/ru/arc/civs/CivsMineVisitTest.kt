@@ -1307,7 +1307,7 @@ private class MineVisitFixture(paper: MockBukkitTestRuntime, maximumAttempts: In
         }
         every { routes.arrivedAt(any(), any(), any(), any()) } answers {
             val actor = firstArg<CitizenActor>()
-            citizenAtSupportedEndpoint(world, actor.npc.location.point(), arg(3))
+            citizenAtSupportedEndpoint(world, actor.npc.location.point(), arg<CivPosition>(3))
         }
         every { routes.startRoute(any(), any(), any(), any(), any()) } answers {
             val actor = firstArg<CitizenActor>()

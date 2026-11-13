@@ -17,6 +17,43 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsBlueprintsTest : FunSpec({
+    test("sleep room extraction stays on the source executor and returns detached floor coordinates") {
+        val pending = ArrayDeque<Runnable>()
+        val cells = buildMap {
+            for (x in 0..8) for (z in 0..10) for (y in 0..4) put(ArcSchematicPoint(x, y, z), when {
+                x == 5 && y == 1 && z == 10 -> "minecraft:structure_void"
+                y == 0 || y == 4 || y in 1..3 && (x == 0 || x == 8 || z == 0 || z == 9 && x != 4) -> "minecraft:stone"
+                else -> "minecraft:air"
+            })
+        }
+        val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(8, 4, 10),
+            ArcSchematicPoint(4, 0, 11), cells)
+        var reads = 0
+        val observed = object : ArcSchematicSnapshot by original {
+            override fun blocks(): List<ArcSchematicBlock> { reads++; return original.blocks() }
+        }
+        val building = CivBuilding(UUID(0, 2), BuildingType.TOWN_HALL, 1, CivPosition(20, 63, 20), 0,
+            "fixture/sleep-room", CivBox(CivPosition(16, 63, 9), CivPosition(24, 67, 19)),
+            CivPosition(20, 64, 19), BuildingPhase.ACTIVE)
+        val libraries = BlueprintLibraries(executor = Executor { pending.addLast(it) })
+        every { libraries.source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns
+            CompletableFuture.completedFuture(observed)
+        libraries.subject.use { blueprints ->
+            val result = blueprints.sleepingFloors(building)
+            result.isDone shouldBe false
+            reads shouldBe 0
+            var steps = 0
+            while (pending.isNotEmpty()) { check(steps++ < 20); pending.removeFirst().run() }
+            val mask = result.join()
+            reads shouldBe 1
+            mask.points.isNotEmpty() shouldBe true
+            mask.points.toSet() shouldBe mask.cells
+            mask.points.all { it.y == 64 && it.z < 18 } shouldBe true
+            verify(exactly = 0) { libraries.source.transform(any(), any()) }
+            verify(exactly = 0) { libraries.source.captureSource(any(), any()) }
+        }
+    }
+
     test("workstation extraction stays on the blueprint executor and retains only bounded detached positions") {
         val pending = ArrayDeque<Runnable>()
         val cells = buildMap {

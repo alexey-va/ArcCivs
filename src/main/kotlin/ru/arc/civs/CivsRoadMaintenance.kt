@@ -231,9 +231,9 @@ data class CivRoadUpkeep(
             })
             // Completed receipts from the original straight-only finish remain recoverable.
             require(after == CivsSettlementLayout.pavement(floor, profile) ||
+                after == CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = true) ||
                 after == CivsSettlementLayout.pathPavement(floor, profile, city.style,
-                    atTurn = floor in CivsSettlementLayout.turnFloors(route), downhill = CivsSettlementLayout.routeDownhill(floor, route)) ||
-                after == CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = true))
+                    atTurn = floor in CivsSettlementLayout.turnFloors(route), downhill = CivsSettlementLayout.routeDownhill(floor, route)))
         }
     }
 }

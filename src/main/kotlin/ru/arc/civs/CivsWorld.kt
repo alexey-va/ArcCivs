@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap
 import me.angeschossen.lands.api.LandsIntegration
 import me.angeschossen.lands.api.flags.type.Flags
 import org.bukkit.Bukkit
@@ -413,7 +414,8 @@ class CivsWorld(
         private val width = if (localFootprint) building.bounds.max.x - building.bounds.min.x + 1 else radius * 2 + 1
         private val depth = if (localFootprint) building.bounds.max.z - building.bounds.min.z + 1 else width
         private val area = requested?.size ?: (width * depth)
-        private val columns = linkedMapOf<Long, CivTerrainSurfaceColumn>()
+        // Packed adjacent X/Z keys collide under Long.hashCode; retain raster order with mixed long hashing.
+        private val columns = Long2ObjectLinkedOpenHashMap<CivTerrainSurfaceColumn>()
         private var topY: Int? = null
         private var waterTopY: Int? = null
         private var probeY = 0

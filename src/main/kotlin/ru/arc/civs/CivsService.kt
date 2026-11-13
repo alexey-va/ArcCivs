@@ -136,6 +136,7 @@ class CivsService(
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
         productionReady = ::productionReady, workInputsReady = ::workInputsReady, workStatusInputs = ::workStatusInputs,
         workstation = workstations::select,
+        sleepingFloors = blueprints::sleepingFloors,
         backgroundActive = chunkLoading::active,
         backgroundHydrating = chunkLoading::hydrating,
         navigationTasks = tasks, navigationWork = nativeWork, navigationSettings = settings.navigation,

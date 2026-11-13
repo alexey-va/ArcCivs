@@ -64,17 +64,50 @@ internal fun citizenStorageFeet(world: World, point: CivPosition): Location? {
 
 internal data class CitizenSleepPose(val position: Location, val bounds: org.bukkit.util.BoundingBox)
 
+/** A sleeping floor keeps its authored plane; native collision geometry owns the exact feet. */
+internal fun citizenSleepFeet(world: World, point: CivPosition): Location? {
+    if (!citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
+        point.y <= world.minHeight || point.y + 1 >= world.maxHeight) return null
+    return listOf(point.y - 1, point.y).flatMap { y ->
+        world.getBlockAt(point.x, y, point.z).collisionShape.boundingBoxes.map { y + it.maxY }
+    }.filter { abs(it - point.y) < 1.0 }.distinct().sortedBy { abs(it - point.y) }.asSequence()
+        .map { point.location(world).apply { y = it } }
+        .firstOrNull { citizenSleepStanding(world, point, it) }
+}
+
+internal fun citizenSleepStanding(world: World, floor: CivPosition, feet: Location): Boolean {
+    if (feet.world?.uid != world.uid || feet.blockX != floor.x || feet.blockZ != floor.z ||
+        !citizenChunkReady(world, floor.x shr 4, floor.z shr 4) || abs(feet.y - floor.y) >= 1.0 ||
+        feet.y <= world.minHeight || feet.y + 1.8 >= world.maxHeight) return false
+    val y = citizenSupportY(feet.y)
+    val support = world.getBlockAt(floor.x, y, floor.z)
+    if (support.isLiquid || support.type in CITIZEN_LEISURE_HAZARDS || citizenRouteOpenable(support.blockData) != null ||
+        support.collisionShape.boundingBoxes.none { abs(y + it.maxY - feet.y) <= .001 &&
+            feet.x - floor.x in it.minX..it.maxX && feet.z - floor.z in it.minZ..it.maxZ }) return false
+    for (dx in listOf(-.3, .3)) for (dz in listOf(-.3, .3))
+        if (!citizenPacketSupported(world, CitizenPoint(feet.x + dx, feet.y, feet.z + dz), false)) return false
+    return citizenPacketSupported(world, feet.point(), false) && citizenPacketCampfireClear(world, feet.point()) &&
+        citizenPacketBodyClear(world, feet.point(), false)
+}
+
+/** The whole lying envelope, including animated arm/armour margins, belongs to one strict room plane. */
+internal fun citizenSleepRoom(floors: Set<CivPosition>, floorY: Int, feet: Location, body: BoundingBox): Boolean =
+    abs(feet.y - floorY) < 1.0 &&
+        (floor(body.minX).toInt()..floor(body.maxX - 1e-7).toInt()).all { x ->
+            (floor(body.minZ).toInt()..floor(body.maxZ - 1e-7).toInt()).all { z -> CivPosition(x, floorY, z) in floors }
+        }
+
 internal fun citizenStandingBounds(feet: Location, scale: Double): BoundingBox = BoundingBox(
     feet.x - .3 * scale, feet.y, feet.z - .3 * scale,
     feet.x + .3 * scale, feet.y + 1.8 * scale, feet.z + .3 * scale)
 
 /** Native 1.21.11 sleeping mesh: head toward -X at yaw zero, .9375 model scale.
  * Include outer skin/armour layers and lift the pose above the actual floor. No fake bed metadata. */
-internal fun citizenSleepPose(world: World, feet: Location, scale: Double,
+internal fun citizenSleepPose(world: World, feet: Location, scale: Double, floorLift: Double = 0.0,
                              available: (BoundingBox) -> Boolean = { true }): CitizenSleepPose? {
     if (!citizenPacketSupported(world, feet.point(), allowClimbable = false) ||
         !citizenPacketBodyClear(world, feet.point(), false)) return null
-    val origin = feet.clone().add(0.0, .32 * scale + .01, 0.0)
+    val origin = feet.clone().add(0.0, (.32 + floorLift) * scale + .01, 0.0)
     for (yaw in listOf(0f, 90f, 180f, 270f)) {
         val radians = Math.toRadians(yaw.toDouble())
         val cos = kotlin.math.cos(radians)

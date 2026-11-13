@@ -201,6 +201,13 @@ class CivsBlueprints(
             CivsBuildingControls.authored(building, snapshot)
         }, executor)
 
+    /** Only plain room-floor coordinates escape the existing bounded source executor. */
+    internal fun sleepingFloors(building: CivBuilding): CompletableFuture<CivSleepingFloorMask> =
+        catalogLoad.thenCompose { sourceSnapshot(building.schematicId) }.thenApplyAsync({ snapshot ->
+            requireVolume(snapshot)
+            CivSleepingFloorMask(CivsBuildingControls.sleepingFloors(building, snapshot))
+        }, executor)
+
     /** One reviewed optional style. Source reads, native-state transforms and the pure merge stay off Main. */
     @Synchronized
     internal fun fortification(style: String): CompletableFuture<CivFortificationTemplate?> {

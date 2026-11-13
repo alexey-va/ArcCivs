@@ -21,6 +21,7 @@ import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.display.PacketTextDisplay
+import ru.arc.paper.display.PacketBlockDisplay
 import ru.arc.paper.display.PaperPacketDisplays
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Files
@@ -30,6 +31,85 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsHologramsTest : FunSpec({
+    test("actual sleep owns a stable floor bedroll and centred label then restores native attachment on wake") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val plugin = paper.createSimplePlugin("CivsSleepVisualTest")
+            val world = ResidentRuntimeWorld().also(paper.server::addWorld)
+            world.loadChunk(0, 0)
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0 })
+            val displays = mockk<PaperPacketDisplays>(relaxed = true)
+            val label = mockk<PacketTextDisplay>(relaxed = true)
+            val blocks = mutableListOf<PacketBlockDisplay>()
+            val parts = mutableListOf<Map<String, Any>>()
+            every { displays.spawnText(any(), any()) } returns label
+            every { displays.spawnBlock(any(), any()) } answers {
+                val at = firstArg<Location>().clone()
+                val material = secondArg<org.bukkit.block.data.BlockData>().asString
+                mockk<PacketBlockDisplay>(relaxed = true).also { handle ->
+                    blocks += handle
+                    every { handle.transformation = any() } answers {
+                        val transform = firstArg<Transformation>()
+                        parts += mapOf("material" to material, "origin" to listOf(at.x, at.y, at.z),
+                            "translation" to listOf(transform.translation.x, transform.translation.y, transform.translation.z),
+                            "scale" to listOf(transform.scale.x, transform.scale.y, transform.scale.z),
+                            "rotation" to listOf(transform.leftRotation.x, transform.leftRotation.y,
+                                transform.leftRotation.z, transform.leftRotation.w))
+                        Unit
+                    }
+                }
+            }
+            every { displays.closeAsync() } returns CompletableFuture.completedFuture(null)
+            val actor = mockk<PacketPlayerNpc> { every { isValid } returns true }
+            val standing = CivsNpcHologramSnapshot(UUID(0, 296), world.uid, 2.5, 64.0, 3.5, "Семён",
+                "workers.status.sheltering", 20.0, 20.0, actor = actor)
+            val ground = Location(world, 2.5, 64.0, 3.5)
+            val pose = requireNotNull(citizenSleepPose(world, ground, 1.0, floorLift = CIVS_SLEEP_PAD_HEIGHT))
+            val sleep = CivSleepPresentation(ground.x, ground.y, ground.z, pose.position.yaw, 1.0,
+                (pose.bounds.minX + pose.bounds.maxX) / 2, pose.bounds.maxY, (pose.bounds.minZ + pose.bounds.maxZ) / 2)
+            var values = listOf(standing)
+            val renderer = CivsHolograms(plugin, tasks, CivsText.fromYaml(civsLocaleSource()), { values }, displays, work)
+            try {
+                renderer.pulse(); paper.performTicks(4)
+                blocks.size shouldBe 0 // Standing sheltering is not a sleeping presentation.
+                verify { label.attachTo(actor) }
+                values = listOf(standing.copy(sleep = sleep, nativeHeight = .2, status = "workers.status.sleeping"))
+                renderer.pulse(); paper.performTicks(4)
+                blocks.size shouldBe 2
+                verify { label.detach(); label.teleport(match {
+                    kotlin.math.abs(it.x - 1.555) < .000001 && kotlin.math.abs(it.y - 64.89) < .000001 && it.z == 3.5
+                }) }
+                verify { label.transformation = match { it.translation.y == 0f } }
+                values = listOf(values.single().copy(hunger = 19))
+                renderer.pulse(); paper.performTicks(4)
+                blocks.size shouldBe 2
+                blocks.forEach { verify(exactly = 0) { it.remove() } }
+                System.getenv("CIVS_SLEEP_VISUAL_OUT")?.let { directory ->
+                    val output = Path.of(directory)
+                    Files.createDirectories(output)
+                    Files.writeString(output.resolve("sleep.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(
+                        "schema" to 1, "source" to "production sleep geometry and captured BlockDisplay transformations",
+                        "ground" to listOf(ground.x, ground.y, ground.z), "yaw" to pose.position.yaw, "scale" to 1.0,
+                        "pose" to listOf(pose.position.x, pose.position.y, pose.position.z),
+                        "body" to listOf(pose.bounds.minX, pose.bounds.minY, pose.bounds.minZ,
+                            pose.bounds.maxX, pose.bounds.maxY, pose.bounds.maxZ),
+                        "label" to listOf(sleep.centreX, sleep.topY + CIVS_NPC_TEXT_GAP, sleep.centreZ), "parts" to parts)))
+                }
+                values = listOf(standing)
+                renderer.pulse(); paper.performTicks(4)
+                blocks.forEach { verify(exactly = 1) { it.remove() } }
+                verify(atLeast = 2) { label.attachTo(actor) }
+                values = listOf(standing.copy(sleep = sleep, nativeHeight = .2))
+                renderer.pulse(); paper.performTicks(4)
+                blocks.size shouldBe 4
+                values = emptyList()
+                renderer.pulse(); paper.performTicks(4)
+                blocks.forEach { verify(exactly = 1) { it.remove() } }
+                verify(exactly = 1) { label.remove() }
+            } finally { renderer.close(); work.close(); tasks.close() }
+        }
+    }
+
     test("packet carriers move nameplates without a second teleport follower and despawn removes the label") {
         MockBukkitTestRuntime.open().use { paper ->
             val plugin = paper.createSimplePlugin("CivsHologramsTest")

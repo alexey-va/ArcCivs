@@ -2645,8 +2645,11 @@ class CivsResidentsRuntimeTest : FunSpec({
                 npc.teleport(feet)
                 npc.uniqueId to feet
             }.toMap()
-            // Exercise the unchanged production reservation: its high non-control candidate really is admissible.
-            val oldTarget = requireNotNull(h.reserveShelter())
+            // The future SITE floor remains physically admissible, but is not an indoor shelter source yet.
+            val oldTarget = requireNotNull(citizenShelterTarget(h.city, h.city.workers.first()) {
+                citizenControlClear(h.city, it) && citizenStandable(h.world, it)
+            })
+            h.reserveShelter() shouldBe null
             oldTarget.y shouldBe 68
             citizenControlClear(h.city, oldTarget) shouldBe true
             citizenStandable(h.world, oldTarget) shouldBe true
@@ -2679,10 +2682,10 @@ class CivsResidentsRuntimeTest : FunSpec({
             val bodies = actors.map(::runtimeSleepingBody)
             for (first in bodies.indices) for (second in first + 1 until bodies.size)
                 bodies[first].overlaps(bodies[second]) shouldBe false
-            // Finishing the first home preserves a safe current sleeper until dawn.
+            // A completed eligible home ends the outdoor bootstrap exception immediately.
             h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == hall.id) it.copy(phase = BuildingPhase.ACTIVE) else it })
             h.owner.pulse(40_000)
-            actors.all { it.pose == PacketNpcPose.SLEEPING } shouldBe true
+            actors.all { it.pose == PacketNpcPose.STANDING } shouldBe true
             h.world.time = 1_000
             h.owner.pulse(41_000)
             for (npc in actors) {
@@ -2787,9 +2790,9 @@ class CivsResidentsRuntimeTest : FunSpec({
             val home = if (mode in setOf("house", "tavern")) hall.copy(id = UUID.randomUUID(), phase = BuildingPhase.ACTIVE,
                 type = if (mode == "house") BuildingType.HOUSE else BuildingType.TAVERN,
                 anchor = CivPosition(22, 64, 0), entrance = CivPosition(22, 64, 0), control = null,
-                bounds = CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2))) else hall
+                bounds = CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2))) else hall.copy(phase = BuildingPhase.ACTIVE)
             h.city = h.city.copy(autonomy = if (mode == "manual") null else h.city.autonomy,
-                buildings = if (home == hall) listOf(hall) else listOf(hall, home),
+                buildings = if (home.id == hall.id) listOf(home) else listOf(hall, home),
                 workers = h.city.workers.map { it.copy(homeId = home.id) })
             val npc = h.owner.collisionActors().single()
             val origin = Location(h.world, 8.8, 64.0, 8.2)
@@ -2810,7 +2813,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("bootstrap shelter follows each resident's selected home when the first house is already active") {
+    test("bootstrap shelter walks to a completed residence without changing the selected inactive home") {
         residentRuntime { h ->
             val hall = h.bootstrapShelterHome()
             for (x in -1..2) for (z in -1..1) h.world.loadChunk(x, z)
@@ -2831,9 +2834,10 @@ class CivsResidentsRuntimeTest : FunSpec({
             val before = h.city
             h.world.time = 13_000
             h.owner.pulse(3_000)
-            actors.getValue(h.workerId).pose shouldBe PacketNpcPose.SLEEPING
+            actors.getValue(h.workerId).pose shouldBe PacketNpcPose.STANDING
             h.owner.residentFeet(h.workerId) shouldBe origin
-            h.routeIdentity(h.workerId) shouldBe null
+            val bootstrapTarget = requireNotNull(h.routeTarget(h.workerId))
+            house.bounds.contains(bootstrapTarget.blockX, bootstrapTarget.blockY, bootstrapTarget.blockZ) shouldBe true
             actors.getValue(neighbour.id).pose shouldBe PacketNpcPose.STANDING
             val target = requireNotNull(h.routeTarget(neighbour.id))
             house.bounds.contains(target.blockX, target.blockY, target.blockZ) shouldBe true
@@ -2929,7 +2933,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a sleeping place occupied during travel releases its reservation before contact and chooses another place") {
+    test("a sleeping place occupied during travel releases its reservation and chooses a clear lying endpoint") {
         residentRuntime { h ->
             for (x in -2..2) for (z in -2..1) h.world.loadChunk(x, z)
             val home = h.city.buildings.single().copy(bounds = CivBox(CivPosition(-4, 64, -4), CivPosition(4, 68, 4)))
@@ -2946,21 +2950,23 @@ class CivsResidentsRuntimeTest : FunSpec({
             visitor.teleport(Location(h.world, 20.5, 64.0, .5))
             h.world.time = 13_000
             h.owner.pulse(3_000)
-            val reserved = Location(h.world, 1.5, 64.0, .5)
+            val reserved = requireNotNull(h.actor().shelterFeet).clone()
             // Another resident occupies the place after reservation. Revalidate before
-            // arrival: the physical collision guard must never let this route finish inside it.
+            // arrival: the route must choose another clear standing and lying endpoint.
             visitor.teleport(reserved)
             h.owner.pulse(4_000)
             resident.pose shouldBe PacketNpcPose.STANDING
+            (requireNotNull(h.actor().shelterFeet).toVector() != reserved.toVector()) shouldBe true
             var slept = false
             for (tick in 1..400) {
                 h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(4_000 + tick * 50L)
                 val at = resident.location
                 val feet = BoundingBox(at.x - .3, at.y, at.z - .3, at.x + .3, at.y + 1.8, at.z + .3)
-                if (resident.pose != PacketNpcPose.SLEEPING)
+                if (resident.pose != PacketNpcPose.SLEEPING &&
                     feet.overlaps(BoundingBox(reserved.x - .3, reserved.y, reserved.z - .3,
-                        reserved.x + .3, reserved.y + 1.8, reserved.z + .3)) shouldBe false
+                        reserved.x + .3, reserved.y + 1.8, reserved.z + .3)))
+                    h.owner.passingBodies(resident) shouldBe true
                 if (resident.pose == PacketNpcPose.SLEEPING) { slept = true; break }
             }
             withClue("location=${resident.location} ${h.navigationState()}") { slept shouldBe true }
@@ -5146,6 +5152,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     val pendingGroundCollection = CompletableFuture<Settlement>()
     val pendingHomeDeposit = CompletableFuture<Settlement>()
     var workReady = true
+    var sleepingFloorSource: ((CivBuilding) -> CompletableFuture<CivSleepingFloorMask>)? = null
     var statusInputs = emptyList<String>()
     var testingAllowed = false
     var foodSource: UUID? = null
@@ -5351,7 +5358,15 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
             collectionAvailable = { collectionEnabled }, collectionHome = { _, _ -> collectionDestination },
             pickupGround = { _, _, ids -> groundRequests += ids; pendingGroundCollection },
             depositCollected = { _, _, point -> homeDeposits += point; pendingHomeDeposit },
-            immortalResidents = { id -> id == city.id && city.settings?.immortalResidents == true && testingAllowed })
+            immortalResidents = { id -> id == city.id && city.settings?.immortalResidents == true && testingAllowed },
+            // This runtime fixture supplies detached authored room coordinates. Classifier geometry has its own source tests.
+            sleepingFloors = { building -> sleepingFloorSource?.invoke(building) ?: CompletableFuture.completedFuture(
+                CivSleepingFloorMask(buildList {
+                    for (y in building.bounds.min.y..building.bounds.max.y)
+                        for (x in building.bounds.min.x..building.bounds.max.x) for (z in building.bounds.min.z..building.bounds.max.z)
+                            add(CivPosition(x, y, z))
+                }.sortedWith(compareBy({ kotlin.math.abs(it.y - building.entrance.y) },
+                    { kotlin.math.abs(it.x - building.entrance.x) + kotlin.math.abs(it.z - building.entrance.z) }, { it.x }, { it.z })))) })
     fun prepareDiningSeat(guard: Boolean = false): PacketPlayerNpc {
         navigationNow = 3_000
         if (guard) for (x in -1..1) world.loadChunk(x, -2)

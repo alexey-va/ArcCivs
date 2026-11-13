@@ -225,6 +225,7 @@ private class SpeciesService(val paper: MockBukkitTestRuntime, autonomous: Boole
         every { store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(emptyList())
         every { store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
         every { store.loadPlan(any()) } returns CompletableFuture.completedFuture(null)
+        every { store.planGeneration } returns 0L
         every { store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
         every { store.homeServer() } returns null
         val citizens = mockk<CivsCitizens>(relaxed = true)

@@ -93,7 +93,8 @@ class CivsStorageApproachOccupancyTest : FunSpec({
         }
     }
 
-    test("a current unfinished storage keeps its real entrance fallback without a barrel or transfer") {
+    for (surface in listOf(Material.STONE, Material.DIRT_PATH))
+    test("a current unfinished storage keeps its real entrance fallback without a barrel or transfer surface=$surface") {
         residentRuntime(server = CivsWorksiteServerFixture()) { h ->
             val fixture = storageApproachFixture(h, true, 0)
             val control = CivPosition(40, 64, 0)
@@ -105,6 +106,16 @@ class CivsStorageApproachOccupancyTest : FunSpec({
                 materials = emptyMap(), payment = CivConstructionPayment(reservedBatch = 0))
             h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + storage, construction = order))
             for (x in -1..4) for (z in -2..2) h.world.loadChunk(x, z)
+            val floor = storage.entrance.copy(y = storage.entrance.y - 1)
+            h.world.getBlockAt(floor.x, floor.y, floor.z).blockData = Bukkit.createBlockData(surface)
+            val navigation = h.owner.javaClass.getDeclaredField("navigation").run {
+                isAccessible = true; get(h.owner) as CivsResidentNavigation
+            }
+            navigation.changed(h.world.uid, floor)
+            val snapshot = h.world.getChunkAt(floor.x shr 4, floor.z shr 4, false)
+                .getChunkSnapshot(false, false, false, false)
+            snapshot.getBlockData(floor.x and 15, floor.y, floor.z and 15).asString shouldBe
+                h.world.getBlockAt(floor.x, floor.y, floor.z).blockData.asString
             citizenStorageReady(h.world, control) shouldBe false
             fixture.routes.cancelRoute(fixture.actor)
             fixture.actor.targets.clear()
@@ -115,6 +126,21 @@ class CivsStorageApproachOccupancyTest : FunSpec({
             fixture.routes.startRoute(fixture.actor, h.world, control, 6_000) shouldBe true
             requireNotNull(fixture.actor.route).target shouldBe storage.entrance.location(h.world)
             requireNotNull(fixture.actor.route).authored shouldBe control
+            var endpoint: CitizenPoint? = null
+            for (tick in 0 until 80) {
+                h.navigate()
+                fixture.actor.route?.let { if (!it.motion.searching) endpoint = it.motion.endpoint }
+                if (endpoint != null) break
+            }
+            requireNotNull(endpoint).y shouldBe if (surface == Material.DIRT_PATH) 63.9375 else 64.0
+            for (tick in 0 until 160) {
+                h.navigate()
+                if (fixture.routes.arrivedAt(fixture.actor, h.city, h.world, control)) break
+            }
+            fixture.routes.arrivedAt(fixture.actor, h.city, h.world, control) shouldBe true
+            (fixture.actor.npc.location.distanceSquared(control.copy(z = -8).location(h.world)) > 0.0) shouldBe true
+            citizenPacketSupported(h.world, fixture.actor.npc.location.point()) shouldBe true
+            citizenPacketBodyClear(h.world, fixture.actor.npc.location.point(), false) shouldBe true
             h.unloads shouldBe 0
             h.deliveries shouldBe 0
         }

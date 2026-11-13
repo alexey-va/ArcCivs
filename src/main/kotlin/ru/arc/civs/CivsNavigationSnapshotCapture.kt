@@ -36,6 +36,10 @@ internal data class CitizenSnapshotRequest(
     val sections: Map<CitizenSnapshotSectionKey, Long> = emptyMap(),
 )
 
+/** The existing dense neighbourhood needs no temporary key; ordinary maps keep their exact lookup. */
+internal operator fun Map<CivPosition, CitizenTerrainBlock>.get(x: Int, y: Int, z: Int): CitizenTerrainBlock? =
+    if (this is CitizenSnapshotBlocks) get(x, y, z) else get(CivPosition(x, y, z))
+
 /** Fixed x/z/y order, with owned immutable keys and cell references instead of sixty-three map nodes. */
 private class CitizenSnapshotBlocks(
     private val positions: List<CivPosition>,
@@ -44,11 +48,13 @@ private class CitizenSnapshotBlocks(
     private val origin = positions.firstOrNull()
     override val size: Int get() = cells.size
 
-    override fun get(key: CivPosition): CitizenTerrainBlock? {
+    override fun get(key: CivPosition): CitizenTerrainBlock? = get(key.x, key.y, key.z)
+
+    fun get(worldX: Int, worldY: Int, worldZ: Int): CitizenTerrainBlock? {
         val first = origin ?: return null
-        val x = key.x.toLong() - first.x
-        val y = key.y.toLong() - first.y
-        val z = key.z.toLong() - first.z
+        val x = worldX.toLong() - first.x
+        val y = worldY.toLong() - first.y
+        val z = worldZ.toLong() - first.z
         if (x !in 0L..2L || y !in 0L..6L || z !in 0L..2L) return null
         return cells[(x.toInt() * 3 + z.toInt()) * 7 + y.toInt()]
     }

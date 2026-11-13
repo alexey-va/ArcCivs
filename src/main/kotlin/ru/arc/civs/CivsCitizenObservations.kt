@@ -379,6 +379,11 @@ internal class CivsCitizenObservations(
             cargo = resident.cargo?.let { mapOf(it.material to it.amount.toInt()) }.orEmpty(),
             yaw = entity.bodyYaw, nativeHeight = entity.height, hunger = CivsResidents.hunger(resident),
             child = CivsResidents.isChild(resident),
+            sleep = if (actor.sleeping && entity.pose == ru.arc.paper.npc.PacketNpcPose.SLEEPING)
+                actor.sleepOrigin?.let { ground -> actor.sleepPose?.bounds?.let { body ->
+                    CivSleepPresentation(ground.x, ground.y, ground.z, entity.bodyYaw, entity.scale,
+                        (body.minX + body.maxX) / 2, body.maxY, (body.minZ + body.maxZ) / 2)
+                } } else null,
             statusInputs = if (status == "waiting-inputs") workStatusInputs(city, resident).distinct() else emptyList(),
             speech = actor.social.visit?.takeIf { status == "talking" }?.let {
                 citizenConversationLine(resident.id, it, Bukkit.getCurrentTick())

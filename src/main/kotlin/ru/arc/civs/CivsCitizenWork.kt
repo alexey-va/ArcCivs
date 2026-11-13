@@ -93,7 +93,7 @@ internal class CivsCitizenWork(
             runtime.statuses[actor.workerId] = "route-unreachable"
             return
         }
-        if (actor.sleeping && !shelter.sleepStillSafe(actor)) {
+        if (actor.sleeping && !shelter.sleepStillSafe(actor, city, worker)) {
             // Changed support/headroom must be handled before work, hunger or another route.
             // A clear but unsupported origin wakes in place and falls on the normal gravity tick.
             if (shelter.wake(actor)) { actor.shelter = null; actor.shelterPose = null }

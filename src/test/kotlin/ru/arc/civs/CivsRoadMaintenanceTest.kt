@@ -26,6 +26,65 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class CivsRoadMaintenanceTest : FunSpec({
+    test("an Auto1 crossing shoulder keeps its owner's straight descent despite a second lower neighbour") {
+        val (city, plans, floor) = upkeepShoulderCrossing()
+        val before = Gson().toJson(city to plans)
+        val target = CivsRoadMaintenance.prepare(city, plans).targets.single { it.floor == floor }
+        target.source.id shouldBe city.buildings[1].id
+        target.neighbours.toSet() shouldBe setOf(CivPosition(2, 66, 0), CivPosition(0, 67, 0),
+            CivPosition(1, 66, 1), CivPosition(1, 68, -1))
+        target.after shouldBe "minecraft:spruce_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]"
+        target.validated(city)
+        Gson().fromJson(Gson().toJson(target), CivRoadUpkeep::class.java).validated(city)
+        // The old null-ordered shoulder finish is still a valid persisted witness after the calculation changes.
+        val legacy = Gson().fromJson(Gson().toJson(target.copy(after = "minecraft:dirt_path")), CivRoadUpkeep::class.java)
+        legacy.validated(city)
+        Gson().toJson(city to plans) shouldBe before
+    }
+
+    test("a foreign paid centreline grade defers new shoulder work while old receipts remain recoverable") {
+        val (city, plans, floor) = upkeepShoulderCrossing()
+        val foreign = plans.last()
+        val route = foreign.terrain!!.route.take(5) + listOf(CivPosition(3, 68, 1), CivPosition(2, 68, 1),
+            CivPosition(1, 68, 1), CivPosition(1, 68, 2), CivPosition(2, 68, 2), CivPosition(3, 68, 2),
+            CivPosition(4, 67, 2), CivPosition(5, 67, 2), CivPosition(6, 67, 2), CivPosition(7, 67, 2),
+            CivPosition(7, 67, 3), foreign.building.entrance)
+        val retained = plans.dropLast(1) + upkeepApproach(city, foreign.building, route)
+        val before = Gson().toJson(city to retained)
+        // Public prepare in .295 emitted this witness when east was the only lower global neighbour.
+        val legacy = CivRoadUpkeep(city.id, city.worldId, city.owner, plans.first().id, plans.first().building, floor,
+            "minecraft:spruce_stairs[facing=west,half=bottom,shape=straight,waterlogged=false]",
+            plans.first().terrain!!.route, listOf(CivPosition(2, 66, 0), CivPosition(0, 67, 0),
+                CivPosition(1, 67, 1), CivPosition(1, 68, -1)))
+        legacy.validated(city)
+        Gson().fromJson(Gson().toJson(legacy), CivRoadUpkeep::class.java).validated(city)
+        shouldThrow<IllegalArgumentException> {
+            legacy.copy(after = "minecraft:spruce_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]").validated(city)
+        }
+        val result = CivsRoadMaintenance.prepare(city, retained)
+        result.targets.none { it.floor == floor } shouldBe true
+        (result.deferredDescent != null) shouldBe true
+        Gson().toJson(city to retained) shouldBe before
+    }
+
+    test("ordered shoulders reject conflicting own profiles and ambiguous perpendicular descents") {
+        val floor = CivPosition(1, 67, 0)
+        val ambiguous = listOf(CivPosition(0, 67, 1), CivPosition(0, 68, 0), CivPosition(0, 68, -1),
+            CivPosition(1, 68, -1), CivPosition(2, 67, -1))
+        CivsAutonomousTerraform.roadProfileContains(ambiguous, floor) shouldBe true
+        CivsAutonomousTerraform.roadProfileContains(ambiguous, CivPosition(1, 66, 1)) shouldBe true
+        CivsAutonomousTerraform.roadProfileContains(ambiguous, CivPosition(2, 66, 0)) shouldBe true
+        CivsSettlementLayout.routeDownhill(floor, ambiguous) shouldBe null
+        val conflicting = listOf(CivPosition(0, 68, 0), CivPosition(0, 67, 1), CivPosition(0, 67, 2),
+            CivPosition(1, 68, 2), CivPosition(1, 68, 1))
+        CivsAutonomousTerraform.roadProfileContains(conflicting, floor) shouldBe true
+        CivsAutonomousTerraform.roadProfileContains(conflicting, CivPosition(1, 66, 1)) shouldBe false
+        CivsSettlementLayout.routeDownhill(floor, conflicting) shouldBe null
+        // Existing centreline ambiguity still has no preferred descent.
+        CivsSettlementLayout.routeDownhill(CivPosition(0, 67, 0),
+            listOf(CivPosition(-1, 67, 0), CivPosition(0, 68, 0), CivPosition(1, 67, 0))) shouldBe null
+    }
+
     test("physical Auto road upkeep consumes one carried cobblestone without closed stock or production credit") {
         val base = upkeepCity()
         val worker = CivsEquipment.replace(base.workers.single(), MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }
@@ -408,8 +467,15 @@ class CivsRoadMaintenanceTest : FunSpec({
 
         val prepared = CivsRoadMaintenance.prepare(queued, listOf(retained))
 
-        prepared.deferredDescent shouldBe CivRoadDescentDeferral(stair, lower, 1)
-        prepared.targets.none { it.floor == stair || it.floor == lower } shouldBe true
+        prepared.deferredDescent shouldBe CivRoadDescentDeferral(stair, lower, 3)
+        for (x in 12561..12563) {
+            val shoulder = stair.copy(x = x)
+            val downhill = lower.copy(x = x)
+            baseline.targets.single { it.floor == shoulder }.after shouldBe
+                "minecraft:oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+            gateBounds.contains(downhill.x, downhill.y, downhill.z) shouldBe true
+            prepared.targets.none { it.floor == shoulder || it.floor == downhill } shouldBe true
+        }
         prepared.targets.single { it.floor == adjacent }.let { surviving ->
             surviving.after shouldBe baseline.targets.single { it.floor == adjacent }.after
             surviving.route shouldBe route
@@ -1146,6 +1212,22 @@ private fun upkeepCity(): Settlement {
     return CivsRules.validate(Settlement(UUID(0, 10), UUID(0, 11), "Upkeep", UUID(0, 12), CivPosition(0, 64, 0), 96,
         "caledonia", Stock(1_000, 1_000, 1_000), listOf(hall, builder, road),
         listOf(CivWorker(UUID(0, 13), "Builder", builder.id, nextDeliveryAt = 1)), autonomy = CivAutonomy()))
+}
+
+/** Auto1's exact four-neighbour crossing, translated horizontally; full valid routes remain the proof. */
+private fun upkeepShoulderCrossing(): Triple<Settlement, List<CivPlacementPlan>, CivPosition> {
+    val base = upkeepCity()
+    val hut = base.buildings[1].copy(anchor = CivPosition(0, 66, 6),
+        bounds = CivBox(CivPosition(-5, 66, 6), CivPosition(5, 90, 10)), entrance = CivPosition(0, 67, 5))
+    val other = CivBuilding(UUID(0, 96), BuildingType.HOUSE, 1, CivPosition(7, 66, 4), 0, "fixture/crossing",
+        CivBox(CivPosition(8, 66, 4), CivPosition(12, 72, 8)), CivPosition(7, 67, 4), BuildingPhase.ACTIVE)
+    val city = base.copy(style = "nordic", buildings = listOf(base.buildings.first(), hut, other))
+    val south = listOf(CivPosition(0, 69, -1), CivPosition(0, 68, 0)) + (1..5).map { CivPosition(0, 67, it) }
+    val east = listOf(CivPosition(0, 69, -1), CivPosition(1, 69, -1), CivPosition(2, 68, -1),
+        CivPosition(3, 67, -1), CivPosition(3, 67, 0), CivPosition(3, 67, 1), CivPosition(3, 67, 2),
+        CivPosition(4, 67, 2), CivPosition(5, 67, 2), CivPosition(6, 67, 2), CivPosition(7, 67, 2),
+        CivPosition(7, 67, 3), other.entrance)
+    return Triple(city, listOf(upkeepApproach(city, hut, south), upkeepApproach(city, other, east)), CivPosition(1, 67, 0))
 }
 
 private fun upkeepWork(city: Settlement, before: String = "minecraft:grass_block[snowy=false]"): CivWorldWork {

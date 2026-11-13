@@ -1792,6 +1792,9 @@ class CivsWorldTest : FunSpec({
             field.isDone shouldBe false
             s.scheduler.tick(3)
             completed(field).columns.size shouldBe 65 * 65
+            completed(field).columns.keys.toList() shouldBe (-32..32).flatMap { dz ->
+                (-32..32).map { dx -> civsTerrainKey(city.center.x + dx, city.center.z + dz) }
+            }
             completed(field).at(32, 0)!!.loaded shouldBe false
             s.world.isChunkLoaded(2, 0) shouldBe false
         }

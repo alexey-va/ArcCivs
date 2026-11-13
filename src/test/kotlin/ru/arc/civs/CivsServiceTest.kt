@@ -8025,6 +8025,7 @@ internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean,
             "nordic", Stock(96, 96, 24), listOf(hall, home), (1..4).map { CivWorker(UUID.randomUUID(), "Worker $it", null) }, createdAt = time))
         every { store.load() } returns CompletableFuture.completedFuture(if (empty) emptyList() else listOf(city))
         every { store.loadPlan(any()) } returns CompletableFuture.completedFuture(null)
+        every { store.planGeneration } returns 0L
         every { store.homeServer() } returns null
         every { store.lookup(any()) } returns CompletableFuture.completedFuture(null)
         every { store.save(any()) } answers {

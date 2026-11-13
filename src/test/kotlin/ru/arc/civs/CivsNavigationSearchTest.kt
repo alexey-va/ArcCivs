@@ -44,6 +44,44 @@ class CivsNavigationSearchTest : FunSpec({
         }
     }
 
+    test("repeated geometry probes preserve fractional support collision and hot-exit guards") {
+        for (height in listOf(.0625, .5, .9375, 1.0))
+            for (kind in listOf("clear", "solid", "reversed", "liquid", "liquid-below", "unknown", "hot", "hot-exit", "body")) {
+                val origin = CitizenPoint(.5, 63 + height, .5)
+                val target = origin.copy(x = 2.5)
+                val avoiding = if (kind == "body") listOf(CitizenTerrainBox(1.1, 63 + height, .1,
+                    1.9, 65 + height, .9)) else emptyList()
+                val search = CitizenNavigationSearch(origin, target, 0, 256, avoiding)
+                var result = search.advance(emptyList())
+                var batches = 0
+                while (result.probes.isNotEmpty()) {
+                    check(batches++ < 32)
+                    result = search.advance(result.probes.map { probe ->
+                        val blocks = buildMap {
+                            for (x in probe.node.x - 1..probe.node.x + 1) for (z in -1..1) for (y in 60..67) {
+                                val at = x == (if (kind == "hot-exit") 0 else 1) && z == 0 && y == 64
+                                val below = kind == "liquid-below" && x == 1 && z == 0 && y == 62
+                                val boxes = when {
+                                    at && kind == "solid" -> listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+                                    at && kind == "reversed" -> listOf(CitizenTerrainBox(1.0, 1.0, 1.0, 0.0, 0.0, 0.0))
+                                    y == 63 -> listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, height, 1.0))
+                                    else -> emptyList()
+                                }
+                                put(CivPosition(x, y, z), CitizenTerrainBlock(!(at && kind == "unknown"),
+                                    below || at && kind == "liquid", false, false,
+                                    at && kind in listOf("hot", "hot-exit"),
+                                    x in 0..2 && z == 0 && y == floor(origin.y + .001).toInt(), 1.0, boxes))
+                            }
+                        }
+                        CitizenSearchCapture(probe, blocks, citizenSearchCandidates(probe, blocks, 0, 256))
+                    })
+                }
+                withClue("height=$height kind=$kind result=$result") {
+                    (result.path?.lastOrNull()?.point == target) shouldBe (kind in listOf("clear", "liquid-below", "hot-exit"))
+                }
+            }
+    }
+
     test("prefetched exact neighbourhoods advance the graph without another native request per step") {
         val target = CitizenPoint(3.5, 64.0, .5)
         val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), target, 0, 256, emptyList())

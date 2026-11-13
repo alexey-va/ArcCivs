@@ -13,6 +13,7 @@ import java.nio.file.StandardOpenOption
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicLong
 
 /** Durable, bounded file state. Explicit load rescans external edits; filesystem work runs on the supplied executor. */
 class CivsStore(
@@ -33,13 +34,15 @@ class CivsStore(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<UUID, CivPlacementPlan>): Boolean = size > 4
     }
     private val consumedItems = CivsConsumedItems()
+    private val planChanges = AtomicLong()
+    internal val planGeneration: Long get() = planChanges.get()
     private var closed = false
 
     init {
         require(maximumCities > 0) { "maximumCities must be positive" }
     }
 
-    fun load(): CompletableFuture<List<Settlement>> = submit {
+    fun load(): CompletableFuture<List<Settlement>> = submitPlanChange {
         // Explicit reload observes administrator file edits, including after a failed city rescan.
         planCache.clear()
         reloadCityIndex(trustedRoot()) to requireNotNull(deletedCityIndex).values.toList()
@@ -152,7 +155,7 @@ class CivsStore(
                 requiredGrass = it.requiredGrass?.toList(), paidGateFloors = it.paidGateFloors?.toList(),
                 paidWaterFloors = it.paidWaterFloors?.toList())
         })
-        return submit {
+        return submitPlanChange {
             // A failed atomic write can have reached rename; never retain its previous cached value.
             planCache.remove(snapshot.id)
             validatePlan(snapshot)
@@ -168,11 +171,11 @@ class CivsStore(
         planStore(trustedRoot, id).loadOrNull()?.plan?.let(::cachePlan)
     }
 
-    fun deletePlan(id: UUID): CompletableFuture<Boolean> = submit {
+    fun deletePlan(id: UUID): CompletableFuture<Boolean> = submitPlanChange {
         planCache.remove(id)
         val trustedRoot = trustedRoot()
         val store = planStore(trustedRoot, id)
-        val existing = store.loadOrNull() ?: return@submit false
+        val existing = store.loadOrNull() ?: return@submitPlanChange false
         requireNotNull(existing.plan)
         store.deleteIfExists()
     }
@@ -624,6 +627,14 @@ class CivsStore(
             .decode(ByteBuffer.wrap(bytes))
             .toString()
         return requireNotNull(gson.fromJson(text, type)) { "JSON record is empty" }
+    }
+
+    private fun <T> submitPlanChange(action: () -> T): CompletableFuture<T> {
+        // Fence both queued readers and projections completed while an uncertain write was in flight.
+        planChanges.incrementAndGet()
+        return submit {
+            try { action() } finally { planChanges.incrementAndGet() }
+        }
     }
 
     private fun <T> submit(action: () -> T): CompletableFuture<T> = synchronized(lifecycleLock) {

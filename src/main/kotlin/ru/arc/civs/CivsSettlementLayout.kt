@@ -828,9 +828,25 @@ internal object CivsSettlementLayout {
 
     internal fun routeDownhill(floor: CivPosition, route: List<CivPosition>): CivPosition? {
         val index = route.indexOf(floor.copy(y = floor.y + 1))
-        if (index < 0) return null
-        return listOfNotNull(route.getOrNull(index - 1), route.getOrNull(index + 1))
+        if (index >= 0) return listOfNotNull(route.getOrNull(index - 1), route.getOrNull(index + 1))
             .singleOrNull { it.y == floor.y }?.let { it.copy(y = it.y - 1) }
+        if (!CivsAutonomousTerraform.roadProfileContains(route, floor)) return null
+        var downhill: CivPosition? = null
+        for (at in 1 until route.size) {
+            val a = route[at - 1]; val b = route[at]
+            val high = when { a.y == b.y + 1 -> a; b.y == a.y + 1 -> b; else -> continue }
+            val low = if (high == a) b else a
+            if (high.y != floor.y + 1) continue
+            val dx = low.x - high.x; val dz = low.z - high.z
+            val sideX = floor.x - high.x; val sideZ = floor.z - high.z
+            // Only the side of this owner's straight descent can inherit its facing.
+            if (abs(dx) + abs(dz) != 1 || abs(sideX) + abs(sideZ) != 1 || dx * sideX + dz * sideZ != 0) continue
+            val projected = CivPosition(low.x + sideX, floor.y - 1, low.z + sideZ)
+            if (!CivsAutonomousTerraform.roadProfileContains(route, projected)) continue
+            if (downhill != null && downhill != projected) return null
+            downhill = projected
+        }
+        return downhill
     }
 
     /** A full intermediate block separates straight stair flights when the continuing exit turns. */

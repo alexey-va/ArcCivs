@@ -530,7 +530,9 @@ internal class CivsCitizenCollisions(
         }
         if (actor.sheltering) {
             actor.shelterPose?.let { add(it.bounds) }
-            (actor.sleepOrigin ?: actor.shelter?.location(actor.npc.world))?.let { add(citizenStandingBounds(it, actor.npc.scale)) }
+            (actor.sleepOrigin ?: actor.shelterFeet ?: actor.shelter?.location(actor.npc.world))?.let {
+                add(citizenStandingBounds(it, actor.npc.scale))
+            }
         }
     }
 
