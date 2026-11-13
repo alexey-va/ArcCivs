@@ -15,6 +15,111 @@ import org.mockbukkit.mockbukkit.world.Coordinate
 import java.util.UUID
 
 class CivsStorageApproachOccupancyTest : FunSpec({
+    for (rise in listOf(1.0) + (1..15).map { it / 16.0 })
+    test("storage routes preserve the actual native support top rise=$rise") {
+        residentRuntime(worldFactory = ::FractionalStorageWorld, server = CivsWorksiteServerFixture()) { h ->
+            val fixture = fractionalStorageFixture(h, rise)
+            val actor = fixture.actor
+            val target = requireNotNull(actor.plan.workplace)
+            val token = actor.plan.token
+            val expected = Location(h.world, fixture.control.x + .5, fixture.control.y - 1 + rise, fixture.control.z - .5)
+            citizenPacketSupported(h.world, expected.point(), false) shouldBe true
+            citizenPacketBodyClear(h.world, expected.point(), false) shouldBe true
+            h.navigationNow = 6_000
+            fixture.routes.startRoute(actor, h.world, target, 6_000) shouldBe true
+            val route = requireNotNull(actor.route)
+            route.authored shouldBe target
+            route.target shouldBe expected
+            actor.plan.token shouldBe token
+            for (tick in 0 until 240) {
+                h.navigate()
+                if (fixture.routes.arrivedAt(actor, h.city, h.world, target)) break
+            }
+            withClue("rise=$rise actual=${actor.npc.location} target=$expected") {
+                fixture.routes.arrivedAt(actor, h.city, h.world, target) shouldBe true
+            }
+            actor.npc.location.y shouldBe expected.y
+            h.unloads shouldBe 0
+            h.deliveries shouldBe 0
+        }
+    }
+
+    for (obstruction in listOf("headroom", "unsupported", "unloaded", "player"))
+    test("fractional storage keeps physical admission guards obstruction=$obstruction") {
+        residentRuntime(worldFactory = ::FractionalStorageWorld, server = CivsWorksiteServerFixture()) { h ->
+            val fixture = fractionalStorageFixture(h, .5)
+            val world = h.world as FractionalStorageWorld
+            val point = fixture.control.copy(y = fixture.control.y - 1, z = fixture.control.z - 1)
+            when (obstruction) {
+                "headroom" -> world.getBlockAt(point.x, point.y + 2, point.z).type = Material.STONE
+                "unsupported" -> {
+                    world.rise = 0.0
+                    world.getBlockAt(point.x, point.y - 1, point.z).type = Material.AIR
+                }
+                "unloaded" -> world.unavailable = (point.x shr 4) to (point.z shr 4)
+                "player" -> h.playerAt(Location(world, point.x + .5, point.y + .5, point.z + .5))
+            }
+            h.nativeCollisions().use { native ->
+                h.owner.residentStepAllowed = native::canResidentMove
+                h.navigationNow = 6_000
+                val accepted = fixture.routes.startRoute(fixture.actor, world, requireNotNull(fixture.actor.plan.workplace), 6_000)
+                if (obstruction == "unloaded") {
+                    // Accepted loading intent must not create a route or invent an arrival.
+                    accepted shouldBe true
+                    citizenStorageFeet(world, point) shouldBe null
+                } else accepted shouldBe false
+                fixture.actor.route shouldBe null
+                h.unloads shouldBe 0
+                h.deliveries shouldBe 0
+            }
+        }
+    }
+
+    test("integer storage retains a supported ladder and fractional validation preserves supplied offsets") {
+        residentRuntime(worldFactory = ::FractionalStorageWorld, server = CivsWorksiteServerFixture()) { h ->
+            val world = h.world as FractionalStorageWorld
+            val point = CivPosition(20, 64, -1)
+            world.loadChunk(1, -1)
+            world.getBlockAt(point.x, point.y - 1, point.z).type = Material.AIR
+            world.getBlockAt(point.x, point.y, point.z).type = Material.LADDER
+            citizenStandable(world, point) shouldBe true
+            citizenStorageFeet(world, point) shouldBe point.location(world)
+            world.getBlockAt(point.x, point.y, point.z).type = Material.AIR
+            world.supportCells = setOf(point.copy(y = 63), point.copy(x = 21, y = 63))
+            world.rise = .5
+            val offset = Location(world, 21.125, 63.5, -.5)
+            citizenStorageStanding(world, point.copy(y = 63), offset) shouldBe true
+            offset.x shouldBe 21.125
+        }
+    }
+
+    test("a current unfinished storage keeps its real entrance fallback without a barrel or transfer") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            val fixture = storageApproachFixture(h, true, 0)
+            val control = CivPosition(40, 64, 0)
+            val storage = CivBuilding(UUID(295, 1), BuildingType.WAREHOUSE, 1, control, 0, "warehouse1",
+                CivBox(CivPosition(38, 64, -2), CivPosition(42, 68, 2)), control.copy(z = -3),
+                BuildingPhase.CONSTRUCTING, control = control)
+            val order = CivConstruction(UUID(295, 2), storage.id, 1, 1, 0, ConstructionPhase.PLACING,
+                Stock(), plannedBuilding = storage, batches = CivConstructionBatches(1, 16), workCredit = 1,
+                materials = emptyMap(), payment = CivConstructionPayment(reservedBatch = 0))
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + storage, construction = order))
+            for (x in -1..4) for (z in -2..2) h.world.loadChunk(x, z)
+            citizenStorageReady(h.world, control) shouldBe false
+            fixture.routes.cancelRoute(fixture.actor)
+            fixture.actor.targets.clear()
+            fixture.actor.plan = fixture.actor.plan.copy(storage = control)
+            fixture.actor.cycle = fixture.actor.plan.cycle().also { it.returnWithObservedWork() }
+            fixture.actor.npc.teleport(control.copy(z = -8).location(h.world))
+            h.navigationNow = 6_000
+            fixture.routes.startRoute(fixture.actor, h.world, control, 6_000) shouldBe true
+            requireNotNull(fixture.actor.route).target shouldBe storage.entrance.location(h.world)
+            requireNotNull(fixture.actor.route).authored shouldBe control
+            h.unloads shouldBe 0
+            h.deliveries shouldBe 0
+        }
+    }
+
     for (cached in listOf(true, false)) test("the native barrel with its north side occupied walks to a clear diagonal cached=$cached") {
         residentRuntime(workerId = UUID(146, 150), worldFactory = ::CapturedBarrelApproachWorld) { h ->
             val fixture = storageApproachFixture(h, true, 1)
@@ -228,6 +333,64 @@ class CivsStorageApproachOccupancyTest : FunSpec({
         }
     }
 })
+
+private fun fractionalStorageFixture(h: ResidentRuntime, rise: Double): StorageApproachFixture {
+    val fixture = storageApproachFixture(h, true, 0)
+    val control = fixture.control
+    val world = h.world as FractionalStorageWorld
+    world.time = 1_000
+    // Lower the last approach cells too: a valid nearby arrival must stand on the tested surface.
+    world.supportCells = (1..3).mapTo(hashSetOf()) { control.copy(y = control.y - 1, z = control.z - it) }
+    world.rise = rise
+    for (x in control.x - 1..control.x + 1) for (z in control.z - 1..control.z + 1) {
+        if (x == control.x && z in control.z - 1..control.z) continue
+        for (y in control.y - 2..control.y + 2) world.getBlockAt(x, y, z).type = Material.STONE
+    }
+    fixture.routes.cancelRoute(fixture.actor)
+    fixture.actor.targets.clear()
+    fixture.actor.npc.teleport(control.copy(z = control.z - 6).location(world))
+    return fixture
+}
+
+/** Contextual native shape values, recorded in both the chunk palette and live cells. */
+private class FractionalStorageWorld : ResidentRuntimeWorld() {
+    var rise = 1.0
+        set(value) {
+            field = value
+            recordSupportData()
+        }
+    var supportCells = emptySet<CivPosition>()
+        set(value) {
+            field = value
+            recordSupportData()
+        }
+    var unavailable: Pair<Int, Int>? = null
+
+    private fun recordSupportData() {
+        for (point in supportCells) super.getBlockAt(Coordinate(point.x, point.y, point.z)).blockData =
+            if (rise == 0.0) Bukkit.createBlockData(Material.AIR)
+            else Bukkit.createBlockData("minecraft:acacia_slab[type=${if (rise == 1.0) "double" else "bottom"},waterlogged=false]")
+    }
+
+    override fun isChunkLoaded(x: Int, z: Int): Boolean = unavailable != (x to z) && super.isChunkLoaded(x, z)
+
+    override fun getBlockAt(point: Coordinate): BlockMock {
+        if (CivPosition(point.x, point.y, point.z) !in supportCells) return super.getBlockAt(point)
+        val box = BoundingBox(0.0, 0.0, 0.0, 1.0, rise, 1.0)
+        val data = super.getBlockAt(point).blockData.clone()
+        // Slabs use the existing fixture's contextual capture seam; never cache a variable shape as static STONE.
+        return object : BlockMock(data.material,
+            Location(this, point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) {
+            init { blockData = data }
+            override fun isPassable(): Boolean = rise == 0.0
+            override fun getBoundingBox(): BoundingBox = box.clone().shift(point.x.toDouble(), point.y.toDouble(), point.z.toDouble())
+            override fun getCollisionShape(): VoxelShape = object : VoxelShape {
+                override fun getBoundingBoxes(): Collection<BoundingBox> = if (rise == 0.0) emptyList() else listOf(box.clone())
+                override fun overlaps(other: BoundingBox): Boolean = rise != 0.0 && box.overlaps(other)
+            }
+        }
+    }
+}
 
 private data class StorageApproachFixture(val building: CivBuilding, val control: CivPosition,
     val actor: CitizenActor, val neighbours: List<CitizenActor>, val routes: CivsCitizenRoutes)

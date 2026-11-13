@@ -4,6 +4,7 @@ import org.bukkit.Location
 import org.bukkit.World
 import org.bukkit.util.BoundingBox
 import kotlin.math.abs
+import kotlin.math.floor
 
 internal fun citizenStandable(world: World, point: CivPosition): Boolean {
     if (!citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
@@ -20,6 +21,45 @@ internal fun citizenStandable(world: World, point: CivPosition): Boolean {
         !floor.isLiquid && support.maxY >= point.y - 0.125 &&
         support.minX <= point.x + 0.2 && support.maxX >= point.x + 0.8 &&
         support.minZ <= point.z + 0.2 && support.maxZ >= point.z + 0.8
+}
+
+/** Storage retains its admitted cell while the native collision top owns the actual feet. */
+internal fun citizenStorageStanding(world: World, point: CivPosition, feet: Location): Boolean {
+    if (feet.world?.uid != world.uid || !citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
+        point.y <= world.minHeight || point.y + 1 >= world.maxHeight ||
+        feet.y < point.y || feet.y >= point.y + 1.0) return false
+    val at = feet.point()
+    if (feet.y == point.y.toDouble()) {
+        if (!citizenStandable(world, point)) return false
+    } else {
+        val x = floor(feet.x).toInt()
+        val z = floor(feet.z).toInt()
+        val y = citizenSupportY(feet.y)
+        if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
+        val support = world.getBlockAt(x, y, z)
+        if (support.isLiquid || citizenRouteOpenable(support.blockData) != null ||
+            support.collisionShape.boundingBoxes.none { abs(y + it.maxY - feet.y) <= .001 &&
+                feet.x - x in it.minX..it.maxX && feet.z - z in it.minZ..it.maxZ }) return false
+        // Preserve the integer standing contract's .6-wide support footprint, including cell seams.
+        for (dx in listOf(-.3, .3)) for (dz in listOf(-.3, .3))
+            if (!citizenPacketSupported(world, CitizenPoint(feet.x + dx, feet.y, feet.z + dz), false)) return false
+    }
+    return citizenPacketSupported(world, at) && citizenPacketCampfireClear(world, at) &&
+        citizenPacketBodyClear(world, at, false)
+}
+
+/** At most the admitted cell and its substrate; no material whitelist or extra route search. */
+internal fun citizenStorageFeet(world: World, point: CivPosition): Location? {
+    if (!citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
+        point.y <= world.minHeight || point.y + 1 >= world.maxHeight) return null
+    val base = point.location(world)
+    val floor = world.getBlockAt(point.x, point.y - 1, point.z)
+    if (citizenStorageStanding(world, point, base) &&
+        (abs(floor.boundingBox.maxY - base.y) <= .001 || !citizenPacketSupported(world, base.point(), false))) return base
+    return listOf(point.y - 1, point.y).flatMap { y ->
+        world.getBlockAt(point.x, y, point.z).collisionShape.boundingBoxes.map { y + it.maxY }
+    }.filter { it > point.y + .001 && it < point.y + 1.0 }.distinct().sorted().asSequence()
+        .map { base.clone().apply { y = it } }.firstOrNull { citizenStorageStanding(world, point, it) }
 }
 
 internal data class CitizenSleepPose(val position: Location, val bounds: org.bukkit.util.BoundingBox)

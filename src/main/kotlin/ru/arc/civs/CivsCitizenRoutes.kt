@@ -122,7 +122,11 @@ internal class CivsCitizenRoutes(
         }
         val entrance = workMine?.let { citizenMineEntranceWaypoint(it, from.point(), resolved, requireNotNull(minePassage)) }
         val waypoint = entrance ?: citizenMineWaypoint(city, world, from, resolved)
-        val to = if (storage != null && waypoint == null) storageFeet(world, resolved) else (waypoint ?: resolved).location(world)
+        val to = if (storage != null && waypoint == null) storageFeet(world, resolved) ?: run {
+            actor.targets.remove(target)
+            pause(actor, "storage-unavailable", now)
+            return false
+        } else (waypoint ?: resolved).location(world)
         if (idleAnchor != null && !collisions.idleDestinationFree(actor, to)) return false
         val distance = from.distance(to)
         if (!citizenRouteWithinReach(from.point(), to.point(), CivsLogistics.maximumTransferDistance(city))) {
@@ -134,7 +138,10 @@ internal class CivsCitizenRoutes(
             actor.pendingChunkTarget = resolved
             return true
         }
-        if (!citizenControlClear(city, resolved) || !citizenStandable(world, resolved) ||
+        val standable = if (storage != null && waypoint == null)
+            storagePointClear(actor, city, world, resolved, to)
+        else citizenStandable(world, resolved)
+        if (!citizenControlClear(city, resolved) || !standable ||
             idleAnchor != null && !citizenIdleTerrain(world, resolved, city.buildings)) {
             if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing"))
                 pauseNavigation(actor, "route-unreachable", "target-not-standable", to, now,
@@ -353,7 +360,7 @@ internal class CivsCitizenRoutes(
         val control = requireNotNull(storage.control)
         val safe: (CivPosition) -> Boolean = { point ->
             val feet = storageFeet(world, point)
-            storagePointClear(actor, city, world, point, feet) &&
+            feet != null && citizenAtStorage(world, feet.point(), control) && storagePointClear(actor, city, world, point, feet) &&
                 (feet.y == point.y.toDouble() || citizenCanReachBlock(world, feet.add(0.0, actor.npc.eyeHeight, 0.0), control))
         }
         val cached = actor.targets[target]?.takeIf { allowCached && citizenAtStorage(world, it.point(), control) && safe(it) }
@@ -374,7 +381,8 @@ internal class CivsCitizenRoutes(
         val oldStanding = route.target.point()
         val standing = citizenStorageTarget(city, storage, world) { point ->
             val feet = storageFeet(world, point)
-            feet.point() != oldStanding && citizenRoutePointAllowed(city, route.allowedBuildings, point) &&
+            feet != null && feet.point() != oldStanding && citizenAtStorage(world, feet.point(), control) &&
+                citizenRoutePointAllowed(city, route.allowedBuildings, point) &&
                 storagePointClear(actor, city, world, point, feet) &&
                 citizenCanReachBlock(world, feet.add(0.0, actor.npc.eyeHeight, 0.0), control)
         } ?: return false
@@ -390,20 +398,11 @@ internal class CivsCitizenRoutes(
 
     private fun storagePointClear(actor: CitizenActor, city: Settlement, world: World, point: CivPosition,
                                   feet: Location = point.location(world)): Boolean =
-        citizenStandable(world, point) && citizenControlClear(city, point) &&
+        (if (feet.y == point.y.toDouble()) citizenStandable(world, point) else citizenStorageStanding(world, point, feet)) &&
+            citizenControlClear(city, point) &&
             citizenPacketBodyClear(world, feet.point(), false) && collisions.residentMoveAllowed(actor, feet, feet)
 
-    /** The cell remains the route authority; a thin carpet changes only the supported feet height. */
-    private fun storageFeet(world: World, point: CivPosition): Location {
-        val base = point.location(world)
-        if (point.y !in world.minHeight until world.maxHeight || !citizenChunkReady(world, point.x shr 4, point.z shr 4)) return base
-        val block = world.getBlockAt(point.x, point.y, point.z)
-        if (!block.type.name.endsWith("_CARPET")) return base
-        val rise = block.collisionShape.boundingBoxes.maxOfOrNull { it.maxY } ?: return base
-        if (rise <= 0.001 || rise > 0.125) return base
-        val lifted = base.clone().add(0.0, rise, 0.0)
-        return lifted.takeIf { citizenPacketSupported(world, it.point(), allowClimbable = false) } ?: base
-    }
+    private fun storageFeet(world: World, point: CivPosition): Location? = citizenStorageFeet(world, point)
 
     /** Keep a clear food approach stable; other residents' bodies and arrival goals retain their existing reservations. */
     fun foodStanding(actor: CitizenActor, city: Settlement, source: CivResidentFoodSource): CivPosition? {
@@ -1032,9 +1031,14 @@ internal class CivsCitizenRoutes(
                 !citizenRouteWithinReach(previous.point(), authored.point(), CivsLogistics.maximumTransferDistance(city)) ||
                 !citizenChunkReady(entity.world, previous.blockX shr 4, previous.blockZ shr 4) ||
                 !labCourierRecoveryAllowed(city, worker, recoveryTrip, originPoints))) return false
+        val storage = labStorage ?: if (waitingMine == null) storageForTarget(actor, city, authored) else null
+        val storageRecovery = storage != null && !actor.sheltering && food == null
+        fun recoveryFeet(candidate: CivPosition): Location? = if (storageRecovery)
+            storageFeet(entity.world, candidate) else candidate.location(entity.world)
         val safe: (CivPosition) -> Boolean = { candidate ->
-            val feet = if (labStorage != null) storageFeet(entity.world, candidate) else candidate.location(entity.world)
-            collisions.recoveryPointSafe(actor, city, candidate, failed.allowedBuildings,
+            val feet = recoveryFeet(candidate)
+            feet != null && (!storageRecovery || citizenAtStorage(entity.world, feet.point(), requireNotNull(storage?.control))) &&
+                collisions.recoveryPointSafe(actor, city, candidate, failed.allowedBuildings,
                 routeMine(actor, city).takeIf { recoveryAnchor == null }, feet) &&
                 (waitingMine == null || outside(waitingMine, candidate.x, candidate.z)) &&
                 (home == null || home.bounds.contains(candidate.x, candidate.y, candidate.z)) &&
@@ -1047,7 +1051,6 @@ internal class CivsCitizenRoutes(
                         labCourierRecoveryPoints(feet, citizenStandingBounds(feet, entity.scale))
                     else listOf(candidate, candidate.copy(y = candidate.y - 1))))
         }
-        val storage = labStorage ?: if (waitingMine == null) storageForTarget(actor, city, authored) else null
         val point = (when {
             actor.sheltering -> {
                 val reserved = authored.takeIf(safe)?.takeIf { point ->
@@ -1067,7 +1070,7 @@ internal class CivsCitizenRoutes(
             storage != null -> citizenStorageTarget(city, storage, entity.world, safe)
             else -> citizenRecoveryTarget(city, authored, safe)
         }) ?: return false
-        val destination = if (labStorage != null) storageFeet(entity.world, point) else point.location(entity.world)
+        val destination = recoveryFeet(point) ?: return false
         if (!collisions.residentMoveAllowed(actor, destination, destination)) return false
         destination.yaw = previous.yaw
         cancelRoute(actor, destination)
@@ -1109,7 +1112,7 @@ internal class CivsCitizenRoutes(
 
     private fun labCourierRecoveryPoints(feet: Location, body: BoundingBox): List<CivPosition> = buildList {
         addAll(recoveryVolumePoints(feet, body))
-        // A carpet supports fractional feet inside its cell. Its substrate is still part of the landing.
+        // Fractional support can occupy the feet cell. Its substrate is still part of the landing.
         if (citizenSupportY(feet.y) == feet.blockY) add(CivPosition(feet.blockX, feet.blockY - 1, feet.blockZ))
     }
 

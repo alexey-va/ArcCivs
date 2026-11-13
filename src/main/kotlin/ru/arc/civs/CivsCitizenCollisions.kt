@@ -343,7 +343,8 @@ internal class CivsCitizenCollisions(
         for (x in kotlin.math.floor(body.minX).toInt()..kotlin.math.floor(body.maxX).toInt())
             for (z in kotlin.math.floor(body.minZ).toInt()..kotlin.math.floor(body.maxZ).toInt())
                 if (!citizenRoutePointAllowed(city, allowed, CivPosition(x, point.y, z), mine)) return false
-        return citizenStandable(npc.world, point) && citizenControlClear(city, point) &&
+        return (if (feet == null || destination.y == point.y.toDouble()) citizenStandable(npc.world, point)
+            else citizenStorageStanding(npc.world, point, destination)) && citizenControlClear(city, point) &&
             citizenPacketBodyClear(npc.world, destination.point(), false) && citizenSleepClear(npc.world, body) &&
             audience.activeAt(city.id, city.worldId, destination.point(), audience.viewers()) && residentMoveAllowed(actor, destination, destination)
     }
