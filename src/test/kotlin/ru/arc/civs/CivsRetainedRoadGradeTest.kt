@@ -13,7 +13,7 @@ class CivsRetainedRoadGradeTest : FunSpec({
         val choices = listOf(CivsAutonomousCandidate(fixture.house))
         val ordinary = CivsAutonomousTerraform.options(fixture.city, choices, fixture.surface)
         ordinary.map { it.building.anchor.y }.toSet() shouldBe setOf(66, 62, 70)
-        ordinary.forEach { option ->
+        ordinary.filterNot { it.building.anchor.y == 70 }.forEach { option ->
             shouldThrow<CivsRejection> {
                 CivsAutonomousTerraform.draft(fixture.city, option, fixture.surface, fixture.access)
             }.reason shouldBe "autonomy-no-path"
@@ -25,6 +25,20 @@ class CivsRetainedRoadGradeTest : FunSpec({
         safe.route.last() shouldBe aligned.entrance
         safe.columns.all { column -> kotlin.math.abs(column.groundY - 66) <= CivsAutonomousTerraform.MAXIMUM_CHANGE } shouldBe true
         val standing = fixture.access.standing(fixture.city, fixture.house.id)
+        val stepped = CivsAutonomousTerraform.draft(fixture.city,
+            ordinary.single { it.building.anchor.y == 70 }, fixture.surface, fixture.access)
+        stepped.building.entrance.y shouldBe 71
+        stepped.route.first() shouldBe fixture.city.buildings.first().entrance
+        stepped.route.last() shouldBe stepped.building.entrance
+        stepped.route.map { it.y }.toSet() shouldBe setOf(70, 71)
+        stepped.route.zipWithNext().all { (a, b) ->
+            kotlin.math.abs(a.x - b.x) + kotlin.math.abs(a.z - b.z) == 1 && kotlin.math.abs(a.y - b.y) <= 1
+        } shouldBe true
+        val preserved = stepped.columns.filter { civsTerrainKey(it.x, it.z) in standing }
+        preserved.isNotEmpty() shouldBe true
+        preserved.all { column -> column.preserve &&
+            column.groundY == standing.getValue(civsTerrainKey(column.x, column.z)).y - 1
+        } shouldBe true
         safe.columns.filter { civsTerrainKey(it.x, it.z) in standing }.all { column ->
             column.groundY == standing.getValue(civsTerrainKey(column.x, column.z)).y - 1
         } shouldBe true

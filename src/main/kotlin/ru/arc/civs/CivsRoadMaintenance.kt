@@ -3,6 +3,8 @@ package ru.arc.civs
 import java.util.UUID
 import kotlin.math.abs
 import org.bukkit.Bukkit
+import org.bukkit.block.data.BlockData
+import org.bukkit.block.data.type.Stairs
 
 /** Bounded local cuts, each checked against the immutable accepted route. */
 data class CivRoadRouteOverride(val originalRoute: List<CivPosition>, val route: List<CivPosition>,
@@ -223,7 +225,9 @@ data class CivRoadUpkeep(
         } else {
             require(!source.type.isInfrastructure && route.size in 1..CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH &&
                 route.last() == source.entrance &&
-                CivsAutonomousTerraform.roadProfileContains(route, floor))
+                (CivsAutonomousTerraform.roadProfileContains(route, floor) ||
+                    CivsAutonomousGeometry.approach(source).any { it.x == floor.x && it.z == floor.z } &&
+                        CivsAutonomousTerraform.approachFloor(route, floor) == floor))
             require(route.all { city.contains(it.x, it.z) && it.y in -4_093..4_094 } &&
                 route.map { civsTerrainKey(it.x, it.z) }.distinct().size == route.size)
             require(route.zipWithNext().all { (a, b) ->
@@ -233,7 +237,8 @@ data class CivRoadUpkeep(
             require(after == CivsSettlementLayout.pavement(floor, profile) ||
                 after == CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = true) ||
                 after == CivsSettlementLayout.pathPavement(floor, profile, city.style,
-                    atTurn = floor in CivsSettlementLayout.turnFloors(route), downhill = CivsSettlementLayout.routeDownhill(floor, route)))
+                    atTurn = floor in CivsSettlementLayout.turnFloors(route), downhill = CivsSettlementLayout.routeDownhill(floor, route)) ||
+                after == CivsRoadMaintenance.apronCorner(source, route, floor, profile, city.style))
         }
     }
 }
@@ -881,6 +886,39 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     ?: city.roadRouteOverrides))
         }
 
+        /** Explicit apron corners need their actual treads; old straight receipts tolerate native stair reshaping. */
+        internal fun sameSurface(upkeep: CivRoadUpkeep, actual: BlockData, expected: BlockData): Boolean =
+            CivsTerrainPolicy.sameConstructionState(actual, expected) &&
+                (upkeep.route == null || expected !is Stairs || expected.shape == Stairs.Shape.STRAIGHT ||
+                    actual is Stairs && actual.shape == expected.shape)
+
+        /** The extra apron can meet an old side flight at two low edges; retain its ordered facing. */
+        internal fun apronCorner(source: CivBuilding, route: List<CivPosition>, floor: CivPosition,
+            profile: Map<Long, Int>, style: String): String? {
+            if (abs(floor.x.toLong() - source.entrance.x) > 3 || abs(floor.z.toLong() - source.entrance.z) > 3) return null
+            val apron = CivsAutonomousGeometry.approach(source).mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            if (route.any { it.x == floor.x && it.z == floor.z } || civsTerrainKey(floor.x, floor.z) !in apron) return null
+            val directions = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
+            val low = directions.filter { (dx, dz) -> profile[civsTerrainKey(floor.x + dx, floor.z + dz)] == floor.y - 1 }
+            if (low.size != 2 || low[0].first * low[1].first + low[0].second * low[1].second != 0 ||
+                low.none { (dx, dz) -> civsTerrainKey(floor.x + dx, floor.z + dz) in apron && route.none {
+                    abs(it.x.toLong() - (floor.x + dx)) <= 1 && abs(it.z.toLong() - (floor.z + dz)) <= 1
+                } } ||
+                directions.filter { it !in low }.any { (dx, dz) ->
+                    profile[civsTerrainKey(floor.x + dx, floor.z + dz)]?.let { it in floor.y..floor.y + 1 } != true
+                }) return null
+            val downhill = CivsSettlementLayout.routeDownhill(floor, route) ?: directions.singleOrNull { (dx, dz) ->
+                CivsAutonomousTerraform.roadProfileContains(route,
+                    floor.copy(x = floor.x + dx, y = floor.y - 1, z = floor.z + dz))
+            }?.let { (dx, dz) -> floor.copy(x = floor.x + dx, y = floor.y - 1, z = floor.z + dz) } ?: return null
+            val descent = (downhill.x - floor.x) to (downhill.z - floor.z)
+            if (descent !in low) return null
+            val other = low.single { it != descent }
+            val shape = if (-other.first == -descent.second && -other.second == descent.first) "outer_left" else "outer_right"
+            return CivsSettlementLayout.pathPavement(floor, profile, style, downhill = downhill)
+                .takeIf { "shape=straight" in it }?.replace("shape=straight", "shape=$shape")
+        }
+
         /** Capture order owns crossings; incompatible grades and authored entrances remain untouched. */
         internal fun sharedShoulder(key: Long, floor: CivPosition, route: List<CivPosition>, profile: Map<Long, CivPosition>): Boolean {
             val previous = profile[key] ?: return true
@@ -1069,6 +1107,23 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     }
                 }.distinctBy { it.floor }
 
+            // The canonical apron is already public approach space. Fill its missing columns only;
+            // all accepted centrelines, ROAD transit and shoulders retain their paid grades above.
+            city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }.forEach { source ->
+                val route = access.routes[source.id].orEmpty()
+                if (route.isEmpty()) return@forEach
+                val retained by lazy(LazyThreadSafetyMode.NONE) { access.standing(city, source.id) }
+                for (point in CivsAutonomousGeometry.approach(source)) {
+                    val key = civsTerrainKey(point.x, point.z)
+                    if (key in floors) continue
+                    val floor = CivsAutonomousTerraform.approachFloor(route, point) ?: continue
+                    if (!excluded(floor) && retained[key]?.let { it.y - 1 == floor.y } != false) {
+                        floors[key] = floor
+                        candidates[key] = source to floor
+                    }
+                }
+            }
+
             val targets = candidates.mapNotNull { (key, candidate) ->
                 val (source, floor) = candidate
                 if (restrictTo != null && key !in restrictTo || key in ambiguous || key in held || excluded(floor)) return@mapNotNull null
@@ -1084,7 +1139,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     return@mapNotNull null
                 val finish = authored ?: if (route == null)
                     CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = source.type == BuildingType.ROAD)
-                else approachFinish(floor, profile, route) ?: return@mapNotNull null
+                else apronCorner(source, route, floor, profile, city.style)
+                    ?: approachFinish(floor, profile, route) ?: return@mapNotNull null
                 CivRoadUpkeep(city.id, city.worldId, city.owner, source.id, source, floor, finish,
                     route, neighbours.toList(), authoredAfter = saved,
                     junction = retainedJunctions.firstOrNull { key in it.columns() && it.owners.any { owner -> owner.source == source } })

@@ -27,6 +27,38 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class CivsRoadMaintenanceTest : FunSpec({
+    test("a side entrance finishes its whole reserved apron without moving any paid road grade") {
+        val base = upkeepCity()
+        val source = base.buildings.last().copy(type = BuildingType.HOUSE, rotation = 180, transit = null,
+            anchor = CivPosition(0, 67, 6), entrance = CivPosition(0, 68, 6),
+            bounds = CivBox(CivPosition(-10, 66, 7), CivPosition(6, 90, 20)))
+        val city = base.copy(style = "nordic", buildings = base.buildings.dropLast(1) + source)
+        val route = (0..6).map { CivPosition(2, 67, it) } + listOf(CivPosition(1, 68, 6), source.entrance)
+        val plans = listOf(upkeepApproach(city, source, route))
+        val before = Gson().toJson(city to plans)
+        val network = CivsRoadMaintenance.prepare(city, plans)
+        val apron = CivsAutonomousGeometry.approach(source).map { civsTerrainKey(it.x, it.z) }.toSet()
+        val targets = network.targets.filter { civsTerrainKey(it.floor.x, it.floor.z) in apron }
+        targets.size shouldBe 12
+        val original = CivsAutonomousTerraform.roadProfile(route)
+        val reserved = CivAutonomousAccess.from(city, plans).standing(city, city.buildings[1].id)
+        targets.forEach { target ->
+            original[civsTerrainKey(target.floor.x, target.floor.z)]?.let { target.floor shouldBe it }
+            reserved[civsTerrainKey(target.floor.x, target.floor.z)] shouldBe target.floor.copy(y = target.floor.y + 1)
+            target.route shouldBe route
+            target.routeOverride shouldBe null
+            target.validated(city)
+            Gson().fromJson(Gson().toJson(target), CivRoadUpkeep::class.java).validated(city)
+        }
+        targets.single { it.floor.x == 0 && it.floor.z == 5 }.after shouldBe
+            "minecraft:spruce_stairs[facing=west,half=bottom,shape=outer_left,waterlogged=false]"
+        val missing = targets.single { it.floor.x == -1 && it.floor.z == 3 }
+        missing.floor.y shouldBe 66
+        shouldThrow<IllegalArgumentException> { missing.copy(floor = missing.floor.copy(y = 67)).validated(city) }
+        shouldThrow<IllegalArgumentException> { missing.copy(floor = missing.floor.copy(x = -2)).validated(city) }
+        Gson().toJson(city to plans) shouldBe before
+    }
+
     test("ordinary road repair reaches a building entrance before distant damaged approach columns") {
         val (city, plans) = upkeepShoulderCrossing()
         val worker = city.workers.single()

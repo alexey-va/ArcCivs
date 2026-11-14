@@ -855,6 +855,56 @@ class CivsStorageTest : FunSpec({
         receipt.after.workers shouldBe before.workers
     }
 
+    test("upkeep applies an explicit corner shape once and replays its single debit") {
+        val base = upkeepStorageReceipt(city).first
+        val source = base.buildings.last().copy(type = BuildingType.HOUSE, rotation = 180, transit = null,
+            anchor = CivPosition(0, 67, 6), entrance = CivPosition(0, 68, 6),
+            bounds = CivBox(CivPosition(-10, 66, 7), CivPosition(6, 90, 20)))
+        val before = base.copy(radius = 32, style = "nordic", buildings = base.buildings.dropLast(1) + source)
+        val route = (0..6).map { CivPosition(2, 67, it) } + listOf(CivPosition(1, 68, 6), source.entrance)
+        val plan = CivPlacementPlan(source.id, before.id, before.worldId, source, emptyList(), terrain = CivTerraformPlan(
+            CivBox(CivPosition(0, 66, 0), CivPosition(2, 69, 6)), emptyList(), route, source.anchor.y, 0, 0))
+        val upkeep = CivsRoadMaintenance.prepare(before, listOf(plan)).targets.single { it.floor == CivPosition(0, 67, 5) }
+        val after = "minecraft:spruce_stairs[facing=west,half=bottom,shape=outer_left,waterlogged=false]"
+        upkeep.after shouldBe after
+        val straight = after.replace("shape=outer_left", "shape=straight")
+        val worker = before.workers.single()
+        val work = CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!, CivPosition(-1, 68, 5),
+            listOf(CivPlanBlock(upkeep.floor, straight, after)), status = "repairing-road", focus = upkeep.floor, upkeep = upkeep)
+        val completed = CivsRoadMaintenance.complete(before, work, 1_000)
+        val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, completed, emptyList(),
+            worldChanges = work.changes, upkeep = CivRoadUpkeepReceipt(worker, before.stock, work, 1_000)).validated()
+        val block = world.getBlockAt(upkeep.floor.x, upkeep.floor.y, upkeep.floor.z)
+        block.blockData = org.bukkit.Bukkit.createBlockData(straight)
+        storage.replaceCities(listOf(before))
+        storage.reserve(before, receipt.id)
+        storage.seal(receipt)
+        storage.validateUpkeepNative = { null }
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        block.blockData.asString shouldBe after
+        receipt.after.stock shouldBe before.stock.copy(stone = before.stock.stone - 1)
+        storage.upkeepNativeApplied(receipt) shouldBe true
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        block.blockData.asString shouldBe after
+        receipt.after.stock shouldBe before.stock.copy(stone = before.stock.stone - 1)
+    }
+
+    test("authored ROAD corner recovery preserves neighbour derived shape") {
+        val after = "minecraft:cobblestone_stairs[facing=east,half=bottom,shape=outer_left,waterlogged=false]"
+        val (before, receipt) = upkeepStorageReceipt(city, after)
+        val floor = receipt.worldChanges!!.single().position
+        val reshaped = after.replace("shape=outer_left", "shape=inner_left")
+        val block = world.getBlockAt(floor.x, floor.y, floor.z)
+        block.blockData = org.bukkit.Bukkit.createBlockData(reshaped)
+        storage.replaceCities(listOf(before))
+        storage.reserve(before, receipt.id)
+        storage.seal(receipt)
+        storage.validateUpkeepNative = { null }
+        repeat(2) { storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied }
+        block.blockData.asString shouldBe reshaped
+        receipt.after.stock shouldBe before.stock.copy(stone = before.stock.stone - 1)
+    }
+
     test("upkeep recovery preserves neighbour derived stair shape but rejects a changed facing") {
         val after = "minecraft:cobblestone_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
         val (before, receipt) = upkeepStorageReceipt(city, after)

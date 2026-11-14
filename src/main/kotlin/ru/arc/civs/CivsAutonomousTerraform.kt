@@ -449,11 +449,13 @@ internal object CivsAutonomousTerraform {
             start = end
         }
         val apronFillLimit = LARGE_FILL_DEPTH.takeIf { unpaidTerrace(city, building) && !compactTerrace(building) }
-        CivsAutonomousGeometry.approach(building).forEach { point ->
+        val approach = CivsAutonomousGeometry.approach(building)
+        approach.forEach { point ->
             // The route already validates and preserves any shared lane. Its other columns are
             // outside the mandatory footprint and must not be raised to the new doorstep.
             if (civsTerrainKey(point.x, point.z) in protectedRoads) return@forEach
-            add(point.x, point.z, building.entrance.y - 1, building.entrance.y - 1,
+            val grade = approachFloor(route, point)?.y ?: building.entrance.y - 1
+            add(point.x, point.z, grade, grade,
                 point.x == route.first().x && point.z == route.first().z, visibleFillLimit = apronFillLimit)
         }
         val floor = minOf(building.anchor.y, building.bounds.min.y - 1)
@@ -653,6 +655,26 @@ internal object CivsAutonomousTerraform {
                 distance == previousDistance && point.y < previous.y) owners[key] = point
         }
         return owners.mapValues { (key, point) -> CivPosition((key shr 32).toInt(), point.y - 1, key.toInt()) }
+    }
+
+    /** One apron reservation: the existing shoulder wins, otherwise use the nearest retained grade. */
+    internal fun approachFloor(route: List<CivPosition>, point: CivPosition): CivPosition? {
+        var nearest: CivPosition? = null
+        var distance = Long.MAX_VALUE
+        var shoulder = false
+        for (candidate in route) {
+            val dx = abs(candidate.x.toLong() - point.x)
+            val dz = abs(candidate.z.toLong() - point.z)
+            val local = dx <= 1 && dz <= 1
+            if (shoulder && !local) continue
+            val next = dx + dz
+            if (local && !shoulder || next < distance || next == distance && candidate.y < requireNotNull(nearest).y) {
+                nearest = candidate
+                distance = next
+            }
+            if (local) shoulder = true
+        }
+        return nearest?.let { point.copy(y = it.y - 1) }
     }
 
     /** Only the existing paid grade of each open transit column can cross the gate footprint. */

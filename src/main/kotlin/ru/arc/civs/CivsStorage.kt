@@ -1293,7 +1293,7 @@ class CivsStorage(private val plugin: Plugin,
 
     private fun worldAfterMatches(transaction: CivInventoryTransaction, actual: BlockData, expected: BlockData,
         cell: CivPlanBlock): Boolean = actual.asString == expected.asString ||
-        transaction.upkeep != null && CivsWorld.sameConstructionState(actual, expected) ||
+        transaction.upkeep != null && CivsRoadMaintenance.sameSurface(requireNotNull(transaction.upkeep.work.upkeep), actual, expected) ||
         transaction.autonomousVisual != null && CivsAutonomousWorksites.nativeAfterMatches(cell, actual.asString)
 
     private fun completedNativeState(transaction: CivInventoryTransaction, sources: Map<CivPosition, Source>, cells: Map<CivPosition, Pair<Block, BlockData>>): CivInventoryApplyResult {

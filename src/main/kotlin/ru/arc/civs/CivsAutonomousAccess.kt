@@ -57,11 +57,15 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
             // A pinned SITE prepares only its entrance column; its wider terrace does not exist yet.
             val approach = if (building.phase == BuildingPhase.ACTIVE) CivsAutonomousGeometry.approach(building)
                 else listOf(building.entrance)
+            // This is a reservation grade; preserved native capture still has to prove its actual support and clearance.
+            val route = routes[building.id]?.takeIf { building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure }
+            val paidApproach = if (route == null) approach else approach.map { nominal ->
+                CivsAutonomousTerraform.approachFloor(route, nominal)?.let { it.copy(y = it.y + 1) } ?: nominal }
             val graded = if (building.type == BuildingType.TOWN_HALL && building.phase == BuildingPhase.ACTIVE) {
                 val leadOut = paidHallLeadOut.takeIf { it.firstOrNull() == building.entrance }.orEmpty()
-                approach.map { nominal -> surveyedHallApron[civsTerrainKey(nominal.x, nominal.z)] ?:
+                paidApproach.map { nominal -> surveyedHallApron[civsTerrainKey(nominal.x, nominal.z)] ?:
                     leadOut.firstOrNull { it.x == nominal.x && it.z == nominal.z } ?: nominal }
-            } else approach
+            } else paidApproach
             (graded + routes[building.id].orEmpty() +
                 building.transit.orEmpty().takeIf { building.phase == BuildingPhase.ACTIVE }.orEmpty()).forEach { feet ->
                 putIfAbsent(civsTerrainKey(feet.x, feet.z), feet)

@@ -16,6 +16,30 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.civs.CivsAutonomousTerraform.Node
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a new side approach follows its paid route grade across the reserved apron") {
+        val city = terraceCity()
+        val building = terraceBuilder(city, ground = 65)
+        val route = listOf(city.buildings.single().entrance, CivPosition(1, 65, 0), CivPosition(2, 65, 0)) +
+            (1..18).map { CivPosition(2, 65, it) } + listOf(CivPosition(1, 66, 18), building.entrance)
+        val surface = terraceSurface { _, _ -> 64 }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface, reservedRoute = route)
+        draft.route shouldBe route
+        val columns = draft.columns.associateBy { civsTerrainKey(it.x, it.z) }
+        val profile = CivsAutonomousTerraform.roadProfile(route)
+        for (point in CivsAutonomousGeometry.approach(building)) {
+            val key = civsTerrainKey(point.x, point.z)
+            val column = columns.getValue(key)
+            val expected = profile[key]?.y ?: 64
+            column.groundY shouldBe expected
+            column.floorY shouldBe expected
+        }
+        val cells = terraceCapture(draft, surface)
+        val plan = CivsAutonomousTerraform.materialize(draft, cells)
+        for (x in -1..0) for (z in 15..16) {
+            plan.blocks.none { it.position == CivPosition(x, 65, z) && it.after != "minecraft:air" } shouldBe true
+        }
+    }
+
     test("a raised new plot blends into shallow supported shoulders without borrowing its route or a protected column") {
         val city = terraceCity()
         val building = terraceBuilder(city, ground = 67).copy(id = UUID(276, 1))
@@ -877,6 +901,11 @@ class CivsAutonomousTerraformTest : FunSpec({
         route.forEach { profile.getValue(civsTerrainKey(it.x, it.z)).y shouldBe it.y - 1 }
         profile.getValue(civsTerrainKey(-1, 1)).y shouldBe 65
         profile.getValue(civsTerrainKey(1, 1)).y shouldBe 64
+        for ((_, floor) in profile) {
+            CivsAutonomousTerraform.approachFloor(route, floor) shouldBe floor
+            CivsAutonomousTerraform.approachFloor(route.reversed(), floor) shouldBe floor
+        }
+        CivsAutonomousTerraform.approachFloor(emptyList(), CivPosition(0, 0, 0)) shouldBe null
     }
 
     test("single floor membership matches the full road profile including ties and integer boundaries") {

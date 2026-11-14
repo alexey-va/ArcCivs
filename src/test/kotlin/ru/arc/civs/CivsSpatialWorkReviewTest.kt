@@ -1833,7 +1833,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 plugin.logger.addHandler(handler)
                 try {
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> locked && point == target })
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> locked && point == target },
+                            nanoTime = { 0L })
                         repeat(3) { runtime.pulse(listOf(city)) }
                         runtime.idleReason(city, worker) shouldBe "worksite-liquid"
                         messages.count { "worksite_blocked" in it } shouldBe 1

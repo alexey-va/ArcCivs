@@ -38,7 +38,7 @@ internal class CivsRoadWorld(
         if (!world.isChunkLoaded(cell.position.x shr 4, cell.position.z shr 4) ||
             cell.position.y !in world.minHeight until world.maxHeight) return false
         if (work.changes.none { it.position == upkeep.floor } &&
-            !sameConstructionState(world.getBlockAt(upkeep.floor.x, upkeep.floor.y, upkeep.floor.z).blockData,
+            !CivsRoadMaintenance.sameSurface(upkeep, world.getBlockAt(upkeep.floor.x, upkeep.floor.y, upkeep.floor.z).blockData,
                 Bukkit.createBlockData(upkeep.after))) return false
         return work.changes.all { change -> change.position.y in world.minHeight until world.maxHeight &&
             world.getBlockAt(change.position.x, change.position.y, change.position.z).blockData.asString == change.before }
@@ -55,7 +55,7 @@ internal class CivsRoadWorld(
         val block = world.getBlockAt(p.x, p.y, p.z)
         val after = Bukkit.createBlockData(upkeep.after)
         val pavement by lazy(LazyThreadSafetyMode.NONE) { CivsRoadMaintenance.ownedPavement(city, upkeep) }
-        val change = if (sameConstructionState(block.blockData, after)) null else {
+        val change = if (CivsRoadMaintenance.sameSurface(upkeep, block.blockData, after)) null else {
             if (!roadUpkeepReplaceable(block) && block.blockData.asString !in pavement[p].orEmpty()) return null
             CivPlanBlock(p, block.blockData.asString, after.asString)
         }
@@ -156,7 +156,7 @@ internal class CivsRoadWorld(
         }
         val block = read(p)
         val after = Bukkit.createBlockData(upkeep.after)
-        val already = sameConstructionState(block.blockData, after)
+        val already = CivsRoadMaintenance.sameSurface(upkeep, block.blockData, after)
         requireCivs(cell?.let { block.blockData.asString == it.before } == true || already, "world-changed")
         requireCivs(block.state !is TileState && !block.isLiquid &&
             (block.blockData as? Waterlogged)?.isWaterlogged != true, "protected-terrain")
