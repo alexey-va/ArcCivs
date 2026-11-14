@@ -365,12 +365,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     }
 
     private fun gradeTargets(city: Settlement, network: CivRoadUpkeepNetwork): List<CivRoadUpkeep> {
-        val lowered = city.roadRouteOverrides.orEmpty().values.flatMap { repair ->
-            val before = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
-            CivsAutonomousTerraform.roadProfile(repair.route).filter { (key, floor) ->
-                before[key]?.let { floor.y < it.y } == true
-            }.values
-        }.toHashSet()
+        val lowered = loweredRoadFloors(city)
         return network.targets.filter { it.routeOverride != null || it.floor in lowered }
     }
 
@@ -655,6 +650,13 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     companion object {
         private const val SCAN_COLUMNS = 8
         private const val PREPARED_FINISH_TICKS = 600L
+        private fun loweredRoadFloors(city: Settlement): Set<CivPosition> =
+            city.roadRouteOverrides.orEmpty().values.flatMap { repair ->
+                val before = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
+                CivsAutonomousTerraform.roadProfile(repair.route).filter { (key, floor) ->
+                    before[key]?.let { floor.y < it.y } == true
+                }.values
+            }.toHashSet()
         /** The old column charge plus each newly placed support; clearance keeps its existing charge. */
         internal fun inputs(city: Settlement, work: CivWorldWork): Map<String, Long> =
             if (CivsAutonomy.legacyStock(city)) emptyMap() else mapOf("COBBLESTONE" to
@@ -1154,7 +1156,24 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             val entryFirst = targets.sortedBy { target ->
                 abs(target.floor.x.toLong() - target.source.entrance.x) + abs(target.floor.z.toLong() - target.source.entrance.z)
             }
-            return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(), gradeTargets + entryFirst,
+            // Retained lowered columns keep the native grade queue's existing sequence.
+            val lowered = loweredRoadFloors(city)
+            val preservedGrades = arrayListOf<CivRoadUpkeep>()
+            val apronColumns = hashMapOf<UUID, Set<Long>>()
+            val entrances = linkedMapOf<UUID, MutableList<CivRoadUpkeep>>()
+            val remaining = arrayListOf<CivRoadUpkeep>()
+            for (target in entryFirst) {
+                if (target.floor in lowered) { preservedGrades += target; continue }
+                val ownApron = target.route != null && !target.source.type.isInfrastructure &&
+                    civsTerrainKey(target.floor.x, target.floor.z) in apronColumns.getOrPut(target.source.id) {
+                        CivsAutonomousGeometry.approach(target.source).mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+                    }
+                if (ownApron) entrances.getOrPut(target.source.id) { arrayListOf() } += target
+                else remaining += target
+            }
+            // Finish the admitted apron at one doorway before travelling to another entrance.
+            return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(),
+                gradeTargets + preservedGrades + entrances.values.flatten() + remaining,
                 city.roadRouteOverrides, deferredDescent)
         }
     }

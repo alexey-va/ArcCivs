@@ -59,6 +59,52 @@ class CivsRoadMaintenanceTest : FunSpec({
         Gson().toJson(city to plans) shouldBe before
     }
 
+    test("ordinary road repair finishes each whole canonical apron before another entrance or distant shoulders") {
+        val base = upkeepCity()
+        val houses = listOf(10, 0).mapIndexed { index, x ->
+            base.buildings.last().copy(id = UUID(0, 30L + index), type = BuildingType.HOUSE, rotation = 180,
+                anchor = CivPosition(x, 63, 5), entrance = CivPosition(x, 64, 4), transit = null,
+                bounds = CivBox(CivPosition(x - 2, 63, 5), CivPosition(x + 2, 69, 8)), schematicId = "fixture/house")
+        }
+        val city = base.copy(buildings = base.buildings.dropLast(1) + houses)
+        val plans = houses.map { house ->
+            upkeepApproach(city, house, (0..4).map { z -> CivPosition(house.entrance.x, 64, z) })
+        }
+        val before = Gson().toJson(city to plans)
+        val network = CivsRoadMaintenance.prepare(city, plans)
+        val aprons = houses.associate { house -> house.id to (1..4).flatMap { z ->
+            (-1..1).map { dx -> CivPosition(house.entrance.x + dx, 63, z) }
+        }.toSet() }
+        houses.forEach { house ->
+            CivsAutonomousGeometry.approach(house).map { it.copy(y = 63) }.toSet() shouldBe aprons.getValue(house.id)
+            network.targets.filter { it.source.id == house.id && it.floor in aprons.getValue(house.id) }
+                .map { it.floor }.toSet() shouldBe aprons.getValue(house.id)
+        }
+        val expected = houses.flatMap { house -> (-1..4).flatMap { z ->
+            (-1..1).map { dx -> CivPosition(house.entrance.x + dx, 63, z) }
+        } }.toSet()
+        network.targets.size shouldBe 36
+        network.targets.map { it.floor }.toSet() shouldBe expected
+        network.targets.forEach { target ->
+            target.route shouldBe plans.single { it.building.id == target.source.id }.terrain!!.route
+            target.routeOverride shouldBe null
+            target.validated(city)
+        }
+        val apronFloors = aprons.values.flatten().toSet()
+        val nonApron = network.targets.filter { it.floor !in apronFloors }
+        nonApron.map { it.floor } shouldBe listOf(
+            CivPosition(10, 63, 0), CivPosition(0, 63, 0),
+            CivPosition(9, 63, 0), CivPosition(10, 63, -1), CivPosition(11, 63, 0),
+            CivPosition(-1, 63, 0), CivPosition(0, 63, -1), CivPosition(1, 63, 0),
+            CivPosition(9, 63, -1), CivPosition(11, 63, -1), CivPosition(-1, 63, -1), CivPosition(1, 63, -1))
+        Gson().toJson(city to plans) shouldBe before
+        withClue("ordered source IDs: ${network.targets.map { it.source.id }}") {
+            network.targets.take(24).map { it.source.id } shouldBe houses.flatMap { house -> List(12) { house.id } }
+        }
+        network.targets.take(24).map { it.floor }.toSet() shouldBe apronFloors
+        network.targets.drop(24) shouldBe nonApron
+    }
+
     test("ordinary road repair reaches a building entrance before distant damaged approach columns") {
         val (city, plans) = upkeepShoulderCrossing()
         val worker = city.workers.single()

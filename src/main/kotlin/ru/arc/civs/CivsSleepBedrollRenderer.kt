@@ -20,7 +20,7 @@ internal const val CIVS_SLEEP_PAD_HEIGHT = .05
 /** Two fixed client-only cloth parts; handles survive ordinary label/status updates. */
 internal class CivsSleepBedrollRenderer(private val displays: PaperPacketDisplays) {
     fun show(ground: Location, yaw: Float, scale: Double): AutoCloseable {
-        val facing = Quaternionf().rotationY(Math.toRadians(-yaw.toDouble()).toFloat())
+        val facing = Quaternionf().rotationY(Math.toRadians(yaw.toDouble()).toFloat())
         val handles = arrayListOf<PacketDisplay>()
         fun part(material: Material, offset: Vector3f, dimensions: Vector3f) {
             val handle = displays.spawnBlock(ground.clone().apply { this.yaw = 0f; pitch = 0f }, material.createBlockData())

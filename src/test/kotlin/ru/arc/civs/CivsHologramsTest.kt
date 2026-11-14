@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import com.google.gson.GsonBuilder
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
@@ -16,6 +17,7 @@ import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
 import org.bukkit.Location
 import org.bukkit.entity.Display
 import org.bukkit.util.Transformation
+import org.joml.Vector3f
 import ru.arc.paper.npc.PacketPlayerNpc
 import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.BukkitTaskScheduler
@@ -31,6 +33,52 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsHologramsTest : FunSpec({
+    test("every sleeping bedroll rotation stays inside the reserved lying footprint") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = ResidentRuntimeWorld().also(paper.server::addWorld)
+            world.loadChunk(0, 0)
+            val ground = Location(world, 2.5, 64.0, 3.5)
+            val displays = mockk<PaperPacketDisplays>(relaxed = true)
+            val parts = mutableListOf<Pair<Location, Transformation>>()
+            every { displays.spawnBlock(any(), any()) } answers {
+                val origin = firstArg<Location>().clone()
+                mockk<PacketBlockDisplay>(relaxed = true).also { handle ->
+                    every { handle.transformation = any() } answers {
+                        parts += origin to firstArg<Transformation>()
+                        Unit
+                    }
+                }
+            }
+            val renderer = CivsSleepBedrollRenderer(displays)
+            val violations = mutableListOf<Pair<Float, String>>()
+            for ((candidate, yaw) in listOf(0f, 90f, 180f, 270f).withIndex()) {
+                var observed = 0
+                val pose = requireNotNull(citizenSleepPose(world, ground, 1.0,
+                    floorLift = CIVS_SLEEP_PAD_HEIGHT) { observed++ == candidate })
+                pose.position.yaw shouldBe yaw
+                parts.clear()
+                renderer.show(ground, yaw, 1.0).use {
+                    parts.size shouldBe 2
+                    for ((origin, transform) in parts) for (x in listOf(0f, 1f))
+                        for (y in listOf(0f, 1f)) for (z in listOf(0f, 1f)) {
+                            val point = Vector3f(x, y, z).rotate(transform.rightRotation).mul(transform.scale)
+                                .rotate(transform.leftRotation).add(transform.translation)
+                                .add(origin.x.toFloat(), origin.y.toFloat(), origin.z.toFloat())
+                            val body = pose.bounds
+                            val epsilon = .00001
+                            if (point.x.toDouble() !in body.minX - epsilon..body.maxX + epsilon ||
+                                point.z.toDouble() !in body.minZ - epsilon..body.maxZ + epsilon ||
+                                point.y < ground.y - epsilon || point.y > body.minY + epsilon)
+                                violations += yaw to "point=$point reserved=$body"
+                        }
+                }
+            }
+            withClue(violations.take(4).joinToString()) {
+                violations.map { it.first }.distinct() shouldBe emptyList()
+            }
+        }
+    }
+
     test("actual sleep owns a stable floor bedroll and centred label then restores native attachment on wake") {
         MockBukkitTestRuntime.open().use { paper ->
             val plugin = paper.createSimplePlugin("CivsSleepVisualTest")
