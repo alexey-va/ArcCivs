@@ -308,6 +308,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     private val currentTick: () -> Int = Bukkit::getCurrentTick) {
     private val networks = mutableMapOf<UUID, CivRoadUpkeepNetwork>()
     private val cursors = mutableMapOf<UUID, Int>()
+    // Surface discovery must not skip a column that a builder has not selected.
+    private val surfaceCursors = mutableMapOf<UUID, Int>()
     private data class Selection(val work: CivWorldWork, val rejectedStandings: Set<CivPosition> = emptySet())
     private val selected = mutableMapOf<UUID, Selection>()
     private data class BuilderClaim(val owner: UUID, val network: CivRoadUpkeepNetwork, val workerId: UUID,
@@ -349,6 +351,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             releaseBuilder(city.id)
             preparedFinishes.remove(city.id)
             cursors.remove(city.id)
+            surfaceCursors.remove(city.id)
             city.workers.forEach { selected.remove(it.id) }
             gradeChecks[city.id] = ArrayDeque(gradeTargets(city, prepared))
             networkGenerations[city.id] = ++generation
@@ -480,7 +483,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             if (!budget(worker.id)) return
             if (prospective != null) staffingProbeAt[city.id] = currentTick()
             val grade = gradeChecks[city.id]?.removeFirstOrNull()
-            val target = grade ?: nextTarget(city.id, network)
+            val target = grade ?: nextTarget(city.id, network, surfaceCursors)
             // A damaged candidate stays unselected while its grade remains in the finite observation pass.
             val captured = world.captureRoadUpkeep(city, worker, target, registerSurface)
             if (grade != null && captured != null) gradeChecks.getValue(city.id).addLast(grade)
@@ -561,9 +564,10 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         return valid
     }
 
-    private fun nextTarget(cityId: UUID, network: CivRoadUpkeepNetwork): CivRoadUpkeep {
-        val cursor = Math.floorMod(cursors[cityId] ?: 0, network.targets.size)
-        cursors[cityId] = (cursor + 1) % network.targets.size
+    private fun nextTarget(cityId: UUID, network: CivRoadUpkeepNetwork,
+        positions: MutableMap<UUID, Int> = cursors): CivRoadUpkeep {
+        val cursor = Math.floorMod(positions[cityId] ?: 0, network.targets.size)
+        positions[cityId] = (cursor + 1) % network.targets.size
         return network.targets[cursor]
     }
 
@@ -634,7 +638,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         waiting.remove(workerId)
     }
     fun clear() {
-        networks.clear(); cursors.clear(); selected.clear(); waiting.clear()
+        networks.clear(); cursors.clear(); surfaceCursors.clear(); selected.clear(); waiting.clear()
         gradeChecks.clear(); developmentWaiting.clear(); awaitingGradeNetwork.clear(); networkGenerations.clear()
         builderClaims.clear(); preparedFinishes.clear(); staffingProbeAt.clear()
     }

@@ -78,6 +78,48 @@ class CivsRoadMaintenanceTest : FunSpec({
         verify(exactly = 1) { native.captureRoadUpkeep(any(), any(), any()) }
     }
 
+    test("background surface observations cannot starve a builder's pending ordinary road repair") {
+        var tick = 0
+        val base = upkeepCity()
+        val road = base.buildings.last().copy(bounds = CivBox(CivPosition(0, 63, 0), CivPosition(15, 65, 0)),
+            transit = (0..15).map { CivPosition(it, 64, 0) })
+        val city = base.copy(buildings = base.buildings.dropLast(1) + road)
+        val plan = CivPlacementPlan(road.id, city.id, city.worldId, road, road.transit!!.map {
+            CivPlanBlock(it.copy(y = it.y - 1), "minecraft:stone", "minecraft:cobblestone")
+        })
+        val network = CivsRoadMaintenance.prepare(city, listOf(plan))
+        network.targets.size shouldBe 16
+        val pending = network.targets[8]
+        pending.validated(city)
+        val before = Gson().toJson(city to network)
+        val worker = city.workers.single()
+        val native = mockk<CivsWorld>()
+        val probes = mutableListOf<Pair<Int, CivPosition>>()
+        every { native.captureRoadUpkeep(any(), any(), any(), any()) } answers {
+            val target = thirdArg<CivRoadUpkeep>()
+            probes += tick to target.floor
+            if (target == pending) CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!,
+                target.floor.copy(x = target.floor.x + 1, y = target.floor.y + 1),
+                listOf(CivPlanBlock(target.floor, "minecraft:grass_block[snowy=false]", target.after)),
+                status = "repairing-road", focus = target.floor, upkeep = target) else null
+        }
+        val maintenance = CivsRoadMaintenance(native, registerSurface = { _, _ -> }, currentTick = { tick })
+        maintenance.publish(city, network)
+        val selected = mutableListOf<CivWorldWork>()
+        repeat(4) {
+            tick++
+            maintenance.plan(city, worker)?.let(selected::add)
+            tick++
+            maintenance.backfillSurfaces(city)
+        }
+        probes.filter { it.first % 2 == 0 }.any { it.second == pending.floor } shouldBe true
+        probes.groupBy { it.first }.values.all { it.size <= 8 } shouldBe true
+        withClue("native probes per tick: $probes") {
+            selected.any { it.upkeep == pending } shouldBe true
+        }
+        Gson().toJson(city to network) shouldBe before
+    }
+
     test("an Auto1 crossing shoulder keeps its owner's straight descent despite a second lower neighbour") {
         val (city, plans, floor) = upkeepShoulderCrossing()
         val before = Gson().toJson(city to plans)

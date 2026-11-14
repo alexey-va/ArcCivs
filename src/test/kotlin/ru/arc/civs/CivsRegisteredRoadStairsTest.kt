@@ -48,17 +48,25 @@ class CivsRegisteredRoadStairsTest : FunSpec({
                 CivsWorld(plugin, tasks) { listOf(city) }.use { native ->
                     (native.captureRoadUpkeep(city, worker, damaged) != null) shouldBe true
                     val registered = mutableListOf<CivPosition>()
+                    val healthy = network.targets.dropLast(1).map { it.floor }
                     var tick = 0
                     val maintenance = CivsRoadMaintenance(native, registerSurface = { _, at -> registered += at }) { tick }
                     maintenance.publish(city, network)
                     CivsRoadMaintenance.eligible(city) shouldBe false
                     maintenance.plan(idle, worker) shouldBe null
                     registered.size shouldBe 8
+                    registered shouldBe healthy
                     maintenance.backfillSurfaces(city)
                     registered.size shouldBe 8 // The earlier resident scan used this tick's entire budget.
                     tick++
                     maintenance.backfillSurfaces(city)
-                    registered.size shouldBe 15 // One damaged candidate plus seven healthy columns, all read-only.
+                    registered.size shouldBe 16 // The foreground cursor no longer advances the background scan.
+                    registered.takeLast(8) shouldBe healthy
+                    tick++
+                    maintenance.backfillSurfaces(city)
+                    registered.size shouldBe 23 // One damaged candidate plus seven healthy columns, all read-only.
+                    registered.takeLast(7) shouldBe healthy.take(7)
+                    registered.none { it == damaged.floor } shouldBe true
                     maintenance.requirements(idle) shouldBe emptyMap()
                     maintenance.requirements(city) shouldBe emptyMap()
                     CivsRoadMaintenance.eligible(city) shouldBe false
