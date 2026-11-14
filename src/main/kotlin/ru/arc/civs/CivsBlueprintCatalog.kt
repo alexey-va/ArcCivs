@@ -174,6 +174,13 @@ internal class CivBlueprintCatalog private constructor(
                 require(bounds.getAsJsonArray("min").map { it.asInt } == origin.map { -it } &&
                     bounds.getAsJsonArray("max").map { it.asInt } == size.indices.map { size[it] - origin[it] - 1 })
                 require(site.getAsJsonArray("entrance").map { it.asInt } == listOf(0, 1, 0))
+                site.getAsJsonObject("hallApproach")?.let { approach ->
+                    require(type == BuildingType.TOWN_HALL && approach.keySet() == setOf("axis", "rows"))
+                    val axis = approach["axis"].asInt
+                    require(axis in -1..1 && origin[0] + axis - 1 >= 0 && origin[0] + axis + 1 < size[0])
+                    require(approach.getAsJsonArray("rows").let { rows -> rows.size() <= minOf(origin[2], 12) &&
+                        rows.all { it.asString in CivsWorksiteLayouts.HALL_PAVING } })
+                }
                 site.getAsJsonArray("forecourt")?.let { rows ->
                     require(type != BuildingType.DECORATION && origin[0] in 1 until size[0] - 1 &&
                         rows.size() in 1..minOf(8, size[2]) && rows.all { it.isJsonPrimitive &&

@@ -11,7 +11,13 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     val paidHallLeadOut: List<CivPosition> = emptyList(),
     val wallApproachWrites: Map<UUID, Set<Long>> = emptyMap(),
     val perimeterCaptures: Map<UUID, CivPerimeterCapture> = emptyMap(),
-    private val surveyedHallApron: Map<Long, CivPosition> = emptyMap()) {
+    private val surveyedHallApron: Map<Long, CivPosition> = emptyMap(),
+    val hallWitness: CivHallApproach? = null) {
+    fun hallApproach(city: Settlement): CivsTownHallApproach? {
+        val proof = hallWitness ?: return null
+        val building = city.building(proof.founding.id) ?: return null
+        return CivsTownHallApproach.from(city, building, proof)?.takeIf { it.admitted(city, this) }
+    }
     /** Only the source's paid terminal and reserved approach may be regraded together. */
     fun entrancePath(city: Settlement, source: CivBuilding, route: List<CivPosition>): CivsEntrancePath? {
         val path = CivsEntrancePath.from(source, route) ?: return null
@@ -86,6 +92,10 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     /** Earlier roads win when an older release recorded incompatible heights at the same column. */
     fun standing(city: Settlement, exceptBuildingId: UUID): Map<Long, CivPosition> = buildMap {
         require(city.buildings.size <= CivsRules.MAX_SITES)
+        val hall = hallApproach(city)
+        if (hall != null && hall.hall.id != exceptBuildingId) for (p in hall.surfaces.keys) {
+            if (!hall.bank(p) && !hall.yard(p)) put(civsTerrainKey(p.x, p.z), p.copy(y = p.y + 1))
+        }
         city.buildings.filter { it.id != exceptBuildingId }.forEach { building ->
             // A pinned SITE prepares only its entrance column; its wider terrace does not exist yet.
             val approach = if (building.phase == BuildingPhase.ACTIVE) CivsAutonomousGeometry.approach(building)
@@ -101,7 +111,9 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                 paidApproach.map { nominal -> surveyedHallApron[civsTerrainKey(nominal.x, nominal.z)] ?:
                     leadOut.firstOrNull { it.x == nominal.x && it.z == nominal.z } ?: nominal }
             } else paidApproach
-            (graded + (if (path != null) path.travel(requireNotNull(route)) else routes[building.id].orEmpty()) +
+            val tail = if (path != null) path.travel(requireNotNull(route)) else routes[building.id].orEmpty()
+            val walk = hall?.takeIf { h -> h.witness.branches.any { it.owner == building.id } }?.travel(tail) ?: tail
+            (graded + walk +
                 building.transit.orEmpty().takeIf { building.phase == BuildingPhase.ACTIVE }.orEmpty()).forEach { feet ->
                 putIfAbsent(civsTerrainKey(feet.x, feet.z), feet)
             }
@@ -170,7 +182,8 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
             return CivAutonomousAccess(routes, CivsSettlementLayout.accepted(city, plans), fortifications,
                 adopted?.plots.orEmpty().flatMap { plot ->
                     plot.fortification?.let { CivsSettlementPlans.portReservations(it.proof) }.orEmpty()
-                }, paidHallLeadOut(city, routes), wallApproachWrites, perimeterCaptures)
+                }, paidHallLeadOut(city, routes), wallApproachWrites, perimeterCaptures,
+                hallWitness = CivsTownHallApproach.capture(city, retained, routes))
         }
 
         /** Only an exact, corroborated paid centreline can replace the Hall's synthetic flat apron. */

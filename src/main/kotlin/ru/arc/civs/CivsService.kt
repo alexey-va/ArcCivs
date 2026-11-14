@@ -200,6 +200,7 @@ class CivsService(
         ::track, { tx -> cargoRequests.validateNativeCollected(tx) }, ::resurrectionRejection, ::requestResurrectionAdmission,
         ::inventoryRetired, ::updateHealth, clock,
         verifyGateCaptures = { tx -> gateMaintenance.verifyCaptures(tx) },
+        verifyHallCaptures = { tx -> cityPlans.verifyHallCaptures(tx) },
         verifyWarehouseCaptures = { tx -> warehouseMaintenance.verifyCaptures(tx) })
 
     private val gateMaintenance: CivsGateMaintenance = CivsGateMaintenance(plugin, this, records, tasks, executor, store, blueprints,

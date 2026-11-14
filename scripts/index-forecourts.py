@@ -67,6 +67,11 @@ def indexed(catalog, roots, base, atelier, requested=None):
             raise ValueError("Current schematic frame differs: " + identifier)
         scene = curate.Scene(size, palette, cells, row["origin"], {"blocks": {}})
         rows = curate.forecourt_rows(scene, row["control"])
+        if row["type"] == "TOWN_HALL":
+            preferred = curate.hall_approach(scene, row["control"])
+            if row["worksite"].get("hallApproach", preferred) != preferred:
+                raise ValueError("Previously attested Hall approach differs: " + identifier)
+            row["worksite"]["hallApproach"] = preferred
         previous = row["worksite"].get("forecourt")
         if previous is not None and rows != previous:
             raise ValueError("Previously attested forecourt differs: " + identifier)
@@ -76,7 +81,8 @@ def indexed(catalog, roots, base, atelier, requested=None):
             report["projected"] += 1
             report["openRows"] += len(rows)
     if requested is not None:
-        entries = {r["schematicId"]: dict(sha256=r["sha256"], forecourt=r["worksite"].get("forecourt", []))
+        entries = {r["schematicId"]: dict(sha256=r["sha256"], forecourt=r["worksite"].get("forecourt", []),
+                       **({"hallApproach": r["worksite"]["hallApproach"]} if "hallApproach" in r["worksite"] else {}))
                    for r in document["entries"] + document.get("retainedEntries", [])
                    if r.get("schematicId") in requested and r["schematicId"] not in report["unavailable"]}
         if set(entries) != set(requested):

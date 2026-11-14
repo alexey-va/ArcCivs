@@ -76,6 +76,57 @@ class CurationGeometryTest(unittest.TestCase):
         self.assertEqual("minecraft:air", scene.at((4, 1, 4)))
         self.assertEqual("minecraft:oak_planks", scene.at((5, 1, 4)))
 
+    def test_town_hall_axis_follows_the_existing_three_wide_exterior_threshold(self):
+        scene = room()
+        for x in range(9):
+            for z in range(9):
+                scene.set((x, 1, z), "minecraft:grass_block", "fixture-lawn")
+        for z in (7, 8):
+            scene.set((4, 1, z), "minecraft:dirt_path", "authored-public-stance")
+        for z in (3, 4, 5):
+            for x in (4, 5, 6):
+                scene.set((x, 1, z), "minecraft:cobblestone", "authored-threshold")
+        scene.set((5, 2, 2), "minecraft:oak_door[half=lower]", "actual-facade")
+        before = list(scene.cells)
+        expected = ["minecraft:dirt_path"] * 3 + ["minecraft:cobblestone"] * 3
+        self.assertEqual({"axis": 1, "rows": expected}, curate.hall_approach(scene, (1, 2, 8)))
+        self.assertEqual(before, list(scene.cells))
+        self.assertEqual(["minecraft:dirt_path"] * 2, curate.forecourt_rows(scene, (1, 2, 8)))
+        for z in (3, 4, 5):
+            scene.set((3, 1, z), "minecraft:cobblestone", "wider-plaza")
+        self.assertEqual(0, curate.hall_approach(scene, (1, 2, 8))["axis"])
+        scene.set((4, 2, 8), "minecraft:barrel[facing=up,open=false]", "foreign-control")
+        self.assertEqual([], curate.hall_approach(scene, (1, 2, 8))["rows"])
+
+    def test_new_offset_hall_pad_is_three_lanes_even_before_the_source_courtyard(self):
+        scene = room()
+        for x in range(9):
+            for z in range(9):
+                soil = "minecraft:air" if z >= 7 else "minecraft:grass_block"
+                scene.set((x, 1, z), soil, "source")
+        for z in (4, 5, 6):
+            for x in (4, 5, 6):
+                scene.set((x, 1, z), "minecraft:cobblestone", "source-hard-entry")
+        scene.set((3, 1, 6), "minecraft:stone_bricks", "authored-parcel-border")
+        curate.front_pad(scene, ([1, 1, 1], [7, 7, 6]), (5, 2, 8), town_hall=True)
+        for z in (7, 8):
+            self.assertEqual([4, 5, 6], [x for x in range(9) if scene.at((x, 1, z)) == "minecraft:dirt_path"])
+        self.assertEqual("minecraft:stone_bricks", scene.at((3, 1, 6)))
+        for z in (4, 5, 6):
+            self.assertEqual(["minecraft:cobblestone"]*3, [scene.at((x, 1, z)) for x in (4,5,6)])
+
+    def test_hall_bridges_a_one_row_trough_only_to_its_intact_three_step_stoop(self):
+        scene = room()
+        for x in (3, 4, 5):
+            for z in (7, 8):
+                scene.set((x,1,z), "minecraft:dirt_path", "public-pad")
+            scene.set((x,0,6), "minecraft:grass_block", "low-courtyard")
+            scene.set((x,1,6), "minecraft:air", "low-courtyard")
+            scene.set((x,1,5), "minecraft:cobblestone_stairs[facing=north,half=bottom,shape=straight]", "porch")
+        self.assertEqual(["minecraft:dirt_path"]*3, curate.hall_approach(scene, (1,2,8))["rows"])
+        scene.set((5,1,5), "minecraft:barrel", "obstruction")
+        self.assertEqual(["minecraft:dirt_path"]*2, curate.hall_approach(scene, (1,2,8))["rows"])
+
     def test_forecourt_keeps_three_lanes_until_real_doorposts_and_preserves_side_padding(self):
         scene = room()
         scene.set((0, 1, 4), "minecraft:air", "empty-side-padding")

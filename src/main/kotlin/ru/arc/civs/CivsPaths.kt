@@ -51,12 +51,14 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
                 val publicWays = access.infrastructure.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }
                     .associateBy { it.id }
                 val guardApproaches = mutableMapOf<UUID, List<CivPosition>>()
+                val hall = access.hallApproach(city)
                 val supports = buildSet {
                     for (building in city.buildings) {
                         if (building.phase != BuildingPhase.ACTIVE) continue
                         val route = if (building.type.isInfrastructure) publicWays[building.id]?.transit
                             else access.routes[building.id]?.let { paid ->
-                                access.entrancePath(city, building, paid)?.travel(paid) ?: paid
+                                val terminal = access.entrancePath(city, building, paid)?.travel(paid) ?: paid
+                                hall?.takeIf { h -> h.witness.branches.any { it.owner == building.id } }?.travel(terminal) ?: terminal
                             }
                         for (feet in route.orEmpty()) add(feet.copy(y = feet.y - 1))
                         if (building.type == BuildingType.GUARD_TOWER && route != null)

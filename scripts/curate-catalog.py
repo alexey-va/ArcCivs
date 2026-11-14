@@ -127,7 +127,82 @@ def forecourt_rows(scene, control):
     return rows
 
 
-def front_pad(scene, content_bounds, control):
+def hall_approach(scene, control):
+    """Select exterior ground between the public stance and its source-authored threshold."""
+    x, ground, outside = scene.origin
+    soil = {"minecraft:dirt", "minecraft:grass_block", "minecraft:coarse_dirt"}
+    hard = {"minecraft:stone_bricks", "minecraft:cobblestone"}
+    path = "minecraft:dirt_path"
+    plants = {"minecraft:short_grass", "minecraft:fern", "minecraft:tall_grass", "minecraft:large_fern",
+              "minecraft:leaf_litter", "minecraft:snow", "minecraft:poppy", "minecraft:dandelion",
+              "minecraft:wildflowers", "minecraft:cornflower", "minecraft:azure_bluet", "minecraft:oxeye_daisy"}
+
+    def clear(lane, z):
+        for y in (ground + 1, ground + 2):
+            p = (x + lane, y, z)
+            state = name(scene.at(p))
+            if state not in AIR and state not in plants and not (p == tuple(control) and state == "minecraft:structure_void"):
+                return False
+        return True
+
+    def rises_inward(lane, z):
+        return any(name(state).endswith("_stairs") and properties(state).get("facing") == "north" and
+                   properties(state).get("half") == "bottom" and properties(state).get("shape", "straight") == "straight"
+                   for state in (scene.at((x + lane, ground, z)), scene.at((x + lane, ground + 1, z))))
+
+    rows, widths = [], []
+    for distance in range(1, min(outside, 12) + 1):
+        z = outside - distance
+        row = {}
+        lowered = set()
+        for lane in range(-3, 4):
+            state = name(scene.at((x + lane, ground, z)))
+            # A one-block trough in the yard can be filled up to the existing landing.
+            if (state in AIR or state in plants) and name(scene.at((x + lane, ground - 1, z))) in soil:
+                state = "minecraft:dirt"
+                lowered.add(lane)
+            row[lane] = state
+        if row[0] not in soil | hard | {path} or not clear(0, z):
+            break
+        rows.append((z, row, lowered))
+        widths.append({axis for axis in (-1, 0, 1) if row[axis] in hard and
+                       all(row[i] == row[axis] and clear(i, z) for i in range(axis - 1, axis + 2)) and
+                       all(row[i] not in hard for i in (axis - 2, axis + 2))})
+    axes = set().union(*(a & b for a, b in zip(widths, widths[1:])))
+    axis = axes.pop() if len(axes) == 1 else 0
+    lanes = range(axis - 1, axis + 2)
+    result = []
+    for index, (z, row, lowered) in enumerate(rows):
+        surface = row[axis] if row[axis] in hard else path
+        if not all(clear(i, z) and row[i] in soil | {path, surface} for i in lanes):
+            break
+        if all(row[i] in soil for i in lanes):
+            covered = any(name(scene.at((x+i, y, z))) not in AIR for i in lanes for y in range(ground + 3, scene.size[1]))
+            if covered or any(i in lowered for i in lanes):
+                # A short roofed/low strip is exterior only when an intact exterior threshold closes it.
+                bridge = False
+                for offset in range(1, 4):
+                    next_z = z - offset
+                    if all(rises_inward(i, next_z) for i in lanes):
+                        bridge = True
+                        break
+                    if index + offset >= len(rows):
+                        break
+                    _, next_row, _ = rows[index + offset]
+                    if not all(clear(i, next_z) for i in lanes):
+                        break
+                    if all(next_row[i] in hard for i in lanes):
+                        bridge = True
+                        break
+                    if not all(next_row[i] in soil for i in lanes):
+                        break
+                if not bridge:
+                    break
+        result.append(surface)
+    return {"axis": axis, "rows": result}
+
+
+def front_pad(scene, content_bounds, control, town_hall=False):
     """A modest shared forecourt is outside retained source cells, never a room cut."""
     ground = scene.origin[1]
     # A source barrier means retained terrain, not authored clearing air. Make
@@ -138,6 +213,7 @@ def front_pad(scene, content_bounds, control):
         if p[1] <= ground and name(scene.palette[pid]) == "minecraft:barrier":
             scene.set(p, "minecraft:dirt", "paid-source-terrain-placeholder")
     # Only padding columns need a floor. Natural source terrain remains unchanged.
+    new_padding = set()
     for z in range(scene.size[2]):
         for x in range(scene.size[0]):
             content_column = content_bounds[0][0] <= x <= content_bounds[1][0] and content_bounds[0][2] <= z <= content_bounds[1][2]
@@ -149,11 +225,17 @@ def front_pad(scene, content_bounds, control):
                         scene.set((x, y, z), "minecraft:cobblestone", "paid-forecourt-foundation")
                 if name(scene.at((x, ground, z))) in SKIP:
                     # The public approach keeps its three lanes. Rear and lateral padding remain soil.
-                    scene.set((x, ground, z), forecourt_surface(scene.origin[0], x, z, content_bounds[1][2],
-                        scene.decoration), "shared-ground-forecourt")
+                    surface = forecourt_surface(scene.origin[0], x, z, content_bounds[1][2], scene.decoration)
+                    scene.set((x, ground, z), surface, "shared-ground-forecourt")
+                    if town_hall and surface == "minecraft:dirt_path":
+                        new_padding.add((x, ground, z))
     scene.set(control, "minecraft:structure_void", "shared-ground-control")
-    for distance, surface in enumerate(forecourt_rows(scene, control), start=1):
-        for lane in (-1, 1):
+    approach = hall_approach(scene, control) if town_hall else {"axis": 0, "rows": forecourt_rows(scene, control)}
+    for pos in new_padding:
+        if abs(pos[0] - scene.origin[0] - approach["axis"]) > 1:
+            scene.set(pos, "minecraft:dirt", "align-new-hall-padding")
+    for distance, surface in enumerate(approach["rows"], start=1):
+        for lane in range(approach["axis"] - 1, approach["axis"] + 2):
             scene.set((scene.origin[0] + lane, ground, scene.origin[2] - distance), surface, "open-forecourt-width")
     seen, parent = scene.reachable()
     doors = [scene.position(i) for i, pid in enumerate(scene.cells)
@@ -605,7 +687,7 @@ def curate_family(inputs, normalizer, rotations, registry, out, recipe_hash, gen
                 scene.set(scene.position(i), "minecraft:air", "retired-source-technical-hut")
         control = (origin[0] + (1 if origin[0] + 1 < target_size[0] else -1), origin[1] + 1, target_size[2] - 1)
         bounds = ([1, 1, 1], [turned_size[0], turned_size[1], turned_size[2]])
-        seen, parent, doors = front_pad(scene, bounds, control)
+        seen, parent, doors = front_pad(scene, bounds, control, source["runtimeType"] == "TOWN_HALL")
         ground_doors = [scene.position(i) for i, pid in enumerate(scene.cells) if name(scene.palette[pid]).endswith("_door") and
                         "half=lower" in scene.palette[pid] and scene.position(i)[1] <= scene.origin[1] + 2]
         if source["runtimeType"] != "DECORATION" and ground_doors and not any(p in scene.reached_cells(seen) for p in ground_doors):
@@ -685,6 +767,8 @@ def curate_family(inputs, normalizer, rotations, registry, out, recipe_hash, gen
         site.update(schematicId=identifier, schematicSha256=entry["sha256"], family=family)
         if rows := forecourt_rows(scene, control):
             site["forecourt"] = rows
+        if source["runtimeType"] == "TOWN_HALL":
+            site["hallApproach"] = hall_approach(scene, control)
         receipt = {"entry": entry, "sourcePrimary": source["primary"], "sourceGroundY": source["placement"]["sourceGroundY"],
                    "sourceGroundPolicy": source["placement"]["groundPolicy"], "sourceGroundEvidence": source["placement"].get("groundEvidence"),
                    "sourceFront": placement["sourceFront"], "sourceQuarterTurns": q, "sourceFrameTranslation": shift,

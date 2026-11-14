@@ -167,6 +167,20 @@ internal class CivsCityPlans(
         return loadRetainedPlans(city, cached).thenApply(RetainedPlans::access)
     }
 
+    /** Reuse the sealed projection for a fresh receipt; a restarted server reopens the retained plan journals. */
+    fun verifyHallCaptures(tx: CivInventoryTransaction): CompletableFuture<Unit> {
+        val upkeep = requireNotNull(tx.upkeep?.work?.upkeep)
+        val proof = requireNotNull(upkeep.hall)
+        val before = requireNotNull(tx.upkeep).before(tx.after)
+        fun verify(access: CivAutonomousAccess) {
+            require(access.hallWitness == proof && access.hallApproach(before)?.surfaces?.get(upkeep.floor) == upkeep.after)
+        }
+        val cached = retainedRoutes[before.id]?.takeIf { it.matchesAccess(before, store.planGeneration, retainedEpoch) }
+        if (cached != null) return try { verify(cached.access); CompletableFuture.completedFuture(Unit) }
+            catch (failure: IllegalArgumentException) { CompletableFuture.failedFuture(failure) }
+        return loadRetainedPlans(before).thenApply { retained -> verify(retained.access) }
+    }
+
     /** Queued upgrade captures are exact future geometry, never retained built access roads. */
     fun loadPlanBoardPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
         require(city.constructionQueue.orEmpty().size <= CivsRules.MAX_SITES)

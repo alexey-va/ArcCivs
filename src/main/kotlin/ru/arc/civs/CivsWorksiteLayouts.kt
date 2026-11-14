@@ -60,6 +60,23 @@ internal object CivsWorksiteLayouts {
         }
     }
 
+    /** The original forecourt above remains the source contract of already accepted receipts. */
+    fun hallRows(building: CivBuilding): Pair<Int, List<String>>? {
+        if (building.type != BuildingType.TOWN_HALL) return null
+        val site = site(building) ?: return null
+        if (site["schematicId"]?.asString != building.schematicId || site["level"]?.asInt != building.level ||
+            site["type"]?.asString != building.type.name || building.entrance != point(building, CivPosition(0, 1, 0))) return null
+        val bounds = site.getAsJsonObject("schematicBounds") ?: return null
+        if (worldBounds(building, vector(bounds["min"]), vector(bounds["max"])) != building.bounds) return null
+        val data = site.getAsJsonObject("hallApproach")
+        val axis = data?.get("axis")?.asInt ?: 0
+        val rows = (data?.getAsJsonArray("rows") ?: site.getAsJsonArray("forecourt"))?.map { it.asString }.orEmpty()
+        if (axis !in -1..1 || rows.size > 12 || rows.any { it !in HALL_PAVING }) return null
+        return axis to rows
+    }
+
+    val HALL_PAVING = setOf("minecraft:dirt_path", "minecraft:cobblestone", "minecraft:stone_bricks")
+
     private fun authoredField(building: CivBuilding): Field? =
         catalog.fields[building.schematicId] ?: fields[building.schematicId]
 

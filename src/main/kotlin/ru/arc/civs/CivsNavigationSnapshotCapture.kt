@@ -51,12 +51,22 @@ private class CitizenSnapshotBlocks(
     override fun get(key: CivPosition): CitizenTerrainBlock? = get(key.x, key.y, key.z)
 
     fun get(worldX: Int, worldY: Int, worldZ: Int): CitizenTerrainBlock? {
-        val first = origin ?: return null
+        val index = indexOf(worldX, worldY, worldZ)
+        return if (index < 0) null else cells[index]
+    }
+
+    fun key(worldX: Int, worldY: Int, worldZ: Int): CivPosition {
+        val index = indexOf(worldX, worldY, worldZ)
+        return if (index < 0) CivPosition(worldX, worldY, worldZ) else positions[index]
+    }
+
+    private fun indexOf(worldX: Int, worldY: Int, worldZ: Int): Int {
+        val first = origin ?: return -1
         val x = worldX.toLong() - first.x
         val y = worldY.toLong() - first.y
         val z = worldZ.toLong() - first.z
-        if (x !in 0L..2L || y !in 0L..6L || z !in 0L..2L) return null
-        return cells[(x.toInt() * 3 + z.toInt()) * 7 + y.toInt()]
+        if (x !in 0L..2L || y !in 0L..6L || z !in 0L..2L) return -1
+        return (x.toInt() * 3 + z.toInt()) * 7 + y.toInt()
     }
 
     override fun containsKey(key: CivPosition): Boolean = get(key) != null
@@ -191,7 +201,7 @@ internal class CitizenSnapshotCapture(
                 edge.copy(permitted = if (probe.incoming) policy.stepAllowed(edge.node.point(), probe.from)
                     else policy.stepAllowed(probe.from, edge.node.point()))
             }
-            edges.forEach { edge -> requiredCosts += CivPosition(edge.node.x, citizenSupportY(edge.node.y), edge.node.z) }
+            edges.forEach { edge -> requiredCosts += blocks.key(edge.node.x, citizenSupportY(edge.node.y), edge.node.z) }
             completed += CapturedProbe(probe, blocks, edges)
             if (prefetch && (next < requestedCount || connectedPrefetch)) for (edge in edges) {
                 if (probes.size >= maximumProbes) break

@@ -30,6 +30,7 @@ internal class CivsInventoryJournal(
     private val updateHealth: () -> Unit,
     private val clock: () -> Long,
     private val verifyGateCaptures: (CivInventoryTransaction) -> CompletableFuture<Unit> = { CompletableFuture.completedFuture(Unit) },
+    private val verifyHallCaptures: (CivInventoryTransaction) -> CompletableFuture<Unit> = { CompletableFuture.failedFuture(CivsRejection("stale-worksite")) },
     private val verifyWarehouseCaptures: (CivInventoryTransaction) -> CompletableFuture<Unit> = { CompletableFuture.completedFuture(Unit) },
 ) {
     private val cities get() = settlements()
@@ -60,7 +61,10 @@ internal class CivsInventoryJournal(
                 .filter { section -> section.any {
                     kotlin.math.abs(it.x.toLong() - upkeep.floor.x) <= 1 && kotlin.math.abs(it.z.toLong() - upkeep.floor.z) <= 1
                 } }.flatten() }.orEmpty()
-            val floors = listOf(upkeep.floor, work.standing) + upkeep.neighbours + cut
+            val walks = upkeep.hall?.let { proof ->
+                CivsTownHallApproach.from(tx.after, upkeep.source, proof)?.crossingChecks(upkeep.floor, work.changes)?.map { it.before + it.after }
+            }.orEmpty()
+            val floors = listOf(upkeep.floor, work.standing) + upkeep.neighbours + cut + walks.flatten()
             for (floor in floors) for (x in ((floor.x - 2) shr 4)..((floor.x + 2) shr 4))
                 for (z in ((floor.z - 2) shr 4)..((floor.z + 2) shr 4)) keys += PaperChunkKey(tx.after.worldId, x, z)
         }
@@ -225,6 +229,13 @@ internal class CivsInventoryJournal(
             if (!retry) { blockedRecovery += tx.cityId; log("reconcile inventory ${tx.id}", error, tx.cityId) }
             result?.completeExceptionally(error)
             updateHealth()
+        }
+        if (tx.upkeep?.work?.upkeep?.hall != null && !gateVerified) {
+            runCatching { verifyHallCaptures(tx) }.getOrElse { CompletableFuture.failedFuture(it) }
+                .whenCompleteSync(tasks) { _, failure ->
+                    if (failure != null) fail(failure) else applyInventory(tx, result, gateVerified = true)
+                }
+            return
         }
         if (tx.warehouseRefit != null && !gateVerified) {
             runCatching { verifyWarehouseCaptures(tx) }.getOrElse { CompletableFuture.failedFuture(it) }
@@ -421,7 +432,7 @@ internal class CivsInventoryJournal(
             storage.lock(tx)
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
-                if (tx.gateRefit != null || tx.warehouseRefit != null) {
+                if (tx.gateRefit != null || tx.warehouseRefit != null || tx.upkeep?.work?.upkeep?.hall != null) {
                     rejectIf(city != tx.after, "stale-city")
                     applyInventory(tx, null)
                     return@runCatching

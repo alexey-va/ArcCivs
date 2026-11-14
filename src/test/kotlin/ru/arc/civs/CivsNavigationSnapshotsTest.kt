@@ -655,6 +655,45 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
+    test("support cost requests reuse captured keys for outgoing incoming and fractional candidates") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val slab = paper.server.createBlockData("minecraft:stone_slab[type=bottom,waterlogged=false]")
+            for (fractional in listOf(false, true)) for (incoming in listOf(false, true))
+                withClue("fractional=$fractional incoming=$incoming") {
+                    val terrain = flatSnapshotTerrain(0, 0,
+                        if (fractional) mapOf(CivPosition(3, 63, 2) to slab) else emptyMap())
+                    if (fractional) terrain.states[slab] = CitizenSnapshotState(CitizenTerrainShape(
+                        false, false, false, false, listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, .5, 1.0))), false)
+                    val node = CitizenSearchNode(2, 64.0, 2)
+                    val policy = CitizenSnapshotPolicy({ p, material ->
+                        material(p)?.let { it.isAir || it == Material.STONE_SLAB } == true
+                    }, { from, to -> to.x > from.x })
+                    val capture = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point(), incoming)),
+                        terrain, policy, -64, 320, 32768, 1, false)
+                    val request = capture.advance(CitizenSnapshotInput())
+                    request.chunks shouldBe emptySet()
+                    request.states shouldBe emptyMap()
+                    request.dynamics shouldBe emptyMap()
+                    request.costs.isNotEmpty() shouldBe true
+                    val result = requireNotNull(capture.advance(CitizenSnapshotInput(
+                        costs = request.costs.associateWith { 2.25 })).captures).single()
+                    request.costs shouldBe result.edges.map { edge ->
+                        CivPosition(edge.node.x, citizenSupportY(edge.node.y), edge.node.z)
+                    }.toSet()
+                    result.edges.any { it.permitted } shouldBe true
+                    result.edges.any { !it.permitted } shouldBe true
+                    result.edges.forEach { edge ->
+                        edge.permitted shouldBe if (incoming) node.x > edge.node.x else edge.node.x > node.x
+                    }
+                    if (fractional) result.edges.any { it.node.x == 3 && it.node.z == 2 && it.node.y == 63.5 } shouldBe true
+                    for (key in request.costs) {
+                        key shouldBeSameInstanceAs result.blocks.keys.single { it == key }
+                        result.blocks.getValue(key).cost shouldBe 2.25
+                    }
+                }
+        }
+    }
+
     test("overlapping snapshot captures share resolved costs while later cost knowledge leaves published captures unchanged") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
             val terrain = flatSnapshotTerrain(0, 0)
