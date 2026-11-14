@@ -54,13 +54,24 @@ internal class CivsRoadWorld(
             p.y !in world.minHeight + 1 until world.maxHeight - CivsRoadMaintenance.MAX_CLEARANCE) return null
         val block = world.getBlockAt(p.x, p.y, p.z)
         val after = Bukkit.createBlockData(upkeep.after)
+        val path = upkeep.route?.let { CivsEntrancePath.from(upkeep.source, it) }
+            ?.takeIf { upkeep.routeOverride == null && upkeep.junction == null && it.surface(p, city.style) == upkeep.after }
+        val bank = path?.bank(p) == true
+        val yard = if (upkeep.source.bounds.contains(p.x, p.y, p.z)) CivsWorksiteLayouts.forecourt(upkeep.source) else emptyMap()
+        val forecourt = yard[p] == upkeep.after
         val pavement by lazy(LazyThreadSafetyMode.NONE) { CivsRoadMaintenance.ownedPavement(city, upkeep) }
         val change = if (CivsRoadMaintenance.sameSurface(upkeep, block.blockData, after)) null else {
-            if (!roadUpkeepReplaceable(block) && block.blockData.asString !in pavement[p].orEmpty()) return null
+            val before = block.blockData.asString
+            if (bank && !CivsRoadMaintenance.bankBefore(before) || forecourt && !CivsRoadMaintenance.forecourtSoil(before) ||
+                !bank && !forecourt && !roadUpkeepReplaceable(block) && before !in pavement[p].orEmpty()) return null
             CivPlanBlock(p, block.blockData.asString, after.asString)
         }
         val foundation = mutableListOf<CivPlanBlock>()
-        if (change != null && block.type.isAir && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+        val below = world.getBlockAt(p.x, p.y - 1, p.z)
+        if (path?.bedding(p, below.blockData.asString, city.style) == true) {
+            if (city.inventory?.mode != CivStorageMode.PHYSICAL) return null
+            foundation += CivPlanBlock(p.copy(y = p.y - 1), below.blockData.asString, "minecraft:dirt")
+        } else if (!forecourt && change != null && block.type.isAir && city.inventory?.mode == CivStorageMode.PHYSICAL &&
             upkeep.route != null && upkeep.routeOverride == null) {
             for (depth in 1..CivsAutonomousTerraform.MAXIMUM_CHANGE) {
                 val y = p.y - depth
@@ -76,11 +87,13 @@ internal class CivsRoadWorld(
             }
             foundation.reverse()
         }
-        val clearance = (1..CivsRoadMaintenance.MAX_CLEARANCE).map { dy ->
+        val clearance = (1..if (bank || forecourt) 2 else CivsRoadMaintenance.MAX_CLEARANCE).map { dy ->
             world.getBlockAt(p.x, p.y + dy, p.z).blockData.asString
         }
-        val cover = CivsRoadMaintenance.covers(p, clearance)
-            ?: CivsRoadMaintenance.covers(p, clearance, pavement) ?: return null
+        val cover = if (bank || forecourt) {
+            if (clearance.any { it !in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air") }) return null
+            emptyList()
+        } else CivsRoadMaintenance.covers(p, clearance) ?: CivsRoadMaintenance.covers(p, clearance, pavement) ?: return null
         val changes = foundation + listOfNotNull(change) + cover
         if (changes.isEmpty()) {
             val stairs = block.blockData as? Stairs
@@ -104,6 +117,7 @@ internal class CivsRoadWorld(
                     CitizenPoint(standing.x + .5, standing.y.toDouble(), standing.z + .5), false)) continue
             if (civsProtectedBuildings(city).any { building ->
                     if (building.type == BuildingType.ROAD) return@any false
+                if (forecourt && building == upkeep.source && standing.copy(y = standing.y - 1) in yard) return@any false
                     val bounds = protectedBounds.getOrPut(building) { CivsAutonomousGeometry.futureBounds(city, building) }
                     CivsAutonomousGeometry.horizontalContains(bounds, standing) ||
                         CivsWorksiteLayouts.isField(building, standing.x, standing.z)
@@ -136,6 +150,8 @@ internal class CivsRoadWorld(
             return world.getBlockAt(p.x, p.y, p.z)
         }
         val p = upkeep.floor
+        val forecourt = upkeep.source.bounds.contains(p.x, p.y, p.z) && CivsWorksiteLayouts.forecourt(upkeep.source)[p] == upkeep.after
+        val bank = upkeep.after == CivsEntrancePath.GRASS && upkeep.route?.let { CivsEntrancePath.from(upkeep.source, it)?.bank(p) } == true
         val supportPosition = p.copy(y = (foundation.keys.minOfOrNull { it.y } ?: p.y) - 1)
         requireCivs(world.worldBorder.isInside(Location(world, p.x + .5, p.y.toDouble(), p.z + .5)), "outside-border")
         val all = cities().filter { it.id != city.id } + city
@@ -150,7 +166,9 @@ internal class CivsRoadWorld(
                 requireCivs(building.control !in positions, "building-overlap")
                 val ownRoad = other.id == city.id && building == upkeep.source && building.type == BuildingType.ROAD &&
                     building.transit.orEmpty().contains(p.copy(y = p.y + 1))
-                requireCivs(ownRoad || !CivsAutonomousGeometry.horizontalContains(CivsAutonomousGeometry.futureBounds(other, building), p) &&
+                val ownYard = forecourt && other.id == city.id && building == upkeep.source &&
+                    building.control?.let { it.x == p.x && it.z == p.z } != true
+                requireCivs((ownRoad || ownYard || !CivsAutonomousGeometry.horizontalContains(CivsAutonomousGeometry.futureBounds(other, building), p)) &&
                     !CivsWorksiteLayouts.isField(building, p.x, p.z), "building-overlap")
             }
         }
@@ -160,8 +178,11 @@ internal class CivsRoadWorld(
         requireCivs(cell?.let { block.blockData.asString == it.before } == true || already, "world-changed")
         requireCivs(block.state !is TileState && !block.isLiquid &&
             (block.blockData as? Waterlogged)?.isWaterlogged != true, "protected-terrain")
-        requireCivs(already || roadUpkeepReplaceable(block) ||
-            block.blockData.asString in CivsRoadMaintenance.ownedPavement(city, upkeep)[p].orEmpty(), "protected-terrain")
+        requireCivs(already || when {
+            bank -> CivsRoadMaintenance.bankBefore(block.blockData.asString)
+            forecourt -> CivsRoadMaintenance.forecourtSoil(block.blockData.asString)
+            else -> roadUpkeepReplaceable(block) || block.blockData.asString in CivsRoadMaintenance.ownedPavement(city, upkeep)[p].orEmpty()
+        }, "protected-terrain")
         // A new half step removes side support. Do not make adjacent torches, ladders or decor pop as loot.
         if (!already && (after is Stairs || after.material == Material.DIRT_PATH)) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
             val beside = read(p.copy(x = p.x + dx, z = p.z + dz))
@@ -176,7 +197,7 @@ internal class CivsRoadWorld(
                 requireCivs(native.blockData.asString == change.before || native.blockData.asString == change.after, "world-changed")
                 requireCivs(native.state !is TileState && !native.isLiquid &&
                     (native.blockData as? Waterlogged)?.isWaterlogged != true, "protected-terrain")
-                requireCivs(canModify(city.owner, native, Material.COBBLESTONE), "lands-denied")
+                requireCivs(canModify(city.owner, native, Bukkit.createBlockData(change.after).material), "lands-denied")
             }
         }
         requireCivs(canModify(city.owner, block, after.material), "lands-denied")

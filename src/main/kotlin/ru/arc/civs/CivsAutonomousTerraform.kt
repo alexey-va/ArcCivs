@@ -335,7 +335,7 @@ internal object CivsAutonomousTerraform {
         val routeFailures = sortedMapOf<String, Int>()
         val preparedRoute by lazy { RoutePreparation(surface, standing, preferredRoads, building) }
         // A short facing link may lack room to grade into the flat apron; the ordinary guarded search can approach from the side.
-        val route = reservedRoute?.also { points ->
+        val candidate = reservedRoute?.also { points ->
             if (points.isEmpty() || points.size > MAXIMUM_ROUTE_LENGTH || points.last() != building.entrance ||
                 points.first() !in sources(city, building) || points.any { p ->
                     routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }
@@ -349,6 +349,9 @@ internal object CivsAutonomousTerraform {
             }
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path",
             mapOf("stage" to "route-search") + routeFailures.mapValues { it.value.toString() })
+        // A reservation has an existing route witness. New journals can pay for the straight entry from the outset.
+        val route = if (reservedRoute != null) candidate else
+            freshEntranceRoute(city, building, candidate, surface, access, routeObstacles, standing)
         if (route.any { civsTerrainKey(it.x, it.z) in waterColumns }) throw CivsRejection("autonomy-no-path")
         val columns = linkedMapOf<Long, CivTerraformColumn>()
         val wallRoadProfiles by lazy {
@@ -449,12 +452,14 @@ internal object CivsAutonomousTerraform {
             start = end
         }
         val apronFillLimit = LARGE_FILL_DEPTH.takeIf { unpaidTerrace(city, building) && !compactTerrace(building) }
-        val approach = CivsAutonomousGeometry.approach(building)
+        // An old side-fed reservation must remain walkable until construction finishes and upkeep adopts its new surface.
+        val entrancePath = access.entrancePath(city, building, route)?.takeUnless { it.sideFed }
+        val approach = entrancePath?.floors ?: CivsAutonomousGeometry.approach(building)
         approach.forEach { point ->
             // The route already validates and preserves any shared lane. Its other columns are
             // outside the mandatory footprint and must not be raised to the new doorstep.
             if (civsTerrainKey(point.x, point.z) in protectedRoads) return@forEach
-            val grade = approachFloor(route, point)?.y ?: building.entrance.y - 1
+            val grade = entrancePath?.floor(point.x, point.z)?.y ?: approachFloor(route, point)?.y ?: building.entrance.y - 1
             add(point.x, point.z, grade, grade,
                 point.x == route.first().x && point.z == route.first().z, visibleFillLimit = apronFillLimit)
         }
@@ -544,11 +549,29 @@ internal object CivsAutonomousTerraform {
             val dx = (entry.x - join.x).coerceIn(-1, 1); val dz = (entry.z - join.z).coerceIn(-1, 1)
             (1..length).map { join.copy(x = join.x + dx * it, z = join.z + dz * it) }
         }.orEmpty()
-        return sources(city, building).asSequence().mapNotNull {
+        val candidate = sources(city, building).asSequence().mapNotNull {
             route(city, building, surface, obstacles, standing, it, preferredRoads = preferred, inspect = inspectRoute,
                 destination = frontage ?: building.entrance, arrival = arrival, streets = streets, prepared = prepared,
                 preferSharedTrunk = unpaidTerrace(city, building))
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
+        return freshEntranceRoute(city, building, candidate, surface, access, obstacles, standing)
+    }
+
+    internal fun freshEntranceRoute(city: Settlement, building: CivBuilding, candidate: List<CivPosition>,
+        surface: CivTerrainSurface, access: CivAutonomousAccess, obstacles: List<CivBox>,
+        standing: Map<Long, CivPosition>): List<CivPosition> {
+        val path = access.entrancePath(city, building, candidate)?.takeIf { it.sideFed } ?: return candidate
+        val projected = path.travel(candidate)
+        for (feet in projected.takeLast(6)) {
+            val p = surface.at(feet.x, feet.z) ?: return candidate
+            val grade = feet.y - 1
+            if (!city.contains(feet.x, feet.z) || !p.loaded || p.waterTopY != null ||
+                !p.natural && !(p.dirtPath && p.groundY == grade && p.topY == grade) ||
+                abs(p.groundY.toLong() - grade) > MAXIMUM_CHANGE || grade <= surface.minHeight || feet.y + 1 >= surface.maxHeight ||
+                obstacles.any { CivsAutonomousGeometry.horizontalContains(it, feet) } ||
+                standing[civsTerrainKey(feet.x, feet.z)]?.let { it.y != feet.y } == true) return candidate
+        }
+        return projected
     }
 
     /** Exact before-images, ordered approach-first, with cuts top-down and fill from real support up. */

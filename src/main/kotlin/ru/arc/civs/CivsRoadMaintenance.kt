@@ -169,7 +169,12 @@ data class CivRoadUpkeep(
     internal fun validated(city: Settlement) {
         require(city.id == cityId && city.worldId == worldId && city.owner == owner && city.pendingDeletion == null)
         require(planId == source.id && source.phase == BuildingPhase.ACTIVE && city.building(source.id) == source)
-        require(city.contains(floor.x, floor.z) && floor.y in -4_094..4_093 && CivsRoadMaintenance.surface(after))
+        val path = route?.let { CivsEntrancePath.from(source, it) }
+        val forecourt = route != null && routeOverride == null && junction == null &&
+            source.bounds.contains(floor.x, floor.y, floor.z) && CivsWorksiteLayouts.forecourt(source)[floor] == after
+        val preferred = routeOverride == null && junction == null && path?.surface(floor, city.style) == after
+        require(city.contains(floor.x, floor.z) && floor.y in -4_094..4_093 &&
+            (CivsRoadMaintenance.surface(after) || preferred || forecourt))
         require(neighbours.size <= 4 && neighbours.map { civsTerrainKey(it.x, it.z) }.distinct().size == neighbours.size)
         require(neighbours.all { abs(it.x.toLong() - floor.x) + abs(it.z.toLong() - floor.z) == 1L &&
             abs(it.y.toLong() - floor.y) <= 1L && city.contains(it.x, it.z) })
@@ -224,15 +229,17 @@ data class CivRoadUpkeep(
                             after == CivsSettlementLayout.pathPavement(floor, profile, city.style, atTurn = true)))
         } else {
             require(!source.type.isInfrastructure && route.size in 1..CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH &&
-                route.last() == source.entrance &&
-                (CivsAutonomousTerraform.roadProfileContains(route, floor) ||
-                    CivsAutonomousGeometry.approach(source).any { it.x == floor.x && it.z == floor.z } &&
-                        CivsAutonomousTerraform.approachFloor(route, floor) == floor))
+                route.last() == source.entrance)
             require(route.all { city.contains(it.x, it.z) && it.y in -4_093..4_094 } &&
                 route.map { civsTerrainKey(it.x, it.z) }.distinct().size == route.size)
             require(route.zipWithNext().all { (a, b) ->
                 abs(a.x.toLong() - b.x) + abs(a.z.toLong() - b.z) == 1L && abs(a.y.toLong() - b.y) <= 1L
             })
+            // A new signature licenses only its paired floor and finish. Other receipts retain the original proof below.
+            if (forecourt || preferred) return
+            require(CivsAutonomousTerraform.roadProfileContains(route, floor) ||
+                CivsAutonomousGeometry.approach(source).any { it.x == floor.x && it.z == floor.z } &&
+                    CivsAutonomousTerraform.approachFloor(route, floor) == floor)
             // Completed receipts from the original straight-only finish remain recoverable.
             require(after == CivsSettlementLayout.pavement(floor, profile) ||
                 after == CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = true) ||
@@ -741,6 +748,10 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
 
         /** At most the retained three-wide old road finish, at its exact old height. */
         internal fun ownedPavement(city: Settlement, upkeep: CivRoadUpkeep): Map<CivPosition, Set<String>> {
+            val route = upkeep.route
+            if (upkeep.routeOverride == null && upkeep.junction == null && route != null && upkeep.after == "minecraft:dirt_path" &&
+                CivsEntrancePath.from(upkeep.source, route)?.oldTurn == upkeep.floor)
+                return mapOf(upkeep.floor to setOf("minecraft:${CivsSettlementLayout.wood(city.style)}_planks"))
             upkeep.junction?.let { junction ->
                 val final = junction.targets(city, after = true).associateBy { civsTerrainKey(it.floor.x, it.floor.z) }
                 val original = junction.owners.map { owner -> owner.route to CivsAutonomousTerraform.roadProfile(owner.route) }
@@ -835,19 +846,36 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             require(changes.size in 1..CivsAutonomousTerraform.MAXIMUM_CHANGE + MAX_CLEARANCE &&
                 changes.map { it.position }.distinct().size == changes.size)
             require(changes.all { it.before != it.after })
+            val path = upkeep.route?.let { CivsEntrancePath.from(upkeep.source, it) }
+                ?.takeIf { upkeep.routeOverride == null && upkeep.junction == null && it.surface(upkeep.floor, city.style) == upkeep.after }
+            val bank = path?.bank(upkeep.floor) == true
+            val forecourt = upkeep.source.bounds.contains(upkeep.floor.x, upkeep.floor.y, upkeep.floor.z) &&
+                CivsWorksiteLayouts.forecourt(upkeep.source)[upkeep.floor] == upkeep.after
             val foundation = changes.takeWhile { it.position.y < upkeep.floor.y }
+            val bedding = foundation.singleOrNull()?.let { change ->
+                change.position == upkeep.floor.copy(y = upkeep.floor.y - 1) && change.after == "minecraft:dirt" &&
+                    path?.bedding(upkeep.floor, change.before, city.style) == true
+            } == true
             if (foundation.isNotEmpty()) {
                 require(city.inventory?.mode == CivStorageMode.PHYSICAL && upkeep.route != null && upkeep.routeOverride == null)
                 require(foundation.size < CivsAutonomousTerraform.MAXIMUM_CHANGE)
-                foundation.forEachIndexed { index, change ->
+                if (!bedding) foundation.forEachIndexed { index, change ->
                     require(change.position == upkeep.floor.copy(y = upkeep.floor.y - foundation.size + index) &&
                         air(change.before) && change.after == "minecraft:cobblestone")
                 }
             }
             val column = changes.drop(foundation.size)
             val floor = column.firstOrNull()?.takeIf { it.position == upkeep.floor }
-            require(foundation.isEmpty() || floor != null && air(floor.before))
+            require(foundation.isEmpty() || bedding || floor != null && air(floor.before))
             require(floor == null || floor.after == upkeep.after)
+            if (bank || forecourt) {
+                require(column == listOfNotNull(floor))
+                if (forecourt) require(foundation.isEmpty())
+                if (floor != null) require(if (forecourt) forecourtSoil(floor.before) else bankBefore(floor.before))
+            }
+            if (floor != null && landing(floor.before) && upkeep.after == "minecraft:dirt_path" && upkeep.route != null &&
+                CivsEntrancePath.from(upkeep.source, upkeep.route)?.oldTurn == upkeep.floor)
+                require(floor.before == "minecraft:${CivsSettlementLayout.wood(city.style)}_planks")
             val cover = column.filter { it.position != upkeep.floor }
             val expected = covers(upkeep.floor, (1..MAX_CLEARANCE).map { dy ->
                 cover.firstOrNull { it.position == upkeep.floor.copy(y = upkeep.floor.y + dy) }?.before ?: "minecraft:air"
@@ -856,6 +884,12 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         }
 
         private fun air(data: String): Boolean = data in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
+
+        internal fun forecourtSoil(data: String): Boolean = data == "minecraft:dirt" ||
+            data.substringBefore('[') == "minecraft:grass_block"
+
+        internal fun bankBefore(data: String): Boolean = air(data) || forecourtSoil(data) || data == "minecraft:dirt_path" ||
+            data == "minecraft:short_grass" || data == "minecraft:fern" || data.startsWith("minecraft:wildflowers[")
 
         fun eligible(city: Settlement): Boolean = city.autonomy?.paused == false &&
             (city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) &&
@@ -892,11 +926,12 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     ?: city.roadRouteOverrides))
         }
 
-        /** Explicit apron corners need their actual treads; old straight receipts tolerate native stair reshaping. */
+        /** Old straight receipts tolerate native reshaping elsewhere. The new flight needs all three straight treads. */
         internal fun sameSurface(upkeep: CivRoadUpkeep, actual: BlockData, expected: BlockData): Boolean =
             CivsTerrainPolicy.sameConstructionState(actual, expected) &&
-                (upkeep.route == null || expected !is Stairs || expected.shape == Stairs.Shape.STRAIGHT ||
-                    actual is Stairs && actual.shape == expected.shape)
+                (upkeep.route == null || expected !is Stairs || actual is Stairs && actual.shape == expected.shape ||
+                    expected.shape == Stairs.Shape.STRAIGHT &&
+                        CivsEntrancePath.from(upkeep.source, upkeep.route)?.stair(upkeep.floor) != true)
 
         /** The extra apron can meet an old side flight at two low edges; retain its ordered facing. */
         internal fun apronCorner(source: CivBuilding, route: List<CivPosition>, floor: CivPosition,
@@ -1113,14 +1148,30 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     }
                 }.distinctBy { it.floor }
 
-            // The canonical apron is already public approach space. Fill its missing columns only;
-            // all accepted centrelines, ROAD transit and shoulders retain their paid grades above.
+            val entrancePaths = mutableMapOf<UUID, CivsEntrancePath>()
+            val forecourts = mutableMapOf<UUID, Map<CivPosition, String>>()
+            // Where the terrace has a single rise, all three lanes share its cross-section.
             city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }.forEach { source ->
                 val route = access.routes[source.id].orEmpty()
                 if (route.isEmpty()) return@forEach
+                val path = access.entrancePath(city, source, route)
+                if (path != null) entrancePaths[source.id] = path
                 val retained by lazy(LazyThreadSafetyMode.NONE) { access.standing(city, source.id) }
-                for (point in CivsAutonomousGeometry.approach(source)) {
+                val yard = CivsWorksiteLayouts.forecourt(source).filterKeys { access.forecourtClear(city, source, it) }
+                if (yard.isNotEmpty()) forecourts[source.id] = yard
+                for (floor in yard.keys) {
+                    val key = civsTerrainKey(floor.x, floor.z)
+                    floors[key] = floor
+                    candidates[key] = source to floor
+                }
+                for (point in path?.floors ?: CivsAutonomousGeometry.approach(source)) {
                     val key = civsTerrainKey(point.x, point.z)
+                    if (path != null) {
+                        val floor = requireNotNull(path.floor(point.x, point.z))
+                        floors[key] = floor
+                        candidates[key] = source to floor
+                        continue
+                    }
                     if (key in floors) continue
                     val floor = CivsAutonomousTerraform.approachFloor(route, point) ?: continue
                     if (!excluded(floor) && retained[key]?.let { it.y - 1 == floor.y } != false) {
@@ -1132,9 +1183,14 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
 
             val targets = candidates.mapNotNull { (key, candidate) ->
                 val (source, floor) = candidate
-                if (restrictTo != null && key !in restrictTo || key in ambiguous || key in held || excluded(floor)) return@mapNotNull null
+                val yard = forecourts[source.id]
+                if (restrictTo != null && key !in restrictTo || key in ambiguous || key in held ||
+                    excluded(floor) && yard?.containsKey(floor) != true) return@mapNotNull null
+                val entrance = entrancePaths[source.id]
                 val neighbours = directions.mapNotNull { (dx, dz) -> floors[civsTerrainKey(floor.x + dx, floor.z + dz)] }
-                    .filter { abs(it.y.toLong() - floor.y) <= 1L && civsTerrainKey(it.x, it.z) !in ambiguous && !excluded(it) }
+                    .filter { abs(it.y.toLong() - floor.y) <= 1L && civsTerrainKey(it.x, it.z) !in ambiguous &&
+                        (!excluded(it) || yard?.containsKey(it) == true) &&
+                        entrance?.bank(it) != true && entrance?.bank(floor) != true }
                 val profile = (neighbours + floor).associate { civsTerrainKey(it.x, it.z) to it.y }
                 val route = access.routes[source.id]?.toList().takeIf { source.type != BuildingType.ROAD }
                 // ROAD transit is a profile, not an ordered route. Preserve its captured facing or landing.
@@ -1143,7 +1199,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 if (authored != null && !authoredStep(floor, authored, profile, city.style) &&
                     !(landing(authored) && authored == CivsSettlementLayout.pathPavement(floor, profile, city.style, atTurn = true)))
                     return@mapNotNull null
-                val finish = authored ?: if (route == null)
+                val finish = authored ?: yard?.get(floor) ?: entrance?.surface(floor, city.style) ?: if (route == null)
                     CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = source.type == BuildingType.ROAD)
                 else apronCorner(source, route, floor, profile, city.style)
                     ?: approachFinish(floor, profile, route) ?: return@mapNotNull null
@@ -1168,7 +1224,9 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     civsTerrainKey(target.floor.x, target.floor.z) in apronColumns.getOrPut(target.source.id) {
                         CivsAutonomousGeometry.approach(target.source).mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
                     }
-                if (ownApron) entrances.getOrPut(target.source.id) { arrayListOf() } += target
+                if (ownApron || entrancePaths[target.source.id]?.nearApproach(target.floor) == true ||
+                    forecourts[target.source.id]?.containsKey(target.floor) == true)
+                    entrances.getOrPut(target.source.id) { arrayListOf() } += target
                 else remaining += target
             }
             // Finish the admitted apron at one doorway before travelling to another entrance.

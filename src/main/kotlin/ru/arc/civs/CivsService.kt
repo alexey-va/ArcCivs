@@ -974,7 +974,7 @@ class CivsService(
                 }
             } else roadMaintenance.upkeepRetired(tx.after, upkeep)
             val surfaceChange = work.changes.firstOrNull { it.position == upkeep.floor }
-            footTraffic.registerSurface(tx.cityId, upkeep.floor)
+            if (upkeep.after != CivsEntrancePath.GRASS) footTraffic.registerSurface(tx.cityId, upkeep.floor)
             CivsDiagnostics.event("road_upkeep_committed", "city" to tx.cityId, "worker" to work.workerId,
                 "cycle" to work.cycle, "transaction" to tx.id, "revision" to tx.after.revision,
                 "source_building" to upkeep.source.id, "floor" to upkeep.floor,

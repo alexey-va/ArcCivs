@@ -76,16 +76,29 @@ class CurationGeometryTest(unittest.TestCase):
         self.assertEqual("minecraft:air", scene.at((4, 1, 4)))
         self.assertEqual("minecraft:oak_planks", scene.at((5, 1, 4)))
 
-    def test_forecourt_connects_the_center_path_without_wrapping_the_building_in_gravel(self):
+    def test_forecourt_keeps_three_lanes_until_real_doorposts_and_preserves_side_padding(self):
         scene = room()
         scene.set((0, 1, 4), "minecraft:air", "empty-side-padding")
         scene.set((4, 1, 8), "minecraft:air", "empty-front-padding")
         scene.set((3, 1, 8), "minecraft:air", "empty-front-shoulder")
+        scene.set((5, 1, 8), "minecraft:air", "empty-front-shoulder")
+        scene.set((4, 1, 7), "minecraft:stone_bricks", "source-entry")
+        for x in (3, 5):
+            scene.set((x, 1, 7), "minecraft:dirt", "source-open-soil")
+        for x in (3, 4, 5):
+            for y in (2, 3):
+                scene.set((x, y, 7), "minecraft:air", "source-open-entry")
+        scene.set((4, 1, 6), "minecraft:stone_bricks", "source-entry")
+        scene.set((3, 2, 6), "minecraft:cobblestone", "source-doorpost")
+        scene.set((3, 1, 6), "minecraft:dirt", "source-floor")
         scene.set((2, 1, 7), "minecraft:gravel", "authored-floor")
         curate.front_pad(scene, ([1, 1, 1], [7, 7, 7]), (5, 2, 8))
         self.assertEqual("minecraft:dirt", scene.at((0, 1, 4)))
         self.assertEqual("minecraft:dirt_path", scene.at((4, 1, 8)))
-        self.assertEqual("minecraft:dirt", scene.at((3, 1, 8)))
+        self.assertEqual(["minecraft:dirt_path"] * 3, [scene.at((x, 1, 8)) for x in (3, 4, 5)])
+        self.assertEqual(["minecraft:stone_bricks"] * 3, [scene.at((x, 1, 7)) for x in (3, 4, 5)])
+        self.assertEqual("minecraft:dirt", scene.at((3, 1, 6)))
+        self.assertEqual("minecraft:structure_void", scene.at((5, 2, 8)))
         self.assertEqual("minecraft:gravel", scene.at((2, 1, 7)))
 
     def mine_cap(self, ground=5):

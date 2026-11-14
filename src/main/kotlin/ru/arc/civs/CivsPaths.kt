@@ -50,18 +50,20 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
             fun from(city: Settlement, access: CivAutonomousAccess): RetainedRoads {
                 val publicWays = access.infrastructure.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }
                     .associateBy { it.id }
+                val guardApproaches = mutableMapOf<UUID, List<CivPosition>>()
                 val supports = buildSet {
                     for (building in city.buildings) {
                         if (building.phase != BuildingPhase.ACTIVE) continue
                         val route = if (building.type.isInfrastructure) publicWays[building.id]?.transit
-                            else access.routes[building.id]
+                            else access.routes[building.id]?.let { paid ->
+                                access.entrancePath(city, building, paid)?.travel(paid) ?: paid
+                            }
                         for (feet in route.orEmpty()) add(feet.copy(y = feet.y - 1))
+                        if (building.type == BuildingType.GUARD_TOWER && route != null)
+                            guardApproaches[building.id] = java.util.List.copyOf(route)
                     }
                 }
                 if (supports.isEmpty()) return EMPTY
-                val guardApproaches = city.buildings.asSequence()
-                    .filter { it.type == BuildingType.GUARD_TOWER && it.phase == BuildingPhase.ACTIVE }
-                    .mapNotNull { tower -> access.routes[tower.id]?.let { tower.id to java.util.List.copyOf(it) } }.toMap()
                 return RetainedRoads(supports, guardApproaches)
             }
         }

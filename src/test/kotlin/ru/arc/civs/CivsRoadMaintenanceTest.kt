@@ -27,7 +27,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class CivsRoadMaintenanceTest : FunSpec({
-    test("a side entrance finishes its whole reserved apron without moving any paid road grade") {
+    test("a straight entrance shares its grades with residents and preserves legacy receipts for its side approach") {
         val base = upkeepCity()
         val source = base.buildings.last().copy(type = BuildingType.HOUSE, rotation = 180, transit = null,
             anchor = CivPosition(0, 67, 6), entrance = CivPosition(0, 68, 6),
@@ -40,23 +40,64 @@ class CivsRoadMaintenanceTest : FunSpec({
         val apron = CivsAutonomousGeometry.approach(source).map { civsTerrainKey(it.x, it.z) }.toSet()
         val targets = network.targets.filter { civsTerrainKey(it.floor.x, it.floor.z) in apron }
         targets.size shouldBe 12
-        val original = CivsAutonomousTerraform.roadProfile(route)
-        val reserved = CivAutonomousAccess.from(city, plans).standing(city, city.buildings[1].id)
+        val access = CivAutonomousAccess.from(city, plans)
+        val reserved = access.standing(city, city.buildings[1].id)
         targets.forEach { target ->
-            original[civsTerrainKey(target.floor.x, target.floor.z)]?.let { target.floor shouldBe it }
             reserved[civsTerrainKey(target.floor.x, target.floor.z)] shouldBe target.floor.copy(y = target.floor.y + 1)
             target.route shouldBe route
             target.routeOverride shouldBe null
             target.validated(city)
             Gson().fromJson(Gson().toJson(target), CivRoadUpkeep::class.java).validated(city)
         }
-        targets.single { it.floor.x == 0 && it.floor.z == 5 }.after shouldBe
-            "minecraft:spruce_stairs[facing=west,half=bottom,shape=outer_left,waterlogged=false]"
+        val centre = targets.single { it.floor.x == 0 && it.floor.z == 5 }
+        centre.after shouldBe "minecraft:spruce_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val straight = Bukkit.createBlockData(centre.after)
+            for (corner in listOf("outer_left", "outer_right")) {
+                val reshaped = Bukkit.createBlockData(centre.after.replace("straight", corner))
+                CivsRoadMaintenance.sameSurface(centre, reshaped, straight) shouldBe false
+            }
+            CivsRoadMaintenance.sameSurface(centre, straight, straight) shouldBe true
+        }
+        val legacy = centre.copy(after = "minecraft:spruce_stairs[facing=west,half=bottom,shape=outer_left,waterlogged=false]",
+            neighbours = centre.neighbours.map { if (it.x == 1) it.copy(y = 66) else it })
+        Gson().fromJson(Gson().toJson(legacy), CivRoadUpkeep::class.java).validated(city)
+        val travel = CivsPaths.RetainedRoads.from(city, access)
+        (CivPosition(0, 67, 5) in travel) shouldBe true
+        (CivPosition(2, 66, 6) in travel) shouldBe false
+        access.routes.getValue(source.id) shouldBe route
         val missing = targets.single { it.floor.x == -1 && it.floor.z == 3 }
         missing.floor.y shouldBe 66
         shouldThrow<IllegalArgumentException> { missing.copy(floor = missing.floor.copy(y = 67)).validated(city) }
         shouldThrow<IllegalArgumentException> { missing.copy(floor = missing.floor.copy(x = -2)).validated(city) }
         Gson().toJson(city to plans) shouldBe before
+    }
+
+    test("a straight entrance does not displace an overlapping road, parcel or another paid approach") {
+        val base = upkeepCity()
+        val source = base.buildings.last().copy(type = BuildingType.HOUSE, rotation = 180, transit = null,
+            anchor = CivPosition(0, 67, 6), entrance = CivPosition(0, 68, 6),
+            bounds = CivBox(CivPosition(-3, 66, 7), CivPosition(3, 74, 13)))
+        val own = (0..6).map { CivPosition(2, 67, it) } + listOf(CivPosition(1, 68, 6), source.entrance)
+        val shared = CivPosition(1, 67, 5)
+        val road = base.buildings.last().copy(id = UUID(0, 520), anchor = shared,
+            bounds = CivBox(shared.copy(y = 66), shared), entrance = shared, transit = listOf(shared))
+        val parcel = source.copy(id = UUID(0, 521), entrance = CivPosition(-8, 67, 5),
+            bounds = CivBox(CivPosition(-7, 66, 5), shared.copy(y = 75)))
+        val other = parcel.copy(bounds = CivBox(CivPosition(-12, 66, 6), CivPosition(-8, 75, 9)))
+        for (neighbour in listOf(road, parcel, other)) {
+            val city = base.copy(buildings = base.buildings.dropLast(1) + listOf(source, neighbour))
+            val plans = mutableListOf(upkeepApproach(city, source, own))
+            if (neighbour == other)
+                plans += upkeepApproach(city, other, (shared.x downTo other.entrance.x).map { CivPosition(it, 67, 5) })
+            if (neighbour == road) plans += CivPlacementPlan(road.id, city.id, city.worldId, road,
+                listOf(CivPlanBlock(shared.copy(y = 66), "minecraft:stone", "minecraft:cobblestone")))
+            val targets = CivsRoadMaintenance.prepare(city, plans, proposeCuts = false).targets
+            targets.none { it.source == source && it.floor == shared && it.after.contains("_stairs") } shouldBe true
+            val access = CivAutonomousAccess.from(city, plans)
+            access.entrancePath(city, source, own) shouldBe null
+            (CivPosition(2, 66, 6) in CivsPaths.RetainedRoads.from(city, access)) shouldBe true
+        }
     }
 
     test("ordinary road repair finishes each whole canonical apron before another entrance or distant shoulders") {

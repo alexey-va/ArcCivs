@@ -12,6 +12,39 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     val wallApproachWrites: Map<UUID, Set<Long>> = emptyMap(),
     val perimeterCaptures: Map<UUID, CivPerimeterCapture> = emptyMap(),
     private val surveyedHallApron: Map<Long, CivPosition> = emptyMap()) {
+    /** Only the source's paid terminal and reserved approach may be regraded together. */
+    fun entrancePath(city: Settlement, source: CivBuilding, route: List<CivPosition>): CivsEntrancePath? {
+        val path = CivsEntrancePath.from(source, route) ?: return null
+        val cells = path.floors
+        if (cells.any { !city.contains(it.x, it.z) } ||
+            infrastructure.any { piece -> piece.transit.any { path.contains(it.x, it.z) } } ||
+            reservedFortificationPorts.any { box -> cells.any { CivsAutonomousGeometry.horizontalContains(box, it) } }) return null
+        for (building in civsProtectedBuildings(city)) {
+            val bounds = CivsAutonomousGeometry.futureBounds(city, building)
+            if (cells.any { CivsAutonomousGeometry.horizontalContains(bounds, it) || CivsWorksiteLayouts.isField(building, it.x, it.z) })
+                return null
+            if (building.id == source.id) continue
+            if (CivsAutonomousGeometry.approach(building).any { path.contains(it.x, it.z) }) return null
+            val other = routes[building.id] ?: CivsSettlementPlans.current(city)?.routes?.get(building.id.toString()) ?: continue
+            if (other.any { feet -> (-1..1).any { dx -> (-1..1).any { dz -> path.contains(feet.x + dx, feet.z + dz) } } })
+                return null
+        }
+        return path
+    }
+
+    fun forecourtClear(city: Settlement, source: CivBuilding, floor: CivPosition): Boolean {
+        if (!city.contains(floor.x, floor.z) || reservedFortificationPorts.any { CivsAutonomousGeometry.horizontalContains(it, floor) } ||
+            infrastructure.any { piece -> piece.transit.any { it.x == floor.x && it.z == floor.z } }) return false
+        return civsProtectedBuildings(city).none { building ->
+            val other = building.id != source.id
+            CivsWorksiteLayouts.isField(building, floor.x, floor.z) ||
+                building.control?.let { it.x == floor.x && it.z == floor.z } == true ||
+                building != source && CivsAutonomousGeometry.horizontalContains(CivsAutonomousGeometry.futureBounds(city, building), floor) ||
+                other && (routes[building.id] ?: CivsSettlementPlans.current(city)?.routes?.get(building.id.toString())).orEmpty()
+                    .any { abs(it.x - floor.x) <= 1 && abs(it.z - floor.z) <= 1 }
+        }
+    }
+
     /** A paid route and the fresh surface can correct the Hall's nominal apron grade. */
     fun withSurveyedHallApron(city: Settlement, surface: CivTerrainSurface): CivAutonomousAccess {
         val hall = city.buildings.singleOrNull { it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.ACTIVE }
@@ -59,14 +92,16 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                 else listOf(building.entrance)
             // This is a reservation grade; preserved native capture still has to prove its actual support and clearance.
             val route = routes[building.id]?.takeIf { building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure }
+            val path = route?.let { entrancePath(city, building, it) }
             val paidApproach = if (route == null) approach else approach.map { nominal ->
-                CivsAutonomousTerraform.approachFloor(route, nominal)?.let { it.copy(y = it.y + 1) } ?: nominal }
+                (path?.floor(nominal.x, nominal.z) ?: CivsAutonomousTerraform.approachFloor(route, nominal))
+                    ?.let { it.copy(y = it.y + 1) } ?: nominal }
             val graded = if (building.type == BuildingType.TOWN_HALL && building.phase == BuildingPhase.ACTIVE) {
                 val leadOut = paidHallLeadOut.takeIf { it.firstOrNull() == building.entrance }.orEmpty()
                 paidApproach.map { nominal -> surveyedHallApron[civsTerrainKey(nominal.x, nominal.z)] ?:
                     leadOut.firstOrNull { it.x == nominal.x && it.z == nominal.z } ?: nominal }
             } else paidApproach
-            (graded + routes[building.id].orEmpty() +
+            (graded + (if (path != null) path.travel(requireNotNull(route)) else routes[building.id].orEmpty()) +
                 building.transit.orEmpty().takeIf { building.phase == BuildingPhase.ACTIVE }.orEmpty()).forEach { feet ->
                 putIfAbsent(civsTerrainKey(feet.x, feet.z), feet)
             }

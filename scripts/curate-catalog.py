@@ -98,7 +98,33 @@ def style_key(style):
 
 def forecourt_surface(front_x, x, z, content_front, decoration=False):
     # Dirt uses the ordinary dirt bill and can green over naturally after work.
-    return "minecraft:dirt_path" if not decoration and x == front_x and z > content_front else "minecraft:dirt"
+    return "minecraft:dirt_path" if not decoration and abs(x - front_x) <= 1 and z > content_front else "minecraft:dirt"
+
+
+def forecourt_rows(scene, control):
+    """The exterior strip ends at the first doorway, obstruction or change from authored soil."""
+    x, ground, outside = scene.origin
+    rows = []
+    if scene.decoration or not 1 <= x < scene.size[0] - 1:
+        return rows
+    for distance in range(1, min(outside, 8) + 1):
+        z = outside - distance
+        surface = scene.at((x, ground, z))
+        if surface not in {"minecraft:dirt_path", "minecraft:stone_bricks", "minecraft:cobblestone"}:
+            break
+        clear = True
+        for lane in (-1, 0, 1):
+            for y in (ground + 1, ground + 2):
+                pos = (x + lane, y, z)
+                state = scene.at(pos)
+                if state not in AIR and not (pos == tuple(control) and state == "minecraft:structure_void"):
+                    clear = False
+        sides = [scene.at((x + lane, ground, z)) for lane in (-1, 1)]
+        if not clear or any(state not in {surface, "minecraft:dirt", "minecraft:grass_block",
+                                         "minecraft:grass_block[snowy=false]"} for state in sides):
+            break
+        rows.append(surface)
+    return rows
 
 
 def front_pad(scene, content_bounds, control):
@@ -122,11 +148,13 @@ def front_pad(scene, content_bounds, control):
                     if name(scene.at((x, y, z))) in SKIP:
                         scene.set((x, y, z), "minecraft:cobblestone", "paid-forecourt-foundation")
                 if name(scene.at((x, ground, z))) in SKIP:
-                    # Continue the public path down the front center only. Side and
-                    # rear padding are terrain, and all authored surfaces stay intact.
+                    # The public approach keeps its three lanes. Rear and lateral padding remain soil.
                     scene.set((x, ground, z), forecourt_surface(scene.origin[0], x, z, content_bounds[1][2],
                         scene.decoration), "shared-ground-forecourt")
     scene.set(control, "minecraft:structure_void", "shared-ground-control")
+    for distance, surface in enumerate(forecourt_rows(scene, control), start=1):
+        for lane in (-1, 1):
+            scene.set((scene.origin[0] + lane, ground, scene.origin[2] - distance), surface, "open-forecourt-width")
     seen, parent = scene.reachable()
     doors = [scene.position(i) for i, pid in enumerate(scene.cells)
              if name(scene.palette[pid]).endswith("_door") and "half=lower" in scene.palette[pid]]
@@ -655,6 +683,8 @@ def curate_family(inputs, normalizer, rotations, registry, out, recipe_hash, gen
                  "storage": {"chests": sum(r["kind"] == "chest" for r in stored), "barrels": sum(r["kind"] == "barrel" for r in stored)},
                  "worksite": site, "dining": [row["seat"] for row in dining], "checks": ["source-hashes", "shared-max-level-frame", "ground-origin", "front-door-route", "one-control", "storage-provenance", "fluid-boundary", "full-cell-readback"]}
         site.update(schematicId=identifier, schematicSha256=entry["sha256"], family=family)
+        if rows := forecourt_rows(scene, control):
+            site["forecourt"] = rows
         receipt = {"entry": entry, "sourcePrimary": source["primary"], "sourceGroundY": source["placement"]["sourceGroundY"],
                    "sourceGroundPolicy": source["placement"]["groundPolicy"], "sourceGroundEvidence": source["placement"].get("groundEvidence"),
                    "sourceFront": placement["sourceFront"], "sourceQuarterTurns": q, "sourceFrameTranslation": shift,

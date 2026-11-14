@@ -1293,7 +1293,10 @@ class CivsStorage(private val plugin: Plugin,
 
     private fun worldAfterMatches(transaction: CivInventoryTransaction, actual: BlockData, expected: BlockData,
         cell: CivPlanBlock): Boolean = actual.asString == expected.asString ||
-        transaction.upkeep != null && CivsRoadMaintenance.sameSurface(requireNotNull(transaction.upkeep.work.upkeep), actual, expected) ||
+        transaction.upkeep?.work?.upkeep?.let { upkeep ->
+            // The grass cheek and its dirt bedding are separate paid images of this column.
+            (cell.position == upkeep.floor || cell.after != "minecraft:dirt") && CivsRoadMaintenance.sameSurface(upkeep, actual, expected)
+        } == true ||
         transaction.autonomousVisual != null && CivsAutonomousWorksites.nativeAfterMatches(cell, actual.asString)
 
     private fun completedNativeState(transaction: CivInventoryTransaction, sources: Map<CivPosition, Source>, cells: Map<CivPosition, Pair<Block, BlockData>>): CivInventoryApplyResult {

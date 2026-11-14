@@ -1002,12 +1002,14 @@ internal object CivsAutonomousGeometry {
 
     fun approach(building: CivBuilding): List<CivPosition> {
         if (building.type.isInfrastructure) return listOf(building.entrance)
-        val front = rotate(CivPosition(0, 0, 1), building.rotation / 90)
+        val front = frontage(building)
         return (0..3).flatMap { distance -> (-1..1).map { side ->
             CivPosition(building.entrance.x + front.x * distance + front.z * side, building.entrance.y,
                 building.entrance.z + front.z * distance - front.x * side)
         } }
     }
+
+    fun frontage(building: CivBuilding): CivPosition = rotate(CivPosition(0, 0, 1), building.rotation / 90)
 
     fun futureBounds(city: Settlement, building: CivBuilding): CivBox {
         if (building.type == BuildingType.PLAN_BOARD) return CivsPlanBoardBlueprint.futureBounds(building)

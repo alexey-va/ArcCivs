@@ -22,6 +22,13 @@ class CivsAutonomousTerraformTest : FunSpec({
         val route = listOf(city.buildings.single().entrance, CivPosition(1, 65, 0), CivPosition(2, 65, 0)) +
             (1..18).map { CivPosition(2, 65, it) } + listOf(CivPosition(1, 66, 18), building.entrance)
         val surface = terraceSurface { _, _ -> 64 }
+        val fresh = CivsAutonomousTerraform.freshEntranceRoute(city, building, route, surface, CivAutonomousAccess(),
+            emptyList(), emptyMap())
+        fresh.takeLast(7) shouldBe listOf(CivPosition(2, 65, 14), CivPosition(1, 65, 14), CivPosition(0, 65, 14),
+            CivPosition(0, 65, 15), CivPosition(0, 65, 16), CivPosition(0, 66, 17), building.entrance)
+        val blocked = CivPosition(1, 65, 14)
+        CivsAutonomousTerraform.freshEntranceRoute(city, building, route, surface, CivAutonomousAccess(),
+            listOf(CivBox(blocked, blocked)), emptyMap()) shouldBe route
         val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface, reservedRoute = route)
         draft.route shouldBe route
         val columns = draft.columns.associateBy { civsTerrainKey(it.x, it.z) }

@@ -64,7 +64,7 @@ internal fun roadHalfStepWalk(world: World, route: List<CivPosition>,
 
 /** Exact collision union for the deliberately small paving palette, including native corner shapes. */
 internal fun roadUpkeepBoxes(data: BlockData): List<CitizenTerrainBox> {
-    if (data.material == Material.COBBLESTONE || CivsRoadMaintenance.landing(data.asString))
+    if (data.material in setOf(Material.COBBLESTONE, Material.STONE_BRICKS, Material.GRASS_BLOCK) || CivsRoadMaintenance.landing(data.asString))
         return listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
     if (data.material == Material.DIRT_PATH) return listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0))
     require(CivsRoadMaintenance.surface(data.asString) && data is Stairs &&

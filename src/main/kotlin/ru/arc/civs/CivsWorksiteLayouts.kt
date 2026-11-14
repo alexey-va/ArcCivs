@@ -41,6 +41,25 @@ internal object CivsWorksiteLayouts {
 
     fun site(building: CivBuilding): JsonObject? = catalog.sites[building.schematicId] ?: sites[building.schematicId]
 
+    /** Exterior-only rows attested by the current immutable schematic's worksite. */
+    fun forecourt(building: CivBuilding): Map<CivPosition, String> {
+        val site = site(building) ?: return emptyMap()
+        val rows = site.getAsJsonArray("forecourt") ?: return emptyMap()
+        if (building.entrance != point(building, CivPosition(0, 1, 0)) ||
+            site["schematicId"].asString != building.schematicId || site["level"].asInt != building.level ||
+            site["type"].asString != building.type.name) return emptyMap()
+        val bounds = site.getAsJsonObject("schematicBounds")
+        if (worldBounds(building, vector(bounds["min"]), vector(bounds["max"])) != building.bounds) return emptyMap()
+        return buildMap {
+            rows.forEachIndexed { index, row ->
+                for (lane in -1..1) {
+                    val p = point(building, CivPosition(lane, 0, -index - 1))
+                    if (building.control?.let { it.x == p.x && it.z == p.z } != true) put(p, row.asString)
+                }
+            }
+        }
+    }
+
     private fun authoredField(building: CivBuilding): Field? =
         catalog.fields[building.schematicId] ?: fields[building.schematicId]
 

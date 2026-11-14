@@ -50,7 +50,8 @@ def revise_payload(row, receipt, payload, normalizer):
         at = (y * length + z) * w + x
         if palette[cells[at]] != "minecraft:gravel":
             raise ValueError("Generated before image differs: " + row["schematicId"])
-        after = curate.forecourt_surface(front_x, x, z, length - 3)
+        # This version reproduces already published immutable v1 payloads byte for byte.
+        after = "minecraft:dirt_path" if x == front_x and z > length - 3 else "minecraft:dirt"
         if after not in palette:
             palette.append(after)
         cells[at] = palette.index(after)

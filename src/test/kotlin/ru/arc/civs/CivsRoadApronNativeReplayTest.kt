@@ -6,9 +6,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
 import org.bukkit.Material
-import org.bukkit.block.BlockFace
 import org.bukkit.block.data.BlockData
-import org.bukkit.block.data.type.Stairs
 import org.bukkit.util.BoundingBox
 import org.mockbukkit.mockbukkit.block.BlockMock
 import org.mockbukkit.mockbukkit.block.data.BlockDataMock
@@ -23,6 +21,7 @@ import kotlin.math.floor
 
 /** Opt-in native terrain replay; every unknown cell is an error, never implicit fixture AIR. */
 class CivsRoadApronNativeReplayTest : FunSpec({
+    afterEach { CivsWorksiteLayouts.installCatalog(emptyMap()) }
     test("the captured Auto1 house apron completes through paid receipts and real local tread walks") {
         val capturePath = System.getenv("CIVS_APRON_NATIVE_INPUT") ?: return@test
         val layoutPath = requireNotNull(System.getenv("CIVS_APRON_LAYOUT_INPUT"))
@@ -33,23 +32,37 @@ class CivsRoadApronNativeReplayTest : FunSpec({
         val capture = JsonParser.parseString(String(captureBytes)).asJsonObject
         val layout = JsonParser.parseString(String(layoutBytes)).asJsonObject
         fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-        val bounds = gson.fromJson(capture["bounds"], CivBox::class.java)
-        capture["unavailable_count"].asInt shouldBe 0
-        capture["voxel_count"].asInt shouldBe 891
-        val palette = capture.getAsJsonArray("palette").map { it.asJsonObject }
-        val before = capture.getAsJsonArray("voxels").associate { value ->
-            val row = value.asJsonArray
-            row[4].asBoolean shouldBe true
-            CivPosition(bounds.min.x + row[0].asInt, bounds.min.y + row[1].asInt, bounds.min.z + row[2].asInt) to
-                palette[row[3].asInt]["block_data"].asString
+        val door = System.getenv("CIVS_APRON_DOOR_INPUT")?.let { JsonParser.parseString(Files.readString(Path.of(it))).asJsonObject }
+        val captures = listOfNotNull(capture, door)
+        val boxes = captures.map { gson.fromJson(it["bounds"], CivBox::class.java) }
+        val bounds = boxes.reduce(CivsAutonomousGeometry::union)
+        val before = linkedMapOf<CivPosition, String>()
+        for ((i, input) in captures.withIndex()) {
+            input["unavailable_count"].asInt shouldBe 0
+            input["voxel_count"].asInt shouldBe 891
+            input["world"].asString shouldBe capture["world"].asString
+            val palette = input.getAsJsonArray("palette").map { it.asJsonObject }
+            val min = boxes[i].min
+            input.getAsJsonArray("voxels").forEach { value ->
+                val row = value.asJsonArray
+                row[4].asBoolean shouldBe true
+                val p = CivPosition(min.x + row[0].asInt, min.y + row[1].asInt, min.z + row[2].asInt)
+                val state = palette[row[3].asInt]["block_data"].asString
+                before.put(p, state)?.let { it shouldBe state }
+            }
         }
-        before.size shouldBe 891
+        val palette = captures.flatMap { input -> input.getAsJsonArray("palette").map { it.asJsonObject } }
+        if (door != null) {
+            val catalog = Path.of(requireNotNull(System.getenv("CIVS_APRON_CATALOG_INPUT")))
+            val index = Files.newBufferedReader(catalog).use { JsonParser.parseReader(it).asJsonObject }
+            CivsWorksiteLayouts.installCatalog(CivBlueprintCatalog.parse(index).worksiteLayouts)
+        }
         val collisions = palette.associate { cell -> cell["block_data"].asString to cell.getAsJsonArray("collision").map { value ->
             val box = value.asJsonArray
             BoundingBox(box[0].asDouble, box[1].asDouble, box[2].asDouble, box[3].asDouble, box[4].asDouble, box[5].asDouble)
         } }
         val worldId = UUID.fromString(capture["world"].asString)
-        MockBukkitTestRuntime.open(ApronNativeServer()).use { paper ->
+        MockBukkitTestRuntime.open(ApronNativeServer(collisions.keys)).use { paper ->
             var enforceCapture = false
             val unknownReads = linkedSetOf<CivPosition>()
             val world = object : CivsWorksiteWorldFixture("captured-house-apron", ground = Material.AIR, collisionForData = { data ->
@@ -150,13 +163,27 @@ class CivsRoadApronNativeReplayTest : FunSpec({
             canonical.size shouldBe 12
             val oldProfile = originalAccess.routes.values.flatMap { CivsAutonomousTerraform.roadProfile(it).values }
             val allowedColumns = canonical + oldProfile.map { civsTerrainKey(it.x, it.z) } +
+                (9659..9660).map { civsTerrainKey(12256, it) } + CivsWorksiteLayouts.forecourt(house).keys.map { civsTerrainKey(it.x, it.z) } +
                 originalAccess.infrastructure.flatMap { it.transit }.map { civsTerrainKey(it.x, it.z) }
-            // Two native-cell margins leave room for real stance/body/side checks. The isolated bank at minZ is deliberately excluded.
-            val localPaid = oldProfile.filter { it.x in bounds.min.x + 2..bounds.max.x - 2 &&
-                it.z in bounds.min.z + 2..bounds.max.z - 2 }.map { civsTerrainKey(it.x, it.z) }
-            val restricted = canonical + localPaid
-            (restricted.size <= 24) shouldBe true
-            fun targets() = CivsRoadMaintenance.prepare(city, plans, proposeCuts = false, restrictTo = restricted).targets
+            val grassIsland = CivPosition(12259, 66, 9654)
+            val expected = buildMap {
+                for (x in 12257..12259) for (z in 9657..9660) {
+                    val floor = CivPosition(x, if (z < 9659) 66 else 67, z)
+                    put(floor, if (z == 9659) "minecraft:spruce_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+                        else "minecraft:dirt_path")
+                }
+                for (z in 9657..9660) {
+                    put(CivPosition(12260, if (z >= 9659) 67 else 66, z), CivsEntrancePath.GRASS)
+                    put(CivPosition(12261, 66, z), CivsEntrancePath.GRASS)
+                    if (z >= 9659) put(CivPosition(12256, 67, z), CivsEntrancePath.GRASS)
+                }
+                if (door != null) for (x in 12257..12259) for (z in 9661..9664)
+                    put(CivPosition(x, 67, z), if (z <= 9662) "minecraft:dirt_path" else "minecraft:stone_bricks")
+                if (grassIsland.z > bounds.min.z) put(grassIsland, "minecraft:dirt_path")
+            }
+            val restricted = expected.keys.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            fun targets() = CivsRoadMaintenance.prepare(city, plans, proposeCuts = false).targets.filter {
+                civsTerrainKey(it.floor.x, it.floor.z) in restricted }
             var permit = true
             val native = CivsRoadWorld(paper.createSimplePlugin("CapturedApron"), { listOf(city) }, { _, _, _ -> permit }, { false })
             val receipts = mutableListOf<CivRoadUpkeepReceipt>()
@@ -167,24 +194,20 @@ class CivsRoadApronNativeReplayTest : FunSpec({
             val failure = runCatching {
                 canonicalTargets = targets().filter { civsTerrainKey(it.floor.x, it.floor.z) in canonical }
                 canonicalTargets.size shouldBe 12
-                for (x in 12257..12258) for (z in 9657..9658)
-                    canonicalTargets.single { it.floor.x == x && it.floor.z == z }.floor.y shouldBe 66
-                canonicalTargets.single { it.floor == CivPosition(12258, 67, 9659) }.after shouldBe
-                    "minecraft:spruce_stairs[facing=west,half=bottom,shape=outer_left,waterlogged=false]"
-                canonicalTargets.single { it.floor == CivPosition(12257, 67, 9659) }.after shouldBe
-                    "minecraft:spruce_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+                targets().associate { it.floor to it.after } shouldBe expected
                 for (pass in 0 until 32) {
                     var progressed = false
                     for (target in targets()) {
                         val captured = native.captureRoadUpkeep(city, city.workers.single(), target)
                         if (captured == null) {
-                            if (!CivsWorld.sameConstructionState(read(target.floor).blockData, Bukkit.createBlockData(target.after)))
+                            if (!CivsRoadMaintenance.sameSurface(target, read(target.floor).blockData, Bukkit.createBlockData(target.after)))
                                 refusals += mapOf("pass" to pass, "floor" to target.floor,
                                     "actual" to read(target.floor).blockData.asString, "desired" to target.after)
                             continue
                         }
                         val work = captured.copy(inputs = CivsRoadMaintenance.inputs(city, captured))
-                        work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                        val cost = 1L + work.changes.count { it.position.y < target.floor.y }
+                        work.inputs shouldBe mapOf("COBBLESTONE" to cost)
                         native.validateRoadUpkeep(city, work)
                         if (!negativeChecks && work.changes.any { it.position == target.floor }) {
                             val unchanged = state()
@@ -198,7 +221,7 @@ class CivsRoadApronNativeReplayTest : FunSpec({
                         val at = 3_000L + receipts.size * 4_000L
                         val after = CivsRoadMaintenance.complete(city, work, at)
                         (CivsEquipment.usableCount(beforeWorker, "COBBLESTONE") -
-                            CivsEquipment.usableCount(after.workers.single(), "COBBLESTONE")) shouldBe 1
+                            CivsEquipment.usableCount(after.workers.single(), "COBBLESTONE")) shouldBe cost.toInt()
                         after.stock shouldBe city.stock
                         after.workers.single().skills shouldBe beforeWorker.skills
                         val receipt = gson.fromJson(gson.toJson(CivRoadUpkeepReceipt(beforeWorker, city.stock, work, at).detached()),
@@ -222,17 +245,12 @@ class CivsRoadApronNativeReplayTest : FunSpec({
                 canonicalTargets = targets().filter { civsTerrainKey(it.floor.x, it.floor.z) in canonical }
                 canonicalTargets.size shouldBe 12
                 canonicalTargets.forEach { target ->
-                    CivsWorld.sameConstructionState(read(target.floor).blockData, Bukkit.createBlockData(target.after)) shouldBe true
                     (1..CivsRoadMaintenance.MAX_CLEARANCE).all { read(target.floor.copy(y = target.floor.y + it)).type.isAir } shouldBe true
                 }
-                for (x in 12257..12258) for (z in 9657..9658) read(CivPosition(x, 67, z)).type.isAir shouldBe true
-                // The generic construction matcher intentionally ignores stair shape. This replay must prove the actual corner was paid and installed.
-                val corner = read(CivPosition(12258, 67, 9659)).blockData as Stairs
-                corner.facing shouldBe BlockFace.WEST
-                corner.shape shouldBe Stairs.Shape.OUTER_LEFT
-                val westLane = read(CivPosition(12257, 67, 9659)).blockData as Stairs
-                westLane.facing shouldBe BlockFace.SOUTH
-                westLane.shape shouldBe Stairs.Shape.STRAIGHT
+                expected.forEach { (p, block) -> read(p).blockData.asString shouldBe block }
+                for (x in listOf(12256, 12260)) for (z in 9659..9660)
+                    read(CivPosition(x, 66, z)).blockData.asString shouldBe "minecraft:dirt"
+                read(CivPosition(12259, 66, 9659)).blockData.asString shouldBe "minecraft:dirt"
                 negativeChecks shouldBe true
                 CivAutonomousAccess.from(city, plans).routes shouldBe originalAccess.routes
                 city.roadRouteOverrides shouldBe originalOverrides
@@ -242,11 +260,11 @@ class CivsRoadApronNativeReplayTest : FunSpec({
                 state().filter { (p, data) -> before[p] != data }.keys.all { it in paid } shouldBe true
                 targets().all { native.captureRoadUpkeep(city, city.workers.single(), it) == null } shouldBe true
                 unknownReads shouldBe emptySet()
-                val routes = listOf(
-                    "old-paid-entry" to listOf(CivPosition(12260, 67, 9660), CivPosition(12259, 68, 9660), house.entrance),
-                    "north-west" to ((9656..9660).map { CivPosition(12257, if (it <= 9658) 67 else 68, it) } + house.entrance),
-                    "north-centre" to (9656..9660).map { CivPosition(12258, if (it <= 9658) 67 else 68, it) },
-                )
+                val paidRoute = originalAccess.routes.getValue(house.id)
+                val projected = requireNotNull(originalAccess.entrancePath(city, house, paidRoute)).travel(paidRoute)
+                val routes = (12257..12259).map { x ->
+                    "north-$x" to (9656..if (door == null) 9660 else 9664).map { CivPosition(x, if (it <= 9658) 67 else 68, it) }
+                } + ("projected-side-entry" to projected.takeLast(7))
                 routes.forEach { (name, route) ->
                     val forward = roadHalfStepWalk(world, route)
                     val reverse = roadHalfStepWalk(world, route.asReversed())
@@ -268,12 +286,10 @@ class CivsRoadApronNativeReplayTest : FunSpec({
                 "captureAt" to capture["captured_at_ms"].asLong, "bounds" to bounds,
                 "canonicalTargets" to canonicalTargets, "receipts" to receipts, "refusals" to refusals,
                 "walks" to walks, "permissionDenyChecked" to negativeChecks, "unknownReads" to unknownReads,
-                "actualCorner" to read(CivPosition(12258, 67, 9659)).blockData.asString,
-                "cornerReceipts" to receipts.count { receipt -> receipt.work.changes.any { it.position == CivPosition(12258, 67, 9659) } },
+                "expectedFinishes" to expected.map { (p, data) -> mapOf("position" to p, "expected" to data, "actual" to read(p).blockData.asString) },
                 "afterChanges" to state().filter { (p, data) -> before[p] != data },
                 "failure" to failure?.let { mapOf("type" to it.javaClass.name, "message" to it.message) },
-                "isolatedBank" to mapOf("position" to CivPosition(12259, 66, 9654), "status" to "LIMITED_CAPTURE_BOUNDARY",
-                    "reason" to "At minZ; native side/neighbour checks need uncapturedZ9653. No fabricated cells or repair."),
+                "foregroundIslandIncluded" to (grassIsland in expected),
                 "limitations" to listOf("One fixture builder carries64cobblestone; captured runtime staffing/supply schedule is not replayed.",
                     "Native palette collisions and guarded fixture world are used, not a live server or native Minecraft client.",
                     "Claims allow the positive flow; explicit denied permission is checked without changing terrain.",
@@ -285,11 +301,13 @@ class CivsRoadApronNativeReplayTest : FunSpec({
     }
 })
 
-/** Pinned MockBukkit lacks wildflower properties; keep the exact native material/state and captured empty shape. */
-private class ApronNativeServer : CivsWorksiteServerFixture() {
+/** A few captured static blocks lack a MockBukkit state parser. Their exact collision comes from the capture. */
+private class ApronNativeServer(private val captured: Set<String>) : CivsWorksiteServerFixture() {
     override fun createBlockData(data: String): BlockData {
-        if (data.substringBefore('[') != "minecraft:wildflowers") return super.createBlockData(data)
-        return object : BlockDataMock(Material.WILDFLOWERS) {
+        val name = data.substringBefore('[')
+        if (data !in captured || name !in setOf("minecraft:wildflowers", "minecraft:cobblestone_wall", "minecraft:spruce_fence"))
+            return super.createBlockData(data)
+        return object : BlockDataMock(requireNotNull(Material.matchMaterial(name))) {
             override fun getAsString(): String = data
             override fun getAsString(hideUnspecified: Boolean): String = data
             override fun clone(): BlockDataMock = this@ApronNativeServer.createBlockData(data) as BlockDataMock
