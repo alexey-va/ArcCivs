@@ -332,6 +332,130 @@ class CivsSleepingFloorsTest : FunSpec({
         }
     }
 
+    test("residents walk to their preferred quarter place and use a nearer communal hall only when that place is taken") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            for (x in -1..2) for (z in -1..1) h.world.loadChunk(x, z)
+            val hall = h.city.buildings.single().copy(control = null, entrance = CivPosition(3, 64, 1),
+                bounds = CivBox(CivPosition(0, 63, 0), CivPosition(2, 68, 2)))
+            val home = hall.copy(id = UUID(2306, 1), type = BuildingType.HOUSE, anchor = CivPosition(10, 64, 1),
+                entrance = CivPosition(8, 64, 1), bounds = CivBox(CivPosition(9, 63, 0), CivPosition(11, 68, 1)))
+            val houseRoom = buildList { for (x in 9..11) for (z in 0..1) add(CivPosition(x, 64, z)) }
+            val hallPlace = CivPosition(2, 64, 1)
+            val hallRoom = buildSet {
+                add(hallPlace)
+                for (x in 0..2) for (z in 0..2) add(CivPosition(x, 64, z))
+            }
+            h.sleepingFloorSource = { building -> CompletableFuture.completedFuture(
+                CivSleepingFloorMask(if (building.id == home.id) houseRoom else hallRoom)) }
+            val neighbour = CivWorker(UUID(2306, 2), "Neighbour", null, homeId = home.id)
+            h.city = h.city.copy(buildings = listOf(hall, home),
+                workers = h.city.workers.map { it.copy(homeId = home.id) } + neighbour)
+            h.owner.pulse(2_000)
+            val residents = listOf(h.actor(), h.actor(neighbour.id))
+            residents.forEachIndexed { i, actor -> actor.npc.teleport(Location(h.world, 4.5, 64.0, 1.5 + i * 2)) }
+            h.navigationNow = 3_000
+            h.world.time = 13_000
+            for (i in 0..5) {
+                h.navigationNow = 3_000L + i * 100
+                h.owner.pulse(requireNotNull(h.navigationNow))
+                if (residents.all { it.shelterHome != null }) break
+            }
+            check(residents.all { it.shelterHome != null }) {
+                residents.joinToString { h.navigationState(it.workerId) + " reason=" + it.shelterLastReason }
+            }
+            val owner = residents.single { it.shelterHome == home.id }
+            val guest = residents.single { it.shelterHome == hall.id }
+            requireNotNull(owner.shelterFeet).distance(requireNotNull(owner.shelter).location(h.world)) shouldBe
+                (.25 plusOrMinus .000001)
+            guest.shelter shouldBe hallPlace
+            owner.shelterSearchIndex.let { it in 1..40 } shouldBe true
+
+            // A centered hall place cannot spend the assigned home's relocation allowance.
+            val route = requireNotNull(guest.route)
+            route.target.point() shouldBe hallPlace.point()
+            route.motion.planningFailed("no-path")
+            val routes = h.owner.javaClass.getDeclaredField("routes").apply { isAccessible = true }.get(h.owner) as CivsCitizenRoutes
+            val runtime = h.owner.javaClass.getDeclaredField("runtime").apply { isAccessible = true }.get(h.owner) as CitizenRuntime
+            val before = guest.npc.location.point()
+            val budget = runtime.recoveryBudget
+            (budget > 0) shouldBe true
+            routes.recoverNavigation(guest, route.target, 100_000) shouldBe false
+            guest.npc.location.point() shouldBe before
+            runtime.recoveryBudget shouldBe budget
+            routes.cancelRoute(guest)
+            h.owner.pulse(requireNotNull(h.navigationNow) + 1)
+
+            val walked = residents.associateWith { mutableSetOf<CitizenPoint>() }
+            for (tick in 1..600) {
+                val previous = residents.associateWith { requireNotNull(h.owner.residentFeet(it.workerId)) }
+                h.navigate()
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                for (actor in residents) {
+                    val at = requireNotNull(h.owner.residentFeet(actor.workerId))
+                    (at.distance(previous.getValue(actor)) <= .118251) shouldBe true
+                    walked.getValue(actor) += at.point()
+                }
+                if (residents.all { it.sleeping }) break
+            }
+            residents.all { it.npc.pose == PacketNpcPose.SLEEPING && walked.getValue(it).size > 5 } shouldBe true
+            for ((actor, room) in listOf(owner to houseRoom.toSet(), guest to hallRoom)) {
+                val origin = requireNotNull(actor.sleepOrigin)
+                val body = requireNotNull(actor.sleepPose).bounds
+                citizenSleepRoom(room, 64, origin, body) shouldBe true
+                citizenSleepClear(h.world, body) shouldBe true
+            }
+            requireNotNull(owner.sleepPose).bounds.overlaps(requireNotNull(guest.sleepPose).bounds) shouldBe false
+            h.city.workers.all { it.homeId == home.id } shouldBe true
+
+            val third = CivWorker(UUID(2306, 3), "Third", null, homeId = home.id)
+            // All remaining standing cells acquire a low ceiling while the occupied place stays clear.
+            val occupiedCell = requireNotNull(guest.sleepOrigin).let { CivPosition(it.blockX, 64, it.blockZ) }
+            for (cell in hallRoom - occupiedCell) h.world.getBlockAt(cell.x, 65, cell.z).type = Material.STONE
+            h.city = h.city.copy(workers = h.city.workers + third)
+            val now = requireNotNull(h.navigationNow)
+            for (i in 1..8) {
+                h.owner.pulse(now + i * 1_000L)
+                h.actor(third.id).shelter shouldBe null
+                h.actor(third.id).npc.pose shouldBe PacketNpcPose.STANDING
+            }
+            val hallFeet = requireNotNull(guest.sleepOrigin).point()
+            val ceiling = h.world.getBlockAt(occupiedCell.x, 65, occupiedCell.z)
+            ceiling.type = Material.STONE
+            h.world.time = 1_000
+            h.owner.pulse(now + 9_000)
+            guest.npc.pose shouldBe PacketNpcPose.SLEEPING
+            requireNotNull(guest.sleepOrigin).point() shouldBe hallFeet
+            ceiling.type = Material.AIR
+            h.owner.pulse(now + 10_000)
+            guest.npc.pose shouldBe PacketNpcPose.STANDING
+            guest.npc.location.point() shouldBe hallFeet
+        }
+    }
+
+    test("a private home and the hall cannot join incomplete masks or borrow another family's floor") {
+        residentRuntime { h ->
+            val hall = h.city.buildings.single().copy(control = null, entrance = CivPosition(0, 64, 3),
+                bounds = CivBox(CivPosition(0, 63, 2), CivPosition(2, 68, 2)))
+            val home = hall.copy(id = UUID(2306, 4), type = BuildingType.HOUSE, entrance = CivPosition(0, 64, 0),
+                bounds = CivBox(CivPosition(0, 63, 1), CivPosition(2, 68, 1)))
+            val privateHome = home.copy(id = UUID(2306, 5), entrance = CivPosition(4, 64, 0),
+                bounds = CivBox(CivPosition(4, 63, 0), CivPosition(8, 68, 4)))
+            h.city = h.city.copy(buildings = listOf(hall, home, privateHome), workers = h.city.workers.map { it.copy(homeId = home.id) })
+            val requested = mutableSetOf<UUID>()
+            h.sleepingFloorSource = { building ->
+                requested += building.id
+                val bounds = building.bounds
+                CompletableFuture.completedFuture(CivSleepingFloorMask(buildList {
+                    for (x in bounds.min.x..bounds.max.x) for (z in bounds.min.z..bounds.max.z) add(CivPosition(x, 64, z))
+                }))
+            }
+            h.actor().npc.teleport(Location(h.world, 4.5, 64.0, 5.5))
+            repeat(6) { h.reserveShelter() shouldBe null }
+            requested shouldBe setOf(home.id, hall.id)
+            h.actor().shelter shouldBe null
+        }
+    }
+
     test("a completed home with pending or absent rooms prevents outdoor bootstrap sleep") {
         residentRuntime { h ->
             val hall = h.bootstrapShelterHome()

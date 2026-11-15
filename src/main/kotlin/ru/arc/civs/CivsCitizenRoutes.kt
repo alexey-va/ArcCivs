@@ -970,6 +970,9 @@ internal class CivsCitizenRoutes(
                                   nightHome: CivBuilding? = null): Boolean {
         val failed = actor.route ?: return false
         if (failed.wanderWalk != null || actor.mineVisit != null) return false
+        // An optional walk back to the resident's own leisure area grants no relocation.
+        if (actor.plan.idleReason == "unassigned" && failed.idleAnchor == failed.authored &&
+            actor.social.visit == null && actor.mealVisit == null) return false
         // Recovery relocates to a centered block. A fractional shelter must be reached on foot.
         if (actor.sheltering && (failed.authored != actor.shelter || actor.shelterFeet?.point() != failed.authored.point())) return false
         val nightRecovery = nightHome != null
@@ -1023,6 +1026,7 @@ internal class CivsCitizenRoutes(
                 labFailure.origin != failed.from || labFailure.trip != actor.plan.courier || !labCourierCaptureFailed(actor, failed))) return false
         val recoveryTrip = labStorage?.let { requireNotNull(actor.plan.courier) }
         val home = if (actor.sheltering) citizenHomeBuilding(city, worker) ?: return false else null
+        if (home != null && actor.shelterHome != home.id) return false
         if (nightHome != null && (home != nightHome || nightHome.phase != BuildingPhase.ACTIVE ||
                 actor.worldId != city.worldId || worker.cargo != null || !failed.chunks.ready(entity.world))) return false
         val waitingMine = waitingMine(actor, city, recoveryAnchor)

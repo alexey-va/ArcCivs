@@ -67,14 +67,14 @@ internal class CivsCitizenShelters(
     private fun completedHome(building: CivBuilding): Boolean = building.phase == BuildingPhase.ACTIVE &&
         (building.type.isResidence || building.type == BuildingType.TOWN_HALL)
 
-    private fun homes(city: Settlement, worker: CivWorker): List<CivBuilding> {
-        val home = citizenHomeBuilding(city, worker)
-        return if (home?.phase == BuildingPhase.ACTIVE) listOf(home) else city.buildings.filter(::completedHome)
-    }
+    private fun eligibleHome(building: CivBuilding, preferred: CivBuilding?): Boolean = completedHome(building) &&
+        (preferred?.phase != BuildingPhase.ACTIVE || preferred.id == building.id || building.type == BuildingType.TOWN_HALL)
 
     private fun reservedHome(actor: CitizenActor, city: Settlement, worker: CivWorker): CivBuilding? {
         val id = actor.shelterHome ?: return null
-        return homes(city, worker).firstOrNull { it.id == id }
+        val preferred = citizenHomeBuilding(city, worker)
+        if (preferred != null && preferred.id == id && completedHome(preferred)) return preferred
+        return city.building(id)?.takeIf { eligibleHome(it, preferred) }
     }
 
     private fun clearReservation(actor: CitizenActor) {
@@ -124,9 +124,9 @@ internal class CivsCitizenShelters(
             sleep(actor, origin, pose)
             return
         }
-        val nightHome = home?.takeIf { it.phase == BuildingPhase.ACTIVE && routes.canResetNightShelter(actor) &&
-            city.id == actor.cityId && city.worldId == actor.worldId && world.uid == actor.worldId }
-        if (nightHome == null) actor.nightHomeProgress.clear()
+        val trackNight = routes.canResetNightShelter(actor) && city.id == actor.cityId &&
+            city.worldId == actor.worldId && world.uid == actor.worldId
+        if (!trackNight) actor.nightHomeProgress.clear()
         if (!actor.sleeping && actor.shelter?.let { point ->
                 routeFeet(actor, city, world, point) == null ||
                     actor.shelterPose?.let { !citizenSleepClear(world, it.bounds) } != false ||
@@ -161,6 +161,7 @@ internal class CivsCitizenShelters(
             }
         }
         val route = actor.route
+        val nightHome = if (trackNight) actor.shelterHome?.let(city::building) else null
         if (nightHome != null) {
             val stalled = actor.nightHomeProgress.stalled(nightHome, actor.npc.location.point(), now)
             if (route != null) {
@@ -247,7 +248,10 @@ internal class CivsCitizenShelters(
         var remaining = 80
         var reason = "mask-unavailable"
         val onOccupied = { reason = "occupied" }
-        val homes = homes(city, worker).sortedWith(compareBy<CivBuilding>(
+        val preferred = citizenHomeBuilding(city, worker)
+        val eligible = city.buildings.filter { eligibleHome(it, preferred) }
+        val homes = if (preferred?.phase == BuildingPhase.ACTIVE) eligible.sortedBy { it.id != preferred.id }
+        else eligible.sortedWith(compareBy<CivBuilding>(
             { kotlin.math.abs(it.entrance.x - at.blockX) + kotlin.math.abs(it.entrance.z - at.blockZ) }, { it.id }))
         actor.shelterHomeSearch.keys.retainAll(homes.mapTo(hashSetOf()) { it.id })
         for ((homeIndex, home) in homes.withIndex()) {
@@ -272,16 +276,17 @@ internal class CivsCitizenShelters(
                 if (citizenControlClear(city, current) && citizenSleepStanding(world, current, at))
                     reserve(current, at)?.let { return it }
             }
-            // Share the unchanged 80-probe admission across homes, rather than starving a later available home.
-            val probes = minOf(mask.points.size, remaining, maxOf(1, remaining / (homes.size - homeIndex)))
+            // Let the preferred room use its share on quarter poses before trying the communal hall.
+            val stances = mask.points.size * sleepOffsets.size
+            val limit = if (home == preferred && homes.size > 1) stances else mask.points.size
+            val probes = minOf(limit, remaining, maxOf(1, remaining / (homes.size - homeIndex)))
             repeat(probes) {
                 remaining--
                 val index = actor.shelterHomeSearch.getOrDefault(home.id, 0)
                 actor.shelterHomeSearch[home.id] = index + 1
                 actor.shelterSearchIndex++
-                // Finish the center sweep before trying each lateral offset. Each native
-                // stance consumes an existing probe; small houses still get one sweep per pulse.
-                val stance = Math.floorMod(index, mask.points.size * sleepOffsets.size)
+                // Finish the center sweep before trying each lateral offset. Each stance costs one probe.
+                val stance = Math.floorMod(index, stances)
                 val point = mask.points[stance % mask.points.size]
                 val (dx, dz) = sleepOffsets[stance / mask.points.size]
                 val chunks = CitizenChunks.between(at.blockX, at.blockZ, point.x, point.z)
@@ -321,10 +326,12 @@ internal class CivsCitizenShelters(
                 occupied.none(citizenStandingBounds(at, npc.scale)::overlaps)
             checkedDestination?.takeIf(::clear) ?: origin?.takeIf(::clear) ?: run {
                 if (runtime.recoveryBudget == 0 || origin == null) return false
-                runtime.recoveryBudget--
                 val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
                 val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
                 val home = citizenHomeBuilding(city, worker) ?: return false
+                // The recovery candidates belong to the assigned home. A guest wakes at the hall's actual feet.
+                if (actor.shelterHome != null && actor.shelterHome != home.id) return false
+                runtime.recoveryBudget--
                 val lying = actor.sleepPose?.bounds ?: return false
                 citizenShelterTarget(city, worker) { point ->
                     val at = point.location(npc.world)
