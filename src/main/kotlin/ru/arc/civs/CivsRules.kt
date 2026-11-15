@@ -299,7 +299,7 @@ object CivsRules {
         if (buildingId == null) check(city.owner == actor, "owner-required")
         val intent = CivDeletion(buildingId)
         city.pendingDeletion?.let { check(it == intent, "deletion-pending"); return city }
-        if (buildingId != null) withoutBuilding(city, buildingId) // Capacity and item limits before native cleanup.
+        if (buildingId != null) withoutBuilding(city, buildingId, checkingRequest = true) // Capacity and item limits before native cleanup.
         return changed(city, city.copy(pendingDeletion = intent))
     }
 
@@ -310,7 +310,8 @@ object CivsRules {
         return changed(city, withoutBuilding(city, buildingId).copy(pendingDeletion = null))
     }
 
-    private fun withoutBuilding(city: Settlement, buildingId: UUID): Settlement {
+    private fun withoutBuilding(city: Settlement, buildingId: UUID, checkingRequest: Boolean = false): Settlement {
+        check(checkingRequest || city.inventory?.constructionBuffers?.containsKey(buildingId.toString()) != true, "storage-busy")
         val building = city.building(buildingId) ?: reject("building-not-found")
         check(building.type != BuildingType.TOWN_HALL, "town-hall-delete")
         val inventory = city.inventory?.let { previous ->

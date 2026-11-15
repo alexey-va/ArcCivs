@@ -6,7 +6,7 @@ import java.util.UUID
 /** Only supply inputs participate in optimistic validation, never the city's general revision. */
 internal fun civSupplyInputs(city: Settlement): Any = listOf(
     city.worldId, city.center, city.radius, city.buildings, city.construction, city.pendingDeletion, city.research,
-    city.inventory?.mode, city.inventory?.containers, city.autonomy?.paused, city.autonomy?.storage,
+    city.inventory?.mode, city.inventory?.containers, city.inventory?.constructionBuffers, city.autonomy?.paused, city.autonomy?.storage,
     city.inventory?.takeIf { it.mode == CivStorageMode.VIRTUAL },
     city.workers.map { listOf(it.id, it.assignment, it.completedCycles, it.inventory, it.items, it.cargo, it.pendingStock, it.childMinutes != null) },
     city.stock.takeIf { city.autonomy != null },
@@ -36,19 +36,21 @@ internal class CivsSupplyPlanning(
             if (!capture.step()) return null
             stores = requireNotNull(capture.result).stores.mapNotNull { (id, observed) ->
                 val building = city.building(id)?.takeIf { it.control != null } ?: return@mapNotNull null
+                val stock = city.inventory?.sourceStock(id, observed.stock) ?: observed.stock
+                val buffered = city.inventory?.bufferStock(id).orEmpty()
                 val reserved = CivsLogistics.desiredStock(city, building).toMutableMap()
                 // Unknown paid bills protect every observed plain item rather than authorizing surplus.
-                (CivsLogistics.constructionBufferReserve(city, id, constructionNeed) ?: observed.stock).forEach { (material, count) ->
+                (CivsLogistics.constructionBufferReserve(city, id, constructionNeed) ?: stock).forEach { (material, count) ->
                     reserved.merge(material, count, Math::max)
                 }
-                id to CivSupplyStore(id, building.entrance, requireNotNull(building.control), observed.stock,
+                id to CivSupplyStore(id, building.entrance, requireNotNull(building.control), stock,
                     reserved.toMap(),
                     CivsProduction.material(building).takeIf { building.phase == BuildingPhase.ACTIVE && !CivsRules.isBuilder(city, building) },
                     observed.capacity, building.type,
                     redistributionDepot = city.autonomy?.paused == false && city.inventory?.mode == CivStorageMode.PHYSICAL &&
                         CivsAutoStorageMigration.ready(city) &&
                         building.phase == BuildingPhase.ACTIVE && building.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) &&
-                        observed.unavailable == 0 && observed.containers in 1..64 && observed.key.upgradingOrder == null)
+                        observed.unavailable == 0 && observed.containers in 1..64 && observed.key.upgradingOrder == null, bufferedStock = buffered)
             }.toMap()
             requests = CivsLogistics.requests(city) { stores?.get(it)?.stock.orEmpty() }
             // The universe also includes arbitrary plain excess such as gravel and dirt.

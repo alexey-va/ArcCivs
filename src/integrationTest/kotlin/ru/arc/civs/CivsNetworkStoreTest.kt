@@ -44,19 +44,23 @@ class CivsNetworkStoreTest : FreeSpec({
         survival = openStore(endpoint, "survival").also(opened::add)
         spawn.loadOwned(emptyList()).await()
         survival.loadOwned(emptyList()).await()
-        endpoint.connect().use { connection ->
-            connection.createStatement().use { statement ->
-                statement.executeUpdate("DELETE FROM arc_civs_member")
-                statement.executeUpdate("DELETE FROM arc_civs_city")
-                statement.executeUpdate("DELETE FROM arc_civs_deleted")
-                statement.executeUpdate("DELETE FROM arc_civs_autonomous_deleted")
-            }
-        }
     }
 
     afterEach {
-        opened.asReversed().forEach { it.closeAsync().await() }
-        opened.clear()
+        try {
+            opened.asReversed().forEach { it.closeAsync().await() }
+        } finally {
+            opened.clear()
+            // Clear the preceding case before another home tries to open its temporary item files.
+            requireNotNull(mysql).endpoint.connect().use { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeUpdate("DELETE FROM arc_civs_member")
+                    statement.executeUpdate("DELETE FROM arc_civs_city")
+                    statement.executeUpdate("DELETE FROM arc_civs_deleted")
+                    statement.executeUpdate("DELETE FROM arc_civs_autonomous_deleted")
+                }
+            }
+        }
     }
 
     afterSpec {
@@ -281,6 +285,52 @@ class CivsNetworkStoreTest : FreeSpec({
         } finally {
             root.toFile().deleteRecursively()
         }
+    }
+
+    "home SQL commits only the exact held construction receipt and can recover from a lost write acknowledgement" {
+        val root = Files.createTempDirectory("civs-sql-buffer")
+        try {
+            val seed = settlement()
+            val old = seed.buildings.single().copy(phase = BuildingPhase.ACTIVE, control = seed.center)
+            val target = old.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
+            val city = seed.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(old), construction = null, revision = 0)
+            val point = seed.center.copy(x = seed.center.x + 1)
+            val cell = CivPlanBlock(point, "minecraft:barrel[facing=east,open=false]", "minecraft:air")
+            val owner = CivConstructionStorageOwner(city.id, city.worldId, old, target, "e".repeat(64))
+            val slots = MutableList<CivResidentItem?>(STORAGE_SLOTS) { null }.also { it[14] = CivResidentItem("COAL", 8) }
+            val snapshot = CivConstructionStorageSnapshot(UUID.randomUUID(), owner, cell, slots, UUID.randomUUID())
+            val store = CivsStore(root, directExecutor, network = spawn)
+            store.save(city).await()
+            store.savePlan(CivPlacementPlan(snapshot.planId, city.id, city.worldId, target, listOf(cell), owner.schematicSha256)).await()
+            val part = store.saveConstructionStorage(snapshot).await()
+            val move = CivContainerRelocation(old, listOf(CivRelocatedContainer(point, "BARREL", cell.before, slots,
+                List(STORAGE_SLOTS) { null })), buffer = CivConstructionStorageMove(owner, null, part, cell))
+            val after = move.after(city)
+            val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(), containerRelocation = move)
+            failure { store.save(after).await() }
+            val forged = tx.copy(after = after.copy(name = "Invented before city"))
+            store.saveInventoryTransaction(forged).await()
+            failure { store.save(forged.after).await() }
+            store.deleteInventoryTransaction(forged.id).await()
+            store.saveInventoryTransaction(tx).await()
+            store.save(after).await()
+            val cold = CivsStore(root, directExecutor, network = spawn)
+            cold.load().await() shouldBe listOf(after)
+            cold.loadInventoryTransactions().await() shouldBe listOf(tx)
+            cold.save(after).await() shouldBe after
+            val blob = root.resolve("construction-buffers/${part.id}.json")
+            val bytes = Files.readAllBytes(blob)
+            Files.delete(blob)
+            failure { cold.load().await() }
+            failure { cold.loadInventoryTransactions().await() }
+            Files.write(blob, bytes)
+            cold.verifyConstructionReceipt(tx).await()
+            cold.deleteInventoryTransaction(tx.id).await()
+            val free = after.copy(revision = after.revision + 1, inventory = after.inventory!!.copy(constructionBuffers = null))
+            failure { cold.save(free).await() }
+            cold.load().await() shouldBe listOf(after)
+        } finally { root.toFile().deleteRecursively() }
     }
 
     "network city saves leave construction plans and captures local to their home" {

@@ -106,6 +106,10 @@ internal class CivsDeletionRequests(
 
     private fun finishDeletion(city: Settlement): CompletableFuture<Unit> {
         rejectIf(city.id in records.busy || inventoryJournal.pending(city.id), "city-busy")
+        val buffer = city.inventory?.constructionBuffers.orEmpty().values.firstOrNull { it.owner.returningForDeletion(city) }
+        if (buffer != null) return authority.returnConstructionStorage(city, buffer, buffer.parts.first()).thenCompose { saved ->
+            if (saved == city) CompletableFuture.failedFuture(CivsRejection("storage-full")) else finishDeletion(saved)
+        }
         val buildings = deletionBuildings(city)
         authority.reserveCity(city.id)
         val result = authority.tracked<Unit>()

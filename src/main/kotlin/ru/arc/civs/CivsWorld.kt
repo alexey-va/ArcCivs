@@ -72,10 +72,10 @@ class CivsWorld(
     fun capture(
         cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         cells: List<ArcSchematicBlock>, previous: CivBuilding?, terrain: CivTerraformPlan? = null,
-        adminPlacement: Boolean = false,
+        adminPlacement: Boolean = false, constructionStorage: Boolean = false, acceptedStorage: List<CivPlanBlock>? = null,
     ): CompletableFuture<CivPlacementPlan> = admit(terrainPoints(terrain)) {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-        Capture(cityId, owner, worldId, building, cells.toList(), previous, terrain = terrain, adminPlacement = adminPlacement)
+        Capture(cityId, owner, worldId, building, cells.toList(), previous, terrain = terrain, adminPlacement = adminPlacement, constructionStorage = constructionStorage, acceptedStorage = acceptedStorage)
     }
 
     /** A new site reserves its marker; an owned queued upgrade only records a proposal until fresh activation. */
@@ -88,12 +88,14 @@ class CivsWorld(
     }
 
     internal fun captureWallRefit(building: CivBuilding, cells: List<ArcSchematicBlock>, previous: CivBuilding,
-        terrain: CivTerraformPlan, approach: CivWallRefitApproach, proposal: Boolean): CompletableFuture<CivPlacementPlan> =
+        terrain: CivTerraformPlan, approach: CivWallRefitApproach, proposal: Boolean,
+        acceptedStorage: List<CivPlanBlock>? = null): CompletableFuture<CivPlacementPlan> =
         admit(terrainPoints(terrain)) {
             val city = approach.city
             requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
             Capture(city.id, city.owner, city.worldId, building, cells.toList(), previous,
-                allowControlPlacement = proposal, terrain = terrain, upgradeProposal = proposal, wallApproach = approach)
+                allowControlPlacement = proposal, terrain = terrain, upgradeProposal = proposal, wallApproach = approach,
+                constructionStorage = !proposal, acceptedStorage = acceptedStorage)
         }
 
     /** Automatic admission never treats the creator's edit permission as permission to clear buildings. */
@@ -102,7 +104,7 @@ class CivsWorld(
         previous: CivBuilding? = null): CompletableFuture<CivPlacementPlan> = admit(terrainPoints(terrain)) {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
         Capture(cityId, owner, worldId, building, cells.toList(), previous,
-            allowControlPlacement = true, strictAutonomous = true, terrain = terrain)
+            allowControlPlacement = true, strictAutonomous = true, terrain = terrain, constructionStorage = true)
     }
 
     /** Only explicitly requested columns survey water; ordinary building searches retain their dry-only scan. */
@@ -989,8 +991,11 @@ class CivsWorld(
         terrain: CivTerraformPlan? = null,
         private val adminPlacement: Boolean = false,
         private val upgradeProposal: Boolean = false,
+        private val constructionStorage: Boolean = false,
+        acceptedStorage: List<CivPlanBlock>? = null,
         private val wallApproach: CivWallRefitApproach? = null,
     ) : CivsWorldScan<CivPlacementPlan>(this@CivsWorld, cityId, owner, worldId, building) {
+        private val acceptedHolders = acceptedStorage?.associateBy { it.position }
         private val blocks = ArrayList<CivPlanBlock>()
         private var terraform = terrain?.copy(blocks = terrain.blocks.toList(), route = terrain.route.toList(),
             waterFoundations = terrain.waterFoundations?.toList(), requiredGrass = terrain.requiredGrass?.toList(),
@@ -1063,7 +1068,7 @@ class CivsWorld(
                 return
             }
             if (adminPlacement && previous?.control != building.control &&
-                (block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false)
+                civsContainerHasItems(block.state))
                 rejectAt("container-not-empty", block)
             // Only an already accepted building owns this marker; an unrelated barrel is terrain.
             if (strictAutonomous && (previous == null || previous.control != building.control))
@@ -1228,19 +1233,28 @@ class CivsWorld(
                 if (if (position.y <= waterFoundation.waterTopY) block.type != Material.WATER else !block.type.isAir)
                     rejectAt("autonomy-terrain", block)
             }
-            if (strictAutonomous && waterFoundation == null && position !in terrainOverlay && (previous?.phase != BuildingPhase.ACTIVE ||
+            val after = parse(cell.blockData)
+            val holder = if ((constructionStorage || upgradeProposal) && state is org.bukkit.block.Container &&
+                block.type.name in CIVS_STORAGE_TYPES && position !in terrainOverlay && waterFoundation == null) {
+                val captured = CivPlanBlock(position, block.blockData.asString, after.asString)
+                val city = cities().firstOrNull { it.id == cityId }
+                val accepted = acceptedHolders?.get(position) == captured
+                val custody = city?.inventory?.constructionBuffers?.get(building.id.toString())
+                val evacuated = custody != null && civsSameBuildingGeometry(custody.owner.target, building) &&
+                    custody.parts.any { it.cell == captured }
+                val acceptedEmpty = (accepted || evacuated) && !civsContainerHasItems(state)
+                city != null && civsStorageChangingCell(captured) && civsConstructionStorageOwns(city, previous, building,
+                    position, acceptedEmpty) && (previous?.phase != BuildingPhase.SITE || acceptedHolders == null || accepted)
+            } else false
+            if (!holder && strictAutonomous && waterFoundation == null && position !in terrainOverlay && (previous?.phase != BuildingPhase.ACTIVE ||
                     !previous.bounds.contains(position.x, position.y, position.z)))
                 checkAutonomousTerrain(block, infrastructureGround[civsTerrainKey(position.x, position.z)] ?: building.anchor.y)
-            if (block.type in PROTECTED_TERRAIN || previous?.bounds?.contains(position.x, position.y, position.z) != true &&
+            if (block.type in PROTECTED_TERRAIN || !holder && previous?.bounds?.contains(position.x, position.y, position.z) != true &&
                 state is TileState) rejectAt("protected-terrain", block)
-            val after = parse(cell.blockData)
             val retained = previous?.phase == BuildingPhase.ACTIVE && previous.bounds.contains(position.x, position.y, position.z) &&
                 block.blockData.asString == after.asString && civsRetainContainerState(after.asString)
-            val proposal = upgradeProposal && previous?.phase == BuildingPhase.ACTIVE && !previous.type.isInfrastructure &&
-                building.level == previous.level + 1 && previous.bounds.contains(position.x, position.y, position.z)
-            // Full changing sources must be evacuated by the exact inventory receipt before this capture.
-            if (!retained && !proposal && (state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
-            if (!retained && cities().firstOrNull { it.id == cityId }?.inventory?.containers?.contains(position) == true)
+            if (!retained && !holder && civsContainerHasItems(state)) rejectAt("container-not-empty", block)
+            if (!retained && !holder && cities().firstOrNull { it.id == cityId }?.inventory?.containers?.contains(position) == true)
                 rejectAt("registered-container", block)
             requireCivs(after.material != Material.BARRIER && cell.isAir == after.material.isAir, "invalid-plan")
             if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)
@@ -1393,7 +1407,7 @@ class CivsWorld(
             if (water && block.blockData.asString != cell.before && block.blockData.asString != cell.after) rejectAt("world-changed", block)
             val retained = civsRetainedContainer(cell)
             if (retained && block.blockData.asString != cell.before) rejectAt("world-changed", block)
-            if (!retained && (block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
+            if (!retained && civsContainerHasItems(block.state)) rejectAt("container-not-empty", block)
             // Players may clear or remodel a cell before this one-pass construction batch reaches it.
             val after = parse(cell.after)
             requireCivs(after.material != Material.BARRIER, "invalid-plan")

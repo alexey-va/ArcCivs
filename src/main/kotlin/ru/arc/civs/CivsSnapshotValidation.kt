@@ -167,6 +167,7 @@ internal object CivsSnapshotValidation {
             })
             city.inventory?.let { inventory ->
                 inventory.validated()
+                snapshot(inventory.constructionBuffers.orEmpty().values.all { it.owner.matches(city) })
                 snapshot(city.stock == Stock())
                 snapshot(inventory.containers.all { city.contains(it.x, it.z) && it.y in -4_096..4_096 })
                 inventory.buildingMaterials?.forEach { (id, items) ->

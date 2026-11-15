@@ -60,7 +60,7 @@ internal class CivsNativePersistence(
         val transfer = transaction.collected
         val containerChanges = if (transaction.containerRelocation != null) transaction.containerRelocation.containers.flatMap { holder ->
             (0 until STORAGE_SLOTS).map { slot -> CivNativeContainerChange(holder.position, holder.type, slot, holder.before[slot], holder.after[slot]) }
-        } else if (transaction.cargoDropoff != null || transaction.cargoPickup != null || transaction.trade != null) transaction.changes.map { change ->
+        } else if (transaction.cargoDropoff != null || transaction.cargoPickup != null || transaction.trade != null || transaction.mixedBufferPickup()) transaction.changes.map { change ->
             CivNativeContainerChange(change.container, change.containerType, change.slot,
                 change.before?.let { CivResidentItem(it.material, it.amount) },
                 change.after?.let { CivResidentItem(it.material, it.amount) })
@@ -70,7 +70,7 @@ internal class CivsNativePersistence(
         require(transfer?.ground.orEmpty().all { it.after == null }) { "Partial ground receipts cannot use this persistence adapter" }
         val world = plugin.server.getWorld(transaction.after.worldId) ?: throw CivsRejection("storage-unavailable")
         val bytes = hashMapOf<CivResidentItem, ByteArray>()
-        fun proof(item: CivResidentItem?) = ItemProof(item?.let { bytes.getOrPut(it) { it.stack().serializeAsBytes() } })
+        fun proof(item: CivResidentItem?) = ItemProof(item?.let { bytes.getOrPut(it) { (if (transaction.containerRelocation?.buffer != null) it.constructionStack() else it.stack()).serializeAsBytes() } })
         val targets = transfer?.ground.orEmpty().groupBy { (it.position.x shr 4) to (it.position.z shr 4) }.map { (chunk, changes) ->
             Target(chunk.first, chunk.second, true, changes.map { GroundProof(it.entityId, proof(if (before) it.before else null)) }, emptyList())
         } + containerChanges.groupBy { (it.container.x shr 4) to (it.container.z shr 4) }.map { (chunk, changes) ->

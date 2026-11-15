@@ -135,7 +135,7 @@ internal class CitizenSnapshotCapture(
             checkCancelled()
             val probe = probes[next]
             val y = floor(probe.node.y).toInt()
-            val positions = buildList {
+            val positions = buildList(probeStates.size) {
                 for (x in probe.node.x - 1..probe.node.x + 1) for (z in probe.node.z - 1..probe.node.z + 1)
                     for (by in y - 3..y + 3) add(CivPosition(x, by, z))
             }

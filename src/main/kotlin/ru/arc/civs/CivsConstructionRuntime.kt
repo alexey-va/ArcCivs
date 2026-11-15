@@ -45,6 +45,7 @@ internal class CivsConstructionRuntime(
         CompletableFuture.failedFuture(CivsRejection("not-ready"))
     },
     private val acceleratedPlacement: (Settlement) -> Boolean = { false },
+    private val returnCompletedStorage: (UUID) -> Unit = {},
 ) : AutoCloseable {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -682,6 +683,7 @@ internal class CivsConstructionRuntime(
                             if (repairFailure != null) log("repair shapes $cityId", repairFailure, cityId)
                             else store.deletePlan(plan.id).thenCompose { store.deleteSchematic(plan.id) }
                                 .whenComplete { _, cleanupFailure -> if (cleanupFailure != null) log("clean captured plan ${plan.id}", cleanupFailure, cityId) }
+                            if (!cities[cityId]?.inventory?.constructionBuffers.isNullOrEmpty()) returnCompletedStorage(cityId)
                             updateHealth()
                         }
                     }.onFailure { releasePlacement(cityId); log("repair shapes $cityId", it, cityId) }

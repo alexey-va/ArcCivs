@@ -49,7 +49,8 @@ class CivsNetworkStore internal constructor(
     /** Imports old JSON without changing the originals; existing canonical SQL always wins. */
     fun loadOwned(legacy: List<Settlement>): CompletableFuture<List<Settlement>> = loadOwned(legacy, emptyList())
 
-    internal fun loadOwned(legacy: List<Settlement>, deleted: List<CivsDeletedCity>): CompletableFuture<List<Settlement>> =
+    internal fun loadOwned(legacy: List<Settlement>, deleted: List<CivsDeletedCity>,
+        verifyBuffers: (Settlement) -> Unit = { require(it.inventory?.constructionBuffers.isNullOrEmpty()) }): CompletableFuture<List<Settlement>> =
         admit("load_owned", "legacy_count" to legacy.size, "deleted_count" to deleted.size) { runtime ->
         runtime.executor.transaction { connection ->
             lockRegistry(connection)
@@ -72,7 +73,7 @@ class CivsNetworkStore internal constructor(
                 CivsRules.validate(city)
                 if (findDeleted(connection, city.id) != null) return@forEach
                 val existing = findCity(connection, city.id)
-                if (existing == null) save(connection, city, importing = true)
+                if (existing == null) { verifyBuffers(city); save(connection, city, importing = true) }
                 else check(existing.server == server && existing.city.owner == city.owner &&
                     (existing.city.autonomy != null) == (city.autonomy != null)) {
                     "Legacy city ${city.id} conflicts with the network home or owner; originals were preserved"
@@ -83,7 +84,7 @@ class CivsNetworkStore internal constructor(
                 statement.executeQuery().use { rows -> buildList {
                     while (rows.next()) {
                         check(size < maximumCities) { "Home settlement capacity exceeds maximum-settlements" }
-                        add(readCity(rows).city)
+                        add(readCity(rows).city.also(verifyBuffers))
                     }
                 } }
             }
@@ -102,19 +103,22 @@ class CivsNetworkStore internal constructor(
     }
 
     /** CivsStore owns the one defensive copy before asynchronous SQL admission. */
-    internal fun save(city: Settlement): CompletableFuture<Settlement> {
+    internal fun save(city: Settlement, verifyBuffers: (Settlement?, Settlement) -> Unit = { old, next ->
+        require(old?.inventory?.constructionBuffers == next.inventory?.constructionBuffers)
+    }): CompletableFuture<Settlement> {
         val snapshot = city
         return admit("save", "city" to snapshot.id, "revision" to snapshot.revision,
             "owner" to snapshot.owner, "members" to snapshot.members.size, "construction" to snapshot.construction?.id) { runtime ->
             runtime.executor.transaction { connection ->
                 lockRegistry(connection)
-                save(connection, snapshot, importing = false)
+                save(connection, snapshot, importing = false, verifyBuffers = verifyBuffers)
             }
         }
     }
 
     /** Deletes only the complete expected home snapshot; retries retain the durable deletion fence. */
     internal fun delete(city: Settlement): CompletableFuture<Unit> {
+        require(city.inventory?.constructionBuffers.isNullOrEmpty()) { "Construction storage must be returned before deletion" }
         val snapshot = city
         return admit("delete", "city" to snapshot.id, "revision" to snapshot.revision, "owner" to snapshot.owner) { runtime ->
             runtime.executor.transaction { connection ->
@@ -144,10 +148,12 @@ class CivsNetworkStore internal constructor(
         }
     }
 
-    private fun save(connection: Connection, proposed: Settlement, importing: Boolean): Settlement {
+    private fun save(connection: Connection, proposed: Settlement, importing: Boolean,
+        verifyBuffers: (Settlement?, Settlement) -> Unit = { _, _ -> }): Settlement {
         CivsRules.validate(proposed)
         if (findDeleted(connection, proposed.id) != null) throw CivsRejection("city-deleted")
         val previous = findCity(connection, proposed.id)
+        verifyBuffers(previous?.city, proposed)
         if (previous != null) {
             check(previous.server == server) { "Only the home server may change settlement ${proposed.id}" }
             check(previous.city.owner == proposed.owner) { "City owner cannot change" }

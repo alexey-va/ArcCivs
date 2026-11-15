@@ -79,16 +79,19 @@ internal class CivsStoragePlanner(
     }
 
     /** Only this building's buffer and native holders inside its own completed footprint. */
-    fun buildingAvailable(city: Settlement, buildingId: UUID): Map<String, Long> {
+    fun buildingAvailable(city: Settlement, buildingId: UUID, nativeOnly: Boolean = false): Map<String, Long> {
         checkReady()
         val inventory = requireNotNull(city.inventory).validated()
         if (city.building(buildingId) == null) throw CivsRejection("building-not-found")
-        if (inventory.mode == CivStorageMode.VIRTUAL) return inventory.buildingStock(buildingId).toSortedMap()
+        if (inventory.mode == CivStorageMode.VIRTUAL) {
+            val stock = inventory.buildingStock(buildingId)
+            return (if (nativeOnly) stock else inventory.sourceStock(buildingId, stock)).toSortedMap()
+        }
         val totals = mutableMapOf<String, Long>()
         containers.localSources(city, buildingId).forEach { source -> source.inventory.storageContents.forEach { item ->
             plain(item)?.let { totals.merge(it.material, it.amount.toLong(), Math::addExact) }
         } }
-        return totals.toSortedMap()
+        return (if (nativeOnly) totals else inventory.sourceStock(buildingId, totals)).toSortedMap()
     }
 
     /** Explicit commerce reads at most sixteen native holders, never the whole settlement. */
@@ -271,10 +274,26 @@ internal class CivsStoragePlanner(
         return prepareDebit(city, required, physical, null, buildingId)
     }
 
-    fun prepareCargoPickup(city: Settlement, cargo: CivCargo): CivStoragePlan {
+    private fun prepareLocalPickup(city: Settlement, worker: CivWorker, sourceId: UUID, required: Map<String, Long>,
+        cargo: CivCargo? = null, prepare: (Map<String, Long>) -> CivStoragePlan): CivStoragePlan {
+        val inventory = requireNotNull(city.inventory)
+        val (after, missing) = inventory.takeBuffered(sourceId, required)
+        val native = prepare(missing)
+        if (after == inventory) return native
+        val withdrawn = required.mapValues { (m, q) -> q - missing.getOrDefault(m, 0L) }.filterValues { it > 0 }
+        return native.copy(inventoryAfter = native.inventoryAfter.copy(constructionBuffers = after.constructionBuffers),
+            bufferPickup = CivConstructionStoragePickup(sourceId, worker, inventory, withdrawn, cargo))
+    }
+
+    fun prepareCargoPickup(city: Settlement, cargo: CivCargo, workerId: UUID? = null): CivStoragePlan {
         require(cargo.amount in 1L..64L)
         reject(cargo.sourceWorkerId != null, "stale-delivery")
-        return prepareBuildingDebit(city, cargo.sourceBuildingId, mapOf(cargo.material to cargo.amount))
+        val required = mapOf(cargo.material to cargo.amount)
+        val source = cargo.sourceBuildingId
+        if (workerId == null || cargo.redistribution || city.building(source)?.type == BuildingType.BUILDER_HUT &&
+            source != cargo.warehouseId && !cargo.directInput) return prepareBuildingDebit(city, source, required)
+        val worker = city.workers.single { it.id == workerId }
+        return prepareLocalPickup(city, worker, source, required, cargo) { prepareBuildingDebit(city, source, it) }
     }
 
     /** Revalidation is bounded to 64 indexed holders per depot and never accepts an unloaded/denied holder. */
@@ -346,7 +365,8 @@ internal class CivsStoragePlanner(
         validateAmounts(required)
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         val supplied = CivsEquipment.collectSupplies(worker, required)
-        return CivResidentTransferPlan(prepareBuildingDebit(city, buildingId, required), supplied)
+        return CivResidentTransferPlan(prepareLocalPickup(city, worker, buildingId, required) {
+            prepareBuildingDebit(city, buildingId, it) }, supplied)
     }
 
     /** Return only fitting ordinary bag surplus to this worker's own workplace in one receipt. */
@@ -435,7 +455,8 @@ internal class CivsStoragePlanner(
         // One stack of each needed material before bulk fill avoids a bag of only the first stone.
         collect(missing(remaining).mapValues { (material, count) -> minOf(count, Material.valueOf(material).maxStackSize.toLong()) })
         collect(missing(remaining))
-        return CivResidentTransferPlan(prepareWork(city, source.id, moved, returned, emptyList()), supplied)
+        return CivResidentTransferPlan(prepareLocalPickup(city, worker, source.id, moved) {
+            prepareWork(city, source.id, it, returned, emptyList()) }, supplied)
     }
 
     /** Consume local recipe inputs and insert local output in the same snapshots and durable receipt. */

@@ -113,7 +113,8 @@ internal fun paidApproachQueue(h: ServiceScenario, city: Settlement, sitePlan: C
         else CompletableFuture.completedFuture(requireNotNull(sitePlan.terrain).copy(route = draft.route))
     }
     every { h.worldAdapter.autonomousRoute(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
-    every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+    every { h.worldAdapter.capture(city.id, city.owner, city.worldId, any(), any(), site, any(),
+        constructionStorage = true, acceptedStorage = emptyList()) } answers {
         CompletableFuture.completedFuture(sitePlan.copy(id = orderId, building = arg(3), terrain = arg(6)))
     }
     val saved = mutableListOf<CivPlacementPlan>()

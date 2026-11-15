@@ -21,7 +21,7 @@ internal data class CivSupplyStore(val id: UUID, val entrance: CivPosition, val 
     val stock: Map<String, Long>, val desiredStock: Map<String, Long>, val outputMaterial: String?, val capacity: CivSupplyCapacity,
     val type: BuildingType? = null,
     /** Complete permitted native Auto depot capture, excluding an in-progress upgrade. */
-    val redistributionDepot: Boolean = false)
+    val redistributionDepot: Boolean = false, val bufferedStock: Map<String, Long> = emptyMap())
 internal data class CivSupplyCourier(val workerId: UUID, val warehouseId: UUID, val cycle: Long,
     val position: CivPosition, val bagRoom: Map<String, Long>)
 internal data class CivSupplyWorkerSource(val workerId: UUID, val buildingId: UUID,
@@ -489,7 +489,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
                 (snapshot.constructionTargets[warehouse.id] ?: key.target) == source.id &&
                 roomFor(source.id, key.material, required = true) == 0L }) return 0
         val stack = snapshot.stackSizes[material]?.takeIf { it in 1..64 } ?: return 0
-        val available = stock[source.id]?.get(material) ?: 0L
+        val available = ((stock[source.id]?.get(material) ?: 0L) - (source.bufferedStock[material] ?: 0L)).coerceAtLeast(0)
         val free = (available - (source.desiredStock[material] ?: 0L)).coerceAtLeast(0)
         val count = minOf(free, stack.toLong())
         // Removing a whole stack, or all of a short material, proves at least one native slot will open.
@@ -510,7 +510,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         val reserved = maxOf(stores[source]?.desiredStock?.get(material) ?: 0L,
             snapshot.stockTargets[source]?.get(material) ?: 0L)
         val pending = demand.entries.filter { it.key.material == material }.sumOf { it.value }
-        return ((stock[source]?.get(material) ?: 0L) - reserved - pending).coerceAtLeast(0)
+        return ((stock[source]?.get(material) ?: 0L) - (stores[source]?.bufferedStock?.get(material) ?: 0L) - reserved - pending).coerceAtLeast(0)
     }
     fun redistributionReady(plan: CivCourierPlan): Boolean {
         val cargo = plan.cargo
@@ -524,7 +524,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             target.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) &&
             (actualRooms[target.id]?.freeEmptySlots ?: 0) >= 2 &&
             available >= cargo.amount && (cargo.amount >= stack ||
-                available == (source.stock[cargo.material] ?: 0L) && cargo.amount == available)
+                available == ((source.stock[cargo.material] ?: 0L) - source.bufferedStock.getOrDefault(cargo.material, 0L)) && cargo.amount == available)
     }
     fun remaining(plan: CivCourierPlan): Long {
         val cargo = plan.cargo
@@ -700,7 +700,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
                     val stack = snapshot.stackSizes[material]?.takeIf { it in 1..64 } ?: continue
                     val free = redistributionFree(source.id, material)
                     val count = minOf(free, stack.toLong())
-                    if (count <= 0 || count < stack && free != (source.stock[material] ?: 0L)) continue
+                    if (count <= 0 || count < stack && free != ((source.stock[material] ?: 0L) - source.bufferedStock.getOrDefault(material, 0L))) continue
                     offer(source, target, material, count, CivSupplyTask(source.id, null, target.id, material, false),
                         redistribution = true)
                 }

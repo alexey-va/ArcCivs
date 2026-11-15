@@ -345,6 +345,33 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     private var remaining = 0
     private val waiting = linkedMapOf<UUID, Int>()
 
+    /** Read existing owner state without probing terrain, validating claims or advancing a cursor. */
+    internal fun debug(cityId: UUID?, workerId: UUID?): Map<String, Any?> {
+        check(Bukkit.isPrimaryThread())
+        fun point(p: CivPosition) = "${p.x},${p.y},${p.z}"
+        fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
+            "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
+        val cityIds = (networks.keys + cursors.keys + surfaceCursors.keys + gradeChecks.keys + developmentWaiting +
+            awaitingGradeNetwork.keys + builderClaims.keys + preparedFinishes.keys +
+            selected.values.mapNotNull { it.work.upkeep?.cityId }).filter { cityId == null || it == cityId }
+        return sample(cityIds) { id ->
+            val selections = selected.entries.filter { (worker, selection) ->
+                selection.work.upkeep?.cityId == id && (workerId == null || worker == workerId)
+            }
+            val claim = builderClaims[id]?.takeIf { workerId == null || it.workerId == workerId }
+            val finish = preparedFinishes[id]?.takeIf { workerId == null || it.workerId == workerId }
+            mapOf("city" to id.toString(), "targets" to (networks[id]?.targets?.size ?: 0),
+                "generation" to networkGenerations[id], "work_cursor" to cursors[id], "surface_cursor" to surfaceCursors[id],
+                "development_waiting" to (id in developmentWaiting), "grade_pending" to (gradeChecks[id]?.size ?: 0),
+                "awaiting_grade" to (id in awaitingGradeNetwork),
+                "selected" to sample(selections) { (worker, selection) -> mapOf(
+                    "worker" to worker.toString(), "floor" to selection.work.upkeep?.floor?.let(::point),
+                    "rejected_standings" to selection.rejectedStandings.size) },
+                "builder_claim" to claim?.let { mapOf("worker" to it.workerId.toString(), "floor" to point(it.target.floor)) },
+                "prepared_finish" to finish?.let { mapOf("worker" to it.workerId.toString(), "floor" to point(it.target.floor)) })
+        }
+    }
+
     /** Fixed citizen iteration cannot let one healthy town consume every native probe forever. */
     private fun budget(workerId: UUID): Boolean {
         val tick = currentTick()

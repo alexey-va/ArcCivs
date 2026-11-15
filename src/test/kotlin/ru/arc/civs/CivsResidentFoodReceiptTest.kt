@@ -1669,6 +1669,7 @@ private class ResidentFoodFixture : AutoCloseable {
     var time = 10_000L
     var foodAllowed = true
     var freshAllowed = true
+    var arrivedForBufferedPickup: (UUID, UUID, UUID) -> Boolean = { _, _, _ -> true }
     val journal: CivsInventoryJournal
     init {
         world.loadChunk(0, 0)
@@ -1686,7 +1687,10 @@ private class ResidentFoodFixture : AutoCloseable {
                 check(freshAllowed) { "retired actor cannot validate a new pickup" }
                 check(storage.collectedBeforeState(tx) == CivInventoryApplyResult.Applied)
                 if (tx.collected!!.food!!.materialized == 0) check(civsCanReachContainer(feet, point))
-            }, { _, _, _ -> null }, {}, { tx, _ -> cities.getValue(tx.cityId) }, {}, { time })
+            }, { _, _, _ -> null }, {}, { tx, _ -> cities.getValue(tx.cityId) }, {}, { time },
+            requireBufferedPickupArrival = { city, worker, building ->
+                if (!arrivedForBufferedPickup(city, worker, building)) throw CivsRejection("route-unreachable")
+            })
     }
     fun foodPhase(phase: BuildingPhase) {
         val hall = city.buildings.single().copy(phase = phase)
@@ -1723,3 +1727,564 @@ internal fun CivsStorage.capturePlanningStorage(city: Settlement) {
     val capture = startSupplyCapture(city, forceNative = true)
     while (!capture.step()) Unit
 }
+
+class CivsConstructionStorageTest : FunSpec({
+    test("full native construction stores evacuate one exact house chest and return its partial balance after cancellation") {
+        UpgradeStorageFixture().use { f ->
+            f.configure(BuildingType.HOUSE)
+            f.fillSource()
+            repeat(STORAGE_SLOTS) { f.inventory(f.destination).setItem(it, ItemStack(Material.DIRT, 64)) }
+            val before = f.h.city
+            val origin = f.items(f.source)
+            val oldControl = f.items(f.control)
+            val oldShelf = f.items(f.destination)
+            val owner = CivConstructionStorageOwner(before.id, before.worldId, f.building, f.target, "a".repeat(64))
+            val cell = CivPlanBlock(f.source, f.state("south"), "minecraft:air")
+            val id = UUID.randomUUID()
+            f.h.storage.reserve(before, id)
+            val capture = requireNotNull(f.h.storage.prepareConstructionStorage(before, f.target, listOf(cell)))
+            val root = Files.createTempDirectory("civs-construction-buffer")
+            val direct = Executor { it.run() }
+            try {
+                val snapshot = CivConstructionStorageSnapshot(id, owner, cell, origin, UUID.randomUUID())
+                val part = CivsStore(root, direct).use { store ->
+                    store.save(before).join()
+                    store.savePlan(CivPlacementPlan(snapshot.planId, before.id, before.worldId, f.target, listOf(cell), owner.schematicSha256)).join()
+                    store.saveConstructionStorage(snapshot).join()
+                }
+                val move = CivContainerRelocation(f.building, listOf(capture.holder), capture.retirement,
+                    CivConstructionStorageMove(owner, null, part, cell))
+                val tx = CivInventoryTransaction(id, before.id, before.revision, move.after(before), emptyList(),
+                    containerRelocation = move).validated()
+                f.h.storage.seal(tx)
+                f.items(f.source) shouldBe origin
+                CivsStore(root, direct).use { store ->
+                    store.saveInventoryTransaction(tx).join() shouldBe tx
+                    store.deletePlan(snapshot.planId).join() shouldBe true
+                    store.saveInventoryTransaction(tx).join() shouldBe tx
+                    store.loadInventoryTransactions().join() shouldBe listOf(tx)
+                    f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+                    store.save(tx.after).join() shouldBe tx.after
+                }
+                f.h.city = tx.after
+                f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+                f.h.storage.unlock(id)
+                f.h.storage.updateCity(tx.after)
+                f.items(f.source).filterNotNull() shouldBe emptyList()
+                f.items(f.control) shouldBe oldControl
+                f.items(f.destination) shouldBe oldShelf
+                CivsStore(root, direct).use { store ->
+                    store.load().join().single() shouldBe tx.after
+                    store.verifyConstructionReceipt(tx).join()
+                    store.deleteInventoryTransaction(id).join()
+                    shouldThrow<CompletionException> { store.saveInventoryTransaction(tx).join() }
+                    val loaded = store.loadConstructionStorage(owner, part).join()
+                    loaded.contents(part) shouldBe origin
+                    val occupied = f.h.city.copy(constructionQueue = listOf(f.building.id))
+                    owner.held(occupied) shouldBe true
+                    shouldThrow<IllegalArgumentException> { store.delete(f.h.city) }
+                    val inventory = requireNotNull(f.h.city.inventory)
+                    shouldThrow<CivsRejection> { inventory.requireStorageMode(CivStorageMode.VIRTUAL) }.reason shouldBe "storage-busy"
+                    shouldThrow<CompletionException> { store.save(f.h.city.copy(inventory = inventory.copy(mode = CivStorageMode.VIRTUAL),
+                        revision = f.h.city.revision + 1)).join() }
+                    val cancelled = f.h.city
+                    repeat(STORAGE_SLOTS) { f.inventory(f.source).setItem(it, ItemStack(Material.DIRT, 64)) }
+                    for (targetId in listOf(f.building.id, null)) {
+                        val deleting = CivsRules.requestDeletion(cancelled, cancelled.owner, targetId)
+                        owner.returningForDeletion(deleting) shouldBe true
+                        if (targetId != null) shouldThrow<CivsRejection> { CivsRules.finishBuildingDeletion(deleting, deleting.owner) }
+                            .reason shouldBe "storage-busy"
+                        f.h.city = deleting
+                        f.h.storage.updateCity(deleting)
+                        val blockedId = UUID.randomUUID()
+                        f.h.storage.reserve(deleting, blockedId)
+                        f.h.storage.prepareConstructionReturn(deleting, loaded, part) shouldBe null
+                        f.h.storage.unlock(blockedId)
+                        loaded.contents(part) shouldBe origin
+                        deleting.building(f.building.id) shouldBe f.building
+                    }
+                    f.h.city = cancelled
+                    f.h.storage.updateCity(cancelled)
+                    f.inventory(f.destination).setItem(17, null)
+                    val returnId = UUID.randomUUID()
+                    f.h.storage.reserve(f.h.city, returnId)
+                    val restore = requireNotNull(f.h.storage.prepareConstructionReturn(f.h.city, loaded, part))
+                    val returned = CivInventoryTransaction(returnId, before.id, f.h.city.revision, restore.after(f.h.city),
+                        emptyList(), containerRelocation = restore).validated()
+                    f.h.storage.seal(returned)
+                    store.saveInventoryTransaction(returned).join()
+                    f.h.storage.reconcile(returned) shouldBe CivInventoryApplyResult.Applied
+                    store.save(returned.after).join()
+                    f.h.city = returned.after
+                    f.h.storage.reconcile(returned) shouldBe CivInventoryApplyResult.Applied
+                    f.items(f.destination)[17] shouldBe origin[0]
+                    val remainder = returned.after.inventory!!.constructionBuffers!!.getValue(f.building.id.toString()).parts.single()
+                    loaded.contents(remainder).filterNotNull() shouldBe origin.drop(1).filterNotNull()
+                    f.h.storage.unlock(returnId)
+                    store.deleteInventoryTransaction(returnId).join()
+                    CivsStore(root, direct).use { reopened ->
+                        reopened.load().join().single() shouldBe returned.after
+                        reopened.loadConstructionStorage(owner, remainder).join().contents(remainder) shouldBe loaded.contents(remainder)
+                    }
+                }
+            } finally { root.toFile().deleteRecursively() }
+        }
+    }
+    test("large native components stay outside the city and a failed durable snapshot never clears a slot") {
+        UpgradeStorageFixture().use { f ->
+            f.configure(BuildingType.FARM)
+            val before = f.h.city
+            val random = java.util.Random(333)
+            for (slot in 0..19) {
+                val bytes = ByteArray(if (slot == 0) 40_000 else 18_000).also(random::nextBytes)
+                f.inventory(f.source).setItem(slot, ItemStack(Material.PAPER, 1).apply { editMeta {
+                    it.displayName(net.kyori.adventure.text.Component.text("Original $slot"))
+                    it.persistentDataContainer.set(org.bukkit.NamespacedKey(f.h.plugin, "payload"),
+                        org.bukkit.persistence.PersistentDataType.BYTE_ARRAY, bytes)
+                } })
+            }
+            val id = UUID.randomUUID()
+            val owner = CivConstructionStorageOwner(before.id, before.worldId, f.building, f.target, "b".repeat(64))
+            val cell = CivPlanBlock(f.source, f.state("south"), "minecraft:oak_planks")
+            f.h.storage.reserve(before, id)
+            val capture = requireNotNull(f.h.storage.prepareConstructionStorage(before, f.target, listOf(cell)))
+            val snapshot = CivConstructionStorageSnapshot(id, owner, cell, capture.holder.before, UUID.randomUUID())
+            val root = Files.createTempDirectory("civs-large-construction-storage")
+            val direct = Executor { it.run() }
+            try {
+                CivsStore(root, direct).use { store ->
+                    store.savePlan(CivPlacementPlan(snapshot.planId, before.id, before.worldId, f.target, listOf(cell), owner.schematicSha256)).join()
+                    val blocked = root.resolve("construction-buffers")
+                    Files.writeString(blocked, "file instead of directory")
+                    shouldThrow<CompletionException> { store.saveConstructionStorage(snapshot).join() }
+                    capture.holder.before shouldBe f.inventory(f.source).storageContents.map(CivResidentItem::ofConstruction)
+                    Files.delete(blocked)
+                    val part = store.saveConstructionStorage(snapshot).join()
+                    (Files.size(blocked.resolve("$id.json")) > CivsStore.MAX_CITY_BYTES) shouldBe true
+                    (capture.holder.before.first()!!.data!!.length > 32768) shouldBe true
+                    val move = CivContainerRelocation(f.building, listOf(capture.holder), capture.retirement,
+                        CivConstructionStorageMove(owner, null, part, cell))
+                    val after = move.after(before)
+                    (com.google.gson.Gson().toJson(after).toByteArray().size < CivsStore.MAX_CITY_BYTES) shouldBe true
+                    val restored = store.loadConstructionStorage(owner, part).join().contents(part)
+                    restored.forEachIndexed { slot, item ->
+                        val actual = item?.constructionStack()
+                        val original = f.inventory(f.source).getItem(slot)
+                        actual?.type shouldBe original?.type
+                        actual?.amount shouldBe original?.amount
+                        actual?.itemMeta?.displayName() shouldBe original?.itemMeta?.displayName()
+                        val key = org.bukkit.NamespacedKey(f.h.plugin, "payload")
+                        val type = org.bukkit.persistence.PersistentDataType.BYTE_ARRAY
+                        actual?.itemMeta?.persistentDataContainer?.get(key, type)?.toList() shouldBe
+                            original?.itemMeta?.persistentDataContainer?.get(key, type)?.toList()
+                    }
+                    val altered = snapshot.copy(items = snapshot.items.toMutableList().also { it[0] = null })
+                    shouldThrow<CompletionException> { store.saveConstructionStorage(altered).join() }
+                    shouldThrow<CompletionException> { store.loadConstructionStorage(owner, part.copy(sha256 = "0".repeat(64))).join() }
+                    shouldThrow<CompletionException> { store.loadConstructionStorage(owner.copy(cityId = UUID.randomUUID()), part).join() }
+                    val file = blocked.resolve("$id.json")
+                    val exactBytes = Files.readAllBytes(file)
+                    Files.write(file, exactBytes + byteArrayOf(32))
+                    shouldThrow<CompletionException> { store.loadConstructionStorage(owner, part).join() }
+                    shouldThrow<CompletionException> { store.saveConstructionStorage(snapshot).join() }
+                    Files.write(file, exactBytes)
+                    store.saveConstructionStorage(snapshot).join() shouldBe part
+                }
+            } finally {
+                f.h.storage.unlock(id)
+                root.toFile().deleteRecursively()
+            }
+        }
+    }
+
+    test("thirty five changing holders empty in individually bounded once-only batches") {
+        UpgradeStorageFixture().use { f ->
+            val future = f.largeWarehouse()
+            val before = f.h.city
+            val points = future.keys.filter { it != f.control && it != f.destination }.take(35)
+            val cells = points.map { point ->
+                f.inventory(point).setItem(13, ItemStack(Material.COBBLESTONE, 2))
+                CivPlanBlock(point, f.h.world.getBlockAt(point.x, point.y, point.z).blockData.asString, "minecraft:air")
+            }
+            val owner = CivConstructionStorageOwner(before.id, before.worldId, f.building, f.target, "c".repeat(64))
+            val originals = mutableSetOf<CivPosition>()
+            repeat(35) {
+                val city = f.h.city
+                val id = UUID.randomUUID()
+                f.h.storage.reserve(city, id)
+                val batch = requireNotNull(f.h.storage.prepareConstructionStorage(city, f.target, cells))
+                originals.add(batch.cell.position) shouldBe true
+                val snapshot = CivConstructionStorageSnapshot(id, owner, batch.cell, batch.holder.before, UUID.randomUUID())
+                val part = snapshot.initial()
+                val move = CivContainerRelocation(f.building, listOf(batch.holder), batch.retirement,
+                    CivConstructionStorageMove(owner, null, part, batch.cell))
+                val tx = CivInventoryTransaction(id, before.id, city.revision, move.after(city), emptyList(),
+                    containerRelocation = move).validated()
+                f.h.storage.seal(tx)
+                f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+                f.h.city = tx.after
+                f.h.storage.unlock(id)
+                f.h.storage.updateCity(tx.after)
+            }
+            val last = UUID.randomUUID()
+            f.h.storage.reserve(f.h.city, last)
+            f.h.storage.prepareConstructionStorage(f.h.city, f.target, cells) shouldBe null
+            f.h.storage.unlock(last)
+            originals shouldBe points.toSet()
+            f.h.city.inventory!!.bufferStock(f.building.id) shouldBe mapOf("COBBLESTONE" to 70L)
+        }
+    }
+    test("mixed native and buffered cargo waits for its region save before publishing the same courier bag") {
+        UpgradeStorageFixture().use { f ->
+            f.configure()
+            val hut = f.addReceiver(BuildingType.BUILDER_HUT)
+            val city = f.h.city.copy(workers = listOf(f.h.worker.copy(assignment = f.building.id, nextDeliveryAt = 1)))
+            val owner = CivConstructionStorageOwner(city.id, city.worldId, f.building, f.target, "d".repeat(64))
+            val cell = CivPlanBlock(f.source, f.state("south"), "minecraft:air")
+            val rows = MutableList<CivResidentItem?>(STORAGE_SLOTS) { null }.also {
+                it[0] = CivResidentItem("COAL", 1)
+                it[1] = CivResidentItem.of(ItemStack(Material.COAL, 5).apply { editMeta { m ->
+                    m.displayName(net.kyori.adventure.text.Component.text("Keepsake"))
+                } })
+            }
+            val snapshot = CivConstructionStorageSnapshot(UUID.randomUUID(), owner, cell, rows, UUID.randomUUID())
+            val part = snapshot.initial()
+            f.h.city = city.copy(inventory = city.inventory!!.updatePart(owner, null, part))
+            f.h.storage.updateCity(f.h.city)
+            f.inventory(f.destination).setItem(5, ItemStack(Material.COAL, 1))
+            val worker = f.h.worker
+            val shipment = CivsLogistics.shipmentId(city.id, worker.id, worker.completedCycles, f.building.id, hut.id, "COAL")
+            val cargo = CivCargo(shipment, f.building.id, f.building.id, hut.id, f.building.entrance, "COAL", 2)
+            f.h.storage.buildingAvailable(f.h.city, f.building.id)["COAL"] shouldBe 2
+            val id = UUID.randomUUID()
+            val before = f.h.city
+            f.h.storage.reserve(before, id)
+            val prepared = f.h.storage.prepareCargoPickup(before, cargo, worker.id)
+            val proof = f.h.storage.captureBufferedPickup(before, requireNotNull(prepared.bufferPickup), prepared.changes)
+            proof.withdrawn shouldBe mapOf("COAL" to 1L)
+            val after = CivsLogistics.pickup(before, worker.id, cargo).copy(inventory = prepared.inventoryAfter)
+            val tx = CivInventoryTransaction(id, city.id, before.revision, after, prepared.changes, bufferPickup = proof).validated()
+            f.h.storage.seal(tx)
+            val beforeFence = CompletableFuture<Unit>()
+            var arrived = true
+            f.h.arrivedForBufferedPickup = { city, actor, building ->
+                city shouldBe before.id; actor shouldBe worker.id; building shouldBe cargo.sourceBuildingId
+                arrived
+            }
+            f.h.storage.persistCollectedNative = { _, source -> check(source); beforeFence }
+            val rejected = f.h.journal.submitCargoPickup(before, tx)
+            arrived = false
+            beforeFence.complete(Unit)
+            f.h.ticks()
+            requireNotNull(CivsDiagnostics.rejection(shouldThrow<CompletionException> { rejected.join() })).reason shouldBe "route-unreachable"
+            verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
+            f.items(f.destination)[5] shouldBe CivResidentItem("COAL", 1)
+            f.h.city shouldBe before
+            arrived = true
+            f.h.storage.reserve(before, id)
+            f.h.storage.seal(tx)
+            val persisted = CompletableFuture<Unit>()
+            every { f.h.store.verifyConstructionReceipt(tx) } returns CompletableFuture.completedFuture(Unit)
+            f.h.storage.persistCollectedNative = { _, source -> if (source) CompletableFuture.completedFuture(Unit) else persisted }
+            val result = f.h.journal.submitCargoPickup(before, tx)
+            f.h.ticks()
+            result.isDone shouldBe false
+            f.items(f.destination)[5] shouldBe null
+            f.h.city shouldBe before
+            verify(exactly = 0) { f.h.store.save(after) }
+            persisted.complete(Unit)
+            f.h.ticks()
+            result.join() shouldBe after
+            CivsEquipment.plainCount(f.h.worker, "COAL") shouldBe 2
+            snapshot.contents(after.inventory!!.constructionBuffers!!.getValue(f.building.id.toString()).parts.single())
+                .filterNotNull() shouldBe listOf(rows[1])
+            CivsLogistics.pickup(after, worker.id, cargo) shouldBe after
+        }
+    }
+
+    test("unregistered and foreign site chests stay independent and only an active depot can receive overflow") {
+        UpgradeStorageFixture().use { f ->
+            f.configure(BuildingType.FARM)
+            val house = f.addReceiver(BuildingType.HOUSE, CivPosition(3, 64, 5))
+            val depot = f.addReceiver(BuildingType.WAREHOUSE, CivPosition(-5, 64, 8))
+            val city = f.h.city
+            val cell = CivPlanBlock(f.source, f.state("south"), "minecraft:air")
+            val site = f.building.copy(phase = BuildingPhase.SITE)
+            val siteTarget = site.copy(phase = BuildingPhase.CONSTRUCTING)
+            civsConstructionStorageOwns(city, site, siteTarget, f.source) shouldBe true
+            civsConstructionStorageOwns(city.copy(inventory = city.inventory!!.copy(containers = emptyList())), site, siteTarget, f.source) shouldBe false
+            civsConstructionStorageOwns(city, site, siteTarget, f.control) shouldBe false
+            civsConstructionReturnAllowed(city, f.building, house.anchor) shouldBe false
+            civsConstructionReturnAllowed(city, f.building, depot.anchor) shouldBe true
+            civsConstructionReturnAllowed(city.copy(constructionQueue = listOf(depot.id)), f.building, depot.anchor) shouldBe false
+        }
+    }
+    test("an expanded registered chest keeps its exact debit authority in cold after-revision recovery") {
+        UpgradeStorageFixture().use { f ->
+            f.configure()
+            val point = CivPosition(13, 64, 0)
+            f.chest(point, "east")
+            f.inventory(point).setItem(4, ItemStack(Material.GOLD_INGOT, 3))
+            f.h.city = f.h.city.copy(inventory = f.h.city.inventory!!.copy(containers = f.h.city.inventory!!.containers + point))
+            f.h.storage.replaceCities(listOf(f.h.city))
+            val before = f.h.city
+            val target = f.target.copy(bounds = CivBox(f.target.bounds.min, f.target.bounds.max.copy(x = 13)))
+            val owner = CivConstructionStorageOwner(before.id, before.worldId, f.building, target, "f".repeat(64))
+            val id = UUID.randomUUID()
+            val cell = CivPlanBlock(point, f.state("east"), "minecraft:air")
+            f.h.storage.reserve(before, id)
+            val batch = requireNotNull(f.h.storage.prepareConstructionStorage(before, target, listOf(cell)))
+            val snapshot = CivConstructionStorageSnapshot(id, owner, cell, batch.holder.before, UUID.randomUUID())
+            val part = snapshot.initial()
+            val move = CivContainerRelocation(f.building, listOf(batch.holder), batch.retirement,
+                CivConstructionStorageMove(owner, null, part, cell))
+            val tx = CivInventoryTransaction(id, before.id, before.revision, move.after(before), emptyList(),
+                containerRelocation = move).validated()
+            f.inventory(point).setItem(4, ItemStack(Material.GOLD_INGOT, 2))
+            shouldThrow<CivsRejection> { f.h.storage.seal(tx) }.reason shouldBe "inventory-conflict"
+            f.items(point)[4] shouldBe CivResidentItem("GOLD_INGOT", 2)
+            f.inventory(point).setItem(4, ItemStack(Material.GOLD_INGOT, 3))
+            f.h.storage.unlock(id)
+            f.h.city = tx.after
+            f.h.storage.updateCity(tx.after)
+            f.h.storage.lock(tx)
+            f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+            f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+            f.items(point).filterNotNull() shouldBe emptyList()
+            (point in tx.after.inventory!!.containers) shouldBe false
+            f.h.storage.unlock(id)
+            // Reopening the approved order after unregister can still consume its own exact empty source.
+            // A newly filled, unregistered chest at the former position never receives this permission.
+            f.h.world.loadChunk(0, -1)
+            val blocks = (target.bounds.min.x..target.bounds.max.x).flatMap { x ->
+                (target.bounds.min.y..target.bounds.max.y).flatMap { y ->
+                    (target.bounds.min.z..target.bounds.max.z).map { z ->
+                        val p = CivPosition(x, y, z)
+                        val state = when (p) { point -> "minecraft:air"; target.control -> "minecraft:structure_void"; else -> "minecraft:barrier" }
+                        ru.arc.paper.api.ArcSchematicBlock(ru.arc.paper.api.ArcSchematicPoint(x, y, z), state,
+                            state == "minecraft:air", state == "minecraft:barrier")
+                    }
+                }
+            }
+            CivsWorld(f.h.plugin, f.h.tasks, { 0L }) { listOf(f.h.city) }.use { world ->
+                fun retry() = world.capture(before.id, before.owner, before.worldId, target, blocks, f.building,
+                    adminPlacement = true, constructionStorage = true, acceptedStorage = listOf(cell)).also { f.h.ticks() }
+                retry().join().blocks.single { it.position == point } shouldBe cell
+                f.inventory(point).setItem(4, ItemStack(Material.DIAMOND))
+                requireNotNull(CivsDiagnostics.rejection(shouldThrow<CompletionException> { retry().join() })).reason shouldBe "protected-terrain"
+                f.items(point)[4] shouldBe CivResidentItem("DIAMOND", 1)
+            }
+            for (p in listOf(f.source, f.destination)) repeat(STORAGE_SLOTS) { f.inventory(p).setItem(it, ItemStack(Material.DIRT, 64)) }
+            val group = tx.after.inventory!!.constructionBuffers!!.getValue(f.building.id.toString())
+            val returnId = UUID.randomUUID()
+            f.h.storage.reserveConstructionReturn(tx.after, returnId, group, part)
+            f.h.storage.prepareConstructionReturn(tx.after, snapshot, part) shouldBe null
+            f.inventory(point).clear()
+            f.h.foodAllowed = false
+            f.h.storage.prepareConstructionReturn(tx.after, snapshot, part) shouldBe null
+            f.h.foodAllowed = true
+            val restored = requireNotNull(f.h.storage.prepareConstructionReturn(tx.after, snapshot, part))
+            restored.restoreSourceRegistration shouldBe true
+            restored.containers.map { it.position } shouldBe listOf(point)
+            val returned = CivInventoryTransaction(returnId, before.id, tx.after.revision, restored.after(tx.after),
+                emptyList(), containerRelocation = restored).validated()
+            f.h.storage.seal(returned)
+            f.h.storage.reconcile(returned) shouldBe CivInventoryApplyResult.Applied
+            f.h.city = returned.after
+            f.h.storage.updateCity(returned.after)
+            f.h.storage.reconcile(returned) shouldBe CivInventoryApplyResult.Applied
+            f.h.storage.unlock(returnId)
+            f.items(point)[4] shouldBe CivResidentItem("GOLD_INGOT", 3)
+            returned.after.inventory!!.constructionBuffers shouldBe null
+            (point in returned.after.inventory!!.containers) shouldBe true
+        }
+    }
+
+    test("a full registration list cannot credit a refilled unregistered SITE chest by its old position") {
+        UpgradeStorageFixture().use { f ->
+            f.configure(BuildingType.HOUSE)
+            val site = f.building.copy(phase = BuildingPhase.SITE)
+            f.h.city = f.h.city.copy(buildings = f.h.city.buildings.map { if (it.id == site.id) site else it })
+            val target = site.copy(phase = BuildingPhase.CONSTRUCTING)
+            val before = f.h.city
+            val owner = CivConstructionStorageOwner(before.id, before.worldId, site, target, "d".repeat(64))
+            val cell = CivPlanBlock(f.source, f.state("south"), "minecraft:stone")
+            f.inventory(f.source).setItem(3, ItemStack(Material.GOLD_INGOT, 2))
+            val id = UUID.randomUUID()
+            f.h.storage.replaceCities(listOf(before))
+            f.h.storage.reserve(before, id)
+            val batch = requireNotNull(f.h.storage.prepareConstructionStorage(before, target, listOf(cell)))
+            val blob = CivConstructionStorageSnapshot(id, owner, cell, batch.holder.before, UUID.randomUUID())
+            val part = blob.initial()
+            val move = CivContainerRelocation(site, listOf(batch.holder), batch.retirement, CivConstructionStorageMove(owner, null, part, cell))
+            val tx = CivInventoryTransaction(id, before.id, before.revision, move.after(before), emptyList(), containerRelocation = move).validated()
+            f.h.storage.seal(tx)
+            f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+            f.h.storage.unlock(id)
+            val registered = (0 until CivInventory.MAX_CONTAINERS).map { CivPosition(it - 8, 64, 6) }
+            val full = CivsRules.validate(tx.after.copy(revision = tx.after.revision + 1,
+                inventory = tx.after.inventory!!.copy(containers = registered)))
+            f.h.city = full
+            f.h.indexed += f.source
+            f.h.storage.replaceCities(listOf(full))
+            f.inventory(f.source).setItem(7, ItemStack(Material.DIAMOND, 1))
+            val group = full.inventory!!.constructionBuffers!!.getValue(site.id.toString())
+            val returning = UUID.randomUUID()
+            f.h.storage.reserveConstructionReturn(full, returning, group, part)
+            owner.cancelledRegisteredSource(full, cell) shouldBe null
+            (f.source in f.h.storage.constructionReturnCandidates(full, blob)) shouldBe false
+            f.h.storage.prepareConstructionReturn(full, blob, part, listOf(f.source)) shouldBe null
+            val original = f.items(f.source)
+            val forged = CivContainerRelocation(site, listOf(CivRelocatedContainer(f.source, "CHEST", cell.before,
+                original, original.toMutableList().also { it[3] = CivResidentItem("GOLD_INGOT", 2) })),
+                buffer = CivConstructionStorageMove(owner, part, null, cell))
+            shouldThrow<IllegalArgumentException> { forged.validated(forged.after(full)) }
+            f.h.storage.unlock(returning)
+            f.items(f.source)[7] shouldBe CivResidentItem("DIAMOND", 1)
+            full.inventory!!.bufferStock(site.id) shouldBe mapOf("GOLD_INGOT" to 2L)
+        }
+    }
+
+    test("a paused same-level plan board holds its stores through the exact refit and releases them on completion or cancellation") {
+        UpgradeStorageFixture().use { f ->
+            f.configure(BuildingType.HOUSE)
+            val original = f.building.copy(type = BuildingType.PLAN_BOARD, schematicId = CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID)
+            val target = original.copy(schematicId = CivsPlanBoardBlueprint.refitId(original), phase = BuildingPhase.CONSTRUCTING)
+            val city = f.h.city.copy(buildings = f.h.city.buildings.map { if (it.id == original.id) original else it })
+            val pin = CivConstructionStorageOwner(city.id, city.worldId, original, target, "a".repeat(64))
+            pin.validate()
+            val paused = CivConstruction(UUID.randomUUID(), target.id, original.level, 4, 1,
+                ConstructionPhase.PAUSED, Stock(), failure = "world-changed", plannedBuilding = target)
+            pin.held(city.copy(construction = paused)) shouldBe true
+            pin.held(city.copy(construction = paused.copy(plannedBuilding = target.copy(rotation = (target.rotation + 90) % 360)))) shouldBe false
+            pin.held(city.copy(constructionQueue = listOf(original.id))) shouldBe true
+            pin.held(city) shouldBe false
+            val completed = city.copy(buildings = city.buildings.map { if (it.id == target.id) target.copy(phase = BuildingPhase.ACTIVE) else it })
+            pin.matches(completed) shouldBe true
+            pin.held(completed.copy(constructionQueue = listOf(target.id))) shouldBe false
+        }
+    }
+    test("a queued producer restart reuses its exact held owner after the ordinary production selection changes") {
+        UpgradeStorageFixture().use { f ->
+            f.configure(BuildingType.FARM)
+            val city = f.h.city.copy(constructionQueue = listOf(f.building.id))
+            val first = CivPlanBlock(f.source, f.state("south"), "minecraft:stone")
+            val second = CivPlanBlock(f.destination, f.state("east"), "minecraft:air")
+            val plan = CivPlacementPlan(UUID.randomUUID(), city.id, city.worldId, f.target, listOf(first, second), "b".repeat(64))
+            val owner = CivConstructionStorageOwner.forPlan(city, f.building, plan)
+            val rows = MutableList<CivResidentItem?>(STORAGE_SLOTS) { null }.also { it[1] = CivResidentItem("COAL", 2) }
+            val held = CivConstructionStorageSnapshot(UUID.randomUUID(), owner, first, rows, plan.id).initial()
+            val partial = city.copy(inventory = city.inventory!!.updatePart(owner, null, held))
+            val restart = CivsRules.setProduction(partial, city.owner, f.building.id, "CARROT", 10_000)
+            val current = requireNotNull(restart.building(f.building.id))
+            val next = plan.copy(id = UUID.randomUUID(), building = plan.building.copy(production = current.production))
+            CivConstructionStorageOwner.forPlan(restart, current, next) shouldBe owner
+            shouldThrow<IllegalArgumentException> { CivConstructionStorageOwner.forPlan(restart, current, next.copy(capturedSha256 = "c".repeat(64))) }
+            shouldThrow<IllegalArgumentException> { CivConstructionStorageOwner.forPlan(restart, current, next.copy(building = next.building.copy(control = f.source))) }
+            f.h.city = restart
+            f.h.storage.updateCity(restart)
+            f.inventory(f.destination).setItem(4, ItemStack(Material.WHEAT, 3))
+            val id = UUID.randomUUID()
+            f.h.storage.reserve(restart, id)
+            val captured = requireNotNull(f.h.storage.prepareConstructionStorage(restart, next.building, listOf(second)))
+            val root = Files.createTempDirectory("construction-producer-retry")
+            try {
+                CivsStore(root, Executor { it.run() }).use { store ->
+                    store.savePlan(next).join()
+                    val saved = store.saveConstructionStorage(CivConstructionStorageSnapshot(id, owner, second, captured.holder.before, next.id)).join()
+                    val move = CivContainerRelocation(current, listOf(captured.holder), captured.retirement,
+                        CivConstructionStorageMove(owner, null, saved, second))
+                    val tx = CivInventoryTransaction(id, city.id, restart.revision, move.after(restart), emptyList(), containerRelocation = move).validated()
+                    store.saveInventoryTransaction(tx).join()
+                    f.h.storage.seal(tx)
+                    f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+                    tx.after.inventory!!.bufferStock(f.building.id) shouldBe mapOf("COAL" to 2L, "WHEAT" to 3L)
+                }
+            } finally { f.h.storage.unlock(id); root.toFile().deleteRecursively() }
+        }
+    }
+
+    test("an autonomous site proposal reads only a registered chest and its newly placed wall retires an empty registration under the accepted plan") {
+        UpgradeStorageFixture().use { f ->
+            f.configure(BuildingType.HOUSE)
+            val p = f.source
+            val before = f.h.city.copy(buildings = f.h.city.buildings.filterNot { it.id == f.building.id },
+                inventory = f.h.city.inventory!!.copy(containers = listOf(p)))
+            val target = f.building.copy(type = BuildingType.WALL, anchor = p, bounds = CivBox(p, p),
+                entrance = p, control = null, phase = BuildingPhase.CONSTRUCTING)
+            val cell = CivPlanBlock(p, f.state("south"), "minecraft:stone_bricks")
+            val blocks = listOf(ru.arc.paper.api.ArcSchematicBlock(ru.arc.paper.api.ArcSchematicPoint(p.x, p.y, p.z), cell.after, false, false))
+            f.inventory(p).setItem(0, ItemStack(Material.GOLD_INGOT, 3))
+            CivsWorld(f.h.plugin, f.h.tasks, { 0L }) { listOf(f.h.city) }.use { world ->
+                fun proposal() = world.captureAutonomousSite(before.id, before.owner, before.worldId, target, blocks).also { f.h.ticks() }
+                f.h.city = before.copy(inventory = before.inventory!!.copy(containers = emptyList()))
+                shouldThrow<CompletionException> { proposal().join() }
+                f.h.city = before
+                val plan = proposal().join().copy(capturedSha256 = "b".repeat(64))
+                plan.blocks shouldBe listOf(cell)
+                f.items(p)[0] shouldBe CivResidentItem("GOLD_INGOT", 3)
+                val site = target.copy(phase = BuildingPhase.SITE)
+                f.h.city = CivsRules.validate(before.copy(buildings = before.buildings + site))
+                f.h.storage.replaceCities(listOf(f.h.city))
+                f.inventory(p).clear()
+                val id = UUID.randomUUID()
+                f.h.storage.reserve(f.h.city, id)
+                val prep = requireNotNull(f.h.storage.prepareConstructionStorage(f.h.city, target, plan.blocks))
+                val retiring = requireNotNull(prep.retirement).copy(planId = plan.id)
+                val move = CivContainerRelocation(site, listOf(prep.holder), retiring)
+                val tx = CivInventoryTransaction(id, before.id, f.h.city.revision, move.after(f.h.city),
+                    emptyList(), containerRelocation = move).validated()
+                val root = Files.createTempDirectory("construction-registered-site")
+                try {
+                    CivsStore(root, Executor { it.run() }).use { store ->
+                        shouldThrow<CompletionException> { store.saveInventoryTransaction(tx).join() }
+                        store.savePlan(plan).join()
+                        store.saveInventoryTransaction(tx).join()
+                        f.h.storage.seal(tx)
+                        f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+                        tx.after.inventory!!.containers shouldBe emptyList()
+                        tx.after.inventory!!.constructionBuffers shouldBe null
+                    }
+                } finally { f.h.storage.unlock(id); root.toFile().deleteRecursively() }
+            }
+        }
+    }
+
+    test("only the assigned builder can pick up buffered native materials and its real bag pays once") {
+        UpgradeStorageFixture().use { f ->
+            f.configure(BuildingType.BUILDER_HUT)
+            val targetSite = f.addReceiver(BuildingType.HOUSE).copy(phase = BuildingPhase.CONSTRUCTING)
+            val needed = mapOf("BRICKS" to 4L)
+            val builder = f.h.worker.copy(assignment = f.building.id, nextDeliveryAt = 1)
+            val order = CivConstruction(UUID.randomUUID(), targetSite.id, 1, 1, 0, ConstructionPhase.READY_TO_PLACE,
+                Stock(), plannedBuilding = targetSite, batches = CivConstructionBatches(1, 16), materials = needed,
+                payment = CivConstructionPayment())
+            val base = f.h.city.copy(autonomy = null, workers = listOf(builder), construction = order,
+                buildings = f.h.city.buildings.map { if (it.id == targetSite.id) targetSite else it })
+            val owner = CivConstructionStorageOwner(base.id, base.worldId, f.building, f.target, "7".repeat(64))
+            val rows = MutableList<CivResidentItem?>(STORAGE_SLOTS) { null }.also { it[2] = CivResidentItem("BRICKS", 4) }
+            val cell = CivPlanBlock(f.source, f.state("south"), "minecraft:stone")
+            val blob = CivConstructionStorageSnapshot(UUID.randomUUID(), owner, cell, rows, UUID.randomUUID())
+            val part = blob.initial()
+            val before = CivsRules.validate(base.copy(inventory = base.inventory!!.updatePart(owner, null, part)))
+            f.h.city = before
+            f.h.storage.updateCity(before)
+            shouldThrow<CivsRejection> { CivsRules.payBatch(before, before.owner, order.id, 0, needed) }.reason shouldBe "materials-missing"
+            val id = UUID.randomUUID()
+            f.h.storage.reserve(before, id)
+            val pickup = f.h.storage.prepareBuilderPickup(before, builder.id, needed)
+            val after = before.copy(workers = listOf(pickup.worker), inventory = pickup.plan.inventoryAfter, revision = before.revision + 1)
+            val tx = CivInventoryTransaction(id, before.id, before.revision, after, pickup.plan.changes,
+                bufferPickup = requireNotNull(pickup.plan.bufferPickup)).validated()
+            tx.mixedBufferPickup() shouldBe false
+            f.h.storage.seal(tx)
+            f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+            f.h.storage.unlock(id)
+            CivsEquipment.plainCount(after.workers.single(), "BRICKS") shouldBe 4
+            val paid = CivsRules.payBatch(after, after.owner, order.id, 0, needed)
+            CivsEquipment.plainCount(paid.workers.single(), "BRICKS") shouldBe 0
+            shouldThrow<CivsRejection> { CivsRules.payBatch(paid, paid.owner, order.id, 0, needed) }.reason shouldBe "stale-construction"
+            paid.inventory!!.constructionBuffers shouldBe null
+        }
+    }
+})

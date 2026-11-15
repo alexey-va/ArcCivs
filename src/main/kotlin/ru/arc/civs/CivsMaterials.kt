@@ -10,6 +10,7 @@ data class CivInventory(
     val materials: Map<String, Long> = emptyMap(),
     val containers: List<CivPosition> = emptyList(),
     val buildingMaterials: Map<String, Map<String, Long>>? = null,
+    val constructionBuffers: Map<String, CivConstructionStorageBuffer>? = null,
 ) {
     fun validated(): CivInventory = apply {
         require(mode != null && materials != null && containers != null)
@@ -23,7 +24,21 @@ data class CivInventory(
                 require(items.size <= MAX_MATERIALS && items.all { (key, value) -> MATERIAL_ID.matches(key) && value in 1..MAX_AMOUNT })
             }
         }
+        constructionBuffers?.let { buffers ->
+            require(buffers.isNotEmpty() && buffers.size <= CivsRules.MAX_SITES)
+            val ids = mutableSetOf<java.util.UUID>()
+            buffers.forEach { (id, group) ->
+                group.owner.validate()
+                require(id == group.owner.original.id.toString() && group.parts.isNotEmpty() &&
+                    group.parts == group.parts.sortedBy { it.id })
+                group.parts.forEach { it.validate(); require(ids.add(it.id)) }
+            }
+        }
         require(containers.size <= MAX_CONTAINERS && containers.distinct().size == containers.size)
+    }
+
+    internal fun requireStorageMode(requested: CivStorageMode) {
+        if (mode != requested && !constructionBuffers.isNullOrEmpty()) throw CivsRejection("storage-busy")
     }
 
     fun buildingStock(buildingId: java.util.UUID): Map<String, Long> = buildingMaterials?.get(buildingId.toString()).orEmpty()

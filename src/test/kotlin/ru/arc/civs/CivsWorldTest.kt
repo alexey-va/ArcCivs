@@ -2768,7 +2768,7 @@ class CivsUpgradeStorageQueuedProposalTest : FunSpec({
         }
     }
 
-    test("proposal-only relaxation excludes waiting sites and legacy registered changing holders") {
+    test("a queued proposal preserves an owned registered holder and rejects an unregistered waiting-site holder") {
         for (registered in listOf(false, true)) worldScenario { s ->
             val p = CivPosition(0, 64, 0)
             val old = worldBuilding(CivBox(p, p)).copy(type = BuildingType.WAREHOUSE,
@@ -2783,7 +2783,15 @@ class CivsUpgradeStorageQueuedProposalTest : FunSpec({
             val proposed = s.subject.captureSite(city.id, city.owner, city.worldId, next,
                 listOf(ArcSchematicBlock(ArcSchematicPoint(p.x, p.y, p.z), "minecraft:air", true, false)), old)
             s.scheduler.tick()
-            failureReason(proposed) shouldBe if (registered) "registered-container" else "container-not-empty"
+            if (registered) {
+                val plan = completed(proposed)
+                plan.blocks shouldBe listOf(CivPlanBlock(p, block.blockData.asString, "minecraft:air"))
+                val validation = s.subject.revalidate(plan, city.owner)
+                s.scheduler.tick()
+                failureReason(validation) shouldBe "container-not-empty"
+                s.cities.single().inventory!!.containers shouldBe listOf(p)
+            } else failureReason(proposed) shouldBe "container-not-empty"
+            block.type shouldBe Material.CHEST
             contents.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
         }
     }

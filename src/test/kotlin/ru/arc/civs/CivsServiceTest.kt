@@ -3127,7 +3127,8 @@ class CivsServiceTest : FunSpec({
             every { h.blueprints.recover(design) } returns CompletableFuture.completedFuture(mockk<ArcSchematicSnapshot> {
                 every { blocks() } returns listOf(ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false))
             })
-            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), any(), true) } returns
+            every { h.worldAdapter.capture(city.id, city.owner, city.worldId, target, any(), site,
+                adminPlacement = true, constructionStorage = true, acceptedStorage = emptyList()) } returns
                 CompletableFuture.completedFuture(captured)
             h.world.loadChunk(site.control!!.x shr 4, site.control.z shr 4)
             h.world.getBlockAt(site.control.x, site.control.y, site.control.z).type = Material.BARREL
@@ -5019,7 +5020,7 @@ class CivsServiceTest : FunSpec({
             (shouldThrow<CompletionException> { result.join() }.cause as CivsRejection).reason shouldBe "builder-required"
             verify(exactly = 0) {
                 h.store.loadPlan(any()); h.store.loadSchematic(any()); h.blueprints.recover(any())
-                h.worldAdapter.capture(any(), any(), any(), any(), any(), any())
+                h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), constructionStorage = true, acceptedStorage = emptyList())
             }
         }
     }
@@ -5041,7 +5042,8 @@ class CivsServiceTest : FunSpec({
             every { h.store.loadPlan(hut.id) } returns CompletableFuture.completedFuture(plan)
             every { h.store.loadSchematic(hut.id) } returns CompletableFuture.completedFuture(byteArrayOf(1))
             every { h.blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
-            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(plan.copy(id = UUID.randomUUID()))
+            every { h.worldAdapter.capture(city.id, city.owner, city.worldId, plan.building, any(), hut,
+                constructionStorage = true, acceptedStorage = emptyList()) } returns CompletableFuture.completedFuture(plan.copy(id = UUID.randomUUID()))
             every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
             every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             h.start()
@@ -5589,12 +5591,16 @@ class CivsServiceTest : FunSpec({
             confirmation.isDone shouldBe false
             h.saves.single().first.pendingControls!!.single().position shouldBe target
             h.world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.AIR
-            verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()); h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) {
+                h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), constructionStorage = true)
+                h.store.saveInventoryTransaction(any())
+            }
             h.commit()
             h.world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.BARREL
-            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.failedFuture(CivsRejection("outside-city"))
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), constructionStorage = true) } returns
+                CompletableFuture.failedFuture(CivsRejection("outside-city"))
             h.commit()
-            (shouldThrow<CompletionException> { confirmation.join() }.cause as CivsRejection).reason shouldBe "outside-city"
+            (shouldThrow<CompletionException> { h.await(confirmation) }.cause as CivsRejection).reason shouldBe "outside-city"
             h.service.city(h.player)!!.building(hall.id)!!.control shouldBe target
         }
     }
@@ -5843,7 +5849,8 @@ class CivsServiceTest : FunSpec({
                 every { h.store.loadPlan(site.id) } returns CompletableFuture.completedFuture(immutable)
                 every { h.store.loadSchematic(site.id) } returns CompletableFuture.completedFuture(byteArrayOf(1))
                 every { h.blueprints.recover(immutable) } returns CompletableFuture.completedFuture(snapshot)
-                every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(fresh)
+                every { h.worldAdapter.capture(city.id, city.owner, city.worldId, immutable.building, any(), site,
+                    constructionStorage = true, acceptedStorage = emptyList()) } returns CompletableFuture.completedFuture(fresh)
                 every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
                 every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
                 h.start(); h.paper.performTicks(20)
@@ -5852,14 +5859,16 @@ class CivsServiceTest : FunSpec({
                     h.saves shouldBe emptyList()
                     h.service.city(h.player)!!.construction shouldBe null
                     h.service.city(h.player)!!.constructionQueue shouldBe listOf(site.id)
-                    verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+                    verify(exactly = 0) { h.worldAdapter.capture(city.id, city.owner, city.worldId, immutable.building, any(), site,
+                        constructionStorage = true, acceptedStorage = emptyList()) }
                     backgroundActive = true
                     h.time += 5_000L
                     h.paper.performTicks(20)
                 }
                 h.saves.single().first.construction!!.id shouldBe fresh.id
                 h.service.city(h.player)!!.constructionQueue shouldBe listOf(site.id)
-                verify(exactly = 1) { h.worldAdapter.capture(city.id, city.owner, city.worldId, site.copy(phase = BuildingPhase.CONSTRUCTING), any(), site) }
+                verify(exactly = 1) { h.worldAdapter.capture(city.id, city.owner, city.worldId, immutable.building, any(), site,
+                    constructionStorage = true, acceptedStorage = emptyList()) }
                 verify(exactly = 1) { h.store.savePlan(fresh) }
                 h.commit()
                 h.service.city(h.player)!!.constructionQueue shouldBe emptyList()
@@ -5903,9 +5912,7 @@ class CivsServiceTest : FunSpec({
                 else CompletableFuture.completedFuture(capture).thenApply { captures[it.id] = it; it }
             }
             h.start()
-            val startOrder = CivsBuildingRequests::class.java.declaredMethods.single { it.name == "startOrder" && it.parameterCount == 5 }
-                .also { it.isAccessible = true }
-            val starting = startOrder.invokeService(h.service, city.owner, city, plan, bytes, null) as CompletableFuture<*>
+            val starting = h.startCapturedOrder(city, plan, bytes)
             if (autonomous && earthworks) {
                 h.saves shouldBe emptyList()
                 starting.isDone shouldBe false
@@ -5954,9 +5961,7 @@ class CivsServiceTest : FunSpec({
                 else CompletableFuture.completedFuture(firstArg())
             }
             h.start()
-            val startOrder = CivsBuildingRequests::class.java.declaredMethods.single { it.name == "startOrder" && it.parameterCount == 5 }
-                .also { it.isAccessible = true }
-            val starting = startOrder.invokeService(h.service, city.owner, city, plan, byteArrayOf(2), null) as CompletableFuture<*>
+            val starting = h.startCapturedOrder(city, plan, byteArrayOf(2))
             h.tick()
 
             CivsDiagnostics.cause(shouldThrow<CompletionException> { starting.join() }) shouldBe failure
@@ -6002,7 +6007,10 @@ class CivsServiceTest : FunSpec({
             val repeated = h.service.upgradeBuilding(h.player, building.id); h.tick(); repeated.join() shouldBe Unit
             h.saves.size shouldBe 1
             verify(exactly = 1) { h.store.saveSchematic(design.id, any()); h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) }
-            verify(exactly = 0) { h.store.saveSchematic(building.id, any()); h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 0) {
+                h.store.saveSchematic(building.id, any())
+                h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), constructionStorage = true)
+            }
         }
     }
 
@@ -6042,7 +6050,8 @@ class CivsServiceTest : FunSpec({
             h.start(); h.paper.performTicks(20)
             if (legacy) {
                 h.saves.single().first.pendingControls!!.single().buildingId shouldBe queued.building.id
-                verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+                verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(),
+                    constructionStorage = true, acceptedStorage = emptyList()) }
                 h.commit()
                 h.world.getBlockAt(10, 63, 0).type shouldBe Material.BARREL
                 h.saves.last().first.pendingControls shouldBe emptyList()
@@ -6052,7 +6061,8 @@ class CivsServiceTest : FunSpec({
             h.service.city(h.player)!!.constructionQueue shouldBe queued.city.constructionQueue
             h.service.buildingStatus(queued.building.id) shouldBe "building-status.lands-denied"
             verify(exactly = 0) { h.store.deletePlan(queued.design.id) }
-            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(queued.fresh)
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(),
+                constructionStorage = true, acceptedStorage = emptyList()) } returns CompletableFuture.completedFuture(queued.fresh)
             h.time += 6_000; h.paper.performTicks(20)
             h.saves.last().first.construction!!.let {
                 it.id shouldBe queued.fresh.id
@@ -8149,7 +8159,8 @@ internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean,
         every { store.loadPlan(id) } returns CompletableFuture.completedFuture(design)
         every { store.loadSchematic(id) } returns CompletableFuture.completedFuture(byteArrayOf(2))
         every { blueprints.recover(design) } returns CompletableFuture.completedFuture(snapshot)
-        every { worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns capture
+        every { worldAdapter.capture(any(), any(), any(), any(), any(), any(),
+            constructionStorage = true, acceptedStorage = emptyList()) } returns capture
         every { store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
         every { store.deletePlan(any()) } returns CompletableFuture.completedFuture(true)
@@ -8311,6 +8322,16 @@ internal class ServicePlacement(val city: Settlement) {
     val pasted = CompletableFuture<ArcSchematicMutationResult>()
     val repaired = CompletableFuture<ArcSchematicMutationResult>()
     val operation = mockk<ArcSchematicOperation>(relaxed = true)
+}
+
+private fun ServiceScenario.startCapturedOrder(city: Settlement, plan: CivPlacementPlan, bytes: ByteArray): CompletableFuture<*> {
+    val owner = CivsBuildingRequests::class.java
+    val approach = owner.declaredClasses.single { it.simpleName == "QueuedApproach" }
+    val method = owner.getDeclaredMethod("startOrder", UUID::class.java, Settlement::class.java,
+        CivPlacementPlan::class.java, ByteArray::class.java, approach, Function1::class.java)
+    method.isAccessible = true
+    val admit: (Settlement) -> Unit = { current -> current shouldBe city }
+    return method.invokeService(service, city.owner, city, plan, bytes, null, admit) as CompletableFuture<*>
 }
 
 /** Private callback tests resolve their exact canonical owner after service decomposition. */

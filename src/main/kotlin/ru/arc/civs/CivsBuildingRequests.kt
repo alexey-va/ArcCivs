@@ -83,9 +83,7 @@ internal class CivsBuildingRequests(
         result
     }
 
-    fun confirmPreview(player: Player, preview: CivsPlacementPreview): CompletableFuture<Unit> = confirmPreview(player, preview, false)
-
-    private fun confirmPreview(player: Player, preview: CivsPlacementPreview, storageChecked: Boolean): CompletableFuture<Unit> {
+    fun confirmPreview(player: Player, preview: CivsPlacementPreview): CompletableFuture<Unit> {
         rejectIf(placement.currentPreview(player) !== preview || !player.isOnline, "preview-expired")
         val blueprint = preview.blueprint
         rejectIf(blueprint.building.type.isInfrastructure, "invalid-building")
@@ -109,12 +107,6 @@ internal class CivsBuildingRequests(
             return storageActions.relocateControl(player, blueprint.building.id, requireNotNull(blueprint.building.control))
                 .thenCompose { authority.afterCityAvailable(cityId) { confirmPreview(player, preview) } }
         }
-        if (preview.upgrading && !queuedUpgrade && !storageChecked && previousCity != null && !blueprint.building.type.isInfrastructure)
-            return withUpgradeStorage(previousCity, blueprint.building, blueprint.cells, freshAdmission = {
-                rejectIf(!player.isOnline || placement.currentPreview(player) !== preview, "preview-expired")
-                authority.near(player, blueprint.worldId, blueprint.building.entrance)
-                rejectIf(placement.managedPlacement(player, cityId, blueprint.building.type) != previousCity, "stale-city")
-            }) { confirmPreview(player, preview, true) }
         rejectIf(cityId in records.busy || cityId in records.unhealthy, "city-busy")
         if (previousCity == null) {
             requireFounder(player, preview.autonomous)
@@ -127,7 +119,7 @@ internal class CivsBuildingRequests(
         val previous = previousCity?.building(blueprint.building.id)
         val adminPlacement = previousCity == null && player.hasPermission("arccivs.admin")
         val capture = if (preview.upgrading && !queuedUpgrade) world.capture(cityId, captureOwner, blueprint.worldId,
-            blueprint.building, blueprint.cells, previous)
+            blueprint.building, blueprint.cells, previous, constructionStorage = true)
         else if (queuedUpgrade) world.captureSite(cityId, captureOwner, blueprint.worldId,
             blueprint.building, blueprint.cells, previous)
         else world.captureManualFoundation(cityId, captureOwner, blueprint.worldId, blueprint.building,
@@ -148,7 +140,11 @@ internal class CivsBuildingRequests(
                 val capturedPlan = requireNotNull(captured).copy(capturedSha256 = blueprint.snapshot.fileSha256,
                     adminPlacement = adminPlacement)
                 if (preview.upgrading && !queuedUpgrade) {
-                    startOrder(player.uniqueId, records.cities.getValue(cityId), capturedPlan, blueprint.sourceBytes).whenCompleteSync(tasks) { _, failure ->
+                    startOrder(player.uniqueId, records.cities.getValue(cityId), capturedPlan, blueprint.sourceBytes, admit = { current ->
+                        rejectIf(!player.isOnline || placement.currentPreview(player) !== preview ||
+                            placement.managedPlacement(player, cityId, blueprint.building.type) != current, "preview-expired")
+                        authority.near(player, blueprint.worldId, blueprint.building.entrance)
+                    }).whenCompleteSync(tasks) { _, failure ->
                         if (failure == null) placement.cancelPreview(player.uniqueId)
                         finishReservation(cityId, player.uniqueId, result, failure)
                     }
@@ -444,10 +440,7 @@ internal class CivsBuildingRequests(
             .forEach { cleanupCaptured(queuedDesignId(it)) }
     }
 
-    fun activateBuilding(city: Settlement, building: CivBuilding, player: Player? = null): CompletableFuture<Unit> =
-        activateBuilding(city, building, player, false)
-
-    private fun activateBuilding(city: Settlement, building: CivBuilding, player: Player?, storageChecked: Boolean): CompletableFuture<Unit> {
+    fun activateBuilding(city: Settlement, building: CivBuilding, player: Player? = null): CompletableFuture<Unit> {
         val buildingId = building.id
         val actor = player?.uniqueId ?: city.owner
         rejectIf(city.pendingDeletion != null, "deletion-pending")
@@ -491,24 +484,6 @@ internal class CivsBuildingRequests(
                 CompletableFuture.supplyAsync({ CivsBlueprints.worldCells(snapshot, target.anchor,
                     decoration = target.type == BuildingType.DECORATION) }, executor).whenCompleteSync(tasks) cellsReady@ { cells, cellsFailure ->
                     if (cellsFailure != null) return@cellsReady completeActivation(cellsFailure)
-                    if (!storageChecked && building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure) {
-                        if (!authority.ready() || records.cities[city.id] != city || city.id !in records.busy) {
-                            completeActivation(CivsRejection("stale-city"))
-                            return@cellsReady
-                        }
-                        ownsReservation = false
-                        authority.releaseCity(city.id)
-                        withUpgradeStorage(city, target, requireNotNull(cells), freshAdmission = {
-                            if (player != null) {
-                                rejectIf(!player.isOnline, "not-authorized")
-                                rejectIf(placement.managedPlacement(player, city.id, building.type) != city, "stale-city")
-                                authority.near(player, city.worldId, building.entrance)
-                            }
-                        }) { refreshed ->
-                            activateBuilding(refreshed, requireNotNull(refreshed.building(buildingId)), player, true)
-                        }.whenCompleteSync(tasks) { _, relocationFailure -> completeActivation(relocationFailure) }
-                        return@cellsReady
-                    }
                     // Waiting designs reserve against fresh before-images, never the terrain at confirmation.
                     val blueprint = CivBlueprint(target, city.worldId, snapshot, requireNotNull(cells), emptyList(), bytes)
                     val capturedDesign: CompletableFuture<Pair<CivPlacementPlan, CivPaidApproachReuse?>> =
@@ -550,7 +525,12 @@ internal class CivsBuildingRequests(
                                         captured.terrain?.route != it.route, "stale-development")
                                     QueuedApproach(city, building, it)
                                 }
-                                startOrder(actor, records.cities.getValue(city.id), captured.copy(capturedSha256 = sitePlan.capturedSha256), bytes, replacement)
+                                startOrder(actor, records.cities.getValue(city.id), captured.copy(capturedSha256 = sitePlan.capturedSha256), bytes, replacement, admit = { current ->
+                                    if (player != null) {
+                                        rejectIf(!player.isOnline || !current.canManage(player.uniqueId), "not-authorized")
+                                        authority.near(player, city.worldId, building.entrance)
+                                    }
+                                })
                                     .whenCompleteSync(tasks) { _, orderFailure ->
                                         if (orderFailure == null && building.phase == BuildingPhase.ACTIVE) cleanupCaptured(designId)
                                         completeActivation(orderFailure)
@@ -569,7 +549,8 @@ internal class CivsBuildingRequests(
         val cells = design.blueprint.cells
         val terrain = design.terrain
         fun capture() = world.capture(city.id, city.owner, city.worldId, target, cells, previous, terrain,
-            adminPlacement = queued.adminPlacement)
+            adminPlacement = queued.adminPlacement, constructionStorage = true,
+            acceptedStorage = queued.blocks.filter(::civsStorageChangingCell))
         if (queued.adminPlacement || previous.type != BuildingType.WALL || target.type != BuildingType.WALL ||
             !CivsInfrastructureRebuild.refit(previous, target) || terrain == null || terrain.route.size < 3) return capture()
 
@@ -586,7 +567,8 @@ internal class CivsBuildingRequests(
                 CivsAutonomousPlacement.wallRefitApproach(city, source, listOf(source) + captures.mapNotNull { it.join() })
                     ?: throw CivsRejection("autonomy-no-path")
             }, executor).thenCompose { approach ->
-                world.captureWallRefit(target, cells, previous, terrain, approach, proposal = false)
+                world.captureWallRefit(target, cells, previous, terrain, approach, proposal = false,
+                    acceptedStorage = queued.blocks.filter(::civsStorageChangingCell))
             }
         }
     }
@@ -614,7 +596,7 @@ internal class CivsBuildingRequests(
 
     /** Starting an order reserves the immutable design; each worked row pays independently later. */
     private fun startOrder(actor: UUID, city: Settlement, plan: CivPlacementPlan, bytes: ByteArray,
-        replacement: QueuedApproach? = null): CompletableFuture<Settlement> {
+        replacement: QueuedApproach? = null, admit: (Settlement) -> Unit = {}): CompletableFuture<Settlement> {
         rejectIf(city.construction != null, "construction-busy")
         replacement?.apply(city) // Fence the captured site and forecast before writing either prepared journal.
         rejectIf(!CivsAutoStorageMigration.ready(city), "materials-migration-pending")
@@ -652,8 +634,8 @@ internal class CivsBuildingRequests(
                 payment = if (CivsAutonomy.legacyStock(city)) null else CivConstructionPayment(),
                 blocksRequired = plan.blocks.count { it.before != it.after } + plan.terrain?.blocks.orEmpty().count { it.before != it.after },
                 blocksPlaced = 0, preparationWorkplace = terrainBatches.firstOrNull()?.workplace ?: plan.terrain?.route?.lastOrNull(),
-                automaticPreparationBatches = automaticPreparation)
-        }, executor).thenCompose { order ->
+                automaticPreparationBatches = automaticPreparation) to plan.blocks.filter(::civsStorageChangingCell)
+        }, executor).thenCompose { prepared ->
             store.saveSchematic(plan.id, bytes).thenCompose { store.savePlan(plan) }.thenCompose {
                 // Order captures are deleted on completion; keep the admitted access road with its building.
                 if (!retarget && city.autonomy != null && (plan.terrain != null || CivsInfrastructureRebuild.stage(building) > 0)) {
@@ -661,20 +643,31 @@ internal class CivsBuildingRequests(
                     store.saveSchematic(retained, bytes).thenCompose { store.savePlan(plan.copy(id = retained)) }
                 }
                 else CompletableFuture.completedFuture(plan)
-            }.thenApply { order }
+            }.thenApply { prepared }
         }.whenCompleteSync(tasks) { preparedOrder, failure ->
             if (failure != null) { authority.releaseCity(city.id); result.completeExceptionally(failure) }
             else runCatching {
                 requireAssignedBuilder(records.cities.getValue(city.id), building.id)
-                val order = requireNotNull(preparedOrder)
+                val (order, changingHolders) = requireNotNull(preparedOrder)
                 val materials = requireNotNull(order.materials)
                 val batches = requireNotNull(order.batches)
-                authority.releaseCity(city.id)
-                authority.mutate(city.id) { before ->
+                fun reserved(before: Settlement): Settlement {
+                    admit(before)
                     rejectIf(retarget && before != city, "stale-building")
-                    val reserved = CivsRules.reserveBuild(replacement?.apply(before) ?: before, actor, building, order)
-                    if (approach == null) reserved else CivsRules.validate(reserved.copy(
-                        pendingControls = reserved.pendingControls.orEmpty() + approach))
+                    val base = replacement?.apply(before) ?: before
+                    return CivsRules.reserveBuild(base, actor, building, order).let { next ->
+                        if (approach == null) next else CivsRules.validate(next.copy(
+                            pendingControls = next.pendingControls.orEmpty() + approach))
+                    }
+                }
+                // All placement, actor, builder, cost and order checks succeed before any existing holder is emptied.
+                reserved(city)
+                authority.releaseCity(city.id)
+                authority.evacuateConstruction(city, plan, changingHolders, admit).thenCompose { available ->
+                    authority.mutate(city.id) { before ->
+                        rejectIf(before != available, "stale-city")
+                        reserved(before)
+                    }
                 }
                     .whenCompleteSync(tasks) { saved, reserveFailure ->
                     if (reserveFailure != null) result.completeExceptionally(reserveFailure)
@@ -764,21 +757,6 @@ internal class CivsBuildingRequests(
                 }
             }.onFailure { authority.releaseCity(city.id); result.completeExceptionally(it) }
         }
-        return result
-    }
-
-    private fun withUpgradeStorage(city: Settlement, target: CivBuilding, cells: List<ru.arc.paper.api.ArcSchematicBlock>,
-        freshAdmission: () -> Unit = {},
-        resume: (Settlement) -> CompletableFuture<Unit>): CompletableFuture<Unit> {
-        val result = authority.tracked<Unit>()
-        runCatching { authority.relocateUpgradeStorage(city, target, cells, freshAdmission) }.onSuccess { moving ->
-            moving.whenCompleteSync(tasks) { saved, failure ->
-                if (failure != null) result.completeExceptionally(failure)
-                else runCatching { resume(requireNotNull(saved)) }.onSuccess { resumed ->
-                    resumed.whenComplete { _, error -> if (error == null) result.complete(Unit) else result.completeExceptionally(error) }
-                }.onFailure { result.completeExceptionally(it) }
-            }
-        }.onFailure { result.completeExceptionally(it) }
         return result
     }
 

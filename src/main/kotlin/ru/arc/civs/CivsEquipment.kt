@@ -16,8 +16,16 @@ data class CivResidentItem(val material: String, val amount: Int, val data: Stri
         data?.let { require(it.length <= 32_768 && Base64.getDecoder().decode(it).size <= 24_576) }
     }
 
-    fun stack(): ItemStack {
-        validated()
+    internal fun validatedConstruction(): CivResidentItem = apply {
+        require(material.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) && amount in 1..99)
+        data?.let { require(it.length <= CivsStore.MAX_INVENTORY_TRANSACTION_BYTES && Base64.getDecoder().decode(it).isNotEmpty()) }
+    }
+
+    fun stack(): ItemStack = decode(false)
+    internal fun constructionStack(): ItemStack = decode(true)
+
+    private fun decode(construction: Boolean): ItemStack {
+        if (construction) validatedConstruction() else validated()
         val type = Material.getMaterial(material)?.takeIf { it.isItem && !it.isAir }
             ?: throw CivsRejection("unsupported-material", mapOf("material" to material))
         val item = data?.let { ItemStack.deserializeBytes(Base64.getDecoder().decode(it)) } ?: ItemStack(type)
@@ -26,12 +34,15 @@ data class CivResidentItem(val material: String, val amount: Int, val data: Stri
     }
 
     companion object {
-        fun of(item: ItemStack?): CivResidentItem? {
+        fun of(item: ItemStack?): CivResidentItem? = encode(item, false)
+        internal fun ofConstruction(item: ItemStack?): CivResidentItem? = encode(item, true)
+
+        private fun encode(item: ItemStack?, construction: Boolean): CivResidentItem? {
             if (item == null || item.type.isAir || item.amount <= 0) return null
             require(item.amount <= item.maxStackSize)
             val data = if (item.isSimilar(ItemStack(item.type))) null else
                 Base64.getEncoder().encodeToString(item.clone().also { it.amount = 1 }.serializeAsBytes())
-            return CivResidentItem(item.type.name, item.amount, data).validated()
+            return CivResidentItem(item.type.name, item.amount, data).let { if (construction) it.validatedConstruction() else it.validated() }
         }
     }
 }

@@ -253,6 +253,7 @@ internal class CivsStorageActions(
     }
 
     fun setStorageMode(player: Player, mode: CivStorageMode): CompletableFuture<Unit> = authority.cityAction("storage_mode", player, "mode" to mode) { city ->
+        city.inventory?.requireStorageMode(mode)
         if (mode == CivStorageMode.PHYSICAL) materialize(city.id).thenApply { Unit }
         else authority.mutate(city.id) { current ->
             val inventory = current.inventory ?: throw CivsRejection("materials-migration-pending")
@@ -489,7 +490,27 @@ internal class CivsStorageActions(
         }.onFailure { authority.log("migrate autonomous storage ${city.id}", it, city.id) }
     }
 
+    private var returnCursor = 0
+    private var nextConstructionReturnAt = 0L
+    internal fun pulseConstructionStorage(completedCity: UUID? = null) {
+        if (completedCity == null && authority.now() < nextConstructionReturnAt) return
+        val cities = if (completedCity == null) records.cities.values else listOfNotNull(records.cities[completedCity])
+        val candidates = cities.asSequence().filter { city ->
+            city.id !in records.busy && city.id !in records.unhealthy && city.pendingDeletion == null &&
+                !city.inventory?.constructionBuffers.isNullOrEmpty() && !construction.isPlacing(city.id) && authority.settlementActive(city)
+        }.flatMap { city -> city.inventory!!.constructionBuffers.orEmpty().values.asSequence().filterNot { it.owner.held(city) }
+            .flatMap { group -> group.parts.asSequence().map { Triple(city, group, it) } } }.toList()
+        if (candidates.isEmpty()) return
+        val cursor = returnCursor++
+        val (city, group, part) = candidates[Math.floorMod(cursor, candidates.size)]
+        nextConstructionReturnAt = authority.now() + 5_000L
+        runCatching { authority.returnConstructionStorage(city, group, part) }.onSuccess { future ->
+            future.whenComplete { _, failure -> if (failure != null) authority.log("return construction storage ${city.id}", failure, city.id) }
+        }.onFailure { authority.log("return construction storage ${city.id}", it, city.id) }
+    }
+
     fun pulseStorage() {
+        pulseConstructionStorage()
         if (authority.now() < nextStorageTransferAt) return
         val candidates = records.cities.values.filter { city ->
             city.id !in records.busy && city.id !in records.unhealthy && city.pendingDeletion == null && city.inventory?.mode == CivStorageMode.PHYSICAL && pendingMaterials(city) > 0 &&

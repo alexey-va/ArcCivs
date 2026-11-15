@@ -298,7 +298,7 @@ object CivsLogistics {
                 withinRoute(city, source, requireNotNull(it.control)) }
     }
 
-    private fun nativeCargoDepot(building: CivBuilding): Boolean = building.phase == BuildingPhase.ACTIVE &&
+    internal fun nativeCargoDepot(building: CivBuilding): Boolean = building.phase == BuildingPhase.ACTIVE &&
         building.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) && building.control != null
 
     /** Selection is read-only. The owner supplies current, permitted local room; a partial batch is never rerouted. */

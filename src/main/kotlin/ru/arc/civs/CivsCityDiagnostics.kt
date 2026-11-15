@@ -22,6 +22,7 @@ internal class CivsCityDiagnostics(
     private val testingPermissions: CivsChunkPermissions,
     private val citizens: CivsCitizens,
     private val supply: CivsSupplyDispatcher,
+    private val roadMaintenanceDebug: (UUID?, UUID?) -> Map<String, Any?>,
     private val construction: CivsConstructionRuntime,
     private val inventoryJournal: CivsInventoryJournal,
     private val residentLife: CivsResidentLifeRuntime,
@@ -93,7 +94,8 @@ internal class CivsCityDiagnostics(
                 selectedWorkers?.mapNotNullTo(hashSetOf()) { it.assignment })
             "supply" -> {
                 val focus = selected.asSequence().flatMap { it.workers.asSequence() }.firstOrNull { it.id == workerId }?.assignment
-                supply.debug(cityId, workerId, focus) + ("forestrySurplus" to authority.forestrySurplusDebug(cityId))
+                supply.debug(cityId, workerId, focus) + ("forestrySurplus" to authority.forestrySurplusDebug(cityId)) +
+                    ("road_maintenance" to roadMaintenanceDebug(cityId, workerId))
             }
             "storage" -> storage.debug(cityId)
             "chunks" -> chunkLoading.debug(cityId, if (cityId == null) null else selected.mapTo(hashSetOf()) { it.owner })

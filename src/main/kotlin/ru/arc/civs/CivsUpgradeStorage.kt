@@ -6,33 +6,59 @@ data class CivRelocatedContainer(val position: CivPosition, val type: String, va
 
 /** Metadata retirement only: these exact empty holders remain native until ordinary upgrade capture. */
 data class CivUpgradeContainerRetirement(val target: CivBuilding, val registeredBefore: List<CivPosition>,
-    val cells: List<CivPlanBlock>)
+    val cells: List<CivPlanBlock>, val planId: java.util.UUID? = null)
 
 data class CivContainerRelocation(val building: CivBuilding, val containers: List<CivRelocatedContainer>,
-    val unregister: CivUpgradeContainerRetirement? = null) {
-    fun after(city: Settlement): Settlement = city.copy(revision = Math.addExact(city.revision, 1),
-        inventory = unregister?.let { proof ->
-            val inventory = requireNotNull(city.inventory)
-            require(inventory.containers == proof.registeredBefore)
-            inventory.copy(containers = inventory.containers - proof.cells.map { it.position }.toSet())
-        } ?: city.inventory)
+    val unregister: CivUpgradeContainerRetirement? = null, val buffer: CivConstructionStorageMove? = null,
+    val restoreSourceRegistration: Boolean = false) {
+    fun after(city: Settlement): Settlement {
+        var inventory = city.inventory
+        unregister?.let { proof ->
+            val old = requireNotNull(inventory)
+            require(old.containers == proof.registeredBefore)
+            inventory = old.copy(containers = old.containers - proof.cells.map { it.position }.toSet())
+        }
+        if (restoreSourceRegistration) {
+            val p = requireNotNull(buffer).cell.position
+            val old = requireNotNull(inventory)
+            require(p !in old.containers && old.containers.size < CivInventory.MAX_CONTAINERS)
+            inventory = old.copy(containers = old.containers + p)
+        }
+        buffer?.let { inventory = requireNotNull(inventory).updatePart(it.owner, it.before, it.after) }
+        return city.copy(revision = Math.addExact(city.revision, 1), inventory = inventory)
+    }
 
-    fun before(after: Settlement): Settlement = after.copy(revision = Math.subtractExact(after.revision, 1),
-        inventory = unregister?.let { requireNotNull(after.inventory).copy(containers = it.registeredBefore) } ?: after.inventory)
+    fun before(after: Settlement): Settlement {
+        var inventory = after.inventory
+        buffer?.let { inventory = requireNotNull(inventory).updatePart(it.owner, it.after, it.before) }
+        if (restoreSourceRegistration) {
+            val old = requireNotNull(inventory)
+            require(old.containers.lastOrNull() == requireNotNull(buffer).cell.position)
+            inventory = old.copy(containers = old.containers.dropLast(1))
+        }
+        unregister?.let { inventory = requireNotNull(inventory).copy(containers = it.registeredBefore) }
+        return after.copy(revision = Math.subtractExact(after.revision, 1), inventory = inventory)
+    }
+
+    /** Scope comes from the registered side of the same accepted transfer. */
+    fun nativeAuthority(after: Settlement) = if (restoreSourceRegistration) after else before(after)
 
     fun validated(city: Settlement) {
+        if (restoreSourceRegistration) require(buffer?.before != null && unregister == null)
         val hallHandoff = if (building.phase == BuildingPhase.SITE) city.pendingControls.orEmpty().firstOrNull { pending ->
             pending.buildingId == building.id && pending.retire?.let {
                 civsAutonomousHallHandoff(city, building, it.position, pending.position)
             } == true
         } else null
-        require(city.building(building.id) == building && (building.phase == BuildingPhase.ACTIVE || hallHandoff != null) &&
-            !building.type.isInfrastructure && city.pendingDeletion == null)
+        require(city.building(building.id) == building && (building.phase == BuildingPhase.ACTIVE || hallHandoff != null || building.phase == BuildingPhase.SITE && (buffer != null || unregister != null) ||
+            buffer?.before != null && buffer.owner.returningForDeletion(city)) &&
+            (!building.type.isInfrastructure || buffer != null || building.phase == BuildingPhase.SITE && unregister?.planId != null || unregister?.target?.let {
+                CivsInfrastructureRebuild.refit(city, building, it) } == true) && (city.pendingDeletion == null || buffer?.before != null && buffer.owner.returningForDeletion(city)))
         val metadataOnly = unregister != null && containers.all { it.before.all { item -> item == null } && it.before == it.after }
-        require(containers.size in (if (metadataOnly) 1 else 2)..MAX_CONTAINERS &&
+        require(containers.size in (if (metadataOnly || buffer != null) 1 else 2)..MAX_CONTAINERS &&
             containers.map { it.position }.distinct().size == containers.size)
         require(containers.map { (it.position.x shr 4) to (it.position.z shr 4) }.distinct().size <= 8)
-        hallHandoff?.let { pending ->
+        hallHandoff?.takeIf { buffer == null && unregister == null }?.let { pending ->
             require(unregister == null && containers.size == 2)
             val source = containers.single { it.position == requireNotNull(pending.retire).position }
             val receiver = containers.single { it.position == pending.position }
@@ -41,18 +67,21 @@ data class CivContainerRelocation(val building: CivBuilding, val containers: Lis
         }
         val delta = mutableMapOf<Pair<String, String?>, Long>()
         fun count(item: CivResidentItem?, sign: Long) {
-            item?.validated()?.let { delta.merge(it.material to it.data, sign * it.amount, Math::addExact) }
+            item?.let { if (buffer == null) it.validated() else it.validatedConstruction() }?.let { delta.merge(it.material to it.data, sign * it.amount, Math::addExact) }
         }
+        val sourceCity = if (buffer?.before == null && unregister != null) before(city) else city
+        val former = buffer?.takeIf { it.before != null }?.let { it.owner.cancelledRegisteredSource(before(city), it.cell) }
         containers.forEach { holder ->
-            val local = civsRelocationLocal(building, holder.position)
-            require(holder.type in CIVS_STORAGE_TYPES && storagePositionAllowed(city, holder.position, holder.type) &&
+            val local = civsRelocationLocal(building, holder.position) || unregister?.cells?.any { it.position == holder.position } == true ||
+                former == holder.position
+            require(holder.type in CIVS_STORAGE_TYPES && storagePositionAllowed(sourceCity, holder.position, holder.type) &&
                 (if (local) city.buildings.none { it.id != building.id && it.control == holder.position }
                 else civsRelocationExternalReceiver(city, building, holder.position)))
             require(holder.blockData.substringBefore('[') == "minecraft:${holder.type.lowercase()}" &&
                 holder.blockData.length in 1..CivsStore.MAX_BLOCK_STATE_CHARS)
             require(holder.before.size == STORAGE_SLOTS && holder.after.size == STORAGE_SLOTS)
             // A foreign holder is credit-only, including an attempted complete debit to an empty after-image.
-            if (!local || holder.after.any { it != null }) {
+            if (!local || holder.after.any { it != null } || buffer?.before != null) {
                 require(civsRetainContainerState(holder.blockData))
                 holder.before.zip(holder.after).forEach { (before, after) ->
                     require(before == null || after != null && before.material == after.material && before.data == after.data &&
@@ -63,10 +92,15 @@ data class CivContainerRelocation(val building: CivBuilding, val containers: Lis
         }
         unregister?.let { proof ->
             val target = proof.target
-            require(target.id == building.id && target.type == building.type && target.level == building.level + 1 &&
-                target.phase == BuildingPhase.CONSTRUCTING &&
+            require(target.id == building.id && target.phase == BuildingPhase.CONSTRUCTING &&
+                (target.type == building.type && (target.level == building.level + 1 ||
+                    building.phase == BuildingPhase.SITE && target.level == building.level) ||
+                    CivsPlanBoardBlueprint.refit(building, target) || CivsInfrastructureRebuild.refit(city, building, target)) &&
                 target.rotation == building.rotation && target.entrance == building.entrance &&
                 civsContainsBox(target.bounds, building.bounds))
+            if (buffer == null && proof.planId == null) require(building.phase == BuildingPhase.ACTIVE &&
+                !building.type.isInfrastructure && target.level == building.level + 1 &&
+                proof.cells.all { civsRelocationLocal(building, it.position) })
             require(proof.registeredBefore.size <= CivInventory.MAX_CONTAINERS &&
                 proof.registeredBefore.distinct().size == proof.registeredBefore.size &&
                 proof.cells.size in 1..MAX_CONTAINERS && proof.cells.map { it.position }.distinct().size == proof.cells.size)
@@ -74,8 +108,9 @@ data class CivContainerRelocation(val building: CivBuilding, val containers: Lis
             require(city.inventory?.containers == proof.registeredBefore.filterNot { it in removed })
             proof.cells.forEach { cell ->
                 val holder = containers.single { it.position == cell.position }
-                require(cell.position in proof.registeredBefore && cell.position != building.control && cell.position != target.control &&
-                    building.bounds.contains(cell.position.x, cell.position.y, cell.position.z) &&
+                require(civsConstructionStorageOwns(sourceCity, building, target, cell.position) &&
+                    cell.position in proof.registeredBefore && cell.position != building.control && cell.position != target.control &&
+                    target.bounds.contains(cell.position.x, cell.position.y, cell.position.z) &&
                     city.buildings.none { it.id != building.id && it.control == cell.position } &&
                     holder.after.all { it == null } && holder.blockData == cell.before && civsRetainContainerState(cell.before) &&
                     cell.after.length in 1..CivsStore.MAX_BLOCK_STATE_CHARS &&
@@ -83,6 +118,32 @@ data class CivContainerRelocation(val building: CivBuilding, val containers: Lis
                     cell.after.substringBefore('[') !in setOf("minecraft:barrier", "minecraft:structure_void") &&
                     !civsSameRelocationContainerState(cell.after, cell.before))
             }
+        }
+        buffer?.let { move ->
+            val original = before(city)
+            val pin = move.owner
+            pin.validate()
+            require(pin.matches(city) && pin.original.id == building.id && (move.before != null || move.after != null))
+            move.before?.validate()
+            move.after?.validate()
+            if (move.before == null) {
+                val holder = containers.single()
+                require(civsSameBuildingGeometry(pin.original, building) && civsConstructionStorageOwns(original, building, pin.target, holder.position) &&
+                    holder.position == move.cell.position && holder.blockData == move.cell.before &&
+                    civsStorageChangingCell(move.cell) && holder.before.any { it != null } && holder.after.all { it == null } &&
+                    (holder.position in original.inventory!!.containers) == (unregister != null))
+                if (CivsInfrastructureRebuild.refit(building, pin.target)) require(CivsInfrastructureRebuild.refit(original, building, pin.target))
+            } else {
+                val returned = containers.singleOrNull { it.position == former }
+                require(restoreSourceRegistration == (returned != null && returned.position !in original.inventory!!.containers))
+                if (restoreSourceRegistration) require(requireNotNull(returned).before.all { it == null })
+                require(unregister == null && !pin.held(original) && containers.all { h ->
+                    if (h.position == former) civsSameRelocationContainerState(h.blockData, move.cell.before) && h.before != h.after
+                    else civsConstructionReturnAllowed(original, building, h.position)
+                })
+            }
+            require(after(original) == city && changes().isNotEmpty())
+            return
         }
         require(unregister != null || containers.any { civsRelocationLocal(building, it.position) &&
             it.before.any { item -> item != null } && it.after.all { item -> item == null } })

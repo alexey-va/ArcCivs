@@ -192,7 +192,9 @@ internal class CivsCargoRequests(
                 }
                 rejectIf(accepted.sourceWorkerId != null, "stale-delivery")
                 rejectIf(accepted.directInput && !CivsLogistics.directInputAllowed(city, accepted), "stale-delivery")
-                val sourceCount = storage.buildingAvailable(city, accepted.sourceBuildingId)[accepted.material] ?: 0L
+                val releaseSlot = accepted.sourceBuildingId != accepted.warehouseId && !accepted.directInput &&
+                    city.building(accepted.sourceBuildingId)?.type == BuildingType.BUILDER_HUT
+                val sourceCount = storage.buildingAvailable(city, accepted.sourceBuildingId, nativeOnly = releaseSlot)[accepted.material] ?: 0L
                 val available = run {
                     val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else {
                         val constructionReserve = CivsLogistics.constructionBufferReserve(city, accepted.sourceBuildingId,
@@ -226,7 +228,7 @@ internal class CivsCargoRequests(
                 rejectIf(!CivsLogistics.validCargo(city, cargo), "stale-delivery")
                 citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
                 val carriedBefore = CivsEquipment.plainCount(worker, cargo.material)
-                authority.inventoryMutation(cityId, { storage.prepareCargoPickup(it, cargo) }, keepViewersOpen = true) { before, inventory ->
+                authority.inventoryMutation(cityId, { storage.prepareCargoPickup(it, cargo, workerId) }, keepViewersOpen = true) { before, inventory ->
                     CivsLogistics.pickup(before, workerId, cargo, supply.craftJobs(cityId).mapValues { it.value.inputs }, residentFoods).copy(inventory = inventory)
                 }.thenApply { saved ->
                     CivsDiagnostics.event("cargo_pickup_committed", "city" to cityId, "worker" to workerId,

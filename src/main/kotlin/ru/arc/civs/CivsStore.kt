@@ -45,8 +45,9 @@ class CivsStore(
     fun load(): CompletableFuture<List<Settlement>> = submitPlanChange {
         // Explicit reload observes administrator file edits, including after a failed city rescan.
         planCache.clear()
-        reloadCityIndex(trustedRoot()) to requireNotNull(deletedCityIndex).values.toList()
-    }.thenCompose { (legacy, deleted) -> network?.loadOwned(legacy, deleted) ?: CompletableFuture.completedFuture(legacy) }
+        val root = trustedRoot()
+        reloadCityIndex(root).also { cities -> if (network == null) cities.forEach { verifyBuffers(root, it) } } to requireNotNull(deletedCityIndex).values.toList()
+    }.thenCompose { (legacy, deleted) -> network?.loadOwned(legacy, deleted) { city -> synchronized(ioLock) { verifyBuffers(trustedRoot(), city) } } ?: CompletableFuture.completedFuture(legacy) }
 
     fun lookup(playerId: UUID): CompletableFuture<CivsNetworkCity?> = synchronized(lifecycleLock) {
         if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
@@ -58,7 +59,7 @@ class CivsStore(
     fun save(city: Settlement): CompletableFuture<Settlement> {
         val proposed = snapshotCity(city)
         if (network != null) return synchronized(lifecycleLock) {
-            if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed")) else network.save(proposed)
+            if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed")) else network.save(proposed) { old, next -> synchronized(ioLock) { requireBufferTransition(trustedRoot(), old, next) } }
         }
         return submit {
             CivsRules.validate(proposed)
@@ -70,6 +71,10 @@ class CivsStore(
                 deleted.values.any { it.owner == proposed.owner && !it.autonomous })
                 proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
             val sameCity = index[snapshot.id]
+            if (sameCity?.buffers != snapshot.inventory?.constructionBuffers ||
+                !sameCity?.buffers.isNullOrEmpty() && sameCity?.mode != snapshot.inventory?.mode) {
+                requireBufferTransition(trustedRoot, cityStore(trustedRoot, snapshot.id).loadOrNull()?.city, snapshot)
+            }
             require(sameCity == null || sameCity.owner == snapshot.owner) { "City id cannot be reassigned to another owner" }
             require(sameCity == null || sameCity.autonomous == (snapshot.autonomy != null)) { "City autonomy cannot change" }
             val otherParticipants = HashSet<UUID>()
@@ -116,6 +121,7 @@ class CivsStore(
     /** The canonical commit precedes local cleanup; a tombstone is durable before its old JSON disappears. */
     fun delete(city: Settlement): CompletableFuture<Unit> {
         val snapshot = snapshotCity(city)
+        require(snapshot.inventory?.constructionBuffers.isNullOrEmpty()) { "Construction storage must be returned before deletion" }
         if (network != null) return synchronized(lifecycleLock) {
             if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
             else network.delete(snapshot).thenCompose { enqueue { deleteLocal(snapshot, network.server.value) } }
@@ -180,6 +186,94 @@ class CivsStore(
         store.deleteIfExists()
     }
 
+    /** Exact items are immutable home-local documents. A city or SQL snapshot only carries their balances. */
+    internal fun saveConstructionStorage(value: CivConstructionStorageSnapshot): CompletableFuture<CivConstructionStoragePart> {
+        val snapshot = value.copy(items = value.items.toList())
+        return submit {
+            val root = trustedRoot()
+            snapshot.validate()
+            verifyConstructionPlan(root, snapshot)
+            val bytes = snapshot.encoded()
+            val part = snapshot.initial(bytes)
+            val file = constructionFile(root, part.id)
+            val stored = file.loadOrNull()
+            if (stored == null) file.write(bytes) else require(stored.contentEquals(bytes)) { "Construction storage id was reused" }
+            check(readPart(root, snapshot.owner, part) == snapshot)
+            forceInventoryDirectories(root, "construction-buffers")
+            part
+        }
+    }
+
+    internal fun loadConstructionStorage(owner: CivConstructionStorageOwner, part: CivConstructionStoragePart) =
+        submit { readPart(trustedRoot(), owner, part) }
+
+    private fun constructionFile(root: Path, id: UUID) = AtomicFileStore(
+        root = root, relativePath = Path.of("construction-buffers", "$id.json"), maxBytes = MAX_INVENTORY_TRANSACTION_BYTES,
+        encode = { it }, decode = { it }, validate = { require(it.isNotEmpty()) },
+    )
+
+    private fun readPart(root: Path, owner: CivConstructionStorageOwner, part: CivConstructionStoragePart): CivConstructionStorageSnapshot {
+        val bytes = requireNotNull(constructionFile(root, part.id).loadOrNull()) { "Construction storage snapshot is missing" }
+        require(CivsGateRefit.sha256(bytes) == part.sha256) { "Construction storage snapshot bytes changed" }
+        val snapshot = decodeJson(bytes, CivConstructionStorageSnapshot::class.java)
+        snapshot.validate()
+        require(snapshot.id == part.id && snapshot.owner == owner && snapshot.cell == part.cell) {
+            "Construction storage snapshot identity changed"
+        }
+        snapshot.contents(part)
+        return snapshot
+    }
+
+    private fun verifyConstructionPlan(root: Path, snapshot: CivConstructionStorageSnapshot) {
+        val plan = planCache[snapshot.planId] ?: requireNotNull(planStore(root, snapshot.planId).loadOrNull()?.plan)
+            .also { cachePlan(it) }
+        require(plan.cityId == snapshot.owner.cityId && plan.worldId == snapshot.owner.worldId &&
+            civsSameBuildingGeometry(plan.building, snapshot.owner.target) && plan.capturedSha256 == snapshot.owner.schematicSha256 &&
+            snapshot.cell in plan.blocks) { "Construction storage does not match the accepted placement" }
+    }
+
+    private fun verifyBuffers(root: Path, city: Settlement) {
+        city.inventory?.constructionBuffers.orEmpty().values.forEach { group ->
+            require(group.owner.matches(city))
+            group.parts.forEach { readPart(root, group.owner, it) }
+        }
+    }
+
+    private fun verifyBufferReceipt(root: Path, tx: CivInventoryTransaction, admitting: Boolean = false) {
+        if (admitting) tx.containerRelocation?.unregister?.let { retired -> retired.planId?.let { id ->
+            val plan = planCache[id] ?: requireNotNull(planStore(root, id).loadOrNull()?.plan).also { cachePlan(it) }
+            require(plan.cityId == tx.cityId && plan.worldId == tx.after.worldId && plan.building == retired.target &&
+                plan.capturedSha256 != null && retired.cells.all { it in plan.blocks }) { "Retired container does not match its accepted placement" }
+        } }
+        tx.containerRelocation?.let { relocation -> relocation.buffer?.let { move ->
+            val proof = readPart(root, move.owner, move.before ?: requireNotNull(move.after))
+            if (admitting && move.before == null) verifyConstructionPlan(root, proof)
+            move.validateSnapshot(proof, relocation.containers)
+        } }
+        tx.bufferPickup?.let { pickup ->
+            val group = pickup.beforeGroup
+            val after = tx.after.inventory?.constructionBuffers?.get(pickup.source.toString())?.parts.orEmpty().associateBy { it.id }
+            group.parts.filter { after[it.id] != it }.forEach { part ->
+                val snapshot = readPart(root, group.owner, part)
+                after[part.id]?.let(snapshot::contents)
+            }
+        }
+    }
+
+    internal fun verifyConstructionReceipt(tx: CivInventoryTransaction): CompletableFuture<Unit> =
+        submit { verifyBufferReceipt(trustedRoot(), tx) }
+
+    private fun requireBufferTransition(root: Path, old: Settlement?, next: Settlement) {
+        next.inventory?.let { old?.inventory?.requireStorageMode(it.mode) }
+        if (old?.inventory?.constructionBuffers == next.inventory?.constructionBuffers) return
+        val tx = loadInventoryTransactions(root).singleOrNull { it.cityId == next.id && it.after == next }
+            ?: error("Construction storage change requires its pending inventory receipt")
+        val before = tx.containerRelocation?.takeIf { it.buffer != null }?.before(next)
+            ?: tx.bufferPickup?.before(next) ?: error("Inventory receipt cannot change construction storage")
+        require(before == old) { "Construction storage receipt has a different canonical before-city" }
+        verifyBufferReceipt(root, tx)
+    }
+
     /** Immutable write-ahead item receipt; the same UUID can only retry identical bytes/state. */
     fun saveInventoryTransaction(transaction: CivInventoryTransaction): CompletableFuture<CivInventoryTransaction> {
         val snapshot = transaction.copy(after = snapshotCity(transaction.after), changes = transaction.changes.toList(),
@@ -191,6 +285,9 @@ class CivsStore(
             upkeep = transaction.upkeep?.detached(),
             cargoDropoff = transaction.cargoDropoff?.detached(),
             cargoPickup = transaction.cargoPickup?.detached(),
+            bufferPickup = transaction.bufferPickup?.let { pickup -> pickup.copy(workerBefore = snapshotWorker(pickup.workerBefore),
+                inventoryBefore = requireNotNull(snapshotCity(pickup.before(transaction.after)).inventory),
+                withdrawn = pickup.withdrawn.toMap(), containers = pickup.containers.toList()) },
             gateRefit = transaction.gateRefit?.detached(),
             warehouseRefit = transaction.warehouseRefit?.detached(),
             autonomousVisual = transaction.autonomousVisual?.let { it.copy(
@@ -209,6 +306,7 @@ class CivsStore(
             val trustedRoot = trustedRoot()
             val store = inventoryTransactionStore(trustedRoot, snapshot.id)
             val existing = store.loadOrNull()?.transaction
+            verifyBufferReceipt(trustedRoot, snapshot, admitting = existing == null)
             if (existing != null) {
                 require(existing == snapshot) { "Inventory transaction retry differs from its journal" }
                 // A previous write may have reached rename but failed its parent-directory acknowledgement.
@@ -242,6 +340,7 @@ class CivsStore(
     fun loadInventoryTransactions(): CompletableFuture<List<CivInventoryTransaction>> = submit {
         val trustedRoot = trustedRoot()
         val transactions = loadInventoryTransactions(trustedRoot)
+        transactions.forEach { verifyBufferReceipt(trustedRoot, it) }
         // Recovery may resume a prior uncertain write immediately after this ACK, without saving it again.
         if (transactions.isNotEmpty()) forceInventoryDirectories(trustedRoot)
         transactions
@@ -266,8 +365,8 @@ class CivsStore(
         deleted
     }
 
-    private fun forceInventoryDirectories(trustedRoot: Path) {
-        val directory = trustedRoot.resolve("inventory-transactions")
+    private fun forceInventoryDirectories(trustedRoot: Path, name: String = "inventory-transactions") {
+        val directory = trustedRoot.resolve(name)
         if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return
         require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) { "Inventory journal directory is not a real directory" }
         // AtomicFileStore covers the file/rename; include both directory creation edges before native mutation.
@@ -327,7 +426,7 @@ class CivsStore(
             requireNotNull(cityIndex)
         }
 
-    private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.members.toSet(), city.revision, city.autonomy != null)
+    private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.members.toSet(), city.revision, city.autonomy != null, city.inventory?.constructionBuffers, city.inventory?.mode)
 
     private fun loadCities(trustedRoot: Path, deleted: Set<UUID>): List<Settlement> {
         val directory = trustedRoot.resolve("cities")
@@ -508,6 +607,7 @@ class CivsStore(
         memberNames = city.memberNames?.toMap(), families = city.families?.toList(),
         corpses = city.corpses?.map { it.copy(worker = snapshotWorker(it.worker)) },
         inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
+            constructionBuffers = it.constructionBuffers?.mapValues { (_, group) -> group.detached() },
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
         construction = city.construction?.let { it.copy(plannedBuilding = it.plannedBuilding?.let(::snapshotBuilding), materials = it.materials?.toMap(),
             payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
@@ -652,7 +752,7 @@ class CivsStore(
     private data class DeletedCityDocument(val schemaVersion: Int, val deleted: CivsDeletedCity?)
     private data class PlanDocument(val schemaVersion: Int, val plan: CivPlacementPlan?)
     private data class InventoryTransactionDocument(val schemaVersion: Int, val transaction: CivInventoryTransaction?)
-    private data class CityIndex(val owner: UUID, val members: Set<UUID>, val revision: Long, val autonomous: Boolean)
+    private data class CityIndex(val owner: UUID, val members: Set<UUID>, val revision: Long, val autonomous: Boolean, val buffers: Map<String, CivConstructionStorageBuffer>?, val mode: CivStorageMode?)
 
     internal companion object {
         const val SCHEMA_VERSION = 1
