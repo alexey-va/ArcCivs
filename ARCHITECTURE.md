@@ -412,13 +412,14 @@ Admitted physical cargo recovery in the isolated lab uses the ordinary native
 storage feet height for both repeated unloaded-chunk and capture-budget failures.
 A thin carpet changes the supported height, while cargo ownership, protection,
 body clearance, retry timing and native unload checks remain authoritative.
-The same arrival, work and cycle-token checks still apply. Actual work-route
-crossings use Trails 2.3.20's `TrailsFootTrafficActor` entry point; Trails retains
-the ordinary permission, protection, terrain progression and persistence pipeline.
+The same arrival, work and cycle-token checks still apply. Resident movement
+does not count toward trail wear. The optional Trails integration reads surface
+speed multipliers and registers accepted road surfaces. Trails processes player
+movement with its own permission, protection, progression and persistence rules.
 Completed work trips teach a bounded shared corridor preference (32 cities,
 512 outdoor cells each, 16 admitted cells per tick); authored buildings and
-fields remain excluded. Terrain conversion belongs solely to Trails. Support
-height includes paths and slabs. Player movement is never cancelled or rewritten
+fields remain excluded. Support height includes paths and slabs.
+Player movement is never cancelled or rewritten
 by resident contact. Overlapping residents yield by at most 0.05 blocks per tick
 into supported, collision-free space or a free side. Contact never writes player
 velocity; even a trapped resident remains passable. Navigation still yields to
@@ -534,7 +535,7 @@ workplace, otherwise home or town hall, at 0.55 of base motion speed. Base motio
 0.215 blocks per tick; productive journeys use 0.8 of that, or 3.44 blocks/second
 at 20 TPS before the current Trails surface multiplier. Idle and combat movement
 retain their existing factors. Routes avoid horizontal footprints
-of foreign buildings and farm fields; idle wandering does not generate Trails wear.
+of foreign buildings and farm fields.
 Unassigned adults share a bounded five-tick handoff (four actors, existing eight-target
 budget per coarse pulse) instead of waiting for the coarse city timer. Successful
 unassigned leisure legs have no artificial rest; unreachable optional routes retain a 2.5–4s
@@ -543,8 +544,8 @@ The walking label requires a ready unblocked route; other unassigned actors use 
 neutral label. Leisure still grants no work cycle or resource.
 Assigned producers retain their 2–6.5s successful rest so asynchronous courier
 allocation can validate the same stationary meeting, including the fast farm lane.
-Productive journeys continue reporting real footsteps to Trails. Turning reduces
-accumulated yaw before choosing the shortest bounded turn, including route corners.
+Turning reduces accumulated yaw before choosing the shortest bounded turn,
+including route corners.
 The bounded search between world-work cycles holds the current position instead
 of starting an idle trip; food, threats and night shelter still take priority.
 Idle/evening campfire visits use existing lit campfires within 24 blocks of the

@@ -33,7 +33,7 @@ class CivsCitizenObservationStatusTest : FunSpec({
         every { motion.searching } returns false
         for (intent in listOf(travel, "moving-to-work", "moving-to-town-hall", "moving-to-tavern",
             "moving-to-pickup", "carrying-cargo", "returning-output", "mine-descending", "mine-returning",
-            "collecting-items", "wandering")) {
+            "collecting-items", "wandering", "to-shelter")) {
             citizenObservedTravelStatus(intent, route) shouldBe intent
         }
         every { motion.waitingForCollision } returns true
@@ -63,7 +63,8 @@ class CivsCitizenObservationStatusTest : FunSpec({
     test("work pauses and pending native receipts retain priority over travel observation") {
         val route = mockk<CitizenRoute>()
         for (activity in listOf("working", "building", "eating", "serving-guests", "collecting-supplies",
-            "loading-cargo", "delivering", "mine-waiting", "storage-full", "waiting-inputs", "paused", "injury-pending")) {
+            "loading-cargo", "delivering", "mine-waiting", "storage-full", "waiting-inputs", "paused", "injury-pending",
+            "sheltering", "sleeping")) {
             citizenObservedTravelStatus(activity, route, yielding = true) shouldBe activity
         }
         verify { route wasNot Called }
@@ -113,6 +114,46 @@ class CivsCitizenObservationStatusTest : FunSpec({
             h.city shouldBe city
             h.workPlans shouldBe workPlans
             h.observedWork() shouldBe 0L
+        }
+    }
+
+    test("night captions distinguish finding a sleeping place from a held or blocked route") {
+        residentRuntime { h ->
+            val source = CompletableFuture<CivSleepingFloorMask>()
+            h.sleepingFloorSource = { source }
+            h.actor().npc.teleport(Location(h.world, 8.5, 64.0, .5))
+            h.holdNavigation = true
+            h.world.time = 13_000
+            h.owner.pulse(2_000)
+            h.actor().shelter shouldBe null
+            h.owner.status(h.workerId) shouldBe "workers.status.sheltering"
+            source.complete(CivSleepingFloorMask(buildList {
+                for (x in -3..3) for (z in -3..3) add(CivPosition(x, 64, z))
+            }))
+            h.owner.pulse(3_000)
+            val route = requireNotNull(h.actor().route)
+            val workPlans = h.workPlans
+            val city = h.city
+            h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
+            h.owner.hologramSnapshots().single().status shouldBe "workers.status.route-searching"
+            route.nativeCollisionTicks = 1
+            h.owner.status(h.workerId) shouldBe "workers.status.route-blocked"
+            route.nativeCollisionTicks = 0
+            route.motion.planningFailed("no-path")
+            h.owner.status(h.workerId) shouldBe "workers.status.route-unreachable"
+            h.owner.hologramSnapshots().single().status shouldBe "workers.status.route-unreachable"
+            h.actor().route shouldBe route
+            h.workPlans shouldBe workPlans
+            h.city shouldBe city
+            val text = CivsText.fromYaml(civsLocaleSource())
+            for ((locale, seeking, walking) in listOf(
+                listOf("ru", "Ищет ночлег", "Идёт на ночлег"),
+                listOf("en", "Looking for a place to sleep", "Walking to a sleeping place"),
+            )) {
+                plainText(text.status(null, "sheltering", locale = locale)) shouldBe seeking
+                plainText(text.status(null, "to-shelter", locale = locale)) shouldBe walking
+                text.keys(locale).contains("building-status.to-shelter") shouldBe true
+            }
         }
     }
 

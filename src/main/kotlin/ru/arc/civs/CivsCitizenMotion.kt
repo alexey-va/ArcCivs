@@ -71,7 +71,8 @@ internal class CivsCitizenMotion(
                         if (collisions.retryOccupiedDeliveryArrival(actor, blocked, now)) continue
                         if (collisions.endpointResident(actor, blocked) == null) {
                             if (routes.handleBodyContact(actor, blocked, now)) continue
-                        } else if (collisions.stepPendingEndpointArrival(actor, blocked, now)) {
+                        } else if (collisions.retryOccupiedContinuation(actor, blocked, now)) continue
+                        else if (collisions.stepPendingEndpointArrival(actor, blocked, now)) {
                             blocked.progressTick = runtime.navigationTick
                             continue
                         }

@@ -98,6 +98,9 @@ class CivsStorage(private val plugin: Plugin,
     internal var validateMineNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "mine-authority-unavailable"))
     }
+    internal var validateMineOpeningNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
+        CivInventoryApplyResult.Conflict(mapOf("reason" to "mine-opening-authority-unavailable"))
+    }
     internal var validateWarehouseRefitNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "warehouse-refit-authority-unavailable"))
     }
@@ -314,6 +317,7 @@ class CivsStorage(private val plugin: Plugin,
                 administrator = claim.city.autonomy != null))
         }
         transaction.gateRefit?.let { require(it.before(transaction.after) == claim.city) }
+        transaction.mineOpening?.let { require(transaction.after.copy(revision = transaction.beforeRevision) == claim.city) }
         transaction.trade?.let { require(transaction.after.copy(revision = transaction.beforeRevision) == claim.city) }
         transaction.warehouseRefit?.let { require(it.before(transaction.after) == claim.city) }
         transaction.collected?.let { collected ->
@@ -1062,6 +1066,11 @@ class CivsStorage(private val plugin: Plugin,
             else -> Unit
         }
         if (transaction.mine != null) when (val authority = validateMineNative(transaction)) {
+            is CivInventoryApplyResult.Retry -> return authority
+            is CivInventoryApplyResult.Conflict -> return authority
+            else -> Unit
+        }
+        if (transaction.mineOpening != null) when (val authority = validateMineOpeningNative(transaction)) {
             is CivInventoryApplyResult.Retry -> return authority
             is CivInventoryApplyResult.Conflict -> return authority
             else -> Unit

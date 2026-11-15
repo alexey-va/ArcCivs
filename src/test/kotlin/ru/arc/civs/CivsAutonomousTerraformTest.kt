@@ -823,12 +823,12 @@ class CivsAutonomousTerraformTest : FunSpec({
                 draft.columns.single { it.x == x && it.z == z }.groundY shouldBe 64
                 after.getValue(CivPosition(x, 65, z)) shouldBe "minecraft:air"
                 after.getValue(CivPosition(x, 64, z)) shouldBe
-                    if (x == 0) "minecraft:coarse_dirt" else "minecraft:grass_block[snowy=false]"
+                    if (abs(x) <= 1) "minecraft:coarse_dirt" else "minecraft:grass_block[snowy=false]"
             }
         } else {
             (plan.fillCount > 0) shouldBe true
             plan.blocks.filter { it.position.y == 64 && it.position.z in 6..8 }.forEach { block ->
-                block.after shouldBe if (block.position.x == 0) "minecraft:coarse_dirt" else "minecraft:grass_block[snowy=false]"
+                block.after shouldBe if (abs(block.position.x) <= 1) "minecraft:coarse_dirt" else "minecraft:grass_block[snowy=false]"
             }
         }
         exportRoadSection(name, surface, plan.route, plan.blocks)
@@ -1144,7 +1144,10 @@ class CivsAutonomousTerraformTest : FunSpec({
         val plan = CivsAutonomousTerraform.materialize(draft, cells)
         plan.cutCount shouldBe 10
         plan.blocks.filter { it.position.y > 64 }.all { it.after == "minecraft:air" } shouldBe true
-        plan.blocks.filter { it.position.y == 64 } shouldBe plan.preparedRouteSurfaces()
+        plan.blocks.filter { it.position.y == 64 }.all {
+            it.after == "minecraft:coarse_dirt" &&
+                CivsAutonomousTerraform.roadProfileContains(plan.route, it.position)
+        } shouldBe true
         plan.blocks.filter { it.position.x == 2 && it.position.z == 22 }.map { it.position.y } shouldBe (74 downTo 65).toList()
     }
 

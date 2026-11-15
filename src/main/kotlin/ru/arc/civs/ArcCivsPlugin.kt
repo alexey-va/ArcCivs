@@ -243,7 +243,8 @@ open class ArcCivsPlugin : JavaPlugin() {
                 CivsTerrainDebugFile(dataRoot, executor)::save, CivsSettlementDebugFile(dataRoot, executor)::save,
                 service::foundVillages, service::cancelVillageSearch, service::villageSearchStatus, service::refitGate, service::infillWall, service::refitWarehouse,
                 { owner, world, style, name, anchor -> service.foundVillageAt(owner, world, style, name, anchor) },
-                refoundVillageAt = service::foundVillageAt, labGrowth = service::configureLabGrowth)
+                refoundVillageAt = service::foundVillageAt, labGrowth = service::configureLabGrowth,
+                repairMineOpening = service::repairMineOpening)
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)

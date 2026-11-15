@@ -57,7 +57,7 @@ class ArtifactLinkageTest(unittest.TestCase):
         feature = self.root / "ArcCivs.jar"
         host = self.root / "ArcCore.jar"
         with zipfile.ZipFile(feature, "w") as archive:
-            archive.writestr("plugin.yml", "name: ArcCivs\ndepend: [ArcCore, packetevents, WorldEdit"
+            archive.writestr("plugin.yml", "name: ArcCivs\ndepend: [ArcCore, packetevents"
                              + (", Citizens" if citizens_dependency else "") + "]\n")
             for name, data in self.classes.items():
                 if name.startswith("net/citizensnpcs/") or (

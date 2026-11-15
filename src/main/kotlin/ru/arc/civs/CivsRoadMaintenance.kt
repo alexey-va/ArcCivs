@@ -33,6 +33,8 @@ data class CivRoadRouteOverride(val originalRoute: List<CivPosition>, val route:
         } && (section.all { it.x == section.first().x } || section.all { it.z == section.first().z })
     }
 
+    internal fun terrace(run: IntRange): Boolean = CivsRoadTerraces.valid(originalRoute, route, run)
+
     /** Move a one-block descent off the low corner and onto its straight approach. */
     internal fun descendingTurn(run: IntRange): Boolean {
         if (run.count() != 1 || run.first < 1 || run.first + 2 > route.lastIndex) return false
@@ -73,7 +75,7 @@ data class CivRoadRouteOverride(val originalRoute: List<CivPosition>, val route:
                 originalRoute[at - 1].x != originalRoute[at + 1].x && originalRoute[at - 1].z != originalRoute[at + 1].z &&
                 originalRoute[at].y == originalRoute[at - 1].y + 1 && route[at].y == route[at - 1].y &&
                 route[at + 1].y in route[at].y..route[at].y + 1
-            require(turn || hump(run) || descendingTurn(run))
+            require(turn || hump(run) || descendingTurn(run) || terrace(run))
         }
     }
 }
@@ -163,6 +165,7 @@ data class CivRoadUpkeep(
     val junction: CivRoadJunction? = null,
     /** Only new Hall work can quote an outbound shared prefix and the ground between its branches. */
     val hall: CivHallApproach? = null,
+    val wallCleanup: CivWallApproachCleanup? = null,
 ) {
     internal fun overrides(): Map<String, CivRoadRouteOverride> = routeOverride?.let {
         linkedRouteOverrides.orEmpty() + (source.id.toString() to it)
@@ -171,6 +174,7 @@ data class CivRoadUpkeep(
     internal fun validated(city: Settlement) {
         require(city.id == cityId && city.worldId == worldId && city.owner == owner && city.pendingDeletion == null)
         require(planId == source.id && source.phase == BuildingPhase.ACTIVE && city.building(source.id) == source)
+        wallCleanup?.let { it.validated(city, this); return }
         hall?.let { proof ->
             require(route == null && routeOverride == null && linkedRouteOverrides == null && previousRouteOverrides == null &&
                 authoredAfter == null && junction == null && neighbours.isEmpty() && city.contains(floor.x, floor.z))
@@ -182,8 +186,9 @@ data class CivRoadUpkeep(
         val forecourt = route != null && routeOverride == null && junction == null &&
             source.bounds.contains(floor.x, floor.y, floor.z) && CivsWorksiteLayouts.forecourt(source)[floor] == after
         val preferred = routeOverride == null && junction == null && path?.surface(floor, city.style) == after
+        val terraceBank = terraceBank()
         require(city.contains(floor.x, floor.z) && floor.y in -4_094..4_093 &&
-            (CivsRoadMaintenance.surface(after) || preferred || forecourt))
+            (CivsRoadMaintenance.surface(after) || preferred || forecourt || terraceBank))
         require(neighbours.size <= 4 && neighbours.map { civsTerrainKey(it.x, it.z) }.distinct().size == neighbours.size)
         require(neighbours.all { abs(it.x.toLong() - floor.x) + abs(it.z.toLong() - floor.z) == 1L &&
             abs(it.y.toLong() - floor.y) <= 1L && city.contains(it.x, it.z) })
@@ -208,7 +213,8 @@ data class CivRoadUpkeep(
             val changed = repair.route.indices.filter { repair.route[it] != previous[it] }
             if (changed.size == 1 && repair.descendingTurn(changed.single()..changed.single()))
                 require(junction?.repair == repair && junction.repairOwner == source.id && junction.run == changed.single())
-            require(changed.isNotEmpty() && changed.zipWithNext().all { (a, b) -> b == a + 1 } &&
+            require(changed.isNotEmpty() && (changed.zipWithNext().all { (a, b) -> b == a + 1 } ||
+                changed.last() - changed.first() < CivsRoadTerraces.MAX_SPAN && repair.runs().all(repair::terrace)) &&
                 route == repair.route && floor == repair.route[changed.first()].let { it.copy(y = it.y - 1) })
             val beforeSection = previous.subList(changed.first() - 1, changed.last() + 2)
             val afterSection = repair.route.subList(changed.first() - 1, changed.last() + 2)
@@ -220,8 +226,10 @@ data class CivRoadUpkeep(
                 require(old == null || old.originalRoute == value.originalRoute)
                 val before = old?.route ?: value.originalRoute
                 val changes = value.route.indices.filter { before[it] != value.route[it] }
-                require(changes.isNotEmpty() && changes.zipWithNext().all { (a, b) -> b == a + 1 } &&
-                    changes.all { value.route[it].y < before[it].y })
+                require(changes.isNotEmpty() && (changes.zipWithNext().all { (a, b) -> b == a + 1 } ||
+                    changes.last() - changes.first() < CivsRoadTerraces.MAX_SPAN && value.runs().all(value::terrace)) &&
+                    changes.all { value.route[it].y < before[it].y ||
+                        value.route[it].y == before[it].y + 1 && value.runs().any { run -> it in run && value.terrace(run) } })
                 val from = before.subList(changes.first() - 1, changes.last() + 2)
                 val to = value.route.subList(changes.first() - 1, changes.last() + 2)
                 require(from == beforeSection && to == afterSection || from == beforeSection.asReversed() && to == afterSection.asReversed())
@@ -245,7 +253,7 @@ data class CivRoadUpkeep(
                 abs(a.x.toLong() - b.x) + abs(a.z.toLong() - b.z) == 1L && abs(a.y.toLong() - b.y) <= 1L
             })
             // A new signature licenses only its paired floor and finish. Other receipts retain the original proof below.
-            if (forecourt || preferred) return
+            if (forecourt || preferred || terraceBank) return
             require(CivsAutonomousTerraform.roadProfileContains(route, floor) ||
                 CivsAutonomousGeometry.approach(source).any { it.x == floor.x && it.z == floor.z } &&
                     CivsAutonomousTerraform.approachFloor(route, floor) == floor)
@@ -257,6 +265,9 @@ data class CivRoadUpkeep(
                 after == CivsRoadMaintenance.apronCorner(source, route, floor, profile, city.style))
         }
     }
+
+    internal fun terraceBank(): Boolean = routeOverride == null && junction == null && route != null &&
+        after == CivsEntrancePath.GRASS && CivsRoadTerraces.banks(route)[civsTerrainKey(floor.x, floor.z)] == floor
 }
 
 /** One paid native column. The existing inventory journal owns replay, locks and retirement. */
@@ -289,8 +300,8 @@ data class CivRoadUpkeepReceipt(val workerBefore: CivWorker, val stockBefore: St
 }
 
 internal fun CivRoadUpkeep.detached(): CivRoadUpkeep {
-    fun repair(value: CivRoadRouteOverride) = value.copy(originalRoute = value.originalRoute.toList(), route = value.route.toList())
-    return copy(hall = hall?.detached(), source = source.copy(transit = source.transit?.toList()), route = route?.toList(), neighbours = neighbours.toList(),
+    fun repair(value: CivRoadRouteOverride) = value.detached()
+    return copy(hall = hall?.detached(), wallCleanup = wallCleanup?.detached(), source = source.copy(transit = source.transit?.toList()), route = route?.toList(), neighbours = neighbours.toList(),
         routeOverride = routeOverride?.let(::repair), linkedRouteOverrides = linkedRouteOverrides?.mapValues { repair(it.value) },
         previousRouteOverrides = previousRouteOverrides?.mapValues { repair(it.value) },
         junction = junction?.let { value -> value.copy(repair = repair(value.repair), owners = value.owners.map { owner ->
@@ -418,7 +429,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
 
     private fun gradeTargets(city: Settlement, network: CivRoadUpkeepNetwork): List<CivRoadUpkeep> {
         val lowered = loweredRoadFloors(city)
-        return network.targets.filter { it.routeOverride != null || it.floor in lowered }
+        return network.targets.filter { it.routeOverride != null || it.wallCleanup != null || it.floor in lowered }
     }
 
     /** Only retired native progress can make an earlier uncapturable peak reachable from a new cut. */
@@ -706,7 +717,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             city.roadRouteOverrides.orEmpty().values.flatMap { repair ->
                 val before = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
                 CivsAutonomousTerraform.roadProfile(repair.route).filter { (key, floor) ->
-                    before[key]?.let { floor.y < it.y } == true
+                    before[key]?.let { floor.y != it.y } == true
                 }.values
             }.toHashSet()
         /** The old column charge plus each newly placed support; clearance keeps its existing charge. */
@@ -791,6 +802,14 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             return repairs
         }
 
+        private fun terraceOverrides(city: Settlement, source: CivBuilding, route: List<CivPosition>): List<CivRoadRouteOverride> {
+            val previous = city.roadRouteOverrides?.get(source.id.toString())
+            return CivsRoadTerraces.candidates(route).mapNotNull { candidate ->
+                CivRoadRouteOverride(previous?.originalRoute ?: route, candidate, previous?.gateDetours)
+                    .takeIf { runCatching { it.validated(city, source) }.isSuccess }
+            }
+        }
+
         /** At most the retained three-wide old road finish, at its exact old height. */
         internal fun ownedPavement(city: Settlement, upkeep: CivRoadUpkeep): Map<CivPosition, Set<String>> {
             val route = upkeep.route
@@ -840,7 +859,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             val priorProfile = linkedMapOf<Long, Int>()
             prior.forEach { route -> route.forEach { p -> priorProfile.putIfAbsent(civsTerrainKey(p.x, p.z), p.y - 1) } }
             prior.forEach { route -> CivsAutonomousTerraform.roadProfile(route).forEach { (key, p) -> priorProfile.putIfAbsent(key, p.y) } }
-            return old.filter { (key, floor) -> final[key]?.y?.let { it < floor.y } == true }.values.associateWith { floor ->
+            return old.filter { (key, floor) -> final[key]?.y?.let { it != floor.y } == true }.values.associateWith { floor ->
                 setOf(CivsSettlementLayout.pavement(floor, profile),
                     CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = true),
                     CivsSettlementLayout.pathPavement(floor, profile, city.style,
@@ -891,6 +910,12 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             require(changes.size in 1..CivsAutonomousTerraform.MAXIMUM_CHANGE + MAX_CLEARANCE &&
                 changes.map { it.position }.distinct().size == changes.size)
             require(changes.all { it.before != it.after })
+            upkeep.wallCleanup?.let { proof ->
+                val change = changes.single()
+                require(change.position == upkeep.floor && change.after == CivsEntrancePath.GRASS &&
+                    change.before == proof.authored.after)
+                return
+            }
             upkeep.hall?.let { proof ->
                 val layout = requireNotNull(CivsTownHallApproach.from(city, upkeep.source, proof))
                 require(layout.surfaces[upkeep.floor] == upkeep.after)
@@ -920,7 +945,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             }
             val path = upkeep.route?.let { CivsEntrancePath.from(upkeep.source, it) }
                 ?.takeIf { upkeep.routeOverride == null && upkeep.junction == null && it.surface(upkeep.floor, city.style) == upkeep.after }
-            val bank = path?.bank(upkeep.floor) == true
+            val bank = path?.bank(upkeep.floor) == true || upkeep.terraceBank()
             val forecourt = upkeep.source.bounds.contains(upkeep.floor.x, upkeep.floor.y, upkeep.floor.z) &&
                 CivsWorksiteLayouts.forecourt(upkeep.source)[upkeep.floor] == upkeep.after
             val foundation = changes.takeWhile { it.position.y < upkeep.floor.y }
@@ -929,11 +954,14 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     path?.bedding(upkeep.floor, change.before, city.style) == true
             } == true
             if (foundation.isNotEmpty()) {
-                require(city.inventory?.mode == CivStorageMode.PHYSICAL && upkeep.route != null && upkeep.routeOverride == null)
+                require(city.inventory?.mode == CivStorageMode.PHYSICAL && upkeep.route != null &&
+                    (upkeep.routeOverride == null || upkeep.routeOverride.runs().any(upkeep.routeOverride::terrace)))
                 require(foundation.size < CivsAutonomousTerraform.MAXIMUM_CHANGE)
+                val paid = ownedPavement(city, upkeep)
                 if (!bedding) foundation.forEachIndexed { index, change ->
                     require(change.position == upkeep.floor.copy(y = upkeep.floor.y - foundation.size + index) &&
-                        air(change.before) && change.after == "minecraft:cobblestone")
+                        (air(change.before) || change.before in paid[change.position].orEmpty()) &&
+                        change.after == if (bank) "minecraft:dirt" else "minecraft:cobblestone")
                 }
             }
             val column = changes.drop(foundation.size)
@@ -1167,7 +1195,9 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             val gradeTargets = if (!proposeCuts) emptyList() else city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }
                 .flatMap { source ->
                     val current = access.routes[source.id].orEmpty()
-                    val repairs = humpOverrides(city, source, current).ifEmpty { listOfNotNull(turnOverride(city, source, current)) }
+                    val repairs = humpOverrides(city, source, current).ifEmpty {
+                        terraceOverrides(city, source, current).ifEmpty { listOfNotNull(turnOverride(city, source, current)) }
+                    }
                     repairs.mapNotNull candidate@ { repair ->
                         val changes = current.indices.filter { current[it] != repair.route[it] }
                         val from = changes.first() - 1
@@ -1179,8 +1209,6 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                         val oldProfile = routeProfiles[source.id].orEmpty()
                         val corrected = CivsAutonomousTerraform.roadProfile(repair.route)
                         val altered = corrected.filter { (key, point) -> oldProfile[key] != point && !excluded(point) }
-                        // Hold the unfinished cut until its first native receipt can safely admit the full section.
-                        altered.keys.forEach(held::add)
                         if (changes.any { excluded(repair.route[it]) } ||
                             altered.any { (key, _) -> key in ambiguous || key in roadColumns || routeProfiles.any { (id, profile) ->
                                 city.building(id)?.type == BuildingType.ROAD && key in profile
@@ -1222,6 +1250,9 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                             .filter { abs(it.y.toLong() - floor.y) <= 1L && !excluded(it) }
                         val profile = (neighbours + floor).associate { civsTerrainKey(it.x, it.z) to it.y }
                         val finish = approachFinish(floor, profile, repair.route) ?: return@candidate null
+                        // A rejected shared-grade proposal must not hide ordinary surface repair.
+                        // Hold only a structurally admitted section until its first native receipt.
+                        altered.keys.forEach(held::add)
                         val touched = linked.keys + source.id.toString()
                         CivRoadUpkeep(city.id, city.worldId, city.owner, source.id, source, floor,
                             finish, repair.route, neighbours, repair, linkedRouteOverrides = linked.takeIf { it.isNotEmpty() },
@@ -1272,6 +1303,15 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 CivRoadUpkeep(city.id, city.worldId, city.owner, layout.hall.id, layout.hall, floor, after,
                     null, emptyList(), hall = layout.witness)
             }
+            val bankTargets = city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }.flatMap { source ->
+                val route = access.routes[source.id].orEmpty()
+                CivsRoadTerraces.banks(route).mapNotNull { (key, floor) ->
+                    if (key in floors || key in held || key in ambiguous || excluded(floor) ||
+                        restrictTo != null && key !in restrictTo) return@mapNotNull null
+                    CivRoadUpkeep(city.id, city.worldId, city.owner, source.id, source, floor, CivsEntrancePath.GRASS,
+                        route, emptyList()).also { it.validated(city) }
+                }
+            }.distinctBy { it.floor }
             val targets = candidates.mapNotNull { (key, candidate) ->
                 if (key in hallColumns) return@mapNotNull null
                 val (source, floor) = candidate
@@ -1301,7 +1341,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     .also { it.validated(city) }
             }
             // Finish walking entrances before spending builder trips on the distant shoulders of long routes.
-            val entryFirst = (hallTargets + targets).sortedBy { target ->
+            val entryFirst = (hallTargets + targets + bankTargets).sortedBy { target ->
                 abs(target.floor.x.toLong() - target.source.entrance.x) + abs(target.floor.z.toLong() - target.source.entrance.z)
             }
             // Retained lowered columns keep the native grade queue's existing sequence.
@@ -1323,7 +1363,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             }
             // Finish the admitted apron at one doorway before travelling to another entrance.
             return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(),
-                gradeTargets.filterNot { touchesHall(it, hallColumns) } +
+                (if (proposeCuts) CivsWallApproachCleanup.targets(city, access) else emptyList()) + gradeTargets.filterNot { touchesHall(it, hallColumns) } +
                     preservedGrades + entrances.values.flatten() + remaining,
                 city.roadRouteOverrides, deferredDescent)
         }

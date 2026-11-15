@@ -131,7 +131,11 @@ internal class CivsCitizenObservations(
         if (actor.workerId in runtime.pendingHarm) return "injury-pending"
         actor.combatStatus?.let { return it }
         if (actor.alarmSheltering) return "alarm-shelter"
-        if (actor.sheltering) return if (actor.sleeping) "sleeping" else "sheltering"
+        if (actor.sheltering) return when {
+            actor.sleeping -> "sleeping"
+            actor.shelter == null -> "sheltering"
+            else -> "to-shelter"
+        }
         if (logistics.collectedPending(actor)) return "loading-cargo"
         if (actor.tavernService != null) return "serving-guests"
         actor.mealVisit?.let { return if (it.seatedFrom != null && it.servedAt == null) "waiting"
@@ -425,5 +429,5 @@ internal fun citizenObservedTravelStatus(activity: String, route: CitizenRoute?,
 private val CITIZEN_TRAVEL_STATUSES = setOf(
     "to-work", "moving-to-work", "moving-to-storage", "moving-to-tavern", "moving-to-town-hall",
     "returning-output", "moving-to-pickup", "carrying-cargo", "to-store", "mine-descending", "mine-returning",
-    "collecting-items", "wandering", "meeting", "to-campfire", "to-meal", "patrolling",
+    "collecting-items", "wandering", "meeting", "to-campfire", "to-meal", "to-shelter", "patrolling",
 )

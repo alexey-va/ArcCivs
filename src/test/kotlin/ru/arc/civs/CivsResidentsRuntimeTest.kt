@@ -1313,7 +1313,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 }
             }
             h.city.workers.single().cargo shouldBe null
-            val preparingStatus = if (sheltering) "workers.status.sheltering" else "workers.status.route-searching"
+            val preparingStatus = "workers.status.route-searching"
             val arrivedStatus = if (sheltering) "workers.status.sleeping" else "workers.status.waiting-orders"
             val maximumStep = if (sheltering) .118251 else .172001
             h.navigationNow = 2_000L
@@ -3160,7 +3160,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                     }
                     if (tick == 200) atTenSeconds = after
                     if (tick == 220) {
-                        h.owner.status(h.workerId) shouldBe "workers.status.sheltering"
+                        h.owner.status(h.workerId) shouldBe "workers.status.to-shelter"
                         actor.pose shouldBe PacketNpcPose.STANDING
                         home.bounds.contains(after.blockX, after.blockY, after.blockZ) shouldBe false
                         (after.distance(requireNotNull(atTenSeconds)) > .5) shouldBe true
@@ -3209,7 +3209,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             repeat(200) { h.navigate() }
             h.owner.pulse(13_001)
             actor.location.x shouldBe 20.5
-            h.owner.status(h.workerId) shouldBe "workers.status.sheltering"
+            h.owner.status(h.workerId) shouldBe "workers.status.route-unreachable"
             h.owner.residentStepAllowed = { _, _, _ -> true }
             h.owner.pulse(14_001)
             val recovered = actor.location

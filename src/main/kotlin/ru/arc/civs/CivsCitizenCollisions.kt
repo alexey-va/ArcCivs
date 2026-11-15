@@ -414,6 +414,20 @@ internal class CivsCitizenCollisions(
         return routes.retryDeliveryStanding(actor, route, courier, blocker.workerId, now)
     }
 
+    /** A search-budget endpoint is not an arrival requirement. Replan toward the same real goal around its occupant. */
+    fun retryOccupiedContinuation(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
+        val since = route.bodyBlockedSince ?: return false
+        if (!route.motion.continuation || route.motion.searching || route.motion.finished || route.motion.failure != null ||
+            route.completion != null || route.idleAnchor != null ||
+            runtime.navigationTick - maxOf(since, route.progressTick) < 40L || endpointResident(actor, route) == null) return false
+        if (routes.replanNavigation(actor, route, "resident-blocked", now, destination = route.target)) return true
+        if (route.replanAttempts < 2) return false
+        // The ordinary work owner retires this leg and retries; contact never licenses a false arrival.
+        routes.navigationDiagnostic(actor, "resident-blocked", route.target, now, terminal = true)
+        route.completion = CitizenNavigationCompletion("resident-blocked")
+        return true
+    }
+
     /** An occupied endpoint still requires walking to a clear, supported side before accepting arrival. */
     fun stepPendingEndpointArrival(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
         val pending = actor.plan.pendingStockDelivery
@@ -532,8 +546,20 @@ internal class CivsCitizenCollisions(
         fun include(body: BoundingBox) {
             if (bounds == null || bounds.overlaps(body)) bodies.add(body)
         }
+        fun includeStanding(feet: Location) {
+            val scale = actor.npc.scale
+            val half = .3 * scale
+            // Match the strict AABB overlap before allocating a distant resident's standing body.
+            if (bounds == null || bounds.maxX > feet.x - half && bounds.minX < feet.x + half &&
+                bounds.maxY > feet.y && bounds.minY < feet.y + 1.8 * scale &&
+                bounds.maxZ > feet.z - half && bounds.minZ < feet.z + half) {
+                bodies.add(citizenStandingBounds(feet, scale))
+            }
+        }
         val meal = actor.mealVisit
-        include(actor.occupiedBody())
+        val posedBody = actor.idleNap?.bounds ?: meal?.seat?.takeIf { actor.npc.isSeated }?.bounds
+            ?: actor.sleepPose?.takeIf { actor.sleeping }?.bounds
+        if (posedBody != null) include(posedBody) else includeStanding(actor.npc.location)
         meal?.seat?.let { seat ->
             include(seat.bounds)
             include(diningStandingBounds(meal.seatedFrom ?: seat.approach.location(actor.npc.world), actor.npc.scale))
@@ -541,7 +567,7 @@ internal class CivsCitizenCollisions(
         if (actor.sheltering) {
             actor.shelterPose?.let { include(it.bounds) }
             (actor.sleepOrigin ?: actor.shelterFeet ?: actor.shelter?.location(actor.npc.world))?.let {
-                include(citizenStandingBounds(it, actor.npc.scale))
+                includeStanding(it)
             }
         }
     }

@@ -92,6 +92,7 @@ class CivsService(
         it.beginReceiptBootstrap()
         it.validateUpkeepNative = ::validateUpkeepNative
         it.validateMineNative = ::validateMineNative
+        it.validateMineOpeningNative = { tx -> mineMaintenance.validateNative(tx) }
         it.validateGateRefitNative = { tx -> gateMaintenance.validateNative(tx) }
         it.validateWarehouseRefitNative = { tx -> warehouseMaintenance.validateNative(tx) }
     }
@@ -129,7 +130,7 @@ class CivsService(
         ::deliver, { player, cityId, workerId ->
             if (cities[cityId]?.autonomy != null && player.hasPermission("arccivs.admin")) ui.openWorker(player, cityId, workerId)
             else if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
-        }, settings.maximumNpcs, settings.viewerRange, hurt = ::hurtResident, footstep = footTraffic::record,
+        }, settings.maximumNpcs, settings.viewerRange, hurt = ::hurtResident,
         surfaceSpeed = footTraffic, workPlan = { city, worker -> roadMaintenance.plan(city, worker) ?: worksites.plan(city, worker) },
         workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
@@ -210,6 +211,10 @@ class CivsService(
     private val warehouseMaintenance: CivsWarehouseMaintenance = CivsWarehouseMaintenance(plugin, this, records, tasks, executor, store, blueprints,
         world, storage, inventoryJournal, { city -> cityPlans.loadAutonomousPlans(city) }, construction::isPlacing,
         citizens::growthBlocked)
+
+    private val mineMaintenance = CivsMineMaintenance(this, records, tasks, world, storage, inventoryJournal,
+        { city, building, point, before -> cityPlans.initialMineBlock(city, building, point, before) },
+        construction::isPlacing, citizens::growthBlocked)
 
     private val vegetation = CivsVillageVegetation(plugin, tasks, planningExecutor,
         { city -> cityPlans.loadAutonomousPlans(city).thenCombine(
@@ -1284,6 +1289,7 @@ class CivsService(
             cities.values.asSequence().filter { it.id !in busy && it.id !in unhealthy && it.pendingDeletion == null }
                 .forEach { city -> roadMaintenance.backfillSurfaces(city) { citizens.canReassign(city.id, it) } }
             inventoryJournal.recover()
+            mineMaintenance.pulse()
             pulseCorpses()
             deletion.pulseDeletions()
             controlInstallations.pulse(::now, ::initialAutonomousApproachAllowed, buildingRequests::repairInitialAutonomousApproach)
@@ -1568,6 +1574,11 @@ class CivsService(
     internal fun deleteRecord(city: Settlement): CompletableFuture<Unit> = store.delete(city)
 
     internal fun repairBuildingStorage(cityId: UUID, buildingId: UUID): CompletableFuture<Map<String, Int>> = storageActions.repairBuildingStorage(cityId, buildingId)
+
+    internal fun repairMineOpening(cityId: UUID, buildingId: UUID): CompletableFuture<Map<String, Any?>> =
+        action("mine_opening_repair", null, "city" to cityId, "building" to buildingId) {
+            afterCityAvailable(cityId) { mineMaintenance.request(cityId, buildingId) }
+        }
 
     internal fun refitWarehouse(cityId: UUID, buildingId: UUID, proof: String?): CompletableFuture<Map<String, Any?>> =
         action("warehouse_refit", null, "city" to cityId, "warehouse" to buildingId, "apply" to (proof != null)) {

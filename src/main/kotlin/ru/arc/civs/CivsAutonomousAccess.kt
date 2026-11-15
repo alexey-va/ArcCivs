@@ -12,7 +12,8 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     val wallApproachWrites: Map<UUID, Set<Long>> = emptyMap(),
     val perimeterCaptures: Map<UUID, CivPerimeterCapture> = emptyMap(),
     private val surveyedHallApron: Map<Long, CivPosition> = emptyMap(),
-    val hallWitness: CivHallApproach? = null) {
+    val hallWitness: CivHallApproach? = null,
+    val wallPavement: Map<UUID, CivWallApproachCapture> = emptyMap()) {
     fun hallApproach(city: Settlement): CivsTownHallApproach? {
         val proof = hallWitness ?: return null
         val building = city.building(proof.founding.id) ?: return null
@@ -183,7 +184,8 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                 adopted?.plots.orEmpty().flatMap { plot ->
                     plot.fortification?.let { CivsSettlementPlans.portReservations(it.proof) }.orEmpty()
                 }, paidHallLeadOut(city, routes), wallApproachWrites, perimeterCaptures,
-                hallWitness = CivsTownHallApproach.capture(city, retained, routes))
+                hallWitness = CivsTownHallApproach.capture(city, retained, routes),
+                wallPavement = CivsWallApproachCleanup.captures(city, retained, routes))
         }
 
         /** Only an exact, corroborated paid centreline can replace the Hall's synthetic flat apron. */

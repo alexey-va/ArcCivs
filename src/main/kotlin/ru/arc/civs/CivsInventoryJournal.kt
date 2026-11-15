@@ -53,7 +53,8 @@ internal class CivsInventoryJournal(
             tx.collected?.ground.orEmpty().map(CivGroundItemChange::position) +
             tx.collected?.forestryLeafLoot?.sources.orEmpty().map(CivForestryLeafSource::leaf) +
             tx.containerRelocation?.containers.orEmpty().map(CivRelocatedContainer::position) +
-            tx.warehouseRefit?.routes.orEmpty().flatten()
+            tx.warehouseRefit?.routes.orEmpty().flatten() +
+            tx.mineOpening?.let { CivsMineOpening.positions(it.building) }.orEmpty()
         val keys = positions.mapTo(linkedSetOf()) { PaperChunkKey(tx.after.worldId, it.x shr 4, it.z shr 4) }
         tx.upkeep?.work?.let { work ->
             val upkeep = requireNotNull(work.upkeep)

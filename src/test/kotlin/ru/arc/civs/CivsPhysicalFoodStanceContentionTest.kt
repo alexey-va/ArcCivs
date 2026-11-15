@@ -7,10 +7,105 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.block.Barrel
 import org.bukkit.inventory.ItemStack
+import org.bukkit.util.BoundingBox
+import org.bukkit.util.VoxelShape
+import org.mockbukkit.mockbukkit.block.BlockMock
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsPhysicalFoodStanceContentionTest : FunSpec({
+    test("a hungry resident walks on native carpet to food, preserves occupied sides and releases the completed pickup") {
+        residentRuntime(worldFactory = ::FoodCarpetWorld, server = CivsWorksiteServerFixture()) { h ->
+            h.navigationNow = 2_000
+            h.holdNavigation = true
+            val quarry = h.assignQuarry()
+            val container = CivPosition(0, 64, 0)
+            val hall = h.city.buildings.first().copy(control = container, entrance = CivPosition(0, 64, -2))
+            val blockerId = UUID(0, 301)
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(hall, quarry),
+                workers = h.city.workers.map { it.copy(hunger = 0) } +
+                    CivWorker(blockerId, "Resident beside food", null, hunger = 20)))
+            h.work = CivWorldWork(h.workerId, 0, quarry.id, CivPosition(21, 64, 0), emptyList(),
+                durationMillis = 60_000, status = "digging-mine")
+            h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            val food = (h.world.getBlockAt(0, 64, 0).state as Barrel).inventory
+            food.setItem(0, ItemStack(Material.BREAD, 64))
+            admitFoodStanceActors(h)
+            val actor = foodStanceActor(h, h.workerId)
+            val blocker = foodStanceActor(h, blockerId)
+            val routes = foodStanceRoutes(h)
+            val logistics = foodStanceLogistics(h)
+            actor.npc.teleport(Location(h.world, 6.5, 64.0, 3.5))
+            blocker.npc.teleport(Location(h.world, 1.5, 64.0625, .5))
+            val canonical = requireNotNull(citizenCollectedHomeTarget(h.city, hall, h.world, container))
+            canonical shouldBe CivPosition(1, 64, 0)
+            citizenStandable(h.world, canonical) shouldBe true
+            citizenPacketBodyClear(h.world, canonical.point(), false) shouldBe false
+            citizenPacketBodyClear(h.world, canonical.location(h.world).add(0.0, .0625, 0.0).point(), false) shouldBe true
+            h.physicalFoodSource = CivResidentFoodSource(hall.id, container, canonical)
+            val receipt = CompletableFuture<Settlement>()
+            var pickups = 0
+            h.physicalFoodPickup = { selected ->
+                selected.container shouldBe container
+                selected.standing shouldBe CivPosition(-1, 64, 0)
+                routes.arrivalBodyClear(actor) shouldBe true
+                civsCanReachContainer(actor.npc.location, container) shouldBe true
+                citizenPacketBodyClear(h.world, actor.npc.location.point(), false) shouldBe true
+                citizenPacketSupported(h.world, actor.npc.location.point()) shouldBe true
+                actor.npc.location.y shouldBe 64.0625
+                food.getItem(0) shouldBe ItemStack(Material.BREAD, 64)
+                pickups++
+                receipt
+            }
+            fun pulseFood() {
+                val now = requireNotNull(h.navigationNow)
+                logistics.drainSupplies(now)
+                logistics.supplyFood(actor, h.city, h.city.workers.single { it.id == h.workerId }, h.world, now)
+            }
+            h.nativeCollisions().use { collisions ->
+                h.owner.residentStepAllowed = collisions::canResidentMove
+                h.navigationNow = requireNotNull(h.navigationNow) + 1_000
+                pulseFood()
+                val route = withClue(h.owner.debug(h.city.id, h.workerId)) { requireNotNull(actor.route) }
+                route.authored shouldBe CivPosition(-1, 64, 0)
+                route.target.point() shouldBe CitizenPoint(-.5, 64.0625, .5)
+                pickups shouldBe 0
+                food.getItem(0) shouldBe ItemStack(Material.BREAD, 64)
+                h.releaseNavigation()
+                for (tick in 1..1_000) {
+                    h.navigate()
+                    if (tick % 5 == 0) pulseFood()
+                    if (pickups > 0) break
+                }
+                withClue(h.owner.debug(h.city.id, h.workerId)) { pickups shouldBe 1 }
+                actor.route shouldBe null
+                (actor.supplyPickup != null) shouldBe true
+                food.getItem(0) shouldBe ItemStack(Material.BREAD, 64)
+                CivsEquipment.usableCount(h.city.workers.single { it.id == h.workerId }, "BREAD") shouldBe 0
+                val supplied = CivsEquipment.collectSupplies(h.city.workers.single { it.id == h.workerId }, mapOf("BREAD" to 4L))
+                food.setItem(0, ItemStack(Material.BREAD, 60))
+                h.city = h.city.copy(revision = h.city.revision + 1,
+                    workers = h.city.workers.map { if (it.id == h.workerId) supplied else it })
+                receipt.complete(h.city)
+                h.navigationNow = requireNotNull(h.navigationNow) + 1_000
+                logistics.drainSupplies(requireNotNull(h.navigationNow))
+                actor.supplyPickup shouldBe null
+                actor.foodPickupSource shouldBe null
+                actor.foodSource shouldBe null
+                h.navigationNow = requireNotNull(h.navigationNow) + 1_000
+                logistics.supplyFood(actor, h.city, supplied, h.world, requireNotNull(h.navigationNow)) shouldBe false
+                pickups shouldBe 1
+                food.getItem(0) shouldBe ItemStack(Material.BREAD, 60)
+                CivsEquipment.usableCount(supplied, "BREAD") shouldBe 4
+                supplied.hunger shouldBe 0 // Pickup transfers existing food; the eating session owns nutrition.
+                h.city.stock shouldBe Stock()
+                h.deliveries shouldBe 0
+                h.supplyRequests shouldBe 0
+                blocker.npc.location.point() shouldBe CitizenPoint(1.5, 64.0625, .5)
+            }
+        }
+    }
+
     test("hungry residents avoid an occupied food side and each other's reserved arrival while retaining their chosen side") {
         residentRuntime(server = CivsWorksiteServerFixture()) { h ->
             h.navigationNow = 2_000
@@ -225,5 +320,32 @@ private fun admitFoodStanceActors(h: ResidentRuntime) {
         life.stopMeal(actor)
         foodStanceRoutes(h).cancelRoute(actor)
         actor.supplyRetryAt = 0
+    }
+}
+
+/** The native Auto3 tavern capture has a full-width carpet collision surface at 1/16 block. */
+private class FoodCarpetWorld : ResidentRuntimeWorld() {
+    private val carpets = mutableMapOf<Pair<Int, Int>, BlockMock>()
+
+    init {
+        // Chunk snapshots must already contain the whole authored carpet; a later lazy
+        // cell would otherwise appear as a native edit against the captured air palette.
+        for (x in -4..4) for (z in -4..4) if (x != 0 || z != 0) getBlockAt(x, 64, z)
+    }
+
+    override fun getBlockAt(x: Int, y: Int, z: Int): BlockMock {
+        if (y != 64 || x !in -4..4 || z !in -4..4 || x == 0 && z == 0) return super.getBlockAt(x, y, z)
+        return carpets.getOrPut(x to z) {
+            super.getBlockAt(x, y, z).type = Material.BLACK_CARPET
+            val shape = BoundingBox(0.0, 0.0, 0.0, 1.0, .0625, 1.0)
+            object : BlockMock(Material.BLACK_CARPET, Location(this, x.toDouble(), y.toDouble(), z.toDouble())) {
+                override fun isPassable(): Boolean = false
+                override fun getBoundingBox(): BoundingBox = shape.clone().shift(x.toDouble(), y.toDouble(), z.toDouble())
+                override fun getCollisionShape(): VoxelShape = object : VoxelShape {
+                    override fun getBoundingBoxes(): Collection<BoundingBox> = listOf(shape.clone())
+                    override fun overlaps(other: BoundingBox): Boolean = shape.overlaps(other)
+                }
+            }
+        }
     }
 }

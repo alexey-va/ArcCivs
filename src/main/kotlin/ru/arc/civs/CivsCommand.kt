@@ -51,6 +51,8 @@ class CivsCommand(
     private val refoundVillageAt: (UUID, String, String, String, CivPosition, UUID) -> CompletableFuture<Any> = { _, _, _, _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
     private val labGrowth: (UUID, String) -> Map<String, Any?> = { _, _ -> throw CivsRejection("lab-growth-unavailable") },
+    private val repairMineOpening: (UUID, UUID) -> CompletableFuture<Map<String, Any?>> = { _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (args.firstOrNull() == "lab-growth") {
@@ -306,6 +308,25 @@ class CivsCommand(
                     else reply(mapOf("state" to "failed", "city" to city, "gate" to gate,
                         "reason" to (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "gate-refit-failed"),
                         "details" to failure?.let { CivsDiagnostics.rejection(it)?.values }))
+                }
+            return true
+        }
+        if (args.firstOrNull() == "repair-mine-opening") {
+            val city = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val building = args.getOrNull(2)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                args.size != 3 || city == null || building == null -> "invalid-mine-opening-arguments"
+                hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
+                else -> null
+            }
+            fun reply(value: Map<String, Any?>) = sender.sendMessage("ARCCIVS_MINE_OPENING " + Gson().toJson(value))
+            if (error != null) reply(mapOf("state" to "failed", "reason" to error))
+            else runCatching { repairMineOpening(requireNotNull(city), requireNotNull(building)) }
+                .getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { value, failure ->
+                    if (failure == null && value != null) reply(value)
+                    else reply(mapOf("state" to "failed", "city" to city, "building" to building,
+                        "reason" to (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "mine-opening-failed")))
                 }
             return true
         }

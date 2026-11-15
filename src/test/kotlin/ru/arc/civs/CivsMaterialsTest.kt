@@ -40,6 +40,7 @@ class CivsMaterialsTest : FunSpec({
         CivsMaterials.requirements("minecraft:potted_poppy") shouldBe mapOf("FLOWER_POT" to 1L, "POPPY" to 1L)
         CivsMaterials.requirements("minecraft:wheat[age=7]") shouldBe mapOf("WHEAT_SEEDS" to 1L)
         CivsMaterials.requirements("minecraft:oak_stairs[waterlogged=true]") shouldBe mapOf("OAK_STAIRS" to 1L)
+        CivsMaterials.requirements("oak planks") shouldBe mapOf("OAK_PLANKS" to 1L)
         CivsMaterials.requirements("minecraft:structure_void") shouldBe emptyMap()
         CivsMaterials.requirements("minecraft:fire[age=15,east=false,north=false,south=false,up=false,west=false]") shouldBe
             mapOf("FIRE_CHARGE" to 1L)

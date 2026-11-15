@@ -410,7 +410,7 @@ class CivsUi internal constructor(
         "active", "working", "working-field", "watering", "fertilizing", "planting-tree", "felling-tree", "digging-mine", "building", "placing",
         "delivering", "loading-cargo", "collecting-supplies", "guarding", "eating" -> COMMIT
         "to-work", "moving-to-work", "moving-to-storage", "moving-to-tavern", "moving-to-town-hall", "to-store", "moving-to-pickup", "carrying-cargo", "to-meal", "patrolling" -> NAVIGATION
-        "sleeping", "sheltering", "to-campfire", "campfire", "no-viewers", "learning" -> PERSONAL
+        "sleeping", "sheltering", "to-shelter", "to-campfire", "campfire", "no-viewers", "learning" -> PERSONAL
         "playing", "wandering", "unassigned", "no-assignment", "no-construction" -> PEOPLE
         else -> STOCK
     }

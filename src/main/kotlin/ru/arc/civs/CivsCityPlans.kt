@@ -62,7 +62,7 @@ internal class CivsCityPlans(
     fun initialMinesUnchanged(before: Settlement?, after: Settlement): Boolean =
         before != null && initialMineKeys(before) == initialMineKeys(after)
 
-    /** Only the current 27 mouth cuts; control/production changes never rewrite the retained capture. */
+    /** Only the current shallow mouth; control/production changes never rewrite the retained capture. */
     fun initialMineBlock(city: Settlement, building: CivBuilding, point: CivPosition, before: String): Boolean {
         if (building.phase != BuildingPhase.ACTIVE || building.type != BuildingType.QUARRY) return false
         val key = initialMineKey(city, building)
@@ -81,9 +81,7 @@ internal class CivsCityPlans(
                     initialMineIdentity(plan.building) !in key.sources) return@thenApplyAsync null
                 val mine = CivsMinePlan.forBuilding(building) ?: return@thenApplyAsync null
                 if (mine.version != 7) return@thenApplyAsync null
-                val targets = mine.sections["0/shaft/opening"].orEmpty().asSequence()
-                    .filter { mine.steps[it].after == null }
-                    .map { CivsWorksiteLayouts.point(building, mine.steps[it].point) }.toSet()
+                val targets = CivsMineOpening.positions(building).toSet()
                 // Construction applies terrain first; the authored schematic has the final word at an overlap.
                 val cuts = buildMap {
                     for (cell in plan.terrain?.blocks.orEmpty()) if (cell.position in targets) put(cell.position, cell.after)

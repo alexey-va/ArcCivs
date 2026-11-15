@@ -119,7 +119,9 @@ internal fun civsPlanBoardSnapshot(city: Settlement, saved: List<CivPlacementPla
     city.construction?.plannedBuilding?.let { planned[it.id] = it.boardCopy() }
     return CivPlanBoardSnapshot(city.id, city.name, civsPlanBoardLayoutKey(city), city.worldId, city.center, city.radius,
         city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map { it.boardCopy() }, planned.values.toList(),
-        CivAutonomousAccess.from(city, saved.filter { it.id == it.building.id }).routes.mapValues { (_, route) -> route.toList() },
+        CivAutonomousAccess.from(city, saved.filter { it.id == CivsWarehouseRefit.retainedPlanId(it.building) }).routes
+            .filterKeys { id -> city.building(id)?.let { CivsWallApproachCleanup.completed(city, it) } != true }
+            .mapValues { (_, route) -> route.toList() },
         CivsSettlementPlans.detached(CivsSettlementPlans.current(city)))
 }
 

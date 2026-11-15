@@ -246,7 +246,8 @@ internal object CivsMaterials {
         return costs
     }
 
-    private fun item(name: String): String = Material.matchMaterial(name)?.takeIf { it.isItem && !it.isAir }?.name
+    private fun item(name: String): String = (Material.getMaterial(name) ?: Material.matchMaterial(name))
+        ?.takeIf { it.isItem && !it.isAir }?.name
         ?: throw CivsRejection("unsupported-material", mapOf("material" to name))
 
     private val TALL_PLANTS = setOf("TALL_GRASS", "LARGE_FERN", "SUNFLOWER", "LILAC", "ROSE_BUSH", "PEONY", "TALL_SEAGRASS", "PITCHER_PLANT")

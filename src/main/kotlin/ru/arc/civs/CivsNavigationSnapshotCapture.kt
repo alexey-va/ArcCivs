@@ -215,16 +215,19 @@ internal class CitizenSnapshotCapture(
             }
             val blocks = CitizenSnapshotBlocks(positions, cells.requireNoNulls())
             val edges = citizenSearchCandidates(probe, blocks, minimumY, maximumY).map { edge ->
-                edge.copy(permitted = if (probe.incoming) policy.stepAllowed(edge.node.point(), probe.from)
-                    else policy.stepAllowed(probe.from, edge.node.point()))
+                val point = edge.node.point()
+                val permitted = if (probe.incoming) policy.stepAllowed(point, probe.from)
+                    else policy.stepAllowed(probe.from, point)
+                if (permitted == edge.permitted) edge else edge.copy(permitted = permitted)
             }
             edges.forEach { edge -> requiredCosts += blocks.key(edge.node.x, citizenSupportY(edge.node.y), edge.node.z) }
             completed += CapturedProbe(probe, blocks, edges)
             if (prefetch && (next < requestedCount || connectedPrefetch)) for (edge in edges) {
                 if (probes.size >= maximumProbes) break
-                if (edge.permitted && probe.corridor?.contains(edge.node.point()) != false &&
-                    probe.bounds?.contains(edge.node.point()) != false && seen.add(edge.node))
-                    probes += CitizenSearchProbe(edge.node, edge.node.point(), corridor = probe.corridor, bounds = probe.bounds)
+                if (!edge.permitted) continue
+                val point = edge.node.point()
+                if (probe.corridor?.contains(point) != false && probe.bounds?.contains(point) != false && seen.add(edge.node))
+                    probes += CitizenSearchProbe(edge.node, point, corridor = probe.corridor, bounds = probe.bounds)
             }
             next++
         }

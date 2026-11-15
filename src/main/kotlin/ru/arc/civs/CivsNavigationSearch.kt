@@ -253,16 +253,17 @@ internal class CitizenNavigationSearch(
         val terrain = CitizenSearchGeometry(capture.blocks, minimumY, maximumY, avoiding)
         val from = capture.probe.from
         if (!terrain.loaded(previous.node.x, floor(previous.node.y).toInt(), previous.node.z)) return "chunk-unloaded"
+        val startPoint = start.point()
         for (edge in capture.edges) {
             if (cancelled.get()) return "cancelled"
             val next = edge.node
             if (!edge.permitted) continue
-            if (!terrain.bodyClear(next.point()) || !terrain.stepClear(from, next.point(), edge.action)) {
+            val point = next.point()
+            if (!terrain.bodyClear(point) || !terrain.stepClear(from, point, edge.action)) {
                 rememberObstacles(capture.blocks, from.y, next.y)
                 continue
             }
-            val point = next.point()
-            if (abs(point.x - start.point().x) > 96 || abs(point.z - start.point().z) > 96 ||
+            if (abs(point.x - startPoint.x) > 96 || abs(point.z - startPoint.z) > 96 ||
                 abs(point.y - start.y) > 96) { clipped = true; continue }
             val weight = capture.blocks[next.x, citizenSupportY(next.y), next.z]?.cost
                 ?: Double.POSITIVE_INFINITY
@@ -307,8 +308,10 @@ internal class CitizenNavigationSearch(
         }
         val terrain = CitizenSearchGeometry(blocks, minimumY, maximumY, avoiding)
         val isolated = blocks.getValue(feet).allowed.not() || !terrain.bodyClear(target) || capture.edges.none { edge ->
-            edge.permitted && terrain.bodyClear(edge.node.point()) &&
-                terrain.stepClear(edge.node.point(), target, edge.action)
+            if (!edge.permitted) false else {
+                val point = edge.node.point()
+                terrain.bodyClear(point) && terrain.stepClear(point, target, edge.action)
+            }
         }
         if (!isolated) return null
         // Every centre outside the captured 3x3 columns is at least two blocks away.

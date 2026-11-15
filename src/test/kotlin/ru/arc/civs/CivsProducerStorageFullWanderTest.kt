@@ -55,7 +55,8 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             h.owner.pulse(requireNotNull(h.navigationNow))
             actor.outputReturn shouldBe null
             actor.supplyFailure shouldBe (workplace.id to "storage-full")
-            val retryAt = requireNotNull(actor.outputFullPause).retryAt
+            val pause = requireNotNull(actor.outputFullPause)
+            val retryAt = pause.retryAt
             actor.supplyRetryAt shouldBe 0L
             val pausedAt = npc.location
             val roadSteps = h.steps.size
@@ -101,7 +102,8 @@ class CivsProducerStorageFullWanderTest : FunSpec({
                 h.owner.pulse(retryAt)
                 (actor.route === leisureRoute) shouldBe true
                 actor.route?.idleAnchor shouldBe workplace.entrance
-                h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+                actor.outputFullPause shouldBe pause
+                h.owner.status(h.workerId) shouldBe "workers.status.route-stopped"
                 for (tick in 1..600) {
                     if (attempts == 2) break
                     h.navigate()
@@ -197,7 +199,8 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             h.navigationNow = pause.retryAt + 250
             h.owner.pulse(requireNotNull(h.navigationNow))
             (actor.route === localWalk) shouldBe true
-            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            actor.outputFullPause shouldBe pause
+            h.owner.status(h.workerId) shouldBe "workers.status.wandering"
             (actor.cycle === acceptedCycle) shouldBe true
             actor.plan shouldBe acceptedPlan
             h.workPlans shouldBe searches
@@ -268,7 +271,7 @@ class CivsProducerStorageFullWanderTest : FunSpec({
                 h.owner.pulse(requireNotNull(h.navigationNow))
             }
             actor.outputFullPause?.buildingId shouldBe quarry.id
-            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            h.owner.status(h.workerId) shouldBe "workers.status.wandering"
             (actor.cycle === cycle) shouldBe true
             actor.plan shouldBe plan
             h.workPlans shouldBe 0

@@ -145,7 +145,9 @@ internal object CivsAutonomousTerraform {
     private const val LARGE_FILL_DEPTH = 3
     private const val MAX_PLATFORM_SHOULDER_COLUMNS = 96
     private const val MAX_PLATFORM_SHOULDER_RISE = 2
-    private const val PARALLEL_ROAD_COST = 8
+    private const val PARALLEL_ROAD_COST = 40
+    private const val ROAD_LEVEL_CHANGE_COST = 40
+    private const val ROAD_FLIGHT_START_COST = 48
 
     /** Remove a loop only before a straight portal crossing. The original solver owns the entire
      * suffix; a paid, currently supported prefix introduces no new street or corridor permission. */
@@ -420,6 +422,16 @@ internal object CivsAutonomousTerraform {
                 add(x, z, shoulderGround, shoulderGround)
             }
         }
+        for ((key, bank) in CivsRoadTerraces.banks(route)) {
+            if (key in columns || key in standing || key in reservedShoulders || key in protectedRoads ||
+                !city.contains(bank.x, bank.z) || CivsAutonomousGeometry.horizontalContains(building.bounds, bank) ||
+                routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, bank) }) continue
+            val native = surface.at(bank.x, bank.z) ?: continue
+            // Leave a higher natural hillside in place. The cheek only closes a shallow exposed side.
+            if (!native.loaded || !native.natural || native.waterTopY != null ||
+                bank.y - native.groundY !in 0..CivsRoadTerraces.MAX_BANK_FILL) continue
+            add(bank.x, bank.z, bank.y, bank.y)
+        }
         // Short bumps return to the same grade at both ends. Ease only their cut banks;
         // the next ring rises by one block, while long hills and all paving keep their width.
         var start = 0
@@ -577,7 +589,10 @@ internal object CivsAutonomousTerraform {
     /** Exact before-images, ordered approach-first, with cuts top-down and fill from real support up. */
     fun materialize(draft: CivTerraformDraft, cells: Map<CivPosition, CivTerraformCell>): CivTerraformPlan {
         val result = linkedMapOf<CivPosition, CivPlanBlock>()
-        val routeColumns = draft.route.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        // Earthworks prepare the complete walking ribbon. Grass between its lanes must
+        // not depend on residents trampling it or a later upkeep trip to become a road.
+        val routeColumns = roadProfile(draft.route).keys
+        val bankFloors = CivsRoadTerraces.banks(draft.route).values.toSet()
         fun at(x: Int, y: Int, z: Int) = cells[CivPosition(x, y, z)] ?: throw CivsRejection("invalid-plan")
         fun rejectTerrain(cell: CivTerraformCell, stage: String): Nothing = throw CivsRejection("autonomy-terrain",
             mapOf("x" to cell.position.x.toString(), "y" to cell.position.y.toString(),
@@ -644,6 +659,7 @@ internal object CivsAutonomousTerraform {
                 })
             }
             if (civsTerrainKey(x, z) in routeColumns) change(at(x, ground, z), "minecraft:coarse_dirt")
+            else if (CivPosition(x, ground, z) in bankFloors) change(at(x, ground, z), "minecraft:grass_block[snowy=false]")
             else if (draft.route.isNotEmpty() && column.surfaceY > ground &&
                 !CivsAutonomousGeometry.horizontalContains(draft.building.bounds, CivPosition(x, ground, z)))
                 change(at(x, ground, z), "minecraft:grass_block[snowy=false]")
@@ -804,7 +820,8 @@ internal object CivsAutonomousTerraform {
                 abs(it.x - building.entrance.x) + abs(it.z - building.entrance.z)
             }
 
-    internal data class Node(val x: Int, val y: Int, val z: Int, val direction: Int = -1, val climbed: Boolean = false) {
+    internal data class Node(val x: Int, val y: Int, val z: Int, val direction: Int = -1, val climbed: Boolean = false,
+        val descended: Boolean = false) {
         override fun hashCode(): Int {
             // A linear 31-based hash aliases distinct grades at y + 1, z - 31.
             // Mix each full coordinate before combining the next; equality keeps every field.
@@ -812,7 +829,8 @@ internal object CivsAutonomousTerraform {
             hash = HashCommon.mix(hash xor y)
             hash = HashCommon.mix(hash xor z)
             hash = HashCommon.mix(hash xor direction)
-            return HashCommon.mix(hash xor climbed.hashCode())
+            hash = HashCommon.mix(hash xor climbed.hashCode())
+            return HashCommon.mix(hash xor descended.hashCode())
         }
     }
     private data class Open(val node: Node, val cost: Int, val score: Int, val ordinal: Int, val parent: Open? = null)
@@ -883,10 +901,10 @@ internal object CivsAutonomousTerraform {
                 val horizontal = abs(n.x - goal.x) + abs(n.z - goal.z)
                 val vertical = abs(n.y - (goal.y - 1))
                 // Every vertical change also consumes a horizontal step; both terms bound real cost.
-                val bounds = discountedBounds ?: return maxOf(horizontal, vertical) * 10 + vertical * 8
+                val bounds = discountedBounds ?: return maxOf(horizontal, vertical) * 10 + vertical * ROAD_LEVEL_CHANGE_COST
                 val unshared = outsideSteps(n.x, goal.x, bounds.min.x, bounds.max.x) +
                     outsideSteps(n.z, goal.z, bounds.min.z, bounds.max.z)
-                return maxOf(horizontal, vertical) * 6 + vertical * 8 + unshared * 4
+                return maxOf(horizontal, vertical) * 6 + vertical * ROAD_LEVEL_CHANGE_COST + unshared * 4
             }
             return minOf(goalDistance(to), finishApproach.minOfOrNull(::goalDistance) ?: Int.MAX_VALUE)
         }
@@ -993,7 +1011,7 @@ internal object CivsAutonomousTerraform {
             val key = civsTerrainKey(n.x, n.z)
             val distances = horizontalDistances
             return maxOf(baseDistance(n),
-                if (distances.containsKey(key)) distances.get(key) + abs(n.y - target.y) * 8 else 0)
+                if (distances.containsKey(key)) distances.get(key) + abs(n.y - target.y) * ROAD_LEVEL_CHANGE_COST else 0)
         }
         val open = PriorityQueue<Open> { a, b ->
             val score = a.score.compareTo(b.score)
@@ -1057,7 +1075,7 @@ internal object CivsAutonomousTerraform {
                 // Arrival history is part of Node, so another viable approach to this column is retained.
                 if (n.direction >= 0 && n.direction != direction && (n.climbed || rise < 0)) continue
                 if (n.climbed && rise < 0) continue // A one-column crest would need a full-block jump from one side.
-                val candidate = Node(n.x + dx, n.y + rise, n.z + dz, direction, rise > 0)
+                val candidate = Node(n.x + dx, n.y + rise, n.z + dz, direction, rise > 0, rise < 0)
                 if (candidate in closed || !allowed(candidate.x, candidate.y, candidate.z) ||
                     candidate.x == start.x && candidate.z == start.z) continue
                 val native = requireNotNull(columns.get(civsTerrainKey(candidate.x, candidate.z)))
@@ -1070,7 +1088,8 @@ internal object CivsAutonomousTerraform {
                     (turnStreets.maxOfOrNull { (12 - abs(n.x - it.center.x) - abs(n.z - it.center.z)).coerceAtLeast(0) } ?: 0) * 12
                 // Positive preferences keep the existing distance field a lower bound. Native
                 // obstacles and grades still decide whether a shared axial street can exist.
-                val cost = current.cost + (if (shared) 6 else 10) + abs(candidate.y - n.y) * 8 +
+                val flightStart = if (rise > 0 && !n.climbed || rise < 0 && !n.descended) ROAD_FLIGHT_START_COST else 0
+                val cost = current.cost + (if (shared) 6 else 10) + abs(rise) * ROAD_LEVEL_CHANGE_COST + flightStart +
                     (if (shared) 0 else abs(native.groundY - candidate.y) * 2) + offStreet + forecourtTurn + parallel
                 if (cost >= costs.getOrDefault(candidate, Int.MAX_VALUE)) continue
                 // A column has exactly one finished ground height. A cheap 3-D route can otherwise

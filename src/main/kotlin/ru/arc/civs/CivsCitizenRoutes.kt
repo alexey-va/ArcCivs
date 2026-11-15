@@ -132,7 +132,13 @@ internal class CivsCitizenRoutes(
             pause(actor, "storage-unavailable", now)
             return false
         } else null
-        val to = nightFeet ?: waypoint?.location(world) ?: finalStorageFeet ?: resolved.location(world)
+        // Food targets an adjacent cell rather than the building control. Its carpet or
+        // other fractional support must use the same native feet as ordinary storage.
+        val foodTarget = actor.foodPickupSource?.takeIf { idleAnchor == null && actor.combatDestination == null &&
+            actor.foodSource == it.buildingId && target == it.standing }
+        val finalFoodFeet = if (nightFeet == null && foodTarget != null)
+            storageFeet(world, resolved) ?: return false else null
+        val to = nightFeet ?: waypoint?.location(world) ?: finalStorageFeet ?: finalFoodFeet ?: resolved.location(world)
         if (idleAnchor != null && !collisions.idleDestinationFree(actor, to)) return false
         val distance = from.distance(to)
         if (!citizenRouteWithinReach(from.point(), to.point(), CivsLogistics.maximumTransferDistance(city))) {
@@ -144,8 +150,9 @@ internal class CivsCitizenRoutes(
             actor.pendingChunkTarget = resolved
             return true
         }
-        val standable = if (nightFeet != null) true else if (finalStorageFeet != null)
-            storagePointClear(actor, city, world, resolved, finalStorageFeet)
+        val containerFeet = finalStorageFeet ?: finalFoodFeet
+        val standable = if (nightFeet != null) true else if (containerFeet != null)
+            storagePointClear(actor, city, world, resolved, containerFeet)
         else citizenStandable(world, resolved)
         if (!citizenControlClear(city, resolved) || !standable ||
             idleAnchor != null && !citizenIdleTerrain(world, resolved, city.buildings)) {
@@ -436,7 +443,9 @@ internal class CivsCitizenRoutes(
         val building = city.building(source.buildingId) ?: return null
         val world = actor.npc.world
         val safe: (CivPosition) -> Boolean = { point ->
-            storagePointClear(actor, city, world, point) && collisions.idleDestinationFree(actor, point.location(world))
+            storageFeet(world, point)?.let { feet ->
+                storagePointClear(actor, city, world, point, feet) && collisions.idleDestinationFree(actor, feet)
+            } == true
         }
         val blocked = actor.foodRouteFailure?.takeIf { !it.alternateTried && it.matches(actor, source, recoveryClock()) }
         // Keep a walking alternative once admitted. A different resident's reservation must not restart it each pulse.

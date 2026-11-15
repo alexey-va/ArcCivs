@@ -282,6 +282,7 @@ class CivsStore(
             trade = transaction.trade?.let { it.copy(changes = it.changes.toList()) },
             worldChanges = transaction.worldChanges?.toList(),
             mine = transaction.mine?.detached(),
+            mineOpening = transaction.mineOpening?.detached(),
             upkeep = transaction.upkeep?.detached(),
             cargoDropoff = transaction.cargoDropoff?.detached(),
             cargoPickup = transaction.cargoPickup?.detached(),

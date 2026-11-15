@@ -206,6 +206,32 @@ class CivsWorld(
         StorageRackRepair(city.id, city.owner, city.worldId, building, cells.toList())
     }
 
+    /** Read-only mouth capture. The inventory journal, never this scan, owns the eventual native cuts. */
+    internal fun captureMineOpening(city: Settlement, building: CivBuilding,
+        initialBlock: (CivPosition, String) -> Boolean): CompletableFuture<List<CivPlanBlock>> =
+        admit(CivsMineOpening.positions(building), loadedOnly = true) {
+            MineOpeningCapture(city, building, initialBlock)
+        }
+
+    internal fun checkMineOpeningCell(city: Settlement, building: CivBuilding, block: Block, initial: Boolean) {
+        val point = CivPosition(block.x, block.y, block.z)
+        requireCivs(city.contains(point.x, point.z) && block.world.worldBorder.isInside(block.location), "outside-city")
+        requireCivs(scanCities().filter { it.worldId == city.worldId }.none { other ->
+            other.id != city.id && other.contains(point.x, point.z) ||
+                civsProtectedBuildings(other).any { protected ->
+                    (other.id != city.id || protected.id != building.id) &&
+                        (protected.bounds.contains(point.x, point.y, point.z) || protected.control == point)
+                } || other.pendingControls.orEmpty().any { pending ->
+                    (other.id != city.id || pending.buildingId != building.id) &&
+                        pending.approach.orEmpty().any { it.position == point }
+                }
+        }, "building-overlap")
+        requireCivs(block.getState(false) !is TileState && !block.isLiquid &&
+            (block.blockData as? Waterlogged)?.isWaterlogged != true, "mine-opening-obstructed")
+        requireCivs(block.type.isAir || CivsMineOpening.removable(block.blockData.asString, initial), "mine-opening-obstructed")
+        requireCivs(canMine(block) && canModify(city.owner, block, Material.AIR), "lands-denied")
+    }
+
     /** Inverse journal cells restore an older access route; no construction credit, drops or resources. */
     internal fun repairAutonomousAccess(city: Settlement,
         repairs: List<CivAutonomousAccessRepair>): CompletableFuture<Map<String, Int>> = admit(repairs.map { it.cell.position }) {
@@ -804,6 +830,27 @@ class CivsWorld(
         private fun dispatch(captured: List<CitizenSearchCapture>) {
             val solver = requireNotNull(search)
             searching = CompletableFuture.supplyAsync({ solver.advance(captured) }, executor)
+        }
+    }
+
+    private inner class MineOpeningCapture(private val snapshot: Settlement, building: CivBuilding,
+        private val initialBlock: (CivPosition, String) -> Boolean) :
+        CivsWorldScan<List<CivPlanBlock>>(this@CivsWorld, snapshot.id, snapshot.owner, snapshot.worldId, building) {
+        private val positions = CivsMineOpening.positions(building)
+        private val cells = mutableListOf<CivPlanBlock>()
+
+        override fun validateIdentity(city: Settlement?) {
+            requireCivs(city != null && city == snapshot && city.pendingDeletion == null && city.building(building.id) == building &&
+                city.construction?.buildingId != building.id && building.id !in city.constructionQueue.orEmpty(), "stale-building")
+        }
+
+        override fun step() {
+            if (index == positions.size) return finish(cells.toList())
+            val point = positions[index++]
+            val block = read(point)
+            val before = block.blockData.asString
+            checkMineOpeningCell(snapshot, building, block, initialBlock(point, before))
+            if (!block.type.isAir) cells += CivPlanBlock(point, before, "minecraft:air")
         }
     }
 
