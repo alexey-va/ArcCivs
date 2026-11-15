@@ -193,6 +193,117 @@ class CivsSleepingFloorsTest : FunSpec({
         }
     }
 
+    test("an adult walks from the street to a quarter-block sleeping place in a three by two room and wakes at those feet") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            for (x in -2..1) for (z in -1..1) h.world.loadChunk(x, z)
+            val room = buildSet { for (x in 0..2) for (z in 1..2) add(CivPosition(x, 64, z)) }
+            val home = h.city.buildings.single().copy(control = null,
+                bounds = CivBox(CivPosition(-5, 63, -4), CivPosition(5, 68, 4)))
+            h.city = h.city.copy(buildings = listOf(home), workers = h.city.workers.map { it.copy(homeId = home.id) })
+            h.sleepingFloorSource = { CompletableFuture.completedFuture(CivSleepingFloorMask(room.toList())) }
+            fun poseFits(cells: Set<CivPosition>, at: Location) = citizenSleepPose(h.world, at, 1.0,
+                floorLift = CIVS_SLEEP_PAD_HEIGHT) { body -> citizenSleepRoom(cells, 64, at, body) } != null
+            room.any { poseFits(room, it.location(h.world)) } shouldBe false
+            val actor = h.actor()
+            actor.npc.teleport(Location(h.world, -3.5, 64.0, 2.5))
+            h.navigationNow = 3_000
+            h.world.time = 13_000
+            h.owner.pulse(3_000)
+            actor.shelter shouldBe null
+            actor.shelterLastReason shouldBe "no-fitting-pose"
+            val walked = mutableSetOf<CitizenPoint>()
+            val finalSteps = mutableSetOf<CitizenPoint>()
+            for (tick in 1..600) {
+                val before = requireNotNull(h.owner.residentFeet(h.workerId))
+                val local = actor.route?.motion?.preparationPhase == "local"
+                h.navigate()
+                val after = requireNotNull(h.owner.residentFeet(h.workerId))
+                (before.distance(after) <= .118251) shouldBe true
+                walked += after.point()
+                if (local) {
+                    finalSteps += before.point()
+                    finalSteps += after.point()
+                    actor.npc.pose shouldBe PacketNpcPose.STANDING
+                }
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (actor.sleeping) break
+            }
+            actor.npc.pose shouldBe PacketNpcPose.SLEEPING
+            actor.shelterLastReason shouldBe "sleeping"
+            val feet = requireNotNull(actor.shelterFeet)
+            val center = requireNotNull(actor.shelter).location(h.world)
+            center.distance(feet) shouldBe (.25 plusOrMinus .000001)
+            (walked.size > 10) shouldBe true
+            finalSteps.contains(center.point()) shouldBe true
+            finalSteps.contains(feet.point()) shouldBe true
+            finalSteps.any { it != center.point() && it != feet.point() } shouldBe true
+            requireNotNull(actor.sleepOrigin).point() shouldBe feet.point()
+            poseFits(room, feet) shouldBe true
+            poseFits(room - room.first(), feet) shouldBe false
+            val state = (h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>).single() as Map<*, *>
+            val shelter = state["shelter"] as Map<*, *>
+            shelter["feet"] shouldBe feet.point()
+            shelter["last_reason"] shouldBe "sleeping"
+            val neighbour = CivWorker(UUID(2305, 2), "Neighbour", null, homeId = home.id)
+            h.city = h.city.copy(workers = h.city.workers + neighbour)
+            val asleepAt = requireNotNull(h.navigationNow)
+            h.owner.pulse(asleepAt + 1_000)
+            val waiting = h.actor(neighbour.id)
+            waiting.npc.teleport(Location(h.world, -3.5, 64.0, 2.5))
+            val reasons = mutableSetOf<String?>()
+            for (index in 2..7) {
+                h.owner.pulse(asleepAt + index * 1_000L)
+                waiting.shelter shouldBe null
+                waiting.npc.pose shouldBe PacketNpcPose.STANDING
+                reasons += waiting.shelterLastReason
+            }
+            reasons.contains("occupied") shouldBe true
+            h.world.time = 1_000
+            h.owner.pulse(asleepAt + 8_000)
+            actor.npc.pose shouldBe PacketNpcPose.STANDING
+            actor.npc.location.point() shouldBe feet.point()
+            h.deliveries shouldBe 0
+            h.unloads shouldBe 0
+        }
+    }
+
+    test("a failed quarter route and a changed home mask cannot recenter or admit the old reservation") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            for (x in -2..1) for (z in -1..1) h.world.loadChunk(x, z)
+            val room = buildList { for (x in 0..2) for (z in 1..2) add(CivPosition(x, 64, z)) }
+            val home = h.city.buildings.single().copy(control = null,
+                bounds = CivBox(CivPosition(-5, 63, -4), CivPosition(5, 68, 4)))
+            val changed = home.copy(schematicId = "fixture/changed-room")
+            h.city = h.city.copy(buildings = listOf(home), workers = h.city.workers.map { it.copy(homeId = home.id) })
+            h.sleepingFloorSource = { current -> CompletableFuture.completedFuture(
+                CivSleepingFloorMask(if (current == home) room else room.drop(1))) }
+            val actor = h.actor()
+            val street = Location(h.world, -3.5, 64.0, 2.5)
+            actor.npc.teleport(street)
+            h.navigationNow = 3_000
+            h.world.time = 13_000
+            for (now in 3_000L..8_000L step 1_000L) {
+                h.owner.pulse(now)
+                if (actor.shelter != null) break
+            }
+            val feet = requireNotNull(actor.shelterFeet)
+            feet.distance(requireNotNull(actor.shelter).location(h.world)) shouldBe (.25 plusOrMinus .000001)
+            val route = requireNotNull(actor.route)
+            route.motion.planningFailed("no-path")
+            val routes = h.owner.javaClass.getDeclaredField("routes").apply { isAccessible = true }.get(h.owner) as CivsCitizenRoutes
+            routes.recoverNavigation(actor, feet, 100_000) shouldBe false
+            actor.npc.location.point() shouldBe street.point()
+            h.city = h.city.copy(buildings = listOf(changed))
+            repeat(6) { h.owner.pulse(101_000 + it * 1_000L) }
+            actor.shelter shouldBe null
+            actor.shelterFeet shouldBe null
+            actor.route shouldBe null
+            actor.shelterLastReason shouldBe "no-fitting-pose"
+            actor.npc.pose shouldBe PacketNpcPose.STANDING
+            actor.npc.location.point() shouldBe street.point()
+        }
+    }
+
     test("fallback homes each advance through their own floor candidates under the shared admission budget") {
         residentRuntime { h ->
             val hall = h.bootstrapShelterHome()
@@ -240,11 +351,13 @@ class CivsSleepingFloorsTest : FunSpec({
             npc.location shouldBe origin
             h.actor().sheltering shouldBe true
             h.actor().route shouldBe null
+            h.actor().shelterLastReason shouldBe "mask-unavailable"
             pending.complete(CivSleepingFloorMask(emptyList()))
             h.owner.pulse(4_000)
             npc.pose shouldBe PacketNpcPose.STANDING
             npc.location shouldBe origin
             h.actor().route shouldBe null
+            h.actor().shelterLastReason shouldBe "no-fitting-pose"
             h.city shouldBe before
         }
     }

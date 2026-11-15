@@ -7,6 +7,8 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.floor
 
+private val unavailableSnapshotBlock = CitizenTerrainBlock.UNAVAILABLE.copy(cost = 1.0)
+
 /** One route's worker-owned immutable inputs and derived cells; never exposed as mutable Main state. */
 internal class CitizenSnapshotTerrain {
     val chunks = hashMapOf<CitizenSnapshotKey, CitizenSnapshotChunk>()
@@ -187,7 +189,7 @@ internal class CitizenSnapshotCapture(
                     return finish()
                 }
                 val state = probeStates[index]
-                val block = if (state == null) CitizenTerrainBlock.UNAVAILABLE else {
+                val block = if (state == null) unavailableSnapshotBlock else {
                     val shape = state.shape
                     CitizenTerrainBlock(true, shape.liquid, shape.door, shape.climbable, shape.hot,
                         policy.allowed(point, ::material), 1.0,
@@ -226,10 +228,9 @@ internal class CitizenSnapshotCapture(
         val resolved = hashMapOf<CivPosition, CitizenTerrainBlock>()
         return request(captures = completed.map { capture ->
             val blocks = capture.blocks.withCosts { point, block ->
-                resolved.getOrPut(point) {
-                    val cost = terrain.costs[point] ?: 1.0
-                    if (cost.toBits() == block.cost.toBits()) block else block.copy(cost = cost)
-                }
+                val cost = terrain.costs[point]
+                if (cost == null || cost.toBits() == block.cost.toBits()) block
+                else resolved.getOrPut(point) { block.copy(cost = cost) }
             }
             CitizenSearchCapture(capture.probe, blocks, capture.edges)
         })

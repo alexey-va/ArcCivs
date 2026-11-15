@@ -694,6 +694,26 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
+    test("unit support costs and uncosted unavailable cells reuse their captured blocks across probes") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val terrain = flatSnapshotTerrain(0, 0)
+            terrain.unavailable += CitizenSnapshotKey(-1, 0)
+            val probes = listOf(2, 3).map { z ->
+                val node = CitizenSearchNode(0, 64.0, z)
+                CitizenSearchProbe(node, node.point())
+            }
+            val captures = completeSnapshotCapture(terrain, probes, 1.0)
+            captures.size shouldBe probes.size
+            terrain.costs.isNotEmpty() shouldBe true
+            val unavailable = terrain.blocks.getValue(CivPosition(-1, 64, 2))
+            unavailable shouldBe CitizenTerrainBlock.UNAVAILABLE.copy(cost = 1.0)
+            for (capture in captures) {
+                capture.blocks.getValue(CivPosition(-1, 64, 2)) shouldBeSameInstanceAs unavailable
+                for ((point, block) in capture.blocks) block shouldBeSameInstanceAs terrain.blocks.getValue(point)
+            }
+        }
+    }
+
     test("overlapping snapshot captures share resolved costs while later cost knowledge leaves published captures unchanged") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
             val terrain = flatSnapshotTerrain(0, 0)

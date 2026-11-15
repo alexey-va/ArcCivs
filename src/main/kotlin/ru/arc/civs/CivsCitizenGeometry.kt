@@ -65,13 +65,13 @@ internal fun citizenStorageFeet(world: World, point: CivPosition): Location? {
 internal data class CitizenSleepPose(val position: Location, val bounds: org.bukkit.util.BoundingBox)
 
 /** A sleeping floor keeps its authored plane; native collision geometry owns the exact feet. */
-internal fun citizenSleepFeet(world: World, point: CivPosition): Location? {
+internal fun citizenSleepFeet(world: World, point: CivPosition, offsetX: Double = 0.0, offsetZ: Double = 0.0): Location? {
     if (!citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
         point.y <= world.minHeight || point.y + 1 >= world.maxHeight) return null
     return listOf(point.y - 1, point.y).flatMap { y ->
         world.getBlockAt(point.x, y, point.z).collisionShape.boundingBoxes.map { y + it.maxY }
     }.filter { abs(it - point.y) < 1.0 }.distinct().sortedBy { abs(it - point.y) }.asSequence()
-        .map { point.location(world).apply { y = it } }
+        .map { Location(world, point.x + .5 + offsetX, it, point.z + .5 + offsetZ) }
         .firstOrNull { citizenSleepStanding(world, point, it) }
 }
 

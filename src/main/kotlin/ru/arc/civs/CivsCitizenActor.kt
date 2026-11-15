@@ -79,6 +79,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var shelterPose: CitizenSleepPose? = null
     var shelterHome: UUID? = null
     var shelterFeet: Location? = null
+    var shelterLastReason: String? = null
     var shelterSearchIndex = 0
     val shelterHomeSearch = mutableMapOf<UUID, Int>()
     val nightHomeProgress = CitizenNightHomeProgress()

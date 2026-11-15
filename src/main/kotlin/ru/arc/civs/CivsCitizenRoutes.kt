@@ -349,6 +349,27 @@ internal class CivsCitizenRoutes(
         return false
     }
 
+    /** The ordinary search ends at a cell center. Walk the final in-cell edge to the reserved feet. */
+    fun alignShelterFeet(actor: CitizenActor, feet: Location, now: Long): Boolean {
+        val route = actor.route ?: return false
+        val from = actor.npc.location
+        val world = from.world ?: return false
+        if (!actor.sheltering || route.authored != actor.shelter || feet.world != world ||
+            route.target.point() != feet.point() || !route.motion.finished || route.intermediate || route.motion.continuation ||
+            route.motion.failure != null || route.completion?.cancelReason != null ||
+            from.blockX != feet.blockX || from.blockZ != feet.blockZ) return false
+        val start = from.point()
+        val end = feet.point()
+        if (!citizenPacketStepClear(world, start, end, false) ||
+            start.y == end.y && !citizenFlatSupportClear(start, end) { citizenPacketSupported(world, it, false) } ||
+            !collisions.residentMoveAllowed(actor, from, feet)) return false
+        val motion = route.motion.replan(from, emptyList(), feet)
+        motion.readyWanderStep()
+        actor.route = CitizenRoute(start, feet, route.chunks, now, 3_000, route.allowedBuildings, motion, null, route.authored)
+            .also { it.progressTick = runtime.navigationTick }
+        return true
+    }
+
     fun finishWander(actor: CitizenActor, city: Settlement, walk: CitizenWanderWalk, now: Long, reason: String?) {
         if (actor.route?.wanderWalk === walk) cancelRoute(actor)
         val offersCargo = reason == null && city.inventory == null &&
@@ -949,6 +970,8 @@ internal class CivsCitizenRoutes(
                                   nightHome: CivBuilding? = null): Boolean {
         val failed = actor.route ?: return false
         if (failed.wanderWalk != null || actor.mineVisit != null) return false
+        // Recovery relocates to a centered block. A fractional shelter must be reached on foot.
+        if (actor.sheltering && (failed.authored != actor.shelter || actor.shelterFeet?.point() != failed.authored.point())) return false
         val nightRecovery = nightHome != null
         if (nightHome != null && (food != null || !nightCaptureFailed(actor, failed, nightHome, now))) return false
         if (!nightRecovery && failed.motion.failure == "capture-budget" && canResetNightShelter(actor)) return false
@@ -1065,7 +1088,9 @@ internal class CivsCitizenRoutes(
                         !nightRecovery || nightRecoveryVolumeAllowed(city, feet, citizenStandingBounds(feet, entity.scale), pose.bounds)
                     }?.also { actor.shelterPose = it } != null
                 }
-                reserved ?: if (nightRecovery) null else shelter.reserveShelter(actor, city, worker, entity.world, safe)
+                reserved ?: if (nightRecovery) null else shelter.reserveShelter(actor, city, worker, entity.world) { candidate, feet ->
+                    feet.point() == candidate.point() && safe(candidate)
+                }
             }
             food != null && foodBuilding != null -> citizenCollectedHomeTarget(city, foodBuilding, entity.world,
                 food.container, food.standing) { candidate ->
@@ -1180,6 +1205,9 @@ internal class CivsCitizenRoutes(
         actor.targets.remove(target)
         actor.shelter = null
         actor.shelterPose = null
+        actor.shelterFeet = null
+        actor.shelterHome = null
+        actor.shelterLastReason = null
         actor.arrivalWait = null
         actor.cycle.deferWork(now)
         actor.nightHomeProgress.rotated(now)

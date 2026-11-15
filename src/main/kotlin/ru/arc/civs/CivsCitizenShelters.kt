@@ -62,6 +62,7 @@ internal class CivsCitizenShelters(
     private val routes get() = routesOwner()
     private val life get() = lifeOwner()
     private val floors = CivsSleepingFloors(loadFloors, runtime.plugin.logger)
+    private val sleepOffsets = listOf(0.0 to 0.0, -.25 to 0.0, .25 to 0.0, 0.0 to -.25, 0.0 to .25)
 
     private fun completedHome(building: CivBuilding): Boolean = building.phase == BuildingPhase.ACTIVE &&
         (building.type.isResidence || building.type == BuildingType.TOWN_HALL)
@@ -81,6 +82,7 @@ internal class CivsCitizenShelters(
         actor.shelterPose = null
         actor.shelterHome = null
         actor.shelterFeet = null
+        actor.shelterLastReason = null
         actor.nightHomeProgress.clear()
     }
 
@@ -89,6 +91,7 @@ internal class CivsCitizenShelters(
             routes.cancelRoute(actor)
             actor.returningToWarehouse = false
             actor.sheltering = true
+            clearReservation(actor)
         }
         if (actor.sleeping) {
             actor.nightHomeProgress.clear()
@@ -143,11 +146,15 @@ internal class CivsCitizenShelters(
         val target = actor.shelter ?: return
         val targetFeet = actor.shelterFeet ?: return
         if (citizenArrived(actor.npc.location, targetFeet)) {
-            // Arrival has a tolerance; retain the observed native feet, never the authored integer floor Y.
             val origin = actor.npc.location
-            val pose = shelterPose(actor, city, worker, origin, collisions.shelterOccupied(actor))
-            if (pose != null) { sleep(actor, origin, pose); return }
+            val offset = targetFeet.x != target.x + .5 || targetFeet.z != target.z + .5
+            val needsAlignment = offset && origin.distanceSquared(targetFeet) > .000001
+            if (!needsAlignment && (!offset || citizenSleepStanding(world, target, origin))) {
+                val pose = shelterPose(actor, city, worker, origin, collisions.shelterOccupied(actor))
+                if (pose != null) { sleep(actor, origin, pose); return }
+            }
             if (actor.route?.motion?.finished == true) {
+                if (needsAlignment && routes.alignShelterFeet(actor, targetFeet, now)) return
                 routes.cancelRoute(actor)
                 clearReservation(actor)
                 return
@@ -191,6 +198,7 @@ internal class CivsCitizenShelters(
         actor.npc.headYaw = pose.position.yaw
         actor.npc.pose = PacketNpcPose.SLEEPING
         actor.sleeping = true
+        actor.shelterLastReason = "sleeping"
         actor.nightHomeProgress.clear()
         runtime.statuses[actor.workerId] = "sleeping"
         CivsDiagnostics.event("citizen_sleep", "city" to actor.cityId, "worker" to actor.workerId,
@@ -206,11 +214,16 @@ internal class CivsCitizenShelters(
     }
 
     private fun roomPose(actor: CitizenActor, home: CivBuilding, mask: CivSleepingFloorMask, floorY: Int,
-                         feet: Location, occupied: List<BoundingBox>): CitizenSleepPose? {
-        if (occupied.any(citizenStandingBounds(feet, actor.npc.scale)::overlaps)) return null
+                         feet: Location, occupied: List<BoundingBox>, onOccupied: (() -> Unit)? = null): CitizenSleepPose? {
+        if (occupied.any(citizenStandingBounds(feet, actor.npc.scale)::overlaps)) {
+            onOccupied?.invoke()
+            return null
+        }
         return citizenSleepPose(actor.npc.world, feet, actor.npc.scale, floorLift = CIVS_SLEEP_PAD_HEIGHT) { body ->
-            citizenSleepRoom(mask.cells, floorY, feet, body) && body.maxY <= home.bounds.max.y + 1.0 &&
-                occupied.none(body::overlaps)
+            if (!citizenSleepRoom(mask.cells, floorY, feet, body) || body.maxY > home.bounds.max.y + 1.0) return@citizenSleepPose false
+            if (occupied.none(body::overlaps)) return@citizenSleepPose true
+            onOccupied?.invoke()
+            false
         }
     }
 
@@ -227,23 +240,28 @@ internal class CivsCitizenShelters(
     }
 
     fun reserveShelter(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World,
-                       safe: (CivPosition) -> Boolean = { true }): CivPosition? {
+                       safe: (CivPosition, Location) -> Boolean = { _, _ -> true }): CivPosition? {
         val occupied = collisions.shelterOccupied(actor)
         val at = actor.npc.location
         val ready = hashMapOf<CitizenChunks, Boolean>()
         var remaining = 80
+        var reason = "mask-unavailable"
+        val onOccupied = { reason = "occupied" }
         val homes = homes(city, worker).sortedWith(compareBy<CivBuilding>(
             { kotlin.math.abs(it.entrance.x - at.blockX) + kotlin.math.abs(it.entrance.z - at.blockZ) }, { it.id }))
         actor.shelterHomeSearch.keys.retainAll(homes.mapTo(hashSetOf()) { it.id })
         for ((homeIndex, home) in homes.withIndex()) {
             val mask = floors.get(city, home) ?: continue
+            if (reason == "mask-unavailable") reason = "no-fitting-pose"
             if (mask.points.isEmpty()) continue
             fun reserve(point: CivPosition, feet: Location): CivPosition? {
-                val pose = roomPose(actor, home, mask, point.y, feet, occupied) ?: return null
+                if (!safe(point, feet)) return null
+                val pose = roomPose(actor, home, mask, point.y, feet, occupied, onOccupied) ?: return null
                 actor.shelter = point
                 actor.shelterPose = pose
                 actor.shelterHome = home.id
                 actor.shelterFeet = feet.clone()
+                actor.shelterLastReason = "approaching"
                 return point
             }
             // Preserve a grounded current location only when its entire body belongs to the room.
@@ -251,7 +269,7 @@ internal class CivsCitizenShelters(
                 val current = CivPosition(at.blockX, y, at.blockZ)
                 if (current !in mask.cells || remaining <= 0) continue
                 remaining--
-                if (citizenControlClear(city, current) && safe(current) && citizenSleepStanding(world, current, at))
+                if (citizenControlClear(city, current) && citizenSleepStanding(world, current, at))
                     reserve(current, at)?.let { return it }
             }
             // Share the unchanged 80-probe admission across homes, rather than starving a later available home.
@@ -261,14 +279,19 @@ internal class CivsCitizenShelters(
                 val index = actor.shelterHomeSearch.getOrDefault(home.id, 0)
                 actor.shelterHomeSearch[home.id] = index + 1
                 actor.shelterSearchIndex++
-                val point = mask.points[Math.floorMod(index, mask.points.size)]
+                // Finish the center sweep before trying each lateral offset. Each native
+                // stance consumes an existing probe; small houses still get one sweep per pulse.
+                val stance = Math.floorMod(index, mask.points.size * sleepOffsets.size)
+                val point = mask.points[stance % mask.points.size]
+                val (dx, dz) = sleepOffsets[stance / mask.points.size]
                 val chunks = CitizenChunks.between(at.blockX, at.blockZ, point.x, point.z)
-                if (citizenControlClear(city, point) && ready.getOrPut(chunks) { chunks.ready(world) } && safe(point)) {
-                    citizenSleepFeet(world, point)?.let { feet -> reserve(point, feet)?.let { return it } }
+                if (citizenControlClear(city, point) && ready.getOrPut(chunks) { chunks.ready(world) }) {
+                    citizenSleepFeet(world, point, dx, dz)?.let { feet -> reserve(point, feet)?.let { return it } }
                 }
             }
             if (remaining <= 0) break
         }
+        actor.shelterLastReason = reason
         return null
     }
 
