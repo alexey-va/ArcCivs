@@ -346,21 +346,30 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     private val waiting = linkedMapOf<UUID, Int>()
 
     /** Read existing owner state without probing terrain, validating claims or advancing a cursor. */
-    internal fun debug(cityId: UUID?, workerId: UUID?): Map<String, Any?> {
+    internal fun debug(cityId: UUID?, workerId: UUID?, cities: Collection<Settlement>): Map<String, Any?> {
         check(Bukkit.isPrimaryThread())
         fun point(p: CivPosition) = "${p.x},${p.y},${p.z}"
         fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
             "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
-        val cityIds = (networks.keys + cursors.keys + surfaceCursors.keys + gradeChecks.keys + developmentWaiting +
+        val cityIds = (cities.mapTo(linkedSetOf()) { it.id } + networks.keys + cursors.keys + surfaceCursors.keys + gradeChecks.keys + developmentWaiting +
             awaitingGradeNetwork.keys + builderClaims.keys + preparedFinishes.keys +
             selected.values.mapNotNull { it.work.upkeep?.cityId }).filter { cityId == null || it == cityId }
         return sample(cityIds) { id ->
+            val network = networks[id]
+            val city = cities.firstOrNull { it.id == id }
+            val hallTargets = network?.targets.orEmpty().withIndex().filter { it.value.hall != null }
             val selections = selected.entries.filter { (worker, selection) ->
                 selection.work.upkeep?.cityId == id && (workerId == null || worker == workerId)
             }
             val claim = builderClaims[id]?.takeIf { workerId == null || it.workerId == workerId }
             val finish = preparedFinishes[id]?.takeIf { workerId == null || it.workerId == workerId }
-            mapOf("city" to id.toString(), "targets" to (networks[id]?.targets?.size ?: 0),
+            mapOf("city" to id.toString(), "network_present" to (network != null), "targets" to (network?.targets?.size ?: 0),
+                "network_current" to city?.let { current -> network?.let { mapOf(
+                    "world" to (it.worldId == current.worldId), "buildings" to (it.buildings == current.buildings),
+                    "route_overrides" to (it.routeOverrides == current.roadRouteOverrides)) } },
+                "hall_targets" to hallTargets.size,
+                "hall_banks" to sample(hallTargets.filter { it.value.after == CivsEntrancePath.GRASS }) { (index, target) ->
+                    mapOf("index" to index, "floor" to point(target.floor), "plan" to target.planId.toString()) },
                 "generation" to networkGenerations[id], "work_cursor" to cursors[id], "surface_cursor" to surfaceCursors[id],
                 "development_waiting" to (id in developmentWaiting), "grade_pending" to (gradeChecks[id]?.size ?: 0),
                 "awaiting_grade" to (id in awaitingGradeNetwork),

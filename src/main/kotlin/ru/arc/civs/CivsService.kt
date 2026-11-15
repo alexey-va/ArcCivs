@@ -352,7 +352,7 @@ class CivsService(
             testingPermissions = testingPermissions,
             citizens = citizens,
             supply = supply,
-            roadMaintenanceDebug = roadMaintenance::debug,
+            roadMaintenanceDebug = { cityId, workerId -> roadMaintenance.debug(cityId, workerId, cities.values) },
             construction = construction,
             inventoryJournal = inventoryJournal,
             residentLife = residentLife,
