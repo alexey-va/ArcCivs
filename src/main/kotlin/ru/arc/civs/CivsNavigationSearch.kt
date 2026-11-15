@@ -437,7 +437,7 @@ private class CitizenSearchGeometry(
         // An endpoint can stand on a stair's high half while its flat approach crosses the low half.
         // Reject that edge in the graph instead of repeatedly handing it to stricter packet movement.
         if (action == CitizenRouteAction.WALK && from.y == to.y &&
-            !citizenFlatSupportClear(from, to, ::supported)) return false
+            !citizenFlatSupportClear(from, to) { citizenWalkingSupported(it, ::supported) }) return false
         // Enter/settle onto the ladder centre before changing height, including fractional starts.
         if (action == CitizenRouteAction.CLIMB || action == CitizenRouteAction.LADDER_ENTER) {
             val centre = CitizenPoint(to.x, from.y, to.z)
@@ -452,13 +452,13 @@ private class CitizenSearchGeometry(
         return segmentClear(from, to, from)
     }
 
-    private fun supported(point: CitizenPoint): Boolean {
+    private fun supported(point: CitizenPoint, allowClimbable: Boolean): Boolean {
         val x = floor(point.x).toInt()
         val z = floor(point.z).toInt()
         val y = floor(point.y + .001).toInt()
         if (y <= minimumY || y >= maximumY) return false
         val feet = blocks[x, y, z]?.takeIf { it.loaded } ?: return false
-        if (feet.climbable) return true
+        if (allowClimbable && feet.climbable) return true
         val by = citizenSupportY(point.y)
         val block = blocks[x, by, z]?.takeIf { it.loaded && !it.liquid && !it.door } ?: return false
         return block.boxes.any {

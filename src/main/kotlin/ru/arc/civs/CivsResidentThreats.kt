@@ -215,7 +215,7 @@ internal class CivsResidentThreats(private val plugin: Plugin,
             val inWorld = at.blockY >= npc.world.minHeight
             if (inWorld && at.block.isLiquid) { falling.remove(target.workerId); continue }
             if (inWorld && (Tag.CLIMBABLE.isTagged(at.block.type) ||
-                    citizenPacketSupported(npc.world, CitizenPoint(at.x, at.y, at.z)))) {
+                    citizenWalkingSupported(npc.world, at.point()))) {
                 val drop = falling.remove(target.workerId)
                 if (drop != null) hit(target, null, DamageCause.FALL, (drop.top - at.y - 3).coerceAtLeast(0.0))
                 continue

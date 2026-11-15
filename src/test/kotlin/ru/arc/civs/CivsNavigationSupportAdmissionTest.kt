@@ -5,6 +5,9 @@ import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.block.BlockFace
+import org.bukkit.block.data.type.Chest
+import org.bukkit.block.data.type.Stairs
 import org.bukkit.util.BoundingBox
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
@@ -51,6 +54,64 @@ class CivsNavigationSupportAdmissionTest : FunSpec({
             at.distanceSquared(target) shouldBe 0.0
             world.getBlockAt(0, 63, -1).type shouldBe Material.SPRUCE_FENCE
             world.getBlockAt(0, 64, -1).type shouldBe Material.BROWN_CARPET
+        }
+    }
+
+    test("a partial route walks across the inset chest seam from the observed idle return position") {
+        supportAdmissionWorld { world ->
+            for (cx in 2..4) for (cz in -1..0) world.loadChunk(cx, cz)
+            for (x in 0..70) world.getBlockAt(x, 75, 0).type = Material.OAK_PLANKS
+            world.getBlockAt(0, 76, 0).blockData = Bukkit.createBlockData("minecraft:chest[facing=south,type=left,waterlogged=false]")
+            world.getBlockAt(1, 76, 0).blockData = Bukkit.createBlockData("minecraft:chest[facing=south,type=right,waterlogged=false]")
+            var at = Location(world, .86499999999, 76.875, .5, -90f, 0f)
+            val target = Location(world, 70.5, 76.0, .5)
+            val route = CitizenPacketRoute(world, at, target, { it.x in 0..70 && it.z == 0 && it.y == 76 },
+                { _, _ -> true }, { 1.0 }, settings = CivsNavigationSettings(maximumNodes = 64))
+            repeat(10_000) { if (route.searching) route.expand() }
+            route.continuationReason shouldBe "search-budget"
+            route.destination?.point() shouldBe CitizenPoint(1.5, 76.875, .5)
+            val seam = requireNotNull(route.move(at, .55) { true })
+            (seam.x in .98324.. .98326) shouldBe true
+            citizenPacketSupported(world, seam.point()) shouldBe false
+            at = seam
+            repeat(40) {
+                route.move(at, .55) { true }?.let { next ->
+                    (next.x - at.x in 0.0.. .118251) shouldBe true
+                    citizenPacketBodyClear(world, next.point(), false) shouldBe true
+                    at = next
+                }
+            }
+            route.failure shouldBe null
+            (route.forwardProgress > 3 && at.x > 4 && at.y == 76.0) shouldBe true
+            route.finished shouldBe false
+
+            // Losing the far chest leaves only one side of the feet supported.
+            world.getBlockAt(1, 76, 0).type = Material.AIR
+            citizenWalkingSupported(world, seam.point()) shouldBe false
+        }
+    }
+
+    test("offset feet on a west stair leave by its supported side before turning northeast") {
+        supportAdmissionWorld { world ->
+            world.getBlockAt(0, 79, 0).blockData = Bukkit.createBlockData(
+                "minecraft:oak_stairs[facing=west,half=bottom,shape=straight,waterlogged=false]")
+            world.getBlockAt(0, 79, -1).type = Material.GRASS_BLOCK
+            world.getBlockAt(1, 79, -1).type = Material.GRASS_BLOCK
+            var at = Location(world, .049769001525, 80.0, .5)
+            val target = Location(world, 1.5, 80.0, -.5)
+            val route = CitizenPacketRoute(world, at, target, { it.y == 80 && it.x in 0..1 && it.z in -1..0 },
+                { _, _ -> true }, { 1.0 })
+            route.prepareSupportAdmission()
+            repeat(100) {
+                route.move(at, .8) { true }?.let { next ->
+                    citizenPacketSupported(world, next.point()) shouldBe true
+                    (at.distance(next) <= .172001) shouldBe true
+                    at = next
+                }
+            }
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.distanceSquared(target) shouldBe 0.0
         }
     }
 
@@ -115,7 +176,12 @@ private fun supportAdmissionWorld(run: (CivsWorksiteWorldFixture) -> Unit) {
                 Material.SPRUCE_FENCE -> listOf(BoundingBox(.375, 0.0, .375, .625, 1.5, .625))
                 Material.BROWN_CARPET -> listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .0625, 1.0))
                 Material.OAK_STAIRS -> listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
-                    BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+                    if ((data as Stairs).facing == BlockFace.WEST) BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
+                    else BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+                // Native south-facing halves on the two sides of the Auto1 warehouse seam.
+                Material.CHEST -> if ((data as Chest).type == Chest.Type.LEFT)
+                    listOf(BoundingBox(0.0, 0.0, .0625, .9375, .875, .9375))
+                else listOf(BoundingBox(.0625, 0.0, .0625, 1.0, .875, .9375))
                 else -> null
             }
         }).also(paper.server::addWorld)

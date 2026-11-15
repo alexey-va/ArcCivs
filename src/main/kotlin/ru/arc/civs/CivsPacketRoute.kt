@@ -179,7 +179,7 @@ internal class CitizenPacketRoute(
                     if (!allowed(CivPosition(x, y, z))) return Double.POSITIVE_INFINITY
         val weight = travelCost(world.getBlockAt(point.x, citizenSupportY(to.y), point.z))
         if (!weight.isFinite() || from.y == to.y &&
-            !citizenFlatSupportClear(from, to) { citizenPacketSupported(world, it) } ||
+            !flatSupportClear(from, to) ||
             !citizenPacketStepClear(world, from, to, true)) return Double.POSITIVE_INFINITY
         return sqrt(from.distanceSquared(to)) * weight.coerceIn(1.0, CivsPaths.ORDINARY_COST)
     }
@@ -514,14 +514,14 @@ internal class CitizenPacketRoute(
             // An accepted flat edge can lose its intermediate floor after capture.
             // Waypoint support alone cannot authorize a packet step over that hole.
             if (entry.action == CitizenRouteAction.WALK && entry.start.y == next.y && a.y == next.y && b.y == next.y && profile == null &&
-                !flatSupportClear(a, b)) { fail("path-changed"); break }
+                !flatSupportClear(a, b, movingEnd = true)) { fail("path-changed"); break }
             if (!permits(a, b) || !(if (descending || profile != null) citizenPacketSegmentClear(world, a, b, false, a, null)
                     else citizenPacketStepClear(world, a, b, false))) {
                 fail("movement-blocked"); break
             }
             val origin = CitizenPoint(from.x, from.y, from.z)
             if (moved && !usedGravity && !stair && !steppedStair && origin.y == next.y && b.y == next.y &&
-                !flatSupportClear(origin, b)) break
+                !flatSupportClear(origin, b, movingEnd = true)) break
             // Native players lift, then sweep horizontally across a stair riser. Preserve that
             // body/ceiling check at a straight stair join; other corners retain the packet chord.
             if ((stair || steppedStair) && abs(b.y - origin.y) > .562501) break
@@ -569,8 +569,10 @@ internal class CitizenPacketRoute(
         return point
     }
 
-    private fun flatSupportClear(from: CitizenPoint, to: CitizenPoint): Boolean =
-        citizenFlatSupportClear(from, to) { citizenPacketSupported(world, it) }
+    private fun flatSupportClear(from: CitizenPoint, to: CitizenPoint, movingEnd: Boolean = false): Boolean {
+        val endpointSupport = if (movingEnd) null else { point: CitizenPoint -> citizenPacketSupported(world, point) }
+        return citizenFlatSupportClear(from, to, endpointSupport) { citizenWalkingSupported(world, it) }
+    }
 
     private fun gravityStep(entry: Waypoint, y: Double): Boolean = entry.profileTerrain == null && entry.point.y < y - .0001 &&
         entry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&

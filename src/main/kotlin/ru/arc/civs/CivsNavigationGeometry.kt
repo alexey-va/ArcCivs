@@ -144,17 +144,32 @@ internal fun citizenPacketSupported(world: World, point: CitizenPoint, allowClim
     }
 }
 
-/** Planning and packet movement inspect the same crossed column interiors, including offset starts. */
-internal fun citizenFlatSupportClear(from: CitizenPoint, to: CitizenPoint, supported: (CitizenPoint) -> Boolean): Boolean {
+/** Two opposing contacts under the middle half of the feet can carry a packet across an inset block seam. */
+internal inline fun citizenWalkingSupported(point: CitizenPoint, supported: (CitizenPoint, Boolean) -> Boolean): Boolean {
+    if (supported(point, true)) return true
+    val offset = .15
+    return floor(point.x - offset) != floor(point.x + offset) &&
+        supported(point.copy(x = point.x - offset), false) && supported(point.copy(x = point.x + offset), false) ||
+        floor(point.z - offset) != floor(point.z + offset) &&
+        supported(point.copy(z = point.z - offset), false) && supported(point.copy(z = point.z + offset), false)
+}
+
+internal fun citizenWalkingSupported(world: World, point: CitizenPoint): Boolean =
+    citizenWalkingSupported(point) { sample, allowClimbable -> citizenPacketSupported(world, sample, allowClimbable) }
+
+/** Offset starts can cross both halves of a stair before leaving its column.
+ * Adjacent centre-to-centre grid edges still have only the block boundary between their ends. */
+internal fun citizenFlatSupportClear(from: CitizenPoint, to: CitizenPoint, endpointSupport: ((CitizenPoint) -> Boolean)? = null,
+                                    supported: (CitizenPoint) -> Boolean): Boolean {
     val boundaries = sortedSetOf(0.0, 1.0)
     for ((start, end) in listOf(from.x to to.x, from.z to to.z)) {
         if (start == end) continue
-        for (edge in floor(min(start, end)).toInt() + 1..floor(max(start, end)).toInt()) {
-            val fraction = (edge - start) / (end - start)
+        for (edge in floor(min(start, end) * 2).toInt() + 1..floor(max(start, end) * 2).toInt()) {
+            val fraction = (edge * .5 - start) / (end - start)
             if (fraction > 0.0 && fraction < 1.0) boundaries += fraction
         }
     }
-    return supported(to) && boundaries.zipWithNext().all { (first, second) ->
+    return (endpointSupport ?: supported)(to) && boundaries.zipWithNext().all { (first, second) ->
         val fraction = (first + second) / 2
         // The two axes can report the same grid corner a few floating-point units apart.
         second - first <= .000000001 || supported(CitizenPoint(from.x + (to.x - from.x) * fraction, from.y,
