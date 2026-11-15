@@ -428,7 +428,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     }
 
     private fun gradeTargets(city: Settlement, network: CivRoadUpkeepNetwork): List<CivRoadUpkeep> {
-        val lowered = loweredRoadFloors(city)
+        val lowered = retainedGradeFloors(city)
         return network.targets.filter { it.routeOverride != null || it.wallCleanup != null || it.floor in lowered }
     }
 
@@ -713,12 +713,21 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     companion object {
         private const val SCAN_COLUMNS = 8
         private const val PREPARED_FINISH_TICKS = 600L
-        private fun loweredRoadFloors(city: Settlement): Set<CivPosition> =
+        private fun retainedGradeFloors(city: Settlement): Set<CivPosition> =
             city.roadRouteOverrides.orEmpty().values.flatMap { repair ->
                 val before = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
+                val ribbon = hashSetOf<Long>()
+                val banks = hashSetOf<Long>()
+                // Equal-height treads and landings still change material when a flight moves.
+                // Finish that cross-section and its already planned grass banks with the grade.
+                for (at in repair.changed()) for (index in (at - 1).coerceAtLeast(0)..(at + 1).coerceAtMost(repair.route.lastIndex)) {
+                    val p = repair.route[index]
+                    for (dx in -1..1) for (dz in -1..1) ribbon += civsTerrainKey(p.x + dx, p.z + dz)
+                    for ((dx, dz) in directions) banks += civsTerrainKey(p.x + dx * 2, p.z + dz * 2)
+                }
                 CivsAutonomousTerraform.roadProfile(repair.route).filter { (key, floor) ->
-                    before[key]?.let { floor.y != it.y } == true
-                }.values
+                    key in ribbon || before[key]?.let { floor.y != it.y } == true
+                }.values + CivsRoadTerraces.banks(repair.route).filterKeys { it in banks }.values
             }.toHashSet()
         /** The old column charge plus each newly placed support; clearance keeps its existing charge. */
         internal fun inputs(city: Settlement, work: CivWorldWork): Map<String, Long> =
@@ -1345,7 +1354,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 abs(target.floor.x.toLong() - target.source.entrance.x) + abs(target.floor.z.toLong() - target.source.entrance.z)
             }
             // Retained lowered columns keep the native grade queue's existing sequence.
-            val lowered = loweredRoadFloors(city)
+            val lowered = retainedGradeFloors(city)
             val preservedGrades = arrayListOf<CivRoadUpkeep>()
             val apronColumns = hashMapOf<UUID, Set<Long>>()
             val entrances = linkedMapOf<UUID, MutableList<CivRoadUpkeep>>()
@@ -1361,10 +1370,12 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     entrances.getOrPut(target.source.id) { arrayListOf() } += target
                 else remaining += target
             }
-            // Finish the admitted apron at one doorway before travelling to another entrance.
+            // Complete terrain grades before cosmetic wall cleanup, including columns of an already
+            // committed terrace. Finish one doorway's admitted apron before travelling to another.
             return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(),
-                (if (proposeCuts) CivsWallApproachCleanup.targets(city, access) else emptyList()) + gradeTargets.filterNot { touchesHall(it, hallColumns) } +
-                    preservedGrades + entrances.values.flatten() + remaining,
+                gradeTargets.filterNot { touchesHall(it, hallColumns) } + preservedGrades +
+                    (if (proposeCuts) CivsWallApproachCleanup.targets(city, access) else emptyList()) +
+                    entrances.values.flatten() + remaining,
                 city.roadRouteOverrides, deferredDescent)
         }
     }

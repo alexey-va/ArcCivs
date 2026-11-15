@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import me.angeschossen.lands.api.LandsIntegration
 import me.angeschossen.lands.api.flags.type.Flags
 import org.bukkit.Bukkit
@@ -113,7 +114,8 @@ class CivsWorld(
         localFootprint: Boolean = false, markWaterTop: Boolean = false): CompletableFuture<CivTerrainSurface> =
         admit(area = if (localFootprint) null else surveyArea(city)) {
         requireCivs(waterColumns.size <= CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS, "autonomy-search-budget")
-        AutonomousHeightField(city, envelope, previous, waterColumns.toSet(), localFootprint = localFootprint,
+        // Keep an owned snapshot without rebuilding packed coordinates in a boxed Long hash set.
+        AutonomousHeightField(city, envelope, previous, LongOpenHashSet(waterColumns), localFootprint = localFootprint,
             markWaterTop = markWaterTop)
     }
 

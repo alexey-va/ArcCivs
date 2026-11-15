@@ -207,6 +207,99 @@ class CivsRoadMaintenanceTest : FunSpec({
         Gson().toJson(city to network) shouldBe before
     }
 
+    test("terrain grades precede wall cleanup both on admission and after a cleanup receipt rebuilds the queue") {
+        val base = upkeepCity()
+        // Actual Auto4 forester cross-section, translated only in X/Z for this small city fixture.
+        val auto4Start = CivPosition(12562, 70, 10386)
+        val route = (10386..10401).map { z -> CivPosition(0, when {
+            z < 10390 -> 70
+            z < 10398 -> 71
+            else -> 72
+        }, z - auto4Start.z) }
+        val source = base.buildings.last().copy(type = BuildingType.HOUSE, rotation = 180, transit = null,
+            anchor = CivPosition(0, 71, 16), entrance = route.last(),
+            bounds = CivBox(CivPosition(-2, 71, 16), CivPosition(2, 77, 20)), schematicId = "fixture/house")
+        val wallRoute = (0..10).map { CivPosition(20, 65, it) }
+        val wall = source.copy(id = UUID(0, 93), type = BuildingType.WALL, anchor = CivPosition(20, 64, 11),
+            entrance = wallRoute.last(), bounds = CivBox(CivPosition(19, 64, 11), CivPosition(21, 69, 13)),
+            schematicId = "fixture/wall")
+        val worker = CivsEquipment.replace(base.workers.single(),
+            MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also {
+                it[CivsEquipment.BAG] = CivResidentItem("COBBLESTONE", 64)
+            })
+        val city = CivsRules.validate(base.copy(style = "original", stock = Stock(),
+            buildings = base.buildings.dropLast(1) + listOf(source, wall), workers = listOf(worker),
+            inventory = CivInventory(CivStorageMode.PHYSICAL)))
+        val wallPlan = upkeepApproach(city, wall, wallRoute).let { plan -> plan.copy(terrain = plan.terrain!!.copy(
+            blocks = wallRoute.map { CivPlanBlock(it.copy(y = 64), "minecraft:grass_block[snowy=false]", "minecraft:coarse_dirt") })) }
+        val plans = listOf(upkeepApproach(city, source, route), wallPlan,
+            upkeepApproach(city, city.buildings[1], listOf(city.buildings[1].entrance)))
+        val network = CivsRoadMaintenance.prepare(city, plans)
+        val grades = network.targets.filter { it.routeOverride != null }
+        val cleanup = network.targets.filter { it.wallCleanup != null }
+        (grades.isNotEmpty() && cleanup.isNotEmpty()) shouldBe true
+        grades.forEach { it.validated(city) }
+        cleanup.forEach { it.validated(city) }
+        network.targets.indexOf(grades.last()) shouldBe grades.lastIndex
+        (network.targets.indexOf(grades.last()) < network.targets.indexOf(cleanup.first())) shouldBe true
+
+        var tick = 0
+        var gradeAvailable = false
+        val probes = mutableListOf<CivRoadUpkeep>()
+        val native = mockk<CivsWorld>()
+        every { native.captureRoadUpkeep(any(), any(), any(), any()) } answers {
+            val target = thirdArg<CivRoadUpkeep>()
+            val builder = secondArg<CivWorker>()
+            probes += target
+            if (target.routeOverride != null && !gradeAvailable) null
+            else if (target.routeOverride == null && target.wallCleanup == null) null
+            else CivWorldWork(builder.id, builder.completedCycles, builder.assignment!!,
+                target.floor.copy(x = target.floor.x + 1, y = target.floor.y + 1),
+                listOf(CivPlanBlock(target.floor, target.wallCleanup?.authored?.after ?: "minecraft:dirt", target.after)),
+                status = "repairing-road", focus = target.floor, upkeep = target)
+        }
+        val maintenance = CivsRoadMaintenance(native, registerSurface = { _, _ -> }, currentTick = { tick })
+        maintenance.publish(city, network)
+        var work: CivWorldWork? = null
+        repeat(4) { if (work == null) { tick++; work = maintenance.plan(city, worker) } }
+        probes.first() shouldBe grades.first()
+        val wallWork = requireNotNull(work)
+        (wallWork.upkeep!!.wallCleanup != null) shouldBe true
+        val after = CivsRoadMaintenance.complete(city, wallWork, 3_000)
+        CivRoadUpkeepReceipt(worker, city.stock, wallWork, 3_000).validated(after)
+        maintenance.upkeepRetired(after, wallWork.upkeep!!)
+        gradeAvailable = true
+        probes.clear()
+        tick++
+        val resumed = requireNotNull(maintenance.plan(after, after.workers.single()))
+        resumed.upkeep shouldBe grades.first()
+        probes.single() shouldBe grades.first()
+
+        // Once a terrace is committed, its remaining grade columns still precede cosmetic work.
+        val committed = city.copy(roadRouteOverrides = mapOf(source.id.toString() to grades.first().routeOverride!!))
+        val retained = CivsRoadMaintenance.prepare(committed, plans).targets
+        val oldProfile = CivsAutonomousTerraform.roadProfile(route)
+        val changedFloors = CivsAutonomousTerraform.roadProfile(grades.first().routeOverride!!.route)
+            .filter { (key, p) -> oldProfile[key]?.y != p.y }.values.toSet()
+        val finish = retained.filter { it.routeOverride == null && it.wallCleanup == null && it.floor in changedFloors }
+        (finish.isNotEmpty()) shouldBe true
+        val firstCleanup = retained.indexOfFirst { it.wallCleanup != null }
+        (firstCleanup >= 0 && finish.all { retained.indexOf(it) < firstCleanup }) shouldBe true
+        val flushPoints = listOf(CivPosition(12562, 70, 10391), CivPosition(12562, 71, 10398))
+        for (actual in flushPoints) {
+            val local = actual.copy(x = actual.x - auto4Start.x, z = actual.z - auto4Start.z)
+            val target = retained.single { it.floor == local && it.source.id == source.id }
+            oldProfile[civsTerrainKey(local.x, local.z)] shouldBe local
+            (retained.indexOf(target) < firstCleanup) shouldBe true
+            if (actual.z == 10391) target.after shouldBe
+                "minecraft:oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+            else target.after shouldBe "minecraft:dirt_path"
+        }
+        val banks = retained.filter { it.source.id == source.id && it.terraceBank() }
+        (banks.isNotEmpty()) shouldBe true
+        banks.all { retained.indexOf(it) < firstCleanup } shouldBe true
+    }
+
     test("an Auto1 crossing shoulder keeps its owner's straight descent despite a second lower neighbour") {
         val (city, plans, floor) = upkeepShoulderCrossing()
         val before = Gson().toJson(city to plans)

@@ -416,9 +416,11 @@ private class CitizenSearchGeometry(
     private val obstacleScratch = BoundingBox()
     fun loaded(x: Int, y: Int, z: Int) = blocks[x, y, z]?.loaded == true
 
-    fun bodyClear(point: CitizenPoint): Boolean {
-        val body = bodyScratch.resize(point.x - .299, point.y + .001, point.z - .299,
-            point.x + .299, point.y + 1.799, point.z + .299)
+    fun bodyClear(point: CitizenPoint): Boolean = bodyClear(point.x, point.y, point.z)
+
+    private fun bodyClear(px: Double, py: Double, pz: Double): Boolean {
+        val body = bodyScratch.resize(px - .299, py + .001, pz - .299,
+            px + .299, py + 1.799, pz + .299)
         val feetRow = floor(body.minY).toInt()
         if (feetRow < minimumY) return false
         for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
@@ -479,7 +481,7 @@ private class CitizenSearchGeometry(
                     val block = blocks[x, y, z] ?: return false
                     if (y !in minimumY until maximumY || !block.loaded) return false
                     if (block.liquid) obstacles += BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
-                    else block.boxes.forEach { obstacles += it.at(x, y, z) }
+                    else for (index in block.boxes.indices) obstacles += block.boxes[index].at(x, y, z)
                 }
         if (citizenSlideBody(Vector(from.x, from.y + .001, from.z), Vector(to.x, to.y + .001, to.z),
                 .299, 1.798, .299, obstacles) != null) return false
@@ -487,10 +489,11 @@ private class CitizenSearchGeometry(
         val occupiedBody = body(occupied, -.001)
         for (index in 1..samples) {
             val t = index.toDouble() / samples
-            val point = CitizenPoint(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t,
-                from.z + (to.z - from.z) * t)
-            if (!bodyClear(point)) return false
-            val body = body(point, -.001)
+            val px = from.x + (to.x - from.x) * t
+            val py = from.y + (to.y - from.y) * t
+            val pz = from.z + (to.z - from.z) * t
+            if (!bodyClear(px, py, pz)) return false
+            val body = BoundingBox(px - .299, py - .001, pz - .299, px + .299, py + 1.799, pz + .299)
             for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
                 for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt())
                     for (y in floor(body.minY).toInt()..floor(body.maxY).toInt()) {

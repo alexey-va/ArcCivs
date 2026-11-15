@@ -28,6 +28,34 @@ class CivsBlueprintCatalogTest : FunSpec({
         catalog.autonomous("sandstone", BuildingType.HOUSE)?.id shouldBe fallback.first()["schematicId"].asString
         catalog.choices(BuildingType.HOUSE, "shire").single().maxLevel shouldBe 1
     }
+    test("automatic selection keeps style, level and family precedence and compact alternative order") {
+        val localLow = catalogFamily("shire", BuildingType.HOUSE, "fundamentals/alpha", maximum = 2)
+        val localHigh = catalogFamily("shire", BuildingType.HOUSE, "fundamentals/zeta")
+        val foreign = catalogFamily("acacia", BuildingType.HOUSE, "fundamentals/citizen")
+        val compact = catalogFamily("tiny", BuildingType.HOUSE, "fundamentals/citizen").onEach {
+            it.add("size", Gson().toJsonTree(listOf(6, 8, 9)))
+        }
+        val catalog = parseCatalog(compact + localLow + foreign + localHigh)
+        catalog.autonomous("shire", BuildingType.HOUSE)?.id shouldBe localHigh.first()["schematicId"].asString
+        catalog.autonomous("missing", BuildingType.HOUSE)?.id shouldBe foreign.first()["schematicId"].asString
+        catalog.autonomousAlternatives("shire", BuildingType.HOUSE).map { it.id } shouldBe
+            listOf(localLow, compact, foreign).map { it.first()["schematicId"].asString }
+        catalog.autonomous("tiny", BuildingType.HOUSE)?.id shouldBe compact.first()["schematicId"].asString
+        catalog.autonomous("shire", BuildingType.HOUSE)?.id shouldBe localHigh.first()["schematicId"].asString
+    }
+    test("a replacement catalog rebuilds automatic choices while accepted revisions and the old instance stay pinned") {
+        val oldLocal = catalogFamily("shire", BuildingType.HOUSE, "fundamentals/citizen", maximum = 1)
+        val fallback = catalogFamily("caledonia", BuildingType.HOUSE, "fundamentals/citizen")
+        val before = parseCatalog(oldLocal + fallback)
+        val newLocal = catalogFamily("shire", BuildingType.HOUSE, "fundamentals/citizen", revision = "b".repeat(20))
+        val after = parseCatalog(newLocal + fallback, retained = oldLocal)
+        before.autonomous("shire", BuildingType.HOUSE)?.id shouldBe fallback.first()["schematicId"].asString
+        after.autonomous("shire", BuildingType.HOUSE)?.id shouldBe newLocal.first()["schematicId"].asString
+        after.autonomousAlternatives("shire", BuildingType.HOUSE).map { it.id } shouldBe
+            listOf(fallback.first()["schematicId"].asString)
+        after.upgrade(oldLocal.first()["schematicId"].asString, 1)?.id shouldBe oldLocal.first()["schematicId"].asString
+        before.autonomous("shire", BuildingType.HOUSE)?.id shouldBe fallback.first()["schematicId"].asString
+    }
     test("accepted upgrade keeps its exact family and revision even when a new default sorts first") {
         val old = catalogFamily("acacia", BuildingType.HOUSE, "fundamentals/citizen", revision = "b".repeat(20))
         val current = catalogFamily("acacia", BuildingType.HOUSE, "fundamentals/alternative", revision = "c".repeat(20))

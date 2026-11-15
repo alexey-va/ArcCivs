@@ -1155,10 +1155,13 @@ class CivsQuarryStaffingRecoveryTest : FunSpec({
             val original = quarryStaffingCity(h.world.uid).copy(owner = h.owner)
             val extra = CivsEquipment.collectSupplies(original.workers[1], mapOf("COAL" to 4L))
             val loaded = original.copy(workers = original.workers.map { if (it.id == extra.id) extra else it })
+            val quarry = loaded.buildings.single { it.type == BuildingType.QUARRY }
+            every { h.worldAdapter.captureMineOpening(loaded, quarry, any()) } returns CompletableFuture.completedFuture(emptyList())
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(loaded))
             every { h.citizens.canReassign(any(), any()) } returns true
             h.start()
             h.paper.performTicks(40)
+            verify(exactly = 1) { h.worldAdapter.captureMineOpening(loaded, quarry, any()) }
             h.saves shouldBe emptyList()
             h.service.settlements().single() shouldBe loaded
             h.service.residentSettlements() shouldBe listOf(loaded)

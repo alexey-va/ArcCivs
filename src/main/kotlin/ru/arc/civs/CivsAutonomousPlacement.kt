@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
@@ -17,8 +18,11 @@ internal data class CivWallRefitApproach(val city: Settlement, val original: Lis
 
 /** The planner and its diagnostic export capture the same water-foundation domain. */
 internal fun civsAutonomousWaterColumns(frame: CivSettlementFrame, retainedGates: List<CivBox>): Set<Long> =
-    (listOf(frame.core) + frame.gates.map { it.passage } + retainedGates).flatMapTo(hashSetOf()) { box ->
-        (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
+    LongOpenHashSet().apply {
+        // Packed adjacent X/Z keys share Long.hashCode; use the terrain owner's mixed long hashing.
+        for (box in listOf(frame.core) + frame.gates.map { it.passage } + retainedGates) {
+            for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z) add(civsTerrainKey(x, z))
+        }
     }
 
 /** Detached earthworks selection; the service owns durable SITE admission and construction. */

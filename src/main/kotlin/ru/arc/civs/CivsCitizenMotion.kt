@@ -371,15 +371,15 @@ internal class CivsCitizenMotion(
                 walk.reachedAt?.let { walk.maxHandoffMillis = maxOf(walk.maxHandoffMillis, now - it) }
                 walk.reachedAt = null
             }
-            if (motion.finished && motion.failure == null) {
-                if (actual.distanceSquared(route.target.point()) > .000001)
-                    routes.finishWander(actor, city, walk, now, "movement-not-applied")
-                else {
-                    walk.legs++
-                    walk.reachedAt = now
-                }
+            if (!motion.finished || motion.failure != null) return false
+            if (actual.distanceSquared(route.target.point()) > .000001) {
+                routes.finishWander(actor, city, walk, now, "movement-not-applied")
+                return false
             }
-            return false
+            walk.legs++
+            walk.reachedAt = now
+            // Spend only the shared handoff admission here. The next leg moves on
+            // the next tick, without an extra stationary tick or a second stride.
         }
         if (walk.legs >= walk.legLimit) {
             routes.finishWander(actor, city, walk, now, null)

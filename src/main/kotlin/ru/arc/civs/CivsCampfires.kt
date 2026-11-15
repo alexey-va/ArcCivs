@@ -81,8 +81,10 @@ internal fun citizenCampEligible(plan: CitizenPlan, phase: CitizenPhase, time: L
     return plan.idleReason == null && phase == CitizenPhase.IDLE && time in 10_500L until 12_000L
 }
 
-internal fun citizenCampfireLit(block: Block): Boolean =
-    block.type in setOf(Material.CAMPFIRE, Material.SOUL_CAMPFIRE) && (block.blockData as? Lightable)?.isLit == true
+internal fun citizenCampfireLit(block: Block): Boolean {
+    val type = block.type
+    return (type == Material.CAMPFIRE || type == Material.SOUL_CAMPFIRE) && (block.blockData as? Lightable)?.isLit == true
+}
 
 internal fun citizenCampfireLit(world: World, point: CivPosition): Boolean =
     point.y in world.minHeight until world.maxHeight && world.isChunkLoaded(point.x shr 4, point.z shr 4) &&

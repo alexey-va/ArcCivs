@@ -103,7 +103,9 @@ class CivsProducerStorageFullWanderTest : FunSpec({
                 (actor.route === leisureRoute) shouldBe true
                 actor.route?.idleAnchor shouldBe workplace.entrance
                 actor.outputFullPause shouldBe pause
-                h.owner.status(h.workerId) shouldBe "workers.status.route-stopped"
+                // The next local leg is ready at the preceding leg's arrival.
+                requireNotNull(actor.route).motion.finished shouldBe false
+                h.owner.status(h.workerId) shouldBe "workers.status.wandering"
                 for (tick in 1..600) {
                     if (attempts == 2) break
                     h.navigate()

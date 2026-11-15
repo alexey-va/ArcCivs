@@ -203,7 +203,7 @@ private class MineOpeningFixture(tall: Boolean = false) : AutoCloseable {
     val quarantined get() = city.id in unhealthy
     private val store = mockk<CivsStore>()
     val storage = CivsStorage(plugin) { emptyArray() }
-    private val access = CivsWorld(plugin, tasks) { cities.values }
+    private val access = CivsWorld(plugin, tasks, nanoTime = { 0L }) { cities.values }
     val journal: CivsInventoryJournal
     val maintenance: CivsMineMaintenance
     var journalWrite: CompletableFuture<CivInventoryTransaction>? = null

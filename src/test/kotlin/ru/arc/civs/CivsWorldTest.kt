@@ -195,6 +195,32 @@ class CivsOwnControlTreeSupportTest : FunSpec({
     }
 })
 
+class CivsAutonomousHeightFieldSnapshotTest : FunSpec({
+    test("height field owns its water-column snapshot and a later request still reads current terrain") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), radius = 1, autonomy = CivAutonomy())
+            s.cities += city
+            s.world.getBlockAt(0, 64, 0).type = Material.WATER
+            s.world.getBlockAt(1, 64, 0).type = Material.WATER
+            val callerColumns = mutableSetOf(civsTerrainKey(0, 0))
+            val captured = s.subject.autonomousHeightField(city, building, waterColumns = callerColumns)
+            callerColumns.clear()
+            callerColumns += civsTerrainKey(1, 0)
+            s.scheduler.tick()
+            completed(captured).at(0, 0)!!.waterBottomY shouldBe 63
+            completed(captured).at(1, 0)!!.waterBottomY shouldBe null
+
+            s.world.getBlockAt(0, 64, 0).type = Material.AIR
+            val refreshed = s.subject.autonomousHeightField(city, building, waterColumns = callerColumns)
+            s.scheduler.tick()
+            completed(refreshed).at(0, 0)!!.groundY shouldBe 63
+            completed(refreshed).at(0, 0)!!.natural shouldBe true
+            completed(refreshed).at(1, 0)!!.waterBottomY shouldBe 63
+        }
+    }
+})
+
 class CivsWorldTest : FunSpec({
     test("reopened paid gate proofs guard queued recapture and both kinds of paid batch") {
         worldScenario(collisionWorld = true) { s ->
