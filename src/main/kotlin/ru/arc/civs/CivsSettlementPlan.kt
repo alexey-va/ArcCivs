@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import java.util.UUID
 import java.util.Collections
 import java.util.concurrent.CompletableFuture
@@ -212,17 +213,27 @@ internal object CivsSettlementPlans {
             })
             require(deferred.crossing?.let { city.contains(it.x, it.z) } != false)
         }
-        require(plan.plots.withIndex().all { (i, a) -> plan.plots.drop(i + 1).none {
-            CivsAutonomousGeometry.overlaps(a.envelope, it.envelope)
-        } })
-        require(plan.routes.all { (id, route) ->
-            runCatching { UUID.fromString(id) }.isSuccess && route.isNotEmpty() &&
-                route.size <= CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH &&
-                route.all { city.contains(it.x, it.z) && it.y in -4095..4095 } &&
-                route.map { civsTerrainKey(it.x, it.z) }.distinct().size == route.size &&
-                route.zipWithNext().all { (a, b) -> abs(a.x.toLong() - b.x) + abs(a.z.toLong() - b.z) == 1L &&
-                    abs(a.y.toLong() - b.y) <= 1L }
-        })
+        for (i in plan.plots.indices) {
+            val a = plan.plots[i]
+            for (j in i + 1 until plan.plots.size)
+                require(!CivsAutonomousGeometry.overlaps(a.envelope, plan.plots[j].envelope))
+        }
+        val routeColumns = LongOpenHashSet()
+        for ((id, route) in plan.routes) {
+            require(runCatching { UUID.fromString(id) }.isSuccess && route.isNotEmpty() &&
+                route.size <= CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH)
+            routeColumns.clear()
+            var previous: CivPosition? = null
+            for (point in route) {
+                require(city.contains(point.x, point.z) && point.y in -4095..4095 &&
+                    routeColumns.add(civsTerrainKey(point.x, point.z)))
+                previous?.let { prior ->
+                    require(abs(prior.x.toLong() - point.x) + abs(prior.z.toLong() - point.z) == 1L &&
+                        abs(prior.y.toLong() - point.y) <= 1L)
+                }
+                previous = point
+            }
+        }
     }
 
     /** Replace an unbuilt outline only after the whole new ring and each ordinary builder approach are proven. */

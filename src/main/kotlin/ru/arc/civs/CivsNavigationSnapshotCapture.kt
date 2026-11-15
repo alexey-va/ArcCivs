@@ -3,6 +3,8 @@ package ru.arc.civs
 import org.bukkit.Material
 import org.bukkit.block.data.BlockData
 import java.util.AbstractMap.SimpleImmutableEntry
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.floor
@@ -14,10 +16,24 @@ internal class CitizenSnapshotTerrain {
     val chunks = hashMapOf<CitizenSnapshotKey, CitizenSnapshotChunk>()
     val unavailable = hashSetOf<CitizenSnapshotKey>()
     val states = hashMapOf<BlockData, CitizenSnapshotState>()
+    // Resolved states accumulate for this route. Refreshed sections supply a new immutable palette.
+    private val resolvedPalettes = Collections.newSetFromMap(IdentityHashMap<Map<BlockData, CivPosition>, Boolean>())
     val dynamics = hashMapOf<CivPosition, List<CitizenTerrainBox>>()
     val costs = hashMapOf<CivPosition, Double>()
     val blocks = hashMapOf<CivPosition, CitizenTerrainBlock>()
     val sections = hashMapOf<CitizenSnapshotSectionKey, Long>()
+
+    fun collectMissingStates(palette: Map<BlockData, CivPosition>, missing: MutableMap<BlockData, CivPosition>) {
+        if (palette in resolvedPalettes) return
+        var complete = true
+        for (data in palette.keys) {
+            if (data in states) continue
+            complete = false
+            if (missing.size == 256) break
+            missing.putIfAbsent(data, palette.getValue(data))
+        }
+        if (complete) resolvedPalettes.add(palette)
+    }
 }
 
 internal data class CitizenSnapshotInput(
@@ -137,13 +153,12 @@ internal class CitizenSnapshotCapture(
             checkCancelled()
             val probe = probes[next]
             val y = floor(probe.node.y).toInt()
-            val positions = buildList(probeStates.size) {
-                for (x in probe.node.x - 1..probe.node.x + 1) for (z in probe.node.z - 1..probe.node.z + 1)
-                    for (by in y - 3..y + 3) add(CivPosition(x, by, z))
-            }
-            val chunkKeys = if (positions.isEmpty()) emptyList() else buildList(4) {
-                for (cx in ((probe.node.x - 1) shr 4)..((probe.node.x + 1) shr 4))
-                    for (cz in ((probe.node.z - 1) shr 4)..((probe.node.z + 1) shr 4)) add(CitizenSnapshotKey(cx, cz))
+            val xs = probe.node.x - 1..probe.node.x + 1
+            val zs = probe.node.z - 1..probe.node.z + 1
+            val ys = y - 3..y + 3
+            val chunkKeys = if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) emptyList() else buildList(4) {
+                for (cx in (xs.first shr 4)..(xs.last shr 4))
+                    for (cz in (zs.first shr 4)..(zs.last shr 4)) add(CitizenSnapshotKey(cx, cz))
             }
             val missingChunks = if (minimumY < maximumY && y - 3 < maximumY && y + 3 >= minimumY)
                 chunkKeys.filterTo(linkedSetOf()) { it !in terrain.chunks && it !in terrain.unavailable }
@@ -159,14 +174,14 @@ internal class CitizenSnapshotCapture(
                     }
                 }
             }
-            // Palette discovery scans a detached whole chunk once, shared by every route using that snapshot.
             val missingStates = linkedMapOf<BlockData, CivPosition>()
             for (key in chunkKeys) {
-                terrain.chunks[key]?.states(y - 3, y + 3)?.forEach { (data, sample) ->
-                    if (data !in terrain.states && missingStates.size < 256) missingStates.putIfAbsent(data, sample)
-                }
+                terrain.chunks[key]?.states(ys.first, ys.last)?.let { terrain.collectMissingStates(it, missingStates) }
             }
             if (missingStates.isNotEmpty()) return request(states = missingStates)
+            val positions = buildList(probeStates.size) {
+                for (x in xs) for (z in zs) for (by in ys) add(CivPosition(x, by, z))
+            }
             val cells = Array<CitizenTerrainBlock?>(positions.size) { terrain.blocks[positions[it]] }
             val dynamic = linkedMapOf<CivPosition, BlockData>()
             for (index in positions.indices) {

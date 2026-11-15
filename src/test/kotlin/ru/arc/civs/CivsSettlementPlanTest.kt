@@ -14,6 +14,54 @@ import java.nio.file.Path
 import java.util.UUID
 
 class CivsSettlementPlanTest : FunSpec({
+    test("plan validation retains route bounds geometry identity and legacy acceptance") {
+        val city = settlementPlanCity()
+        val hall = city.buildings.single()
+        val plot = CivSettlementPlot(hall, hall.bounds)
+        val otherBounds = CivBox(CivPosition(10, 64, -8), CivPosition(18, 76, -1))
+        val other = CivSettlementPlot(hall.copy(id = UUID(94, 900), anchor = CivPosition(14, 64, 0),
+            bounds = otherBounds, entrance = CivPosition(14, 65, 0)), otherBounds)
+        val id = UUID(94, 901).toString()
+        val route = listOf(CivPosition(0, 65, 0), CivPosition(1, 66, 0), CivPosition(1, 65, 1))
+        val gates = listOf(-8, 0, 8).map { x ->
+            CivBox(CivPosition(x, 64, -16), CivPosition(x, 70, -16))
+        }
+        val plan = CivSettlementPlan(CivsSettlementPlans.VERSION, 0, 56, listOf(plot, other),
+            mapOf(id to route), emptyList(), gates)
+        val longest = (-64..64).map { CivPosition(it, 65, 0) } + (64 downTo -63).map { CivPosition(it, 65, 1) }
+        val accepted = listOf(plan, plan.copy(routes = emptyMap()),
+            plan.copy(routes = mapOf(id to longest.take(CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH))),
+            plan.copy(routes = mapOf(id to listOf(CivPosition(0, -4095, 0)))),
+            plan.copy(routes = mapOf(id to listOf(CivPosition(0, 4095, 0)))),
+            plan.copy(routes = mapOf(id to route, "1-1-1-1-1" to route)))
+        for (candidate in accepted) {
+            CivsSettlementPlans.validate(city, candidate)
+            val restored = Gson().fromJson(Gson().toJson(candidate), CivSettlementPlan::class.java)
+            CivsSettlementPlans.current(city.copy(autonomy = city.autonomy!!.copy(plan = restored))) shouldBe candidate
+        }
+        val loop = listOf(CivPosition(0, 65, 0), CivPosition(1, 66, 0), CivPosition(1, 67, 1),
+            CivPosition(0, 68, 1), CivPosition(0, 69, 0))
+        val invalidRoutes = listOf(emptyList(), longest, loop, loop.map { it.copy(y = 65) },
+            listOf(CivPosition(0, 65, 0), CivPosition(2, 65, 0)),
+            listOf(CivPosition(0, 65, 0), CivPosition(1, 65, 1)),
+            listOf(CivPosition(0, 65, 0), CivPosition(1, 67, 0)),
+            listOf(CivPosition(city.radius + 1, 65, 0)),
+            listOf(CivPosition(0, -4096, 0)), listOf(CivPosition(0, 4096, 0)))
+        for (invalid in invalidRoutes)
+            shouldThrow<IllegalArgumentException> { CivsSettlementPlans.validate(city, plan.copy(routes = mapOf(id to invalid))) }
+        for (invalid in listOf(plan.copy(routes = mapOf("invalid" to route)),
+            plan.copy(plots = listOf(plot, other.copy(building = other.building.copy(id = hall.id)))),
+            plan.copy(plots = listOf(plot, other, plot.copy(building = hall.copy(id = UUID(94, 902)))))))
+            shouldThrow<IllegalArgumentException> { CivsSettlementPlans.validate(city, invalid) }
+        val wide = city.copy(radius = Int.MAX_VALUE)
+        CivsSettlementPlans.validate(wide, plan.copy(routes = mapOf(id to listOf(
+            CivPosition(Int.MAX_VALUE - 1, 65, 0), CivPosition(Int.MAX_VALUE, 66, 0)))))
+        shouldThrow<IllegalArgumentException> {
+            CivsSettlementPlans.validate(wide, plan.copy(routes = mapOf(id to listOf(
+                CivPosition(-Int.MAX_VALUE, 65, 0), CivPosition(Int.MAX_VALUE, 65, 0)))))
+        }
+    }
+
     test("a gentle terraformable hillside keeps the full profile despite its raw relief") {
         val city = settlementPlanCity().copy(radius = 128)
         val hall = city.buildings.single()

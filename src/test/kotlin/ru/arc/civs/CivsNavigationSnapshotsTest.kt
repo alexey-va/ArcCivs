@@ -776,6 +776,38 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
+    test("a replacement palette is fully resolved in bounded batches before the pending probe resumes") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val snow = paper.server.createBlockData(Material.SNOW)
+            val at = CivPosition(2, 64, 2)
+            val terrain = flatSnapshotTerrain(0, 0, mapOf(at to snow))
+            val key = CitizenSnapshotKey(0, 0)
+            val original = terrain.chunks.getValue(key).snapshot
+            val node = CitizenSearchNode(at.x, at.y.toDouble(), at.z)
+            val policy = CitizenSnapshotPolicy({ p, _ -> p.y == at.y }, { _, _ -> true })
+            val capture = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), terrain,
+                policy, -64, 320, 63, 1, false)
+            capture.advance(CitizenSnapshotInput()).dynamics shouldBe mapOf(at to snow)
+
+            // These extra states are in the same immutable section, outside the probe's 63 cells.
+            val extra = List(257) { mockk<BlockData>() }
+            val replacement = object : ChunkSnapshot by original {
+                override fun getBlockData(x: Int, y: Int, z: Int): BlockData =
+                    extra.getOrNull((y - 70) * 256 + z * 16 + x) ?: original.getBlockData(x, y, z)
+            }
+            var request = capture.advance(CitizenSnapshotInput(chunks = mapOf(key to CitizenSnapshotChunk(replacement, -64, 320))))
+            request.states.keys.toList() shouldBe extra.take(256)
+            val state = terrain.states.getValue(paper.server.createBlockData(Material.AIR))
+            request = capture.advance(CitizenSnapshotInput(states = request.states.keys.associateWith { state }))
+            request.states.keys.toList() shouldBe listOf(extra.last())
+            request = capture.advance(CitizenSnapshotInput(states = mapOf(extra.last() to state)))
+            request.dynamics shouldBe mapOf(at to snow)
+            request = capture.advance(CitizenSnapshotInput(dynamics = mapOf(at to emptyList())))
+            val result = capture.advance(CitizenSnapshotInput(costs = request.costs.associateWith { 1.0 }))
+            requireNotNull(result.captures).single().blocks.size shouldBe 63
+        }
+    }
+
     test("immutable chunk palette ranges reuse their merged state map and keep later section sample precedence") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
             val terrain = flatSnapshotTerrain(-1, -1)
