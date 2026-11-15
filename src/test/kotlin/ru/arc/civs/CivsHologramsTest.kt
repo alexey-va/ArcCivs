@@ -276,10 +276,11 @@ class CivsHologramsTest : FunSpec({
             val label = civsNpcHologramText(text, npc)
             plainText(label) shouldContain "Василий\n"
             plainText(label) shouldContain "\nФермер\n"
-            for (status in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped")) {
-                plainText(civsNpcHologramText(text, npc.copy(status = status))).lines()[2] shouldBe "Ждёт"
-                plainText(civsNpcHologramText(text, npc.copy(status = status, profession = "unassigned"))).lines()[2] shouldBe "Ждёт"
-                plainText(civsNpcHologramText(text, npc.copy(status = status, child = true))).lines()[2] shouldBe "Ждёт"
+            for ((status, caption) in mapOf("route-preparing" to "Готовится идти", "route-searching" to "Ищет путь",
+                "route-blocked" to "Ждёт свободный проход", "route-stopped" to "Остановился")) {
+                plainText(civsNpcHologramText(text, npc.copy(status = status))).lines()[2] shouldBe caption
+                plainText(civsNpcHologramText(text, npc.copy(status = status, profession = "unassigned"))).lines()[2] shouldBe caption
+                plainText(civsNpcHologramText(text, npc.copy(status = status, child = true))).lines()[2] shouldBe caption
             }
             plainText(label) shouldContain "\n\uE601 18.5/20   \uE603 20/20"
             plainText(civsNpcHologramText(text, npc.copy(hunger = 6))) shouldContain "\uE604 6/20"

@@ -280,7 +280,10 @@ internal class CivsResidentSupplies(
                     val source = city.building(buildingId) ?: throw CivsRejection("building-not-found")
                     citizens.requireStorageArrival(cityId, workerId, buildingId)
                     carriedBefore = CivsEquipment.available(worker, emptyMap())
-                    val food = (source.type == BuildingType.TOWN_HALL || source.type == BuildingType.TAVERN && source.phase == BuildingPhase.ACTIVE) && CivsResidents.hunger(worker) <= 14 &&
+                    // Physical food owns an exact container receipt. A hungry scribe's ordinary
+                    // work pickup must still collect paper and leather from the town hall.
+                    val food = city.inventory?.mode == CivStorageMode.VIRTUAL &&
+                        (source.type == BuildingType.TOWN_HALL || source.type == BuildingType.TAVERN && source.phase == BuildingPhase.ACTIVE) && CivsResidents.hunger(worker) <= 14 &&
                         CivsEquipment.usableCount(worker, "BREAD") == 0
                     val builder = !food && CivsRules.isBuilder(city, source)
                     reportSupply = worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true

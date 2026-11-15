@@ -52,9 +52,9 @@ class CivsSceneEntityInfoTest : FunSpec({
             info.title shouldBe "Анна"
             info.fields.first().value shouldBe "Берёзки"
             val searching = snapshot().copy(status = "workers.status.route-searching")
-            civsSceneEntityInfo(text, bounds, setOf(id), searching, city())!!.fields.first { it.key == "status" }.value shouldBe "Ждёт"
+            civsSceneEntityInfo(text, bounds, setOf(id), searching, city())!!.fields.first { it.key == "status" }.value shouldBe "Ищет путь"
             val unassigned = city().copy(workers = city().workers.map { it.copy(assignment = null, cargo = null) })
-            civsSceneEntityInfo(text, bounds, setOf(id), searching, unassigned)!!.fields.first { it.key == "status" }.value shouldBe "Ждёт"
+            civsSceneEntityInfo(text, bounds, setOf(id), searching, unassigned)!!.fields.first { it.key == "status" }.value shouldBe "Ищет путь"
             civsSceneEntityInfo(text, bounds, setOf(id), snapshot().copy(status = "workers.status.waiting-inputs",
                 statusInputs = listOf("GRAVEL")), city())!!.fields.first { it.key == "status" }.value shouldBe "Ждёт: Гравий"
         }

@@ -144,14 +144,20 @@ internal fun citizenPacketSupported(world: World, point: CitizenPoint, allowClim
     }
 }
 
-/** Two opposing contacts under the middle half of the feet can carry a packet across an inset block seam. */
+/** Foot contacts carry a packet across inset seams and the low half of a stair beside full ground. */
 internal inline fun citizenWalkingSupported(point: CitizenPoint, supported: (CitizenPoint, Boolean) -> Boolean): Boolean {
     if (supported(point, true)) return true
     val offset = .15
-    return floor(point.x - offset) != floor(point.x + offset) &&
+    if (floor(point.x - offset) != floor(point.x + offset) &&
         supported(point.copy(x = point.x - offset), false) && supported(point.copy(x = point.x + offset), false) ||
         floor(point.z - offset) != floor(point.z + offset) &&
-        supported(point.copy(z = point.z - offset), false) && supported(point.copy(z = point.z + offset), false)
+        supported(point.copy(z = point.z - offset), false) && supported(point.copy(z = point.z + offset), false)) return true
+    // The 0.598-wide feet overlap a full-height contact throughout a half-block tread.
+    // Require the lower tread too: an unsupported gap beside a ledge is not a stair.
+    if (!supported(point.copy(y = point.y - .5), false)) return false
+    val foot = .298
+    return supported(point.copy(x = point.x - foot), false) || supported(point.copy(x = point.x + foot), false) ||
+        supported(point.copy(z = point.z - foot), false) || supported(point.copy(z = point.z + foot), false)
 }
 
 internal fun citizenWalkingSupported(world: World, point: CitizenPoint): Boolean =

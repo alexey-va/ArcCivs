@@ -32,7 +32,8 @@ class CivsCitizenObservationStatusTest : FunSpec({
         }
         every { motion.searching } returns false
         for (intent in listOf(travel, "moving-to-work", "moving-to-town-hall", "moving-to-tavern",
-            "moving-to-pickup", "carrying-cargo", "returning-output", "mine-descending", "mine-returning")) {
+            "moving-to-pickup", "carrying-cargo", "returning-output", "mine-descending", "mine-returning",
+            "collecting-items", "wandering")) {
             citizenObservedTravelStatus(intent, route) shouldBe intent
         }
         every { motion.waitingForCollision } returns true
@@ -56,7 +57,7 @@ class CivsCitizenObservationStatusTest : FunSpec({
         every { motion.failure } returns "no-path"
         citizenObservedTravelStatus(travel, route) shouldBe "route-unreachable"
         every { route.preparationRetryAt } returns 5_000L
-        citizenObservedTravelStatus(travel, route) shouldBe "route-preparing"
+        citizenObservedTravelStatus(travel, route) shouldBe "route-unreachable"
     }
 
     test("work pauses and pending native receipts retain priority over travel observation") {
@@ -68,7 +69,7 @@ class CivsCitizenObservationStatusTest : FunSpec({
         verify { route wasNot Called }
     }
 
-    test("raw held search remains diagnostic while public nameplates show waiting without replanning") {
+    test("held search remains visible on public nameplates without replanning") {
         residentRuntime { h ->
             h.assignFarm()
             val hall = h.city.buildings.first().copy(control = h.city.buildings.first().entrance)
@@ -95,16 +96,19 @@ class CivsCitizenObservationStatusTest : FunSpec({
             val text = CivsText.fromYaml(civsLocaleSource())
             for ((key, label) in mapOf("route-preparing" to "Готовится идти", "route-searching" to "Ищет путь",
                 "route-blocked" to "Ждёт свободный проход", "route-stopped" to "Остановился")) {
-                plainText(text.status(null, key, hasWork = true)) shouldBe "Ждёт"
-                plainText(text.status(null, key)) shouldBe "Ждёт"
+                plainText(text.status(null, key, hasWork = true)) shouldBe label
+                plainText(text.status(null, key)) shouldBe label
                 plainText(text.render("workers.status.$key")) shouldBe label
                 for (locale in listOf("ru", "en")) {
                     text.keys(locale).contains("workers.status.$key") shouldBe true
                     text.keys(locale).contains("building-status.$key") shouldBe true
                 }
             }
-            plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[2] shouldBe "Ждёт"
+            plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[2] shouldBe "Ищет путь"
             h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
+            @Suppress("UNCHECKED_CAST")
+            val observed = (h.owner.debug(h.city.id, h.workerId)["entries"] as List<Map<String, Any?>>).single()
+            observed["observed_status"] shouldBe "route-searching"
             h.routeIdentity() shouldBe route
             h.city shouldBe city
             h.workPlans shouldBe workPlans
@@ -112,19 +116,22 @@ class CivsCitizenObservationStatusTest : FunSpec({
         }
     }
 
-    test("public captions distinguish waiting, ordinary travel, guard duty and work in both languages") {
+    test("public captions retain route causes and travel purposes in both languages") {
         val text = CivsText.fromYaml(civsLocaleSource())
-        for ((locale, waiting, walking, guarding, working) in listOf(
-            listOf("ru", "Ждёт", "Идёт", "На посту", "Работает"),
-            listOf("en", "Waiting", "Walking", "On watch", "Working"),
+        for ((locale, waiting, wandering, guarding, working) in listOf(
+            listOf("ru", "Ждёт", "Гуляет без дела", "На посту", "Работает"),
+            listOf("en", "Waiting", "Wandering idly", "On watch", "Working"),
         )) {
             for (state in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped",
-                "searching-work", "workstation-unavailable", "mine-waiting", "paused", "waiting", "idle")) {
+                "searching-work", "workstation-unavailable", "mine-waiting", "paused", "no-research", "research-unfunded",
+                "moving-to-work", "moving-to-storage", "carrying-cargo", "returning-output", "moving-to-pickup",
+                "mine-descending", "mine-returning", "patrolling", "collecting-items", "meeting", "to-campfire")) {
+                text.status(null, state, locale = locale, hasWork = true) shouldBe text.render("workers.status.$state", locale)
+            }
+            for (state in listOf("waiting", "idle"))
                 plainText(text.status(null, state, locale = locale, hasWork = true)) shouldBe waiting
-            }
-            for (state in listOf("walking", "moving-to-work", "moving-to-storage", "carrying-cargo", "patrolling")) {
-                plainText(text.status(null, state, locale = locale, hasWork = true)) shouldBe walking
-            }
+            for (state in listOf("walking", "wandering"))
+                plainText(text.status(null, state, locale = locale)) shouldBe wandering
             plainText(text.status(null, "guarding", locale = locale, hasWork = true)) shouldBe guarding
             for (state in listOf("working", "working-field", "building", "placing")) {
                 plainText(text.status(null, state, locale = locale, hasWork = true)) shouldBe working

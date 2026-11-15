@@ -192,6 +192,14 @@ internal fun citizenResidentEscapeStep(npc: PacketPlayerNpc, allowed: (Location)
 
 internal data class CitizenCollisionMove(val position: Vector, val contact: Vector)
 
+/** Conservative movement envelope: boundary contacts still reach the exact sweep below. */
+internal fun citizenResidentSweep(npc: PacketPlayerNpc, from: Location, to: Location): BoundingBox {
+    val half = .3 * npc.scale
+    return BoundingBox(minOf(from.x, to.x) - half, minOf(from.y, to.y), minOf(from.z, to.z) - half,
+        maxOf(from.x, to.x) + half, maxOf(from.y, to.y) + npc.height, maxOf(from.z, to.z) + half)
+        .expand(CONTACT_EPSILON)
+}
+
 /** Owned packet residents use the same full-body sweep as native-player contact. */
 internal fun citizenResidentStepClear(npc: PacketPlayerNpc, from: Location, to: Location,
     bodies: List<BoundingBox>): Boolean {
@@ -211,10 +219,14 @@ internal fun citizenSlideBody(
     bodies: List<BoundingBox>,
 ): CitizenCollisionMove? {
     if (bodies.isEmpty()) return null
-    val expanded = bodies.map {
-        BoundingBox(it.minX - halfX, it.minY - height, it.minZ - halfZ,
+    val sweep = BoundingBox(minOf(from.x, to.x) - halfX, minOf(from.y, to.y), minOf(from.z, to.z) - halfZ,
+        maxOf(from.x, to.x) + halfX, maxOf(from.y, to.y) + height, maxOf(from.z, to.z) + halfZ)
+        .expand(CONTACT_EPSILON)
+    val expanded = bodies.mapNotNull {
+        if (!sweep.overlaps(it)) null else BoundingBox(it.minX - halfX, it.minY - height, it.minZ - halfZ,
             it.maxX + halfX, it.maxY, it.maxZ + halfZ)
     }
+    if (expanded.isEmpty()) return null
     val at = from.clone()
     var remaining = to.clone().subtract(from)
     var contact: Vector? = null

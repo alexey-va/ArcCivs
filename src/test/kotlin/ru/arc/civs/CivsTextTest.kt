@@ -95,12 +95,13 @@ class CivsTextTest : FunSpec({
                 plainText(text.status(null, status, locale = locale, hasWork = true)) shouldBe noWork
             for (status in listOf("idle", "waiting"))
                 plainText(text.status(null, status, locale = locale)) shouldBe noWork
-            for (status in listOf("wandering", "meeting", "to-campfire", "campfire", "talking"))
+            for (status in listOf("campfire", "talking"))
                 plainText(text.status(null, status, locale = locale)) shouldBe resting
-            for (status in listOf("waiting-materials", "waiting-inputs", "research-unfunded"))
+            for (status in listOf("waiting-materials", "waiting-inputs"))
                 plainText(text.status(null, status, locale = locale)) shouldBe materials
             for (status in listOf("eating", "sleeping", "to-meal", "moving-to-tavern", "moving-to-town-hall",
-                "route-unreachable", "worksite-no-access", "storage-full")) {
+                "route-unreachable", "worksite-no-access", "storage-full", "wandering", "meeting", "to-campfire",
+                "no-research", "research-unfunded")) {
                 text.status(null, status, locale = locale, hasWork = true) shouldBe text.render("workers.status.$status", locale)
             }
         }
@@ -256,9 +257,11 @@ class CivsTextTest : FunSpec({
         val assigned = city.copy(workers = listOf(CivWorker(UUID(0, 5), "Worker", building.id)))
         plainText(text.buildingHologram(player, assigned, building)) shouldBe "Ферма\nУр. 2\nРаботников: 1"
         plainText(text.buildingHologram(player, assigned, building, "building-status.waiting")) shouldBe "Ферма\nУр. 2\nЖдёт"
-        for (status in listOf("route-preparing", "route-searching", "route-blocked", "route-stopped", "searching-work")) {
-            plainText(text.buildingHologram(player, assigned, building, "building-status.$status")) shouldBe "Ферма\nУр. 2\nЖдёт"
-            plainText(text.buildingHologram(player, city, building, "building-status.$status")) shouldBe "Ферма\nУр. 2\nЖдёт"
+        for ((status, caption) in mapOf("route-preparing" to "Работник готовится идти", "route-searching" to "Работник ищет путь",
+            "route-blocked" to "Работник ждёт свободный проход", "route-stopped" to "Работник остановился",
+            "searching-work" to "Ищет место работы")) {
+            plainText(text.buildingHologram(player, assigned, building, "building-status.$status")) shouldBe "Ферма\nУр. 2\n$caption"
+            plainText(text.buildingHologram(player, city, building, "building-status.$status")) shouldBe "Ферма\nУр. 2\n$caption"
         }
         plainText(text.buildingHologram(player, city, building.copy(phase = BuildingPhase.SITE))) shouldBe "Ферма\nУр. 2\nНе начато"
         val order = CivConstruction(UUID(0, 6), building.id, 3, 100, 40, ConstructionPhase.CONSTRUCTING, Stock())
@@ -267,8 +270,12 @@ class CivsTextTest : FunSpec({
             "Ферма\nУр. 2\nОстановлено"
         every { player.locale() } returns Locale.ENGLISH
         plainText(text.buildingHologram(player, assigned, building)) shouldBe "Farm\nLevel 2\nWorkers: 1"
-        plainText(text.buildingHologram(player, assigned, building, "building-status.route-searching")) shouldBe "Farm\nLevel 2\nWaiting"
-        plainText(text.buildingHologram(player, city, building, "building-status.route-searching")) shouldBe "Farm\nLevel 2\nWaiting"
+        for ((status, caption) in mapOf("route-preparing" to "Worker is preparing to walk", "route-searching" to "Worker is finding a route",
+            "route-blocked" to "Worker is waiting for a clear passage", "route-stopped" to "Worker has stopped",
+            "searching-work" to "Looking for work")) {
+            plainText(text.buildingHologram(player, assigned, building, "building-status.$status")) shouldBe "Farm\nLevel 2\n$caption"
+            plainText(text.buildingHologram(player, city, building, "building-status.$status")) shouldBe "Farm\nLevel 2\n$caption"
+        }
         plainText(text.buildingHologram(player, city.copy(construction = order.copy(phase = ConstructionPhase.WAITING_MATERIALS)), building)) shouldBe
             "Farm\nLevel 2\nWaiting for materials"
     }

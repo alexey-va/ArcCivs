@@ -142,16 +142,13 @@ internal class CivsCitizenObservations(
             return citizenSupplyDestinationStatus(city.building(source)?.type)
         }
         if (actor.collectionHome != null) return "moving-to-storage"
-        if (actor.collectionSeek != null) return "walking"
+        if (actor.collectionSeek != null) return "collecting-items"
         if (actor.supplyPickup != null) return "loading-cargo"
-        if (actor.outputFullPause?.let { it.buildingId == worker.assignment } == true &&
-            actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) return "storage-full"
         actor.mineVisit?.let { visit ->
             return runtime.statuses[actor.workerId]?.takeIf { it in setOf("mine-descending", "mine-returning", "route-unreachable", "searching-work") }
                 ?: if (visit.returning) "mine-returning" else if (visit.target == null) "searching-work" else "mine-descending"
         }
         if (actor.returningToWarehouse) return "moving-to-storage"
-        if (actor.supplyFailure?.second == "storage-full" && actor.supplyRetryAt > runtime.residentObservedAt) return "storage-full"
         if (actor.outputReturn != null) return when {
             actor.supplyPickup != null -> "loading-cargo"
             actor.supplyFailure == (actor.outputReturn to "storage-full") && actor.supplyRetryAt > runtime.residentObservedAt -> "storage-full"
@@ -163,16 +160,18 @@ internal class CivsCitizenObservations(
             } else if (it.arrivedAt == null) "to-campfire" else "campfire"
         }
         if (actor.idleNap != null && actor.npc.isSeated) return "resting"
+        if (workRuntime.navigationFailed(actor)) return "route-unreachable"
+        // The leisure owner identifies actual roaming; production reasons stay in the plan/debug.
+        // The travel observer still exposes preparation, blocked motion and stopped segments.
+        if (actor.route?.wanderWalk != null) return "wandering"
+        if (actor.outputFullPause?.let { it.buildingId == worker.assignment } == true &&
+            actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) return "storage-full"
+        if (actor.supplyFailure?.second == "storage-full" && actor.supplyRetryAt > runtime.residentObservedAt) return "storage-full"
         if (workRuntime.waitingForMineAccess(actor, city, worker, register = false)) return "mine-waiting"
         val plan = actor.plan
         if (runtime.statuses[actor.workerId] == "workstation-unavailable") return "workstation-unavailable"
         if (actor.cycle.phase == CitizenPhase.PAUSED) return actor.cycle.status()
-        if (workRuntime.navigationFailed(actor)) return "route-unreachable"
         workRuntime.workActivityStatus(actor, plan)?.let { return it }
-        if (plan.idleReason == "unassigned" && actor.route?.let { route ->
-                route.idleAnchor != null && route.motion.navigating && !route.motion.searching &&
-                    !route.motion.waitingForCollision && !route.motion.turning
-            } == true) return "walking"
         plan.idleReason?.takeUnless { it == "placing" }?.let { return it }
         if (plan.token.assignmentId != worker.assignment || plan.token.completedCycles != worker.completedCycles) return "waiting"
         if (actor.patrolTarget?.let { it == actor.route?.idleAnchor } == true) return "patrolling"
@@ -202,7 +201,9 @@ internal class CivsCitizenObservations(
                 val meal = actor.mealVisit
                 val guest = city?.workers?.firstOrNull { it.id == actor.workerId }
                 linkedMapOf("city" to actor.cityId, "worker" to actor.workerId, "valid" to valid,
-                    "status" to runtime.statuses[actor.workerId], "phase" to actor.cycle.phase,
+                    "status" to runtime.statuses[actor.workerId],
+                    "observed_status" to if (valid && city != null && guest != null) activityStatus(actor, city, guest) else null,
+                    "phase" to actor.cycle.phase,
                     "pause_reason" to actor.cycle.reason, "failed_attempts" to actor.cycle.failedAttempts,
                     "mine_route_episode" to actor.mineRouteEpisode.snapshot(now)?.let { mapOf(
                         "building" to it.key.buildingId, "plan_version" to it.key.planVersion, "cycle" to it.key.cycle,
@@ -247,8 +248,11 @@ internal class CivsCitizenObservations(
                         "source_worker" to actor.plan.courier?.cargo?.sourceWorkerId, "carrying" to actor.plan.courier?.carrying),
                     "combat" to mapOf("attacker" to actor.attacker?.uniqueId, "until" to actor.combatUntil,
                         "status" to actor.combatStatus, "target" to actor.combatDestination),
-                    "food" to mapOf("source" to actor.foodSource, "pickup_pending" to (actor.supplyPickup != null),
-                        "retry_at" to actor.supplyRetryAt),
+                    "food" to mapOf("source" to actor.foodSource, "container" to actor.foodPickupSource?.container,
+                        "standing" to actor.foodPickupSource?.standing, "material" to actor.foodPickupSource?.material,
+                        "hunger" to guest?.let(CivsResidents::hunger), "pickup_pending" to (actor.supplyPickup != null),
+                        "retry_at" to actor.supplyRetryAt,
+                        "supply_failure" to actor.supplyFailure?.let { mapOf("building" to it.first, "reason" to it.second) }),
                     "output_full" to actor.outputFullPause?.let { mapOf("building" to it.buildingId, "retry_at" to it.retryAt) },
                     "meal" to (mapOf("building" to actor.mealVisit?.plan?.buildingId, "source" to actor.mealVisit?.plan?.source,
                         "target" to actor.mealVisit?.target, "started_at" to actor.mealVisit?.startedAt,
@@ -408,8 +412,8 @@ internal fun citizenObservedTravelStatus(activity: String, route: CitizenRoute?,
     return when {
         motion.waitingForCollision || route.nativeCollisionTicks > 0 || route.bodyBlockedSince != null -> "route-blocked"
         motion.searching -> "route-searching"
-        route.preparationRetryAt != null -> "route-preparing"
         motion.failure != null || route.completion?.cancelReason != null -> "route-unreachable"
+        route.preparationRetryAt != null -> "route-preparing"
         route.completion != null || motion.finished ->
             if (route.intermediate || motion.continuation) "route-preparing" else "route-stopped"
         motion.turning -> "route-preparing"
@@ -421,5 +425,5 @@ internal fun citizenObservedTravelStatus(activity: String, route: CitizenRoute?,
 private val CITIZEN_TRAVEL_STATUSES = setOf(
     "to-work", "moving-to-work", "moving-to-storage", "moving-to-tavern", "moving-to-town-hall",
     "returning-output", "moving-to-pickup", "carrying-cargo", "to-store", "mine-descending", "mine-returning",
-    "walking", "wandering", "meeting", "to-campfire", "to-meal", "patrolling",
+    "collecting-items", "wandering", "meeting", "to-campfire", "to-meal", "patrolling",
 )

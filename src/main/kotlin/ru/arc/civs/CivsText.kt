@@ -130,20 +130,15 @@ class CivsText private constructor(
     internal fun publicStatusKey(status: String, hasWork: Boolean = false): String = when (
         val state = status.removePrefix("workers.status.").removePrefix("building-status.")
     ) {
-        "route-preparing", "route-searching", "route-blocked", "route-stopped", "searching-work",
-        "workstation-unavailable", "mine-waiting" -> "waiting"
-        "paused" -> if (status == "building-status.paused") state else "waiting"
         "idle", "waiting" -> if (hasWork) "waiting" else "no-work"
-        "to-work", "moving-to-work", "moving-to-storage", "returning-output", "to-store",
-        "moving-to-pickup", "carrying-cargo", "mine-descending", "mine-returning", "patrolling" -> "walking"
+        "walking" -> "wandering"
         "loading-cargo", "collecting-supplies", "delivering", "working-field", "repairing-road", "watering", "fertilizing",
         "felling-tree", "planting-tree", "digging-mine", "securing-mine", "building", "placing",
         "serving-guests" -> "working"
-        "unassigned", "no-assignment", "no-construction", "no-research",
+        "unassigned", "no-assignment", "no-construction",
         "waiting-orders", "waiting-guests", "queued-construction", "waiting-reassignment" -> "no-work"
-        "wandering", "meeting", "talking", "to-campfire", "campfire", "old-age-retirement",
+        "talking", "campfire", "old-age-retirement",
         "no-viewers", "capacity", "closed" -> "resting"
-        "research-unfunded" -> "waiting-materials"
         else -> state
     }
 

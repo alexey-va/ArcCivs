@@ -1447,7 +1447,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.status(h.workerId) shouldBe "workers.status.defending"
             h.owner.status(helperId) shouldBe "workers.status.defending"
             for (idle in listOf(distantId, outsiderId)) {
-                (h.owner.status(idle) in setOf("workers.status.unassigned", "workers.status.walking")) shouldBe true
+                (h.owner.status(idle) in setOf("workers.status.unassigned", "workers.status.wandering")) shouldBe true
                 h.actor(idle).attacker shouldBe null
             }
             verify(exactly = 1) { victim.swingMainHand() }
@@ -1814,7 +1814,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a full producer output barrel reports storage full and bounds retries without dropping its bag") {
+    test("a full producer output barrel retains its pause and bag while the producer wanders") {
         residentRuntime(workerId = UUID(0, 20)) { h ->
             val farm = h.assignFarm()
             val npc = h.owner.collisionActors().single()
@@ -1839,7 +1839,9 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
             h.owner.pulse(7_000)
             attempts shouldBe 1
-            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            h.actor().outputFullPause?.buildingId shouldBe farm.id
+            requireNotNull(h.actor().route?.wanderWalk)
+            h.owner.status(h.workerId) shouldBe "workers.status.wandering"
             h.city.workers.single().items shouldBe bag
             h.deliveries shouldBe 0
             val localWalk = requireNotNull(h.routeIdentity())
@@ -1847,7 +1849,8 @@ class CivsResidentsRuntimeTest : FunSpec({
             // Retry expiry must not cancel the admitted local walk and send the worker back to a full barrel.
             attempts shouldBe 1
             (h.routeIdentity() === localWalk) shouldBe true
-            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            h.actor().outputFullPause?.buildingId shouldBe farm.id
+            h.owner.status(h.workerId) shouldBe "workers.status.wandering"
             h.city.workers.single().items shouldBe bag
         }
     }
@@ -2589,7 +2592,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 
     test("an unreachable waiting miner recovers beside its quarry without completing work or returning to the hall") {
-        residentRuntime { h ->
+        residentRuntime(workerId = UUID(0, 20)) { h ->
             val quarry = h.assignQuarry()
             h.idleReason = "waiting-tool"
             val actor = h.owner.collisionActors().single()
@@ -2609,7 +2612,9 @@ class CivsResidentsRuntimeTest : FunSpec({
             recovered shouldBe true
             (at.distanceSquared(Location(h.world, control.x + .5, control.y.toDouble(), control.z + .5)) <= 8.0 * 8.0) shouldBe true
             (at.blockX != control.x || at.blockZ != control.z) shouldBe true
-            h.owner.status(h.workerId) shouldBe "workers.status.waiting-tool"
+            h.actor().plan.idleReason shouldBe "waiting-tool"
+            requireNotNull(h.actor().route?.wanderWalk)
+            h.owner.status(h.workerId) shouldBe "workers.status.wandering"
             h.spawns shouldBe 1
             h.deliveries shouldBe 0
             h.city.workers.single().completedCycles shouldBe 0
@@ -4134,7 +4139,33 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (walked >= .5) break
             }
             (walked >= .5) shouldBe true
-            h.owner.status(h.workerId) shouldBe "workers.status.walking"
+            val walker = h.actor()
+            val route = requireNotNull(walker.route)
+            requireNotNull(route.wanderWalk)
+            val text = CivsText.fromYaml(civsLocaleSource())
+            fun caption() = plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[2]
+            for (reason in listOf("unassigned", "no-research", "storage-surplus", "waiting-growth", "waiting-tool")) {
+                walker.plan = walker.plan.copy(idleReason = reason)
+                h.owner.status(h.workerId) shouldBe "workers.status.wandering"
+                caption() shouldBe "Гуляет без дела"
+            }
+            // The same leisure route must show its observed movement state, not its idle reason.
+            val moving = route.motion
+            route.motion = CitizenPacketRoute(h.world, walker.npc.location, route.target,
+                { true }, { _, _ -> true }, { 1.0 })
+            h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
+            caption() shouldBe "Ищет путь"
+            route.motion.cancel()
+            route.motion = moving
+            val beforeBlocked = walker.npc.location
+            moving.move(beforeBlocked, .55, movementAllowed = { _, _ -> false }) { true } shouldBe null
+            moving.waitingForCollision shouldBe true
+            walker.npc.location shouldBe beforeBlocked
+            h.owner.status(h.workerId) shouldBe "workers.status.route-blocked"
+            caption() shouldBe "Ждёт свободный проход"
+            route.completion = CitizenNavigationCompletion("capture-budget")
+            h.owner.status(h.workerId) shouldBe "workers.status.route-unreachable"
+            caption() shouldBe "Нет доступного пути"
             h.steps shouldBe emptyList()
             h.deliveries shouldBe 0
         }
@@ -4706,14 +4737,16 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.pendingDelivery.complete(h.city) shouldBe true
             h.owner.pulse(62_250)
             h.phase() shouldBe CitizenPhase.RETURNING
-            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
-            // Both discovery states must yield to a completed session's conserved storage limit.
+            h.actor().plan.idleReason shouldBe "storage-full"
+            requireNotNull(h.actor().route?.wanderWalk)
+            h.owner.status(h.workerId) shouldBe "workers.status.wandering"
+            // The conserved capacity pause remains while its visible leisure route advances or rests.
             h.navigationNow = 62_250
             for (reason in listOf("searching-work", "waiting-growth")) {
                 h.idleReason = reason
                 repeat(21) { h.navigate() }
                 h.owner.pulse(requireNotNull(h.navigationNow))
-                h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+                h.actor().plan.idleReason shouldBe "storage-full"
                 h.autonomousObservedMillis() shouldBe 60_000L
                 h.city.stock shouldBe original.stock
                 h.city.workers shouldBe original.workers

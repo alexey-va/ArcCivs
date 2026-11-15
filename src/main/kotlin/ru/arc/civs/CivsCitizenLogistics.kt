@@ -225,7 +225,7 @@ internal class CivsCitizenLogistics(
         if (now < actor.collectionRetryAt || !collectionAvailable(city.id) || runtime.collectionBudget == 0) {
             // An admitted leisure route retains its identity while another resident uses the native budget.
             if (actor.collectionSeek != null || actor.collectionHome != null) {
-                runtime.statuses[worker.id] = if (actor.collectionHome != null) "moving-to-storage" else "walking"
+                runtime.statuses[worker.id] = if (actor.collectionHome != null) "moving-to-storage" else "collecting-items"
                 return true
             }
             return false
@@ -306,7 +306,7 @@ internal class CivsCitizenLogistics(
             actor.collectionRetryAt = now + 5_000
             return false
         }
-        runtime.statuses[worker.id] = "walking"
+        runtime.statuses[worker.id] = "collecting-items"
         return true
     }
 

@@ -14,6 +14,19 @@ internal class CivsCityResearch(
     private val researchSupply: (Settlement) -> CivSupplySnapshot? = { null },
 ) {
     private var researchCursor = 0
+    private data class AdmissionObservation(val at: Long, val revision: Long, val detail: Map<String, Any?>)
+    private val eligibility = mutableMapOf<UUID, AdmissionObservation>()
+    private val admissions = mutableMapOf<UUID, AdmissionObservation>()
+
+    /** Actual pulse decisions only: debug never refreshes supply or invokes its current-capture check. */
+    fun admissionDebug(city: Settlement): Map<String, Any?> {
+        val now = authority.now()
+        fun describe(value: AdmissionObservation?) = value?.let { it.detail + mapOf(
+            "evaluatedAtMillis" to it.at, "ageMillis" to (now - it.at).coerceAtLeast(0),
+            "revision" to it.revision, "revisionChanged" to (city.revision != it.revision)) }
+        return mapOf("source" to "last-research-pulse", "freshNativeRead" to false,
+            "eligibility" to describe(eligibility[city.id]), "decision" to describe(admissions[city.id]))
+    }
 
     fun researchCity(player: Player, cityId: UUID, mutation: Boolean): Settlement {
         authority.requireReady(player)
@@ -50,10 +63,25 @@ internal class CivsCityResearch(
         }
 
     fun pulseResearch() {
-        val candidates = records.cities.values.filter { city -> city.id !in records.busy && city.id !in records.unhealthy && city.pendingDeletion == null &&
-            city.autonomy?.paused != true && CivsAutoStorageMigration.ready(city) && authority.settlementActive(city) && CivsResearch.university(city) != null &&
-            (CivsResearch.canFund(city) || city.autonomy != null && city.research?.project == null &&
-                CivResearchId.entries.any { CivsResearch.reason(city, it) == null }) }
+        eligibility.keys.retainAll(records.cities.keys)
+        admissions.keys.retainAll(records.cities.keys)
+        val at = authority.now()
+        val candidates = records.cities.values.filter { city ->
+            val reason = when {
+                city.id in records.busy -> "city-busy"
+                city.id in records.unhealthy -> "storage-unavailable"
+                city.pendingDeletion != null -> "deletion-pending"
+                city.autonomy?.paused == true -> "autonomy-paused"
+                !CivsAutoStorageMigration.ready(city) -> "storage-migration-pending"
+                !authority.settlementActive(city) -> "settlement-inactive"
+                CivsResearch.university(city) == null -> "university-required"
+                CivsResearch.canFund(city) || city.autonomy != null && city.research?.project == null &&
+                    CivResearchId.entries.any { CivsResearch.reason(city, it) == null } -> null
+                else -> "no-funding-or-automatic-project"
+            }
+            eligibility[city.id] = AdmissionObservation(at, city.revision, mapOf("reason" to (reason ?: "eligible")))
+            reason == null
+        }
         if (candidates.isEmpty()) return
         val city = candidates[Math.floorMod(researchCursor++, candidates.size)]
         val project = city.research?.project
@@ -88,11 +116,27 @@ internal class CivsCityResearch(
     }
 
     private fun automaticResearch(city: Settlement): CivResearchId? {
-        CivsResearch.automatic(city)?.let { return it }
-        val snapshot = researchSupply(city) ?: return null
-        val observation = snapshot.inputKey as? CivSupplyObservation ?: return null
-        if (!CivsAutoSupplies.observed(city, snapshot) || !storage.supplyCaptureCurrent(city, observation.capture)) return null
-        return CivsResearch.automatic(city, civsResearchAvailableMaterials(city, snapshot))
+        fun remember(reason: String, selected: CivResearchId? = null, details: Map<String, Any?> = emptyMap()): CivResearchId? {
+            admissions[city.id] = AdmissionObservation(authority.now(), city.revision,
+                mapOf("reason" to reason, "selected" to selected) + details)
+            return selected
+        }
+        CivsResearch.automatic(city)?.let { return remember("historical-project", it) }
+        val snapshot = researchSupply(city) ?: return remember("supply-observation-missing")
+        val observation = snapshot.inputKey as? CivSupplyObservation ?: return remember("supply-observation-metadata-missing")
+        val capture = mapOf("captureStartedAtMillis" to observation.capture.startedAtMillis)
+        if (!CivsAutoSupplies.observed(city, snapshot)) return remember("supply-observation-not-current", details = capture)
+        if (!storage.supplyCaptureCurrent(city, observation.capture)) return remember("supply-capture-not-current", details = capture)
+        val available = civsResearchAvailableMaterials(city, snapshot)
+        val selected = CivsResearch.automatic(city, available)
+        val bills = CivResearchId.entries.filter { CivsResearch.reason(city, it) == null }
+            .associateWith { CivsResearch.cost(city, it).materials }
+        val materials = bills.values.flatMap { it.keys }.toSet()
+        return remember(if (selected == null) "materials-unavailable" else "selected", selected, capture + mapOf(
+            "availableMaterials" to materials.associateWith { available[it] ?: 0L },
+            "missingMaterials" to bills.mapKeys { it.key.name }.mapValues { (_, bill) ->
+                bill.mapValues { (material, count) -> (count - (available[material] ?: 0L)).coerceAtLeast(0) }.filterValues { it > 0 }
+            }))
     }
 
     private fun rejectIf(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason) }

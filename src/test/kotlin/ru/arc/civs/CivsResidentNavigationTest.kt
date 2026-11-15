@@ -924,7 +924,7 @@ class CivsResidentNavigationTest : FunSpec({
                     route.move(at, .8) { true }?.let { next ->
                         (next.distance(at) <= .172001) shouldBe true
                         next.y shouldBe 64.0
-                        citizenPacketSupported(terrain.world, next.point()) shouldBe true
+                        touchesNativeFloor(terrain.world, next) shouldBe true
                         citizenPacketBodyClear(terrain.world, next.point(), false) shouldBe true
                         citizenPacketStepClear(terrain.world, at.point(), next.point(), false) shouldBe true
                         at = next

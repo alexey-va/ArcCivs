@@ -38,7 +38,8 @@ internal class CivsCitizenCollisions(
         val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
         val from = npc.location
         val to = from.clone().add(impulse)
-        if (npc.world.uid != city.worldId || !citizenResidentStepClear(npc, from, to, shelterOccupied(actor)) ||
+        if (npc.world.uid != city.worldId || !citizenResidentStepClear(npc, from, to,
+                shelterOccupied(actor, citizenResidentSweep(npc, from, to))) ||
             !citizenResidentNudgeClear(npc, from, to)) return false
         if (!residentRouteStepAllowed(actor, city, from, to)) return false
         npc.teleport(to)
@@ -60,10 +61,11 @@ internal class CivsCitizenCollisions(
     }
 
     fun residentMoveAllowed(actor: CitizenActor, from: Location, to: Location): Boolean =
-        citizenResidentStepClear(actor.npc, from, to, shelterOccupied(actor)) && residentStepAllowed(actor.npc, from, to)
+        citizenResidentStepClear(actor.npc, from, to, shelterOccupied(actor, citizenResidentSweep(actor.npc, from, to))) &&
+            residentStepAllowed(actor.npc, from, to)
 
     fun routeMoveAllowed(actor: CitizenActor, from: Location, to: Location): Boolean {
-        val occupied = shelterOccupied(actor)
+        val occupied = shelterOccupied(actor, citizenResidentSweep(actor.npc, from, to))
         val clear = citizenResidentStepClear(actor.npc, from, to, occupied)
         val end = actor.route?.motion?.endpoint
         if (end != null && to.point() == end &&
@@ -206,7 +208,8 @@ internal class CivsCitizenCollisions(
         // 1.25 clears both 0.6-wide bodies at a diagonal approach, not just their current feet.
         for (direction in listOf(side, side.clone().multiply(-1.0), forward)) {
             val to = from.clone().add(direction.clone().multiply(1.25))
-            if (!citizenResidentStepClear(yielding.npc, from, to, shelterOccupied(yielding)) ||
+            if (!citizenResidentStepClear(yielding.npc, from, to,
+                    shelterOccupied(yielding, citizenResidentSweep(yielding.npc, from, to))) ||
                 !yieldPlayerClear(yielding, from, to) ||
                 !citizenResidentStepClear(passing.npc, passFrom, passTo, listOf(citizenStandingBounds(to, yielding.npc.scale)))) continue
             // A clear endpoint cannot authorize stepping over an unsupported cell in between.
@@ -513,7 +516,7 @@ internal class CivsCitizenCollisions(
 
     fun idleDestinationFree(actor: CitizenActor, to: Location): Boolean {
         val body = citizenStandingBounds(to, actor.npc.scale).expand(.15, 0.0, .15)
-        if (shelterOccupied(actor).any(body::overlaps)) return false
+        if (shelterOccupied(actor, body).any(body::overlaps)) return false
         return runtime.actors.values.none { other -> other !== actor && other.worldId == actor.worldId && other.npc.isValid &&
             (other.route?.target?.let { body.overlaps(citizenStandingBounds(it, other.npc.scale)) } == true ||
                 other.mealVisit?.target?.location(other.npc.world)?.let {
@@ -522,25 +525,32 @@ internal class CivsCitizenCollisions(
     }
 
     private fun residentOccupied(actor: CitizenActor): List<BoundingBox> = buildList {
+        appendResidentOccupied(actor, this, null)
+    }
+
+    private fun appendResidentOccupied(actor: CitizenActor, bodies: MutableList<BoundingBox>, bounds: BoundingBox?) {
+        fun include(body: BoundingBox) {
+            if (bounds == null || bounds.overlaps(body)) bodies.add(body)
+        }
         val meal = actor.mealVisit
-        add(actor.occupiedBody())
+        include(actor.occupiedBody())
         meal?.seat?.let { seat ->
-            add(seat.bounds)
-            add(diningStandingBounds(meal.seatedFrom ?: seat.approach.location(actor.npc.world), actor.npc.scale))
+            include(seat.bounds)
+            include(diningStandingBounds(meal.seatedFrom ?: seat.approach.location(actor.npc.world), actor.npc.scale))
         }
         if (actor.sheltering) {
-            actor.shelterPose?.let { add(it.bounds) }
+            actor.shelterPose?.let { include(it.bounds) }
             (actor.sleepOrigin ?: actor.shelterFeet ?: actor.shelter?.location(actor.npc.world))?.let {
-                add(citizenStandingBounds(it, actor.npc.scale))
+                include(citizenStandingBounds(it, actor.npc.scale))
             }
         }
     }
 
-    fun shelterOccupied(actor: CitizenActor): List<BoundingBox> = buildList {
+    fun shelterOccupied(actor: CitizenActor, bounds: BoundingBox? = null): List<BoundingBox> = buildList {
         // Only the configured, capped runtime actors and their reservations are read; no world/entity discovery.
         for (other in runtime.actors.values) {
             if (other === actor || other.worldId != actor.worldId || !other.npc.isValid) continue
-            addAll(residentOccupied(other))
+            appendResidentOccupied(other, this, bounds)
         }
     }
 }

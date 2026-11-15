@@ -369,11 +369,7 @@ class CivsService(
             records,
             tasks = tasks,
             storage = storage,
-            researchSupply = { city ->
-                val snapshot = supply.observation(city.id)
-                val observation = snapshot?.inputKey as? CivSupplyObservation
-                snapshot?.takeIf { observation != null && storage.supplyCaptureCurrent(city, observation.capture) }
-            })
+            researchSupply = { city -> supply.observation(city.id) })
         cityPlans = CivsCityPlans(this,
             records,
             tasks = tasks,
@@ -1750,6 +1746,7 @@ class CivsService(
     override fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit> = membership.removeMember(player, memberId)
 
     internal fun forestrySurplusDebug(cityId: UUID?): Map<String, Any?> = residentSupplies.forestrySurplusDebug(cityId)
+    internal fun researchAdmissionDebug(city: Settlement): Map<String, Any?> = cityResearch.admissionDebug(city)
 
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? = residentSupplies.craftPlan(city, worker)
 

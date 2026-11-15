@@ -78,7 +78,8 @@ internal class CivsCityDiagnostics(
         fun rows(transform: (Settlement) -> Map<String, Any?>): Map<String, Any?> = mapOf(
             "total" to total, "truncated" to (total > selected.size), "entries" to selected.map(transform))
         return when (system) {
-            "research" -> rows { city -> mapOf("city" to city.id, "revision" to city.revision, "view" to CivsResearch.view(city)) }
+            "research" -> rows { city -> mapOf("city" to city.id, "revision" to city.revision, "view" to CivsResearch.view(city),
+                "automaticAdmission" to authority.researchAdmissionDebug(city)) }
             "industry" -> rows { city -> mapOf("city" to city.id, "revision" to city.revision, "view" to CivsIndustry.view(city)) }
             "autonomy" -> rows { city -> mapOf("city" to city.id, "enabled" to (city.autonomy != null),
                 "state" to city.autonomy, "progress" to autonomyStatus(city.id), "stock" to city.stock) +

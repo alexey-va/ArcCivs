@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
@@ -10,6 +11,7 @@ import org.bukkit.block.data.type.Chest
 import org.bukkit.block.data.type.Stairs
 import org.bukkit.util.BoundingBox
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import kotlin.math.floor
 
 class CivsNavigationSupportAdmissionTest : FunSpec({
     test("sleep requires floor support even when movement can hold a ladder") {
@@ -91,7 +93,7 @@ class CivsNavigationSupportAdmissionTest : FunSpec({
         }
     }
 
-    test("offset feet on a west stair leave by its supported side before turning northeast") {
+    test("offset feet on a west stair retain native floor contact while turning northeast") {
         supportAdmissionWorld { world ->
             world.getBlockAt(0, 79, 0).blockData = Bukkit.createBlockData(
                 "minecraft:oak_stairs[facing=west,half=bottom,shape=straight,waterlogged=false]")
@@ -104,7 +106,11 @@ class CivsNavigationSupportAdmissionTest : FunSpec({
             route.prepareSupportAdmission()
             repeat(100) {
                 route.move(at, .8) { true }?.let { next ->
-                    citizenPacketSupported(world, next.point()) shouldBe true
+                    withClue("offset stair $at -> $next") {
+                        supportAdmissionFootContact(world, next) shouldBe true
+                        citizenPacketBodyClear(world, next.point(), false) shouldBe true
+                        citizenPacketStepClear(world, at.point(), next.point(), false) shouldBe true
+                    }
                     (at.distance(next) <= .172001) shouldBe true
                     at = next
                 }
@@ -144,6 +150,55 @@ class CivsNavigationSupportAdmissionTest : FunSpec({
         }
     }
 
+    test("a half stair between full ground stays supported by the feet in both directions") {
+        supportAdmissionWorld { world ->
+            world.getBlockAt(0, 63, 0).blockData = Bukkit.createBlockData(
+                "minecraft:cobblestone_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]")
+            world.getBlockAt(0, 63, -1).type = Material.COBBLESTONE
+            world.getBlockAt(0, 63, 1).type = Material.GRASS_BLOCK
+            val outside = Location(world, .5, 64.0, 1.5)
+            val inside = Location(world, .5, 64.0, -.5)
+            for (returning in listOf(false, true)) for (speed in listOf(.55, 1.0)) {
+                var at = (if (returning) inside else outside).clone()
+                val target = if (returning) outside else inside
+                val route = CitizenPacketRoute(world, at, target,
+                    { it.x == 0 && it.z in -1..1 && it.y == 64 }, { _, _ -> true }, { 1.0 })
+                route.prepareSupportAdmission()
+                route.failure shouldBe null
+                repeat(100) {
+                    route.move(at, speed) { true }?.let { next ->
+                        (at.distance(next) <= .215 * speed + .000001) shouldBe true
+                        citizenPacketBodyClear(world, next.point(), false) shouldBe true
+                        supportAdmissionFootContact(world, next) shouldBe true
+                        citizenPacketStepClear(world, at.point(), next.point(), false) shouldBe true
+                        at = next
+                    }
+                }
+                route.failure shouldBe null
+                route.finished shouldBe true
+                at.distanceSquared(target) shouldBe 0.0
+            }
+        }
+    }
+
+    test("a half stair cannot carry a flat route over a missing adjacent full block") {
+        supportAdmissionWorld { world ->
+            world.getBlockAt(0, 63, 0).blockData = Bukkit.createBlockData(
+                "minecraft:cobblestone_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]")
+            for (z in listOf(-1, 1, 2)) world.getBlockAt(0, 63, z).type = Material.COBBLESTONE
+            var at = Location(world, .5, 64.0, 2.5)
+            val route = CitizenPacketRoute(world, at, Location(world, .5, 64.0, -.5),
+                { it.x == 0 && it.z in -1..2 && it.y == 64 }, { _, _ -> true }, { 1.0 })
+            route.prepareSupportAdmission()
+            route.failure shouldBe null
+            world.getBlockAt(0, 63, 1).type = Material.AIR
+            repeat(100) { route.move(at, 1.0) { true }?.let { next -> at = next } }
+            route.failure shouldBe "path-changed"
+            route.finished shouldBe false
+            (route.forwardProgress < 1.0) shouldBe true
+        }
+    }
+
     test("supported ground does not admit a route through blocked headroom") {
         supportAdmissionWorld { world ->
             world.getBlockAt(1, 64, 0).type = Material.OAK_PLANKS
@@ -175,6 +230,9 @@ private fun supportAdmissionWorld(run: (CivsWorksiteWorldFixture) -> Unit) {
                 Material.ACACIA_SLAB -> listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0))
                 Material.SPRUCE_FENCE -> listOf(BoundingBox(.375, 0.0, .375, .625, 1.5, .625))
                 Material.BROWN_CARPET -> listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .0625, 1.0))
+                // Native straight north-facing bottom stair, independent of any settlement layout.
+                Material.COBBLESTONE_STAIRS -> listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                    BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5))
                 Material.OAK_STAIRS -> listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
                     if ((data as Stairs).facing == BlockFace.WEST) BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
                     else BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
@@ -194,4 +252,18 @@ private fun supportAdmissionWorld(run: (CivsWorksiteWorldFixture) -> Unit) {
 private fun CitizenPacketRoute.prepareSupportAdmission() {
     repeat(1_000) { if (searching) expand() }
     searching shouldBe false
+}
+
+/** Independent native footprint oracle: a contact must intersect the actual sole, not just its centre. */
+private fun supportAdmissionFootContact(world: CivsWorksiteWorldFixture, feet: Location): Boolean {
+    val sole = BoundingBox(feet.x - .299, feet.y - .001, feet.z - .299,
+        feet.x + .299, feet.y, feet.z + .299)
+    val y = floor(sole.minY).toInt()
+    return (floor(sole.minX).toInt()..floor(sole.maxX).toInt()).any { x ->
+        (floor(sole.minZ).toInt()..floor(sole.maxZ).toInt()).any { z ->
+            world.getBlockAt(x, y, z).collisionShape.boundingBoxes.any {
+                it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()).overlaps(sole)
+            }
+        }
+    }
 }
