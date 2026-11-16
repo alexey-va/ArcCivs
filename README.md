@@ -381,9 +381,13 @@ ArcCore сам читает и размещает схемы; WorldEdit и FAWE 
 пакетов. Lands необязателен: при наличии проверяются его
 разрешения на размещение.
 
-1. Соберите JAR: `./gradlew test integrationTest shadowJar` и проверьте его вместе с точным
-   ArcCore JAR: `python3 scripts/verify-jar.py`. Установите зависимости и
-   `build/libs/ArcCivs-0.1.141.jar` в `plugins` по принятой процедуре сервера.
+1. Соберите JAR: `./gradlew test integrationTest shadowJar`. Возьмите значение
+   `version` из `build.gradle.kts` и передайте путь к этой сборке явно:
+   `python3 scripts/verify-jar.py --jar 'build/libs/ArcCivs-<version>.jar'`
+   (замените `<version>` значением из файла). Проверка использует точный ArcCore
+   JAR, подготовленный задачей `shadowJar`, и не выбирает среди старых сборок.
+   Установите зависимости и этот же проверенный JAR в `plugins` по принятой
+   процедуре сервера.
    `integrationTest` использует одноразовый MySQL 8.0.46 через Core Testcontainers;
    для него нужен Docker. Рабочая база в тестах не используется.
 2. Подготовьте закрытый каталог под `schematics-root`. Прежние **153** схемы с
