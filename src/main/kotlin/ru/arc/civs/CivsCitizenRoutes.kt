@@ -796,8 +796,23 @@ internal class CivsCitizenRoutes(
         }
         if (runtime.navigationTick < actor.navigationReportAfter) { actor.navigationSuppressed++; return false }
         actor.navigationReportAfter = runtime.navigationTick + 200
+        val intent = when {
+            actor.combatDestination != null -> "combat"
+            actor.sheltering -> "shelter"
+            actor.foodPickupSource?.standing == route?.authored && actor.foodPickupSource != null -> "food-pickup"
+            actor.mealVisit != null -> "meal-visit"
+            actor.returningToWarehouse || actor.outputReturn != null -> "warehouse-return"
+            actor.supplyPickup != null -> "supplies"
+            actor.mineVisit != null -> "mine-visit"
+            route?.wanderWalk != null -> "wander"
+            route?.idleAnchor != null -> "leisure"
+            actor.plan.courier != null && actor.cycle.phase != CitizenPhase.IDLE -> "courier"
+            route?.authored == actor.plan.workplace && actor.cycle.phase != CitizenPhase.IDLE -> "work"
+            else -> "unknown"
+        }
         CivsDiagnostics.record(runtime.plugin.logger, Level.WARNING, actor.cityId, NAVIGATION_DIAGNOSTIC.line(
             "city" to actor.cityId, "worker" to actor.workerId, "cycle" to actor.plan.token.completedCycles,
+            "intent" to intent, "route_started_at" to route?.startedAt,
             "attempt" to actor.cycle.failedAttempts + 1, "phase" to actor.cycle.phase, "reason" to if (route?.motion?.waitingForCollision == true)
                 if (actor.collisionResident != null) "resident-blocked" else "player-blocked" else detail,
             "blocking_resident" to actor.collisionResident,

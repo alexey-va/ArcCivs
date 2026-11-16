@@ -22,6 +22,13 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         fun contains(point: CivPosition): Boolean =
             abs(point.x.toLong() - center.x) <= radius && abs(point.z.toLong() - center.z) <= radius
 
+        fun overlapsChunk(x: Int, z: Int): Boolean {
+            val minX = x.toLong() * 16
+            val minZ = z.toLong() * 16
+            return minX <= center.x.toLong() + radius && minX + 15 >= center.x.toLong() - radius &&
+                minZ <= center.z.toLong() + radius && minZ + 15 >= center.z.toLong() - radius
+        }
+
         fun onPlot(point: CivPosition): Boolean =
             protectedBuildings.any { point.x in it.bounds.min.x..it.bounds.max.x &&
                 point.z in it.bounds.min.z..it.bounds.max.z || CivsWorksiteLayouts.isField(it, point.x, point.z) }
@@ -215,10 +222,16 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     fun removeWorld(world: UUID) { networks.entries.removeIf { it.value.geometry.world == world } }
 
     fun invalidateChunk(world: UUID, x: Int, z: Int) {
+        // All learned cells passed Geometry.outside when observed. An unload outside
+        // the settlement cannot invalidate a remembered route or pending learning.
         networks.entries.removeIf { (_, network) -> network.geometry.world == world &&
+            network.geometry.overlapsChunk(x, z) &&
             network.cells.any { it.x shr 4 == x && it.z shr 4 == z } }
-        learning.removeIf { batch -> batch.trip.network.geometry.world == world &&
-            batch.trip.walked.any { it.x shr 4 == x && it.z shr 4 == z } }
+        learning.removeIf { batch ->
+            val geometry = batch.trip.network.geometry
+            geometry.world == world && geometry.overlapsChunk(x, z) &&
+                batch.trip.walked.any { it.x shr 4 == x && it.z shr 4 == z }
+        }
     }
 
     fun invalidateBlock(world: UUID, changed: CivPosition) {

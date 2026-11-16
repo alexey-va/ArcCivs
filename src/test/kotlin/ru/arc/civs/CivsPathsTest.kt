@@ -66,6 +66,20 @@ class CivsPathsTest : FunSpec({
         paths.remembered(city.id) shouldBe emptySet()
     }
 
+    test("an unload beyond the negative city edge keeps pending learning while its exact edge chunk retires it") {
+        val city = pathsCity()
+        val paths = CivsPaths()
+        val trip = paths.begin(city)
+        trip.observe(CitizenPoint(-63.5, 64.0, .5))
+        trip.observe(CitizenPoint(-62.5, 64.0, .5))
+        paths.complete(city, trip)
+        paths.invalidateChunk(city.worldId, -5, 0)
+        paths.pulse()
+        paths.remembered(city.id) shouldBe setOf(CivPosition(-64, 63, 0), CivPosition(-63, 63, 0))
+        paths.invalidateChunk(city.worldId, -4, 0)
+        paths.remembered(city.id) shouldBe emptySet()
+    }
+
     test("trace, city and corridor memory have fixed ceilings") {
         val city = pathsCity().copy(radius = 1_024)
         val paths = CivsPaths()

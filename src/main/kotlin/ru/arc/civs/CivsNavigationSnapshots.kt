@@ -355,7 +355,10 @@ internal class CivsNavigationSnapshots(
     fun retainedPayloads(): List<CitizenSnapshotSection> { checkOwner(); return sections.values.map { it.value } }
     fun knownStates(values: Collection<CitizenSnapshotSection>): Map<BlockData, CitizenSnapshotState> {
         checkOwner()
-        return buildMap { values.forEach { section -> section.samples.keys.forEach { data -> palette[data]?.let { put(data, it) } } } }
+        return buildMap {
+            for (section in values) for (data in section.samples.keys)
+                if (!containsKey(data)) palette[data]?.let { put(data, it) }
+        }
     }
 
     fun state(world: World, data: BlockData, sample: CivPosition): CitizenSnapshotState {
@@ -435,14 +438,21 @@ internal class CivsNavigationSnapshots(
     }
     fun removeChunk(world: UUID, x: Int, z: Int) {
         checkOwner()
+        var tracked = false
         for (dx in -1..1) for (dz in -1..1) {
             val key = Key(world, CitizenSnapshotKey(x + dx, z + dz))
-            sections.keys.filter { it.chunk == key }.toList().forEach { remove(it, eviction = false) }
-            if (key in revisions) { val revision = ++revisionSerial; revisions[key] = revision; minimumRevisions[key] = revision }
+            if (key !in revisions) continue
+            tracked = true
+            val revision = ++revisionSerial; revisions[key] = revision; minimumRevisions[key] = revision
             revisionTicks.remove(key); sectionChanges.remove(key); dirty.remove(key); deferredChunks.remove(key)
         }
-        revisions.remove(Key(world, CitizenSnapshotKey(x, z)))
-        minimumRevisions.remove(Key(world, CitizenSnapshotKey(x, z)))
+        // A captured generation can still be in flight without any published section.
+        if (!tracked) return
+        sections.keys.filter { it.world == world && it.section.x - x in -1..1 && it.section.z - z in -1..1 }
+            .forEach { remove(it, eviction = false) }
+        val key = Key(world, CitizenSnapshotKey(x, z))
+        revisions.remove(key)
+        minimumRevisions.remove(key)
     }
     fun removeWorld(world: UUID) {
         checkOwner()

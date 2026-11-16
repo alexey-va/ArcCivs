@@ -442,7 +442,7 @@ private class CitizenSearchGeometry(
     private val bodies = avoiding.map { it.at(0, 0, 0) }
     // Each geometry handles one synchronous expansion or endpoint probe. The sweep only reads its list.
     private val segmentObstacles = ArrayList<BoundingBox>()
-    // Only bodyClear borrows these two boxes, separate from the segment slots and avoided bodies.
+    // Synchronous checks borrow these boxes; occupied bounds are copied before samples reuse the body.
     private val bodyScratch = BoundingBox()
     private val obstacleScratch = BoundingBox()
     fun loaded(x: Int, y: Int, z: Int) = blocks[x, y, z]?.loaded == true
@@ -524,20 +524,29 @@ private class CitizenSearchGeometry(
         if (citizenSlideBody(Vector(from.x, from.y + .001, from.z), Vector(to.x, to.y + .001, to.z),
                 .299, 1.798, .299, segmentObstacles) != null) return false
         val samples = ceil(sqrt(from.distanceSquared(to)) / .15).toInt().coerceIn(1, 16)
-        val occupiedBody = body(occupied, -.001)
+        bodyScratch.resize(occupied.x - .299, occupied.y - .001, occupied.z - .299,
+            occupied.x + .299, occupied.y + 1.799, occupied.z + .299)
+        val occupiedMinX = bodyScratch.minX
+        val occupiedMinY = bodyScratch.minY
+        val occupiedMinZ = bodyScratch.minZ
+        val occupiedMaxX = bodyScratch.maxX
+        val occupiedMaxY = bodyScratch.maxY
+        val occupiedMaxZ = bodyScratch.maxZ
         for (index in 1..samples) {
             val t = index.toDouble() / samples
             val px = from.x + (to.x - from.x) * t
             val py = from.y + (to.y - from.y) * t
             val pz = from.z + (to.z - from.z) * t
             if (!bodyClear(px, py, pz)) return false
-            val body = BoundingBox(px - .299, py - .001, pz - .299, px + .299, py + 1.799, pz + .299)
+            val body = bodyScratch.resize(px - .299, py - .001, pz - .299, px + .299, py + 1.799, pz + .299)
             for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
                 for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt())
                     for (y in floor(body.minY).toInt()..floor(body.maxY).toInt()) {
                         val block = blocks[x, y, z] ?: return false
                         if (!block.loaded) return false
-                        if (block.hot && !occupiedBody.overlaps(BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0))) return false
+                        if (block.hot && !(occupiedMinX < x + 1.0 && occupiedMaxX > x.toDouble() &&
+                                occupiedMinY < y + 1.0 && occupiedMaxY > y.toDouble() &&
+                                occupiedMinZ < z + 1.0 && occupiedMaxZ > z.toDouble())) return false
                     }
         }
         return true
@@ -549,6 +558,4 @@ private class CitizenSearchGeometry(
         else segmentObstacles.add(BoundingBox(minX, minY, minZ, maxX, maxY, maxZ))
     }
 
-    private fun body(point: CitizenPoint, bottomOffset: Double = .001) = BoundingBox(
-        point.x - .299, point.y + bottomOffset, point.z - .299, point.x + .299, point.y + 1.799, point.z + .299)
 }

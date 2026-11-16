@@ -108,6 +108,43 @@ class CivsNavigationSectionCacheTest : FunSpec({
         }
     }
 
+    test("unload skips unrelated chunks but retires unpublished neighbours and shared nearby sections") {
+        SectionHarness().use { h ->
+            val pending = requireNotNull(h.cache.capture(h.world, CitizenSnapshotKey(-1, 0), 0, setOf(4), h.city.id))
+            try { pending.prepare() } finally { pending.releaseSource() }
+            h.cache.debug()["sections"] shouldBe 0
+            h.cache.removeChunk(h.world.uid, 0, 0)
+            h.cache.currentSections(h.world.uid, pending.payloads().associate { it.key to it.revision }) shouldBe false
+            h.cache.publish(h.world.uid, pending.payloads(), h.city.id)
+            h.cache.debug()["sections"] shouldBe 0
+
+            val a = h.city.id; val b = UUID(0, 2)
+            val centre = h.extract(CitizenSnapshotKey(0, 0), setOf(3, 4), a)
+            val neighbour = h.extract(CitizenSnapshotKey(1, 1), setOf(4), b)
+            val far = h.extract(CitizenSnapshotKey(4, 0), setOf(3, 4), a)
+            h.cache.cached(h.world, listOf(CitizenSnapshotSectionKey(0, 4, 0)), 0, b)
+            val before = h.cache.retainedPayloads()
+            val stamps = before.associate { it.key to it.revision }
+            h.cache.removeChunk(h.world.uid, 100, 100)
+            h.cache.retainedPayloads() shouldBe before
+            h.cache.currentSections(h.world.uid, stamps) shouldBe true
+
+            h.cache.removeChunk(h.world.uid, 0, 0)
+            h.cache.retainedPayloads() shouldBe before.filter { it.key.x == 4 }
+            h.cityStats(a)["sections"] shouldBe 2
+            h.cityStats(b)["sections"] shouldBe 0
+            h.cityStats(a)["evictions"] shouldBe 0L
+            h.cityStats(b)["evictions"] shouldBe 0L
+            h.cache.debug()["physical_section_evictions"] shouldBe 0L
+            h.cache.currentSections(h.world.uid, far.payloads().associate { it.key to it.revision }) shouldBe true
+            h.cache.publish(h.world.uid, centre.payloads(), a)
+            h.cache.publish(h.world.uid, neighbour.payloads(), b)
+            h.cache.retainedPayloads() shouldBe before.filter { it.key.x == 4 }
+            // The unpublished -1/0, centre, and 1/1 generations retain their original dx/dz order.
+            h.extract(CitizenSnapshotKey(1, 1), setOf(4), b).revision shouldBe far.revision + 3
+        }
+    }
+
     test("raw copies are released on extraction and cancellation and are absent from retained section graphs") {
         SectionHarness().use { h ->
             val key = CitizenSnapshotKey(0, 0)
