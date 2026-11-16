@@ -1785,6 +1785,7 @@ class CivsRoadGradeRecoveryServiceTest : FunSpec({
                 Bukkit.createBlockData(if (state == "mixed") target.after else "minecraft:dirt")
             h.world.getBlockAt(upper.x, upper.y, upper.z).type = Material.DIRT
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(loaded))
+            every { h.store.loadRetainedPlanSource(any()) } returns CompletableFuture.completedFuture(null)
             every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
             every { h.store.deleteInventoryTransaction(tx.id) } returns CompletableFuture.completedFuture(true)
             every { h.worldAdapter.validateRoadUpkeep(any(), work) } answers {
