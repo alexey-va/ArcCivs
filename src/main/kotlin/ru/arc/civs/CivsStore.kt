@@ -2,6 +2,8 @@ package ru.arc.civs
 
 import com.google.gson.Gson
 import ru.arc.persistence.AtomicFileStore
+import java.io.ByteArrayInputStream
+import java.io.InputStreamReader
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.CodingErrorAction
@@ -813,12 +815,15 @@ class CivsStore(
     }
 
     private fun <T> decodeJson(bytes: ByteArray, type: Class<T>): T {
-        val text = StandardCharsets.UTF_8.newDecoder()
+        val decoder = StandardCharsets.UTF_8.newDecoder()
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)
-            .decode(ByteBuffer.wrap(bytes))
-            .toString()
-        return requireNotNull(gson.fromJson(text, type)) { "JSON record is empty" }
+        val record = if (bytes.size >= MIN_STREAMED_JSON_BYTES) {
+            InputStreamReader(ByteArrayInputStream(bytes), decoder).use { gson.fromJson(it, type) }
+        } else {
+            gson.fromJson(decoder.decode(ByteBuffer.wrap(bytes)).toString(), type)
+        }
+        return requireNotNull(record) { "JSON record is empty" }
     }
 
     private fun <T> submitPlanChange(action: () -> T): CompletableFuture<T> {
@@ -863,6 +868,8 @@ class CivsStore(
         // Schema 1's {"schemaVersion":1,"city":<payload>} adds exactly 27 ASCII bytes.
         const val MAX_CITY_DOCUMENT_BYTES = MAX_CITY_BYTES + 27
         const val MAX_PLAN_BYTES = 32L * 1024L * 1024L
+        // The stream's fixed input buffer costs more than decoding the smallest documents directly.
+        private const val MIN_STREAMED_JSON_BYTES = 4 * 1024
         const val MAX_SCHEMATIC_BYTES = 16 * 1024 * 1024
         const val MAX_INVENTORY_TRANSACTION_BYTES = 32L * 1024L * 1024L
         const val MAX_DELETED_CITY_BYTES = 1_024L

@@ -144,11 +144,11 @@ class CivsNavigationSearchTest : FunSpec({
         result.failure shouldBe null
     }
 
-    test("the configured search batch limits detached frontier requests") {
+    test("the configured search batch still limits the local detached frontier") {
         for (batch in listOf(1, 8)) {
-            val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), CitizenPoint(90.5, 64.0, .5),
+            val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), CitizenPoint(8.5, 64.0, .5),
                 0, 256, emptyList(), CivsNavigationSettings(searchNodesPerBatch = batch))
-            val probe = search.advance(emptyList()).probes.single()
+            val probe = search.advance(emptyList()).probes.single { !it.incoming }
             val blocks = buildMap {
                 for (x in -1..1) for (z in -1..1) for (y in 61..67)
                     put(CivPosition(x, y, z), CitizenTerrainBlock(true, false, false, false, false, y == 64, 1.0,
@@ -158,6 +158,46 @@ class CivsNavigationSearchTest : FunSpec({
                 citizenSearchCandidates(probe, blocks, 0, 256))))
             result.probes.size shouldBe batch
         }
+    }
+
+    test("initial long requests group equal scores while local and widened frontiers keep full batches") {
+        val blocks = buildMap {
+            for (x in -1..2) for (z in -1..4) for (y in 61..67)
+                put(CivPosition(x, y, z), CitizenTerrainBlock(true, false, false, false, false, y == 64, 1.0,
+                    if (y <= 63) listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)) else emptyList()))
+        }
+        val best = listOf(CitizenSearchNode(1, 64.0, -1), CitizenSearchNode(1, 64.0, 1))
+        val costlier = CitizenSearchNode(0, 64.0, 1)
+        for (distance in listOf(16, 17)) {
+            val gated = distance == 17
+            val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), CitizenPoint(distance + .5, 64.0, .5),
+                0, 256, emptyList())
+            val first = search.advance(emptyList()).probes.single { !it.incoming }
+            val result = search.advance(listOf(CitizenSearchCapture(first, blocks,
+                (best + costlier).map { CitizenSearchEdge(it, CitizenRouteAction.WALK, true) })))
+            result.failure shouldBe null
+            result.probes.map(CitizenSearchProbe::node) shouldBe if (gated) best else best + costlier
+            result.nodes shouldBe if (gated) 3 else 4
+            if (gated) {
+                val resumed = search.advance(result.probes.map { CitizenSearchCapture(it, blocks, emptyList()) })
+                resumed.probes.map(CitizenSearchProbe::node) shouldBe listOf(costlier)
+                resumed.nodes shouldBe 4
+                search.cancel()
+                search.advance(emptyList()).failure shouldBe "cancelled"
+            }
+        }
+        val detour = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), CitizenPoint(17.5, 64.0, .5),
+            0, 256, emptyList(), CivsNavigationSettings(initialHorizontalMargin = 1))
+        var probe = detour.advance(emptyList()).probes.single()
+        // Two ordinary southward steps leave the valid initial bounds and activate the existing wider phase.
+        for (z in 1..2) probe = detour.advance(listOf(CitizenSearchCapture(probe, blocks,
+            listOf(CitizenSearchEdge(CitizenSearchNode(0, 64.0, z), CitizenRouteAction.WALK, true))))).probes.single()
+        probe.bounds shouldBe null
+        val branches = listOf(CitizenSearchNode(1, 64.0, 2), CitizenSearchNode(0, 64.0, 3))
+        val widened = detour.advance(listOf(CitizenSearchCapture(probe, blocks,
+            branches.map { CitizenSearchEdge(it, CitizenRouteAction.WALK, true) })))
+        widened.probes.map(CitizenSearchProbe::node) shouldBe branches
+        widened.nodes shouldBe 5
     }
 
     test("unknown frontier terrain cannot be reported as a proven no-path") {

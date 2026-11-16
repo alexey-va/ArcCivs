@@ -212,6 +212,8 @@ internal class CivsVillageVegetation(
             val top = chunk.getHighestBlockYAt(x and 15, z and 15).coerceAtMost(frame.maximumY - 1)
             // Snow layers left by no-physics edits can be above the heightmap.
             for (y in minOf(frame.maximumY - 1, top + 12) downTo maxOf(frame.minimumY + 1, top - CivsForestry.MAX_HEIGHT)) {
+                val type = chunk.getBlockType(x and 15, y, z and 15)
+                if (type != Material.SNOW && type !in frame.logs && type !in frame.leaves) continue
                 val p = CivPosition(x, y, z)
                 if (p in authored || p in pending || p in frame.reserved) continue
                 var covered = false
@@ -220,7 +222,6 @@ internal class CivsVillageVegetation(
                     break
                 }
                 if (covered) continue
-                val type = chunk.getBlockType(x and 15, y, z and 15)
                 if (type == Material.SNOW && unsupportedSnow.size < MAXIMUM_CELLS &&
                     chunk.getBlockType(x and 15, y - 1, z and 15).isAir) {
                     unsupportedSnow += CivVegetationCell(p, chunk.getBlockData(x and 15, y, z and 15).asString,

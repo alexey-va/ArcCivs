@@ -85,6 +85,7 @@ internal class CitizenNavigationSearch(
     private val heuristicWeight = 1.0 + (MAXIMUM_HEURISTIC_WEIGHT - 1.0) *
         ((sqrt(origin.distanceSquared(target)) - LOCAL_ROUTE_DISTANCE) /
             (WEIGHTED_ROUTE_DISTANCE - LOCAL_ROUTE_DISTANCE)).coerceIn(0.0, 1.0)
+    private val gateRequests = origin.distanceSquared(target) > settings.closeRouteDistance * settings.closeRouteDistance
     private val open = PriorityQueue<Entry>(compareBy<Entry> { it.score }.thenBy { it.order })
     private val deferred = mutableListOf<Entry>()
     private val costs = hashMapOf(start to 0.0)
@@ -141,6 +142,7 @@ internal class CitizenNavigationSearch(
         pending = emptyMap()
         if (reachedIsolatedFrontier()) return partial("no-path", MINIMUM_PARTIAL_GAIN)
         val requested = linkedMapOf<CitizenSearchNode, Entry>()
+        var firstRequestedScore = Double.POSITIVE_INFINITY
         while (requested.size < settings.searchNodesPerBatch) {
             if (cancelled.get()) return result(failure = "cancelled")
             var entry = open.poll()
@@ -154,6 +156,11 @@ internal class CitizenNavigationSearch(
                 }
                 break
             }
+            // Settle the initial long corridor first; widened detours need full batches to avoid repeated prefetch.
+            if (gateRequests && !widerSearch && requested.isNotEmpty() && entry.score > firstRequestedScore) {
+                open += entry
+                break
+            }
             val found = goal
             if (found != null && entry.score >= found.cost) {
                 open += entry
@@ -165,8 +172,10 @@ internal class CitizenNavigationSearch(
                 if (goal?.let { entry.cost < it.cost } != false) goal = entry
             } else {
                 val known = neighbourhoods[node]
-                if (known == null) requested[node] = entry
-                else expand(entry, known)?.let { return result(failure = it) }
+                if (known == null) {
+                    if (requested.isEmpty()) firstRequestedScore = entry.score
+                    requested[node] = entry
+                } else expand(entry, known)?.let { return result(failure = it) }
             }
             if (reachedIsolatedFrontier()) return partial("no-path", MINIMUM_PARTIAL_GAIN)
             // Only the initial hinted return may leave on useful native progress before the hard budget.

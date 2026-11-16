@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FreeSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.MockKMatcherScope
@@ -42,6 +43,56 @@ class CivsStoreTest : FreeSpec({
         reopened.deletePlan(plan.id).join() shouldBe true
         reopened.loadPlan(plan.id).join() shouldBe null
         reopened.deletePlan(plan.id).join() shouldBe false
+    }
+
+    "large UTF-8 city, plan and receipt documents roundtrip and refuse corrupt receipt bytes" {
+        val metadata = Base64.getEncoder().encodeToString(ByteArray(6_000) { 7 })
+        val worker = CivWorker(UUID.randomUUID(), "Василий", null, items = List(CivsEquipment.SLOTS) { slot ->
+            if (slot == CivsEquipment.BAG) CivResidentItem("IRON_AXE", 1, metadata) else null
+        })
+        val city = settlement().copy(name = "Верхний посад", workers = listOf(worker))
+        val plan = placementPlan(city).copy(blocks = buildList {
+            for (x in -2..2) for (y in 60..63) for (z in -2..2)
+                add(CivPlanBlock(CivPosition(x, y, z), "minecraft:air", "minecraft:stone"))
+        })
+        val receipt = inventoryTransaction(city)
+        val receiptPath = root.resolve("inventory-transactions/${receipt.id}.json")
+        CivsStore(root, directExecutor).use { store ->
+            store.save(city).join() shouldBe city
+            store.savePlan(plan).join() shouldBe plan
+            store.saveInventoryTransaction(receipt).join() shouldBe receipt
+        }
+        val bytes = Files.readAllBytes(receiptPath)
+        listOf(root.resolve("cities/${city.id}.json"), root.resolve("plans/${plan.id}.json"), receiptPath).forEach {
+            (Files.size(it) > 6_000) shouldBe true
+        }
+        val json = bytes.toString(Charsets.UTF_8)
+        json.contains(city.name) shouldBe true
+        val malformed = byteArrayOf(0xc3.toByte(), 0x28)
+        val whitespace = ByteArray(32_768) { ' '.code.toByte() }
+        val corrupt = mapOf(
+            "malformed UTF-8 before JSON" to malformed + bytes,
+            "malformed UTF-8 in the city name" to json.substringBefore(city.name).toByteArray() + malformed +
+                json.substringAfter(city.name).toByteArray(),
+            "malformed UTF-8 after trailing spaces" to bytes + whitespace + malformed,
+            "second JSON value" to bytes + "{}".toByteArray(),
+            "null document" to "null".toByteArray() + whitespace,
+        )
+        CivsStore(root, directExecutor).use { reopened ->
+            reopened.load().join() shouldBe listOf(city)
+            reopened.loadPlan(plan.id).join() shouldBe plan
+            reopened.loadInventoryTransactions().join() shouldBe listOf(receipt)
+            reopened.saveInventoryTransaction(receipt).join() shouldBe receipt
+            for ((name, invalid) in corrupt) withClue(name) {
+                Files.write(receiptPath, invalid)
+                shouldThrow<CompletionException> { reopened.loadInventoryTransactions().join() }
+                shouldThrow<CompletionException> { reopened.deleteInventoryTransaction(receipt.id).join() }
+                Files.readAllBytes(receiptPath).contentEquals(invalid) shouldBe true
+            }
+            Files.write(receiptPath, bytes)
+            reopened.loadInventoryTransactions().join() shouldBe listOf(receipt)
+            reopened.deleteInventoryTransaction(receipt.id).join() shouldBe true
+        }
     }
 
     "historical three-miner city and its exact receipt load before a once-only staffing revision" {

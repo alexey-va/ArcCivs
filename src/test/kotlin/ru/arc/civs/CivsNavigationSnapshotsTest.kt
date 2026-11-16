@@ -930,17 +930,31 @@ class CivsNavigationSnapshotsTest : FunSpec({
             snapshotReads shouldBe 8192
             val node = CitizenSearchNode(2, 64.0, 2)
             fun route(allowed: Boolean): CitizenSearchCapture {
-                val policy = CitizenSnapshotPolicy({ point, material -> allowed && material(point) == Material.AIR }, { _, _ -> true })
+                val checked = mutableListOf<CivPosition>()
+                val policy = CitizenSnapshotPolicy({ point, material ->
+                    checked += point
+                    allowed && material(point) == Material.AIR
+                }, { _, _ -> true })
                 val capture = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), CitizenSnapshotTerrain(),
                     policy, -64, 320, 63, 1, false)
                 val request = capture.advance(CitizenSnapshotInput(chunks = mapOf(key to chunk), states = palette))
-                return requireNotNull(capture.advance(CitizenSnapshotInput(costs = request.costs.associateWith { 1.0 })).captures).single()
+                val result = requireNotNull(capture.advance(CitizenSnapshotInput(costs = request.costs.associateWith { 1.0 })).captures).single()
+                checked shouldBe result.blocks.keys.toList()
+                return result
             }
             val admitted = route(true)
             val denied = route(false)
             val feet = CivPosition(2, 64, 2)
             admitted.blocks.getValue(feet).allowed shouldBe true
             denied.blocks.getValue(feet).allowed shouldBe false
+            admitted.blocks.getValue(feet) shouldBeSameInstanceAs admitted.blocks.getValue(feet.copy(x = 3))
+            admitted.blocks.getValue(feet) shouldBeSameInstanceAs route(true).blocks.getValue(feet)
+            denied.blocks.getValue(feet) shouldBeSameInstanceAs denied.blocks.getValue(feet.copy(y = 65))
+            denied.blocks.getValue(feet) shouldBeSameInstanceAs route(false).blocks.getValue(feet)
+            for ((point, block) in admitted.blocks) block shouldBe CitizenTerrainBlock(true, false, false, false,
+                false, point.y >= 64, 1.0, if (point.y >= 64) emptyList() else full)
+            for ((point, block) in denied.blocks) block shouldBe CitizenTerrainBlock(true, false, false, false,
+                false, false, 1.0, if (point.y >= 64) emptyList() else full)
             admitted.blocks.getValue(feet.copy(y = 63)).boxes shouldBeSameInstanceAs denied.blocks.getValue(feet.copy(y = 63)).boxes
             snapshotReads shouldBe 8192
         }

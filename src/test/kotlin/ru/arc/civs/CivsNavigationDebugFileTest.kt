@@ -57,7 +57,8 @@ class CivsNavigationDebugFileTest : FunSpec({
             receipt["state"] shouldBe "saved"
             receipt["reported_blocks"] shouldBe selected.capturedBlocks
             receipt["actual_blocks"] shouldBe h.settings.maximumCapturedBlocks
-            (selected.capturedBlocks < h.settings.maximumCapturedBlocks) shouldBe true
+            // Prefetch published the full cap before the next required probe failed.
+            selected.capturedBlocks shouldBe h.settings.maximumCapturedBlocks
             val encoded = Files.readString(h.root.resolve(receipt["path"] as String))
             for (secret in listOf("PRIVATE_CITY", "PRIVATE_RESIDENT", "PRIVATE_PRODUCTION", h.city.owner.toString(),
                 "buildingMaterials", "stock", "inventory", "workers", "nbt")) encoded.contains(secret) shouldBe false
@@ -92,6 +93,56 @@ class CivsNavigationDebugFileTest : FunSpec({
             val json = JsonParser.parseString(bytes.toString(Charsets.UTF_8)).asJsonObject
             json["schema"].asInt shouldBe 2
             replayNavigationCapture(json)
+        }
+    }
+
+    test("an unavailable neighbour preserves the actual capture budget and masked failure without changing gameplay") {
+        navigationFileFixture { h ->
+            h.world.unloadChunk(-1, 0) shouldBe true
+            val baseline = h.request(); h.finish(baseline)
+            baseline.failure shouldBe "chunk-unloaded"
+            val file = CivsNavigationDebugFile(h.root, h.io)
+            var captured: CitizenNavigationDebugFrame? = null
+            val arm = h.arm { frame -> captured = frame; file.save(frame) }
+            val route = h.request(); h.attach(route); h.finish(route)
+            route.failure shouldBe baseline.failure
+            route.nodeCount shouldBe baseline.nodeCount
+            route.capturedBlocks shouldBe baseline.capturedBlocks
+            h.io.pending.size shouldBe 1
+            val reads = h.nativeReads
+            h.io.runNext()
+            h.nativeReads shouldBe reads
+            val receipt = arm.completion.join()
+            receipt["state"] shouldBe "saved"
+            receipt["actual_blocks"] shouldBe h.settings.maximumCapturedBlocks
+            val path = h.root.resolve(receipt["path"] as String)
+            val encoded = Files.readString(path)
+            val json = JsonParser.parseString(encoded).asJsonObject
+            json["terminal"].asJsonObject["failure"].asString shouldBe "chunk-unloaded"
+            json["terminal"].asJsonObject["budget_call"].asString shouldBe "capture-budget"
+            json["unavailable_chunks"].asJsonArray.map {
+                it.asJsonObject["x"].asInt to it.asJsonObject["z"].asInt
+            } shouldBe listOf(-1 to 0)
+            replayNavigationCapture(json)
+            val withoutBudget = file.save(requireNotNull(captured).copy(budgetCall = null))
+            h.io.runNext()
+            navigationFileFailure(withoutBudget) shouldBe "unsupported-navigation-capture"
+            Files.readString(path) shouldBe encoded
+        }
+    }
+
+    test("an ordinary unavailable origin without a capture budget remains not captured") {
+        navigationFileFixture { h ->
+            h.world.unloadChunk(0, 0) shouldBe true
+            val arm = h.arm()
+            val route = h.request(); h.attach(route); h.finish(route)
+            route.failure shouldBe "chunk-unloaded"
+            val receipt = arm.completion.join()
+            receipt["state"] shouldBe "not-captured"
+            receipt["failure"] shouldBe "chunk-unloaded"
+            (route.capturedBlocks < h.settings.maximumCapturedBlocks) shouldBe true
+            h.io.pending shouldBe emptyList()
+            Files.exists(h.root.resolve("debug")) shouldBe false
         }
     }
 

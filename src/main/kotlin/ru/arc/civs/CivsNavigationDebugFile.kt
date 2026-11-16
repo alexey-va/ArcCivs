@@ -87,8 +87,7 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
     private fun document(frame: CitizenNavigationDebugFrame): Map<String, Any?> {
         if (frame.rounds.isEmpty() || frame.rounds.size > MAX_ROUNDS ||
             frame.terrain.blocks.size > minOf(frame.settings.maximumCapturedBlocks, MAX_CELLS) ||
-            frame.terminal.failure !in setOf("capture-budget", "search-budget") ||
-            frame.terminal.path != null || frame.terminal.continuation)
+            !supportsFailure(frame.terminal, frame.budgetCall))
             throw CivsRejection("unsupported-navigation-capture")
         var probeCount = 0
         val palette = linkedMapOf<CitizenTerrainBlock, Int>()
@@ -212,6 +211,11 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
     }
 
     companion object {
+        fun supportsFailure(result: CitizenSearchResult, budgetCall: String?): Boolean =
+            result.path == null && !result.continuation &&
+                (result.failure in setOf("capture-budget", "search-budget") ||
+                    result.failure == "chunk-unloaded" && budgetCall == "capture-budget")
+
         const val MAX_CELLS = 32_768
         const val MAX_ROUNDS = 4097
         const val MAX_PROBES = 65_536

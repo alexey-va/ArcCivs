@@ -36,6 +36,49 @@ class CivsVillageVegetationTest : FunSpec({
         civsVillageVegetationCandidates(found, mapOf(stump.position to "minecraft:birch_log[axis=y]")) shouldBe emptyList()
     }
 
+    for (dense in listOf(false, true))
+    test("material filtering retains exact detached selection and protections dense=$dense") {
+        VillageVegetationFixture().use { h ->
+            val authoredRoot = CivPosition(0, 64, 0)
+            val pendingRoot = CivPosition(-4, 64, -4)
+            val siteRoot = CivPosition(6, 64, 6)
+            val roots = if (dense) (-6..6 step 2).flatMap { x ->
+                (-6..6 step 2).map { z -> CivPosition(x, 64, z) }
+            } else listOf(authoredRoot, pendingRoot, siteRoot, CivPosition(6, 64, -6))
+            val trees = roots.associateWith(h::tree)
+            val hall = h.city.buildings.single()
+            h.retained[hall.id] = CivPlacementPlan(hall.id, h.city.id, h.city.worldId, hall,
+                trees.getValue(authoredRoot).mapIndexed { i, p ->
+                    CivPlanBlock(p, "minecraft:air", if (i == 4) "minecraft:oak_leaves" else "minecraft:oak_log[axis=y]")
+                })
+            val job = CivForestryJob(UUID(0, 93), pendingRoot, "OAK_SAPLING", listOf(pendingRoot),
+                listOf("minecraft:oak_log[axis=y]", "minecraft:oak_leaves"),
+                (0..4).map { y -> 15 or (15 shl 5) or (y shl 10) or (if (y == 4) 1 shl 16 else 0) })
+            h.city = h.city.copy(buildings = h.city.buildings + hall.copy(id = UUID(0, 94),
+                anchor = siteRoot, entrance = siteRoot.copy(z = 7),
+                phase = BuildingPhase.SITE, bounds = CivBox(siteRoot, siteRoot.copy(y = 68))),
+                forestryJobs = mapOf(hall.id.toString() to job))
+            val barrel = CivPosition(-5, 64, 5)
+            h.put(barrel, Material.BARREL)
+
+            h.startCapture()
+            // This tree is absent from the immutable snapshot and must wait for a later sweep.
+            val later = h.tree(CivPosition(5, 64, -5))
+            h.finishCapture()
+            h.drain()
+
+            val protectedRoots = setOf(authoredRoot, pendingRoot, siteRoot)
+            val removed = trees.filterKeys { it !in protectedRoots }.values.flatten().toSet()
+            h.notifications shouldBe removed
+            removed.forEach { h.type(it) shouldBe Material.AIR }
+            (protectedRoots.map(trees::getValue) + listOf(later)).forEach { tree ->
+                tree.forEachIndexed { i, p -> h.type(p) shouldBe if (i == 4) Material.OAK_LEAVES else Material.OAK_LOG }
+            }
+            h.type(barrel) shouldBe Material.BARREL
+            h.city.revision shouldBe 0
+        }
+    }
+
     test("current level three authored tree survives a level one retained plan while an outside natural tree is cleared") {
         VillageVegetationFixture().use { h ->
             val initial = h.city.buildings.single()

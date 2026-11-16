@@ -673,6 +673,114 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("one native movement check reuses its shapes and the next invocation observes fresh terrain") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            fun point(x: Double, y: Double, z: Double) = CitizenPoint(12257 + x, 29 + y, 8367 + z)
+            val paths = listOf(
+                Triple(point(.5, 64.0, .5) to point(.672, 64.0, .5), 3, 9),
+                Triple(point(.8, 64.0, .5) to point(.972, 64.0, .5), 6, 18),
+                Triple(point(.8, 64.0, .8) to point(.9216, 64.0, .9216), 12, 36),
+                Triple(point(.5, 64.0, .5) to point(1.5, 64.0, .5), 6, 39),
+                Triple(point(.8, 64.0, .5) to point(1.1, 64.5, .5), 8, 86),
+            )
+            for ((path, unique, repeated) in paths) {
+                val (from, to) = path
+                terrain.shapeReads = 0
+                citizenPacketStepClear(terrain.world, from, to, false) shouldBe true
+                terrain.shapeReads shouldBe unique
+                terrain.shapeReads = 0
+                citizenPacketStepClear(terrain.world, from, to, false) { x, y, z ->
+                    citizenCollisionSnapshot(terrain.world, x, y, z)
+                } shouldBe true
+                terrain.shapeReads shouldBe repeated
+            }
+            val (from, to) = paths[3].first
+            val obstruction = CivPosition(12258, 94, 8367)
+            terrain.blocks[obstruction] = Material.STONE
+            citizenPacketStepClear(terrain.world, from, to, false) shouldBe false
+            terrain.blocks.remove(obstruction)
+            citizenPacketSegmentClear(terrain.world, from, to, false, from, null) shouldBe true
+            terrain.loaded = false
+            terrain.shapeReads = 0
+            terrain.blockReads = 0
+            citizenPacketStepClear(terrain.world, from, to, false) shouldBe false
+            terrain.shapeReads shouldBe 0
+            terrain.blockReads shouldBe 0
+        }
+    }
+
+    test("native collision reuse preserves swept sampled and caller supplied geometry") {
+        MockBukkitTestRuntime.open().use {
+            fun check(from: CitizenPoint, to: CitizenPoint, expected: Boolean, allowDoors: Boolean = false,
+                      configure: (ResidentRouteTerrain) -> Unit) {
+                val terrain = ResidentRouteTerrain().also(configure)
+                citizenPacketStepClear(terrain.world, from, to, allowDoors) shouldBe expected
+                citizenPacketStepClear(terrain.world, from, to, allowDoors) { x, y, z ->
+                    citizenCollisionSnapshot(terrain.world, x, y, z)
+                } shouldBe expected
+            }
+            val from = CitizenPoint(.5, 64.0, .5)
+            val to = CitizenPoint(1.5, 64.0, .5)
+            check(from, to, false) { terrain ->
+                terrain.boxes[CivPosition(1, 64, 0)] = listOf(BoundingBox(0.0, 0.0, 0.0, .03125, 1.0, 1.0))
+            }
+            check(from, to, true) { terrain ->
+                terrain.boxes[CivPosition(0, 64, 0)] = listOf(BoundingBox(0.0, 0.0, .799, 1.0, 1.0, 1.0))
+            }
+            for ((start, expected) in listOf(1.28 to true, 1.0 to false)) {
+                check(CitizenPoint(start, 64.0, .5), to, expected) { terrain ->
+                    terrain.blocks[CivPosition(0, 64, 0)] = Material.STONE
+                }
+            }
+            for (allowDoors in listOf(false, true)) check(from, to, allowDoors, allowDoors) { terrain ->
+                val door = CivPosition(1, 64, 0)
+                terrain.blocks[door] = Material.OAK_DOOR
+                terrain.boxes[door] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+            }
+            check(from, to, false) { terrain ->
+                val liquid = terrain.world.getBlockAt(1, 64, 0)
+                every { liquid.isLiquid } returns true
+            }
+            for (exiting in listOf(false, true)) {
+                val fire = from.copy(y = 64.4375)
+                val safe = to.copy(y = 64.4375)
+                check(if (exiting) fire else safe, if (exiting) safe else fire, exiting) { terrain ->
+                    terrain.blocks[CivPosition(0, 64, 0)] = Material.CAMPFIRE
+                    (terrain.world.getBlockAt(0, 64, 0).blockData as Lightable).isLit = true
+                }
+            }
+            // The caller's callback may expose projected or changing geometry; it must never be memoized.
+            val terrain = ResidentRouteTerrain()
+            val visits = mutableMapOf<CivPosition, Int>()
+            citizenPacketStepClear(terrain.world, from, to, false) { x, y, z ->
+                val point = CivPosition(x, y, z)
+                val count = visits.getOrDefault(point, 0) + 1
+                visits[point] = count
+                val state = citizenCollisionSnapshot(terrain.world, x, y, z)
+                if (y == 64 && count > 1) state.copy(boxes = listOf(BoundingBox(x.toDouble(), y.toDouble(),
+                    z.toDouble(), x + 1.0, y + 1.0, z + 1.0))) else state
+            } shouldBe false
+            visits.values.any { it > 1 } shouldBe true
+        }
+    }
+
+    test("large native movement envelopes retain the uncached fallback") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val from = CitizenPoint(.5, 64.0, .5)
+            val to = CitizenPoint(28.5, 64.0, .5) // 29 x 3 x 1 cells exceeds the 80-slot bound.
+            citizenPacketSegmentClear(terrain.world, from, to, false, from, null) shouldBe true
+            val reads = terrain.shapeReads
+            (reads > 80) shouldBe true
+            terrain.shapeReads = 0
+            citizenPacketSegmentClear(terrain.world, from, to, false, from) { x, y, z ->
+                citizenCollisionSnapshot(terrain.world, x, y, z)
+            } shouldBe true
+            terrain.shapeReads shouldBe reads
+        }
+    }
+
     test("native and detached sweeps include tall fence shapes below the feet but admit openable gates") {
         MockBukkitTestRuntime.open().use {
             for (material in listOf(Material.OAK_FENCE, Material.OAK_FENCE_GATE)) {
@@ -2516,6 +2624,7 @@ private class ResidentRouteTerrain {
     val boxes = mutableMapOf<CivPosition, List<BoundingBox>>()
     var loaded = true
     var blockReads = 0
+    var shapeReads = 0
     val world = mockk<World>()
     private val chunk = mockk<Chunk>()
     private val native = mutableMapOf<CivPosition, Block>()
@@ -2534,6 +2643,7 @@ private class ResidentRouteTerrain {
             native.getOrPut(point) {
                 val shape = mockk<VoxelShape> {
                     every { boundingBoxes } answers {
+                        shapeReads++
                         boxes[point] ?: if (material(point).isSolid) listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, when (material(point)) {
                             Material.DIRT_PATH -> .9375
                             Material.CAMPFIRE, Material.SOUL_CAMPFIRE -> .4375

@@ -40,7 +40,16 @@ internal data class CitizenRouteReuseKey private constructor(
 
 internal data class CitizenSnapshotKey(val x: Int, val z: Int)
 internal data class CitizenSnapshotSectionKey(val x: Int, val y: Int, val z: Int)
-internal data class CitizenSnapshotState(val shape: CitizenTerrainShape, val dynamic: Boolean)
+internal data class CitizenSnapshotState(val shape: CitizenTerrainShape, val dynamic: Boolean) {
+    private val permitted = if (dynamic) null else CitizenTerrainBlock(true, shape.liquid, shape.door,
+        shape.climbable, shape.hot, true, 1.0, shape.boxes)
+    private val denied = permitted?.copy(allowed = false)
+
+    /** Permissions are evaluated per cell; only the resulting immutable unit-cost value is shared. */
+    fun block(allowed: Boolean, boxes: List<CitizenTerrainBox>): CitizenTerrainBlock =
+        (if (allowed) permitted else denied) ?: CitizenTerrainBlock(true, shape.liquid, shape.door,
+            shape.climbable, shape.hot, allowed, 1.0, boxes)
+}
 
 /** The chunk copy and compact section palettes are detached; only workers decode sections. */
 internal class CitizenSnapshotChunk(val snapshot: ChunkSnapshot, val minimumY: Int, val maximumY: Int, val revision: Long = 0,

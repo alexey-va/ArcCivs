@@ -248,10 +248,8 @@ internal class CitizenSnapshotCapture(
                 }
                 val state = probeStates[index]
                 val block = if (state == null) unavailableSnapshotBlock else {
-                    val shape = state.shape
-                    CitizenTerrainBlock(true, shape.liquid, shape.door, shape.climbable, shape.hot,
-                        policy.allowed(point, ::material), 1.0,
-                        if (state.dynamic) terrain.dynamics.getValue(point) else shape.boxes)
+                    state.block(policy.allowed(point, ::material),
+                        if (state.dynamic) terrain.dynamics.getValue(point) else state.shape.boxes)
                 }
                 cells[index] = terrain.blocks.add(point, block)
             }

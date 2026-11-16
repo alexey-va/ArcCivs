@@ -230,15 +230,46 @@ internal fun citizenStepHeightAllowed(fromY: Double, toY: Double): Boolean {
 internal fun citizenPacketStepClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean,
                                    collision: ((Int, Int, Int) -> CitizenCollisionSnapshot)? = null): Boolean {
     if (!citizenStepHeightAllowed(from.y, to.y)) return false
+    val captured = collision ?: citizenMovementCollision(world, from, to)
     if (from.y != to.y) {
         val high = max(from.y, to.y)
         val aboveFrom = CitizenPoint(from.x, high, from.z)
         val aboveTo = CitizenPoint(to.x, high, to.z)
-        return citizenPacketSegmentClear(world, from, aboveFrom, allowDoors, from, collision) &&
-            citizenPacketSegmentClear(world, aboveFrom, aboveTo, allowDoors, from, collision) &&
-            citizenPacketSegmentClear(world, aboveTo, to, allowDoors, from, collision)
+        return citizenPacketSegmentClear(world, from, aboveFrom, allowDoors, from, captured) &&
+            citizenPacketSegmentClear(world, aboveFrom, aboveTo, allowDoors, from, captured) &&
+            citizenPacketSegmentClear(world, aboveTo, to, allowDoors, from, captured)
     }
-    return citizenPacketSegmentClear(world, from, to, allowDoors, from, collision)
+    return citizenPacketSegmentClear(world, from, to, allowDoors, from, captured)
+}
+
+/** One synchronous native check; never retained across a door/action callback or movement frame. */
+private fun citizenMovementCollision(world: World, from: CitizenPoint, to: CitizenPoint):
+    ((Int, Int, Int) -> CitizenCollisionSnapshot)? {
+    if (!from.x.isFinite() || !from.y.isFinite() || !from.z.isFinite() ||
+        !to.x.isFinite() || !to.y.isFinite() || !to.z.isFinite()) return null
+    val minX = floor(min(from.x, to.x) - .299).toInt()
+    val minY = (floor(min(from.y, to.y) + .001).toInt().toLong() - 1).coerceAtLeast(world.minHeight.toLong()).toInt()
+    val minZ = floor(min(from.z, to.z) - .299).toInt()
+    val maxX = floor(max(from.x, to.x) + .299).toInt()
+    val maxY = floor(max(from.y, to.y) + 1.799).toInt()
+    val maxZ = floor(max(from.z, to.z) + .299).toInt()
+    val width = maxX.toLong() - minX + 1
+    val height = maxY.toLong() - minY + 1
+    val depth = maxZ.toLong() - minZ + 1
+    // Ordinary movement fits at most 4 x 4 x 5 cells. Longer callers keep the native fallback.
+    if (width !in 1..80 || height !in 1..80 || depth !in 1..80 || width * height * depth > 80) return null
+    val cells = arrayOfNulls<CitizenCollisionSnapshot>((width * height * depth).toInt())
+    val rows = height.toInt()
+    val columns = depth.toInt()
+    return { x, y, z ->
+        if (x !in minX..maxX || y !in minY..maxY || z !in minZ..maxZ) {
+            // Preserve native reads if interpolation rounding reaches a boundary outside the envelope.
+            citizenCollisionSnapshot(world, x, y, z)
+        } else {
+            val index = ((x - minX) * rows + y - minY) * columns + z - minZ
+            cells[index] ?: citizenCollisionSnapshot(world, x, y, z).also { cells[index] = it }
+        }
+    }
 }
 
 internal fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean,
@@ -248,12 +279,13 @@ internal fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: Cit
     val obstacles = mutableListOf<BoundingBox>()
     val feetRow = floor(min(from.y, to.y) + .001).toInt()
     if (feetRow < world.minHeight) return false
+    val captured = collision ?: citizenMovementCollision(world, from, to)
     for (x in floor(min(from.x, to.x) - .299).toInt()..floor(max(from.x, to.x) + .299).toInt())
         for (z in floor(min(from.z, to.z) - .299).toInt()..floor(max(from.z, to.z) + .299).toInt()) {
             if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
             for (y in max(world.minHeight, feetRow - 1)..floor(max(from.y, to.y) + 1.799).toInt()) {
                 if (y !in world.minHeight until world.maxHeight) return false
-                val state = collision?.invoke(x, y, z) ?: citizenCollisionSnapshot(world, x, y, z)
+                val state = captured?.invoke(x, y, z) ?: citizenCollisionSnapshot(world, x, y, z)
                 if (state.liquid) obstacles += BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
                 else if (!allowDoors || !state.door) obstacles += state.boxes
             }
@@ -267,7 +299,7 @@ internal fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: Cit
         val point = CitizenPoint(from.x + (to.x - from.x) * t,
             from.y + (to.y - from.y) * t,
             from.z + (to.z - from.z) * t)
-        if (!citizenPacketBodyClear(world, point, allowDoors, collision = collision) || !citizenPacketCampfireClear(world, point, occupied)) return false
+        if (!citizenPacketBodyClear(world, point, allowDoors, collision = captured) || !citizenPacketCampfireClear(world, point, occupied)) return false
     }
     return true
 }

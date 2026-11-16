@@ -199,7 +199,7 @@ internal class CivsResidentNavigation(
         val trace = job.debugTrace ?: return
         pollDebug()
         if (debugRequest !== request) return
-        if (result.failure !in setOf("capture-budget", "search-budget") || result.path != null || result.continuation) {
+        if (!CivsNavigationDebugFile.supportsFailure(result, trace.budgetCall)) {
             job.debugTrace = null
             debugRequest = null
             request.arm.completion.complete(request.arm.receipt() + mapOf("state" to "not-captured",
