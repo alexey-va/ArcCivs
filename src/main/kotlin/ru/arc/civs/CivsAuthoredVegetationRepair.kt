@@ -117,31 +117,48 @@ internal class CivsAuthoredVegetationRepair(
                                     "transactions" to transactions.toList(), "revision" to expected.revision))
                                 return
                             }
-                            runCatching {
-                                available(cityId)
-                                requireVegetation(records.cities[cityId] == expected &&
-                                    expected.copy(revision = city.revision) == city, "stale-city")
-                                reserve()
-                                val receipt = CivAuthoredVegetationReceipt(building, region, projection.sha256, batches[index]).detached()
-                                val id = UUID.randomUUID()
-                                val tx = CivInventoryTransaction(id, cityId, expected.revision,
-                                    expected.copy(revision = expected.revision + 1), emptyList(),
-                                    worldChanges = receipt.cells, authoredVegetation = receipt).validated()
-                                requireNative(validateNative(tx))
-                                storage.reserve(expected, id)
-                                try { storage.seal(tx, keepViewersOpen = true) }
-                                catch (failure: Exception) { storage.unlock(id); throw failure }
-                                release()
-                                journal.submit(tx).whenCompleteSync(tasks) { saved, journalError ->
-                                    if (journalError != null) fail(journalError)
-                                    else {
-                                        transactions += id
-                                        CivsDiagnostics.event("authored_vegetation_repaired", "city" to cityId, "building" to buildingId,
-                                            "transaction" to id, "changed_cells" to receipt.cells.size, "source_sha256" to projection.sha256)
-                                        next(index + 1, requireNotNull(saved))
+                            var accepted: CivInventoryTransaction? = null
+                            val submitted = runCatching {
+                                // Retirement releases the city before this scheduled callback. Ordinary resident work
+                                // may own it now; queue normally and preserve that work in the next exact revision.
+                                authority.afterCityAvailable(cityId) {
+                                    try {
+                                        available(cityId)
+                                        val current = records.cities[cityId] ?: throw CivsRejection("no-city")
+                                        requireVegetation(current.worldId == city.worldId && current.owner == city.owner &&
+                                            current.pendingDeletion == null, "stale-city")
+                                        requireVegetation(current.building(buildingId) == building &&
+                                            current.construction?.buildingId != buildingId &&
+                                            buildingId !in current.constructionQueue.orEmpty(), "vegetation-stale-building")
+                                        reserve()
+                                        val receipt = CivAuthoredVegetationReceipt(building, region, projection.sha256, batches[index]).detached()
+                                        val id = UUID.randomUUID()
+                                        val tx = CivInventoryTransaction(id, cityId, current.revision,
+                                            current.copy(revision = current.revision + 1), emptyList(),
+                                            worldChanges = receipt.cells, authoredVegetation = receipt).validated()
+                                        requireNative(validateNative(tx))
+                                        storage.reserve(current, id)
+                                        try { storage.seal(tx, keepViewersOpen = true) }
+                                        catch (failure: Exception) { storage.unlock(id); throw failure }
+                                        accepted = tx
+                                        release()
+                                        journal.submit(tx)
+                                    } catch (failure: Throwable) {
+                                        release()
+                                        throw failure
                                     }
                                 }
-                            }.onFailure(::fail)
+                            }.getOrElse { fail(it); return }
+                            submitted.whenCompleteSync(tasks) { saved, journalError ->
+                                if (journalError != null) fail(journalError)
+                                else {
+                                    val tx = requireNotNull(accepted)
+                                    transactions += tx.id
+                                    CivsDiagnostics.event("authored_vegetation_repaired", "city" to cityId, "building" to buildingId,
+                                        "transaction" to tx.id, "changed_cells" to batches[index].size, "source_sha256" to projection.sha256)
+                                    next(index + 1, requireNotNull(saved))
+                                }
+                            }
                         }
                         next(0, city)
                     }.onFailure(::fail)

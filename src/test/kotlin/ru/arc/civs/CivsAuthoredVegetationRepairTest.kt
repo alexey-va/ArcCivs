@@ -150,6 +150,59 @@ class CivsAuthoredVegetationRepairTest : FunSpec({
         }
     }
 
+    test("queued resident progress between repair batches is preserved through fresh city admission") {
+        VegetationRepairFixture(large = true).use { f ->
+            val before = f.city
+            var residentAfter: CivWorker? = null
+            var competed = false
+            f.afterRetired = {
+                if (!competed) {
+                    competed = true
+                    // The journal has released its city; a waiting ordinary pickup owns it before the
+                    // repair's whenCompleteSync callback runs, exactly as in the live .312 history.
+                    f.beginOrdinaryMutation { current ->
+                        val worker = CivsEquipment.collectSupplies(current.workers.single(), mapOf("BREAD" to 4L))
+                            .copy(completedCycles = current.workers.single().completedCycles + 1)
+                        residentAfter = worker
+                        current.copy(workers = listOf(worker))
+                    }
+                }
+            }
+            f.await(f.repair.request(before.id, f.hall.id, f.hall.bounds))["changed_cells"] shouldBe 570
+            f.queuedAdmissions shouldBe 1
+            f.written.map { it.worldChanges!!.size } shouldBe listOf(128, 128, 128, 128, 58)
+            f.written.map { it.beforeRevision } shouldBe (listOf(0L, 2L, 3L, 4L, 5L).map { it + before.revision })
+            f.written.forEach { tx -> tx.after.copy(revision = tx.beforeRevision) shouldBe f.beforeReceipts.getValue(tx.id) }
+            f.city.workers shouldBe listOf(requireNotNull(residentAfter))
+            f.city.revision shouldBe before.revision + 6
+            f.targets.forEach { f.state(it.position) shouldBe it.after }
+            f.guards.forEach { (p, value) -> f.state(p) shouldBe value }
+            f.journal.pendingCount shouldBe 0
+            f.journal.blockedCount shouldBe 0
+        }
+    }
+
+    test("a changed target building while continuation waits rejects remaining cells before another receipt") {
+        VegetationRepairFixture(large = true).use { f ->
+            var competed = false
+            f.afterRetired = {
+                if (!competed) {
+                    competed = true
+                    f.beginOrdinaryMutation { current -> current.copy(buildings = listOf(f.hall.copy(rotation = 90))) }
+                }
+            }
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> {
+                f.await(f.repair.request(f.city.id, f.hall.id, f.hall.bounds))
+            })?.reason shouldBe "vegetation-stale-building"
+            f.queuedAdmissions shouldBe 1
+            f.written.size shouldBe 1
+            f.targets.take(128).forEach { f.state(it.position) shouldBe it.after }
+            f.targets.drop(128).forEach { f.state(it.position) shouldBe "minecraft:air" }
+            f.journal.pendingCount shouldBe 0
+            f.journal.blockedCount shouldBe 0
+        }
+    }
+
     test("source hash, source cells, city geometry and revision drift fail closed during recovery") {
         for (drift in listOf("hash", "source-cell", "geometry", "revision")) VegetationRepairFixture().use { f ->
             val tx = f.transaction()
@@ -251,10 +304,14 @@ private class VegetationRepairFixture(large: Boolean = false) : AutoCloseable {
     var journalWrite: CompletableFuture<CivInventoryTransaction>? = null
     var sourceFence = CompletableFuture.completedFuture(Unit)
     val written = mutableListOf<CivInventoryTransaction>()
+    val beforeReceipts = mutableMapOf<UUID, Settlement>()
+    private val waiting = ArrayDeque<() -> Unit>()
+    var queuedAdmissions = 0
     var recovered = emptyList<CivInventoryTransaction>()
     var occupied = false
     var verifications = 0
     var afterPublish: () -> Unit = {}
+    var afterRetired: () -> Unit = {}
 
     init {
       try {
@@ -280,7 +337,9 @@ private class VegetationRepairFixture(large: Boolean = false) : AutoCloseable {
         guards.forEach(::put)
         storage.replaceCities(listOf(city))
         every { store.saveInventoryTransaction(any()) } answers {
-            written += firstArg<CivInventoryTransaction>()
+            val tx = firstArg<CivInventoryTransaction>()
+            written += tx
+            beforeReceipts[tx.id] = city
             journalWrite ?: CompletableFuture.completedFuture(firstArg())
         }
         every { store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
@@ -290,7 +349,7 @@ private class VegetationRepairFixture(large: Boolean = false) : AutoCloseable {
         journal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy, unhealthy, { false },
             { saved -> city = saved; storage.updateCity(saved); afterPublish(); CompletableFuture.completedFuture(Unit) },
             { _, _ -> error("Authored restoration cannot create a second city mutation") }, {}, {}, { _, _, _ -> null }, {},
-            { _, _ -> city }, {}, { 0L }, verifyAuthoredVegetationSource = { tx ->
+            { _, _ -> afterRetired(); city }, {}, { 0L }, verifyAuthoredVegetationSource = { tx ->
                 verifications++
                 sourceFence.thenCompose { repair.verifySource(tx) }
             })
@@ -299,12 +358,28 @@ private class VegetationRepairFixture(large: Boolean = false) : AutoCloseable {
         every { authority.tracked<Map<String, Any?>>() } answers { CompletableFuture() }
         every { authority.reserveCity(any()) } answers { busy += firstArg<UUID>(); Unit }
         every { authority.releaseCity(any()) } answers { busy -= firstArg<UUID>(); Unit }
+        every { authority.afterCityAvailable<Settlement>(any(), any()) } answers {
+            firstArg<UUID>() shouldBe city.id
+            val action = secondArg<() -> CompletableFuture<Settlement>>()
+            if (city.id !in busy && waiting.isEmpty()) action()
+            else {
+                queuedAdmissions++
+                val result = CompletableFuture<Settlement>()
+                waiting.addLast {
+                    runCatching { action() }.getOrElse { CompletableFuture.failedFuture(it) }.whenComplete { value, failure ->
+                        if (failure == null) result.complete(value) else result.completeExceptionally(failure)
+                    }
+                }
+                result
+            }
+        }
         val records = CivsCityRecords({ cities }, busy, unhealthy, { false }, { false }, { null }, { 0 }, { 0 })
         repair = CivsAuthoredVegetationRepair(authority, records, tasks, { building, _ ->
             building.schematicId shouldBe hall.schematicId
             CompletableFuture.completedFuture(source)
         }, access, storage, journal, { false }, { _, _ -> occupied })
         storage.validateAuthoredVegetationNative = repair::validateNative
+        tasks.runTimer(1, 1) { if (city.id !in busy && waiting.isNotEmpty()) waiting.removeFirst().invoke() }
       } catch (failure: Throwable) {
         access.close(); storage.close(); tasks.close(); paper.close()
         throw failure
@@ -314,6 +389,15 @@ private class VegetationRepairFixture(large: Boolean = false) : AutoCloseable {
     fun transaction(): CivInventoryTransaction = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision,
         city.copy(revision = city.revision + 1), emptyList(), worldChanges = targets,
         authoredVegetation = CivAuthoredVegetationReceipt(hall, hall.bounds, source.sha256, targets)).validated()
+    fun beginOrdinaryMutation(transform: (Settlement) -> Settlement) {
+        check(city.id !in busy)
+        busy += city.id
+        tasks.runLater(3) {
+            city = CivsRules.validate(transform(city).copy(revision = city.revision + 1))
+            storage.updateCity(city)
+            busy -= city.id
+        }
+    }
     fun put(p: CivPosition, state: String) = world.getBlockAt(p.x, p.y, p.z).setBlockData(Bukkit.createBlockData(state), false)
     fun state(p: CivPosition) = world.getBlockAt(p.x, p.y, p.z).blockData.asString
     fun ticks() { paper.performTicks(30) }
