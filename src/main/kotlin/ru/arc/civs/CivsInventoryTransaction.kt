@@ -94,15 +94,17 @@ data class CivInventoryTransaction(
     val bufferPickup: CivConstructionStoragePickup? = null,
     /** Shallow mine access repair; never grants resources or advances worker/mining progress. */
     val mineOpening: CivMineOpeningReceipt? = null,
+    /** Explicit AIR-only repair from the current verified source; never a production reward. */
+    val authoredVegetation: CivAuthoredVegetationReceipt? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
         require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null ||
-            autonomousVisual != null || containerRelocation != null || gateRefit != null || warehouseRefit != null || mineOpening != null || after.autonomy != null && residentTransfer != null)
+            autonomousVisual != null || containerRelocation != null || gateRefit != null || warehouseRefit != null || mineOpening != null || authoredVegetation != null || after.autonomy != null && residentTransfer != null)
         require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine,
-            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup, gateRefit, warehouseRefit, trade, bufferPickup, mineOpening).size <= 1)
+            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup, gateRefit, warehouseRefit, trade, bufferPickup, mineOpening, authoredVegetation).size <= 1)
         bufferPickup?.let {
             require(worldChanges.isNullOrEmpty())
             it.validate(after, changes)
@@ -123,7 +125,11 @@ data class CivInventoryTransaction(
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
         }
-        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || upkeep != null || autonomousVisual != null || gateRefit != null || warehouseRefit != null || mineOpening != null || worldChanges.orEmpty().isEmpty()))
+        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || upkeep != null || autonomousVisual != null || gateRefit != null || warehouseRefit != null || mineOpening != null || authoredVegetation != null || worldChanges.orEmpty().isEmpty()))
+        authoredVegetation?.let {
+            require(changes.isEmpty() && worldChanges.orEmpty() == it.cells)
+            it.validated(after)
+        }
         mineOpening?.let {
             require(changes.isEmpty() && worldChanges.orEmpty() == it.cells)
             it.validated(after)

@@ -82,7 +82,7 @@ class CivsRoadHumpAlternativesTest : FunSpec({
         CivsRoadMaintenance.prepare(city, retained + plan).targets.none { it.floor == SECOND_HUMP && it.routeOverride != null } shouldBe true
     }
 
-    test("a native bedrock support refusal leaves the later shared hill available and all twenty one columns finish") {
+    test("a native bedrock refusal leaves the later shared hill and its linked landing finishable") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = CivsWorksiteWorldFixture("forester-hump-alternatives", collisionForData = { data ->
                 if (CivsRoadMaintenance.surface(data.asString)) roadUpkeepBoxes(data).map { it.at(CivPosition(0, 0, 0)) } else null
@@ -126,6 +126,7 @@ class CivsRoadHumpAlternativesTest : FunSpec({
                     }
                     var tick = 0
                     var cuts = 0
+                    val finished = mutableListOf<Pair<CivPosition, String>>()
                     var development = false
                     val maintenance = CivsRoadMaintenance(native) { tick }
                     maintenance.publish(city, initial)
@@ -145,17 +146,24 @@ class CivsRoadHumpAlternativesTest : FunSpec({
                         native.validateRoadUpkeep(city, work)
                         city = after
                         cuts++
+                        finished += work.upkeep!!.floor to work.upkeep!!.after
                         if (work.upkeep!!.routeOverride != null) maintenance.publish(city, CivsRoadMaintenance.prepare(city, plans))
                         else maintenance.upkeepRetired(city, work.upkeep!!)
                     }
                     development shouldBe true
-                    cuts shouldBe 21
+                    val expected = (-1869..-1867).flatMap { x -> (-2715..-2709).map { z -> CivPosition(x, 63, z) } } +
+                        listOf(CivPosition(-1867, 63, -2708), CivPosition(-1867, 63, -2707))
+                    // Completion includes the unchanged-height landing of the linked paid gate.
+                    // These are existing profile targets, not another cut or new corridor.
+                    cuts shouldBe expected.size
+                    finished.toSet() shouldBe expected.map { it to "minecraft:dirt_path" }.toSet()
                     city.workers.single().completedCycles shouldBe workerBefore.completedCycles + cuts
                     city.stock.stone shouldBe base.stock.stone - cuts
                     for (x in -1869..-1867) for (z in -2715..-2709) {
                         world.getBlockAt(x, 63, z).type shouldBe Material.DIRT_PATH
                         for (y in 64..67) world.getBlockAt(x, y, z).type.isAir shouldBe true
                     }
+                    expected.forEach { p -> world.getBlockAt(p.x, p.y, p.z).type shouldBe Material.DIRT_PATH }
                     world.getBlockAt(blockedSupport.x, blockedSupport.y, blockedSupport.z).type shouldBe Material.BEDROCK
                     Gson().toJson(plans) shouldBe savedPlans
                 }

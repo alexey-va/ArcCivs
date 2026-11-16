@@ -167,6 +167,16 @@ internal fun citizenWalkingSupported(world: World, point: CitizenPoint): Boolean
  * Adjacent centre-to-centre grid edges still have only the block boundary between their ends. */
 internal fun citizenFlatSupportClear(from: CitizenPoint, to: CitizenPoint, endpointSupport: ((CitizenPoint) -> Boolean)? = null,
                                     supported: (CitizenPoint) -> Boolean): Boolean {
+    val dx = to.x - from.x
+    val dz = to.z - from.z
+    if (from.y == to.y && from.x == floor(from.x) + .5 && from.z == floor(from.z) + .5 &&
+        to.x == floor(to.x) + .5 && to.z == floor(to.z) + .5 &&
+        (dx == 0.0 || abs(dx) == 1.0) && (dz == 0.0 || abs(dz) == 1.0) && (dx != 0.0 || dz != 0.0)) {
+        // Adjacent centres cross only t=.5 on either axis, including diagonal corners.
+        return (endpointSupport ?: supported)(to) &&
+            supported(CitizenPoint(from.x + dx * .25, from.y, from.z + dz * .25)) &&
+            supported(CitizenPoint(from.x + dx * .75, from.y, from.z + dz * .75))
+    }
     val boundaries = sortedSetOf(0.0, 1.0)
     for ((start, end) in listOf(from.x to to.x, from.z to to.z)) {
         if (start == end) continue

@@ -101,6 +101,9 @@ class CivsStorage(private val plugin: Plugin,
     internal var validateMineOpeningNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "mine-opening-authority-unavailable"))
     }
+    internal var validateAuthoredVegetationNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
+        CivInventoryApplyResult.Conflict(mapOf("reason" to "vegetation-authority-unavailable"))
+    }
     internal var validateWarehouseRefitNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "warehouse-refit-authority-unavailable"))
     }
@@ -318,6 +321,7 @@ class CivsStorage(private val plugin: Plugin,
         }
         transaction.gateRefit?.let { require(it.before(transaction.after) == claim.city) }
         transaction.mineOpening?.let { require(transaction.after.copy(revision = transaction.beforeRevision) == claim.city) }
+        transaction.authoredVegetation?.let { require(transaction.after.copy(revision = transaction.beforeRevision) == claim.city) }
         transaction.trade?.let { require(transaction.after.copy(revision = transaction.beforeRevision) == claim.city) }
         transaction.warehouseRefit?.let { require(it.before(transaction.after) == claim.city) }
         transaction.collected?.let { collected ->
@@ -1075,6 +1079,11 @@ class CivsStorage(private val plugin: Plugin,
             is CivInventoryApplyResult.Conflict -> return authority
             else -> Unit
         }
+        if (transaction.authoredVegetation != null) when (val authority = validateAuthoredVegetationNative(transaction)) {
+            is CivInventoryApplyResult.Retry -> return authority
+            is CivInventoryApplyResult.Conflict -> return authority
+            else -> Unit
+        }
         if (transaction.warehouseRefit != null) when (val authority = validateWarehouseRefitNative(transaction)) {
             is CivInventoryApplyResult.Retry -> return authority
             is CivInventoryApplyResult.Conflict -> return authority
@@ -1459,7 +1468,8 @@ class CivsStorage(private val plugin: Plugin,
             // The grass cheek and its dirt bedding are separate paid images of this column.
             (cell.position == upkeep.floor || cell.after != "minecraft:dirt") && CivsRoadMaintenance.sameSurface(upkeep, actual, expected)
         } == true ||
-        transaction.autonomousVisual != null && CivsAutonomousWorksites.nativeAfterMatches(cell, actual.asString)
+        transaction.autonomousVisual != null && CivsAutonomousWorksites.nativeAfterMatches(cell, actual.asString) ||
+        transaction.authoredVegetation != null && CivAuthoredVegetationReceipt.afterMatches(actual, expected)
 
     private fun completedNativeState(transaction: CivInventoryTransaction, sources: Map<CivPosition, Source>, cells: Map<CivPosition, Pair<Block, BlockData>>): CivInventoryApplyResult {
         val containers = classify(transaction, sources)

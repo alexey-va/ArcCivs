@@ -78,11 +78,12 @@ internal class CivsVillageVegetation(
     private val changed: (UUID, Collection<CivPosition>) -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
     private val nanoTime: () -> Long = System::nanoTime,
+    private val loadAuthored: (CivBuilding, Set<String>) -> CompletableFuture<Set<CivPosition>>,
 ) : AutoCloseable {
     private data class Frame(val city: Settlement, val area: CivBox, val minimumY: Int, val maximumY: Int,
         val chunks: Map<Pair<Int, Int>, ChunkSnapshot>, val plans: List<CivPlacementPlan>,
         val logs: Set<Material>, val leaves: Set<Material>, val productiveGroves: Set<Pair<Int, Int>>,
-        val reserved: Set<CivPosition>)
+        val reserved: Set<CivPosition>, val currentAuthored: List<Set<CivPosition>>)
     private data class Sweep(val city: Settlement, val selection: CivVegetationSelection, val reserved: Set<CivPosition>,
         val deferred: MutableSet<CivPosition> = hashSetOf(),
         var next: Int = 0, var removed: Int = 0, var skipped: Int = 0)
@@ -101,7 +102,18 @@ internal class CivsVillageVegetation(
             now >= (nextSweep[it.id] ?: 0) }.minByOrNull { nextSweep[it.id] ?: 0 } ?: return
         nextSweep[selected.id] = now + 120_000
         preparing = true
-        loadPlans(selected).whenCompleteSync(tasks) loaded@ { plans, failure ->
+        val logs = Tag.LOGS.values.toSet()
+        val leaves = Tag.LEAVES.values.toSet()
+        val materials = (logs + leaves + Material.SNOW).mapTo(hashSetOf()) { "minecraft:${it.name.lowercase()}" }
+        loadPlans(selected).thenCompose { retained ->
+            val expected = retained.associateBy { it.building.id }
+            val masks = selected.buildings.filter { building -> building.phase == BuildingPhase.ACTIVE &&
+                !civsSameBuildingGeometry(expected[building.id]?.building?.copy(phase = building.phase,
+                    control = building.control), building)
+            }.map { loadAuthored(it, materials) }
+            // A missing or failed current source cannot authorize a sweep using stale ownership.
+            CompletableFuture.allOf(*masks.toTypedArray()).thenApply { retained to masks.map { it.join() } }
+        }.whenCompleteSync(tasks) loaded@ { prepared, failure ->
             if (closed) return@loaded
             if (failure != null) { preparing = false; return@loaded }
             val current = city(selected.id)
@@ -122,7 +134,7 @@ internal class CivsVillageVegetation(
                     "failure" to failure.javaClass.simpleName)
                 return@loaded
             }
-            val retained = requireNotNull(plans)
+            val (retained, currentAuthored) = requireNotNull(prepared)
             val reserved = retained.filter { it.id == current.construction?.id }.flatMap {
                 (it.blocks + it.terrain?.blocks.orEmpty()).map { block -> block.position }
             }.toHashSet()
@@ -157,7 +169,7 @@ internal class CivsVillageVegetation(
                 }
             }
             val frame = Frame(current, area, world.minHeight, world.maxHeight, chunks, retained,
-                Tag.LOGS.values.toSet(), Tag.LEAVES.values.toSet(), groves, reserved)
+                logs, leaves, groves, reserved, currentAuthored)
             val pending = try { CompletableFuture.supplyAsync({ capture(frame) }, executor) }
             catch (failure: RejectedExecutionException) {
                 preparing = false
@@ -181,9 +193,10 @@ internal class CivsVillageVegetation(
         val logs = frame.logs.mapTo(hashSetOf()) { "minecraft:${it.name.lowercase()}" }
         val leaves = frame.leaves.mapTo(hashSetOf()) { "minecraft:${it.name.lowercase()}" }
         val expected = frame.plans.associateBy { it.building.id }
-        val authored = frame.plans.flatMap { p -> p.blocks.filter { cell ->
+        val authored = frame.currentAuthored.flatMapTo(hashSetOf()) { it }
+        frame.plans.flatMap { p -> p.blocks.filter { cell ->
             cell.after.substringBefore('[').let { it in logs || it in leaves || it == "minecraft:snow" }
-        }.map { it.position } }.toHashSet()
+        }.map { it.position } }.toCollection(authored)
         val previousNatural = frame.plans.flatMap { p -> (p.blocks + p.terrain?.blocks.orEmpty()).filter { cell ->
             cell.after == "minecraft:air" && cell.before.substringBefore('[') in logs
         }.map { it.position to it.before } }.toMap()

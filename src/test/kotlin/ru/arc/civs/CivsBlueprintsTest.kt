@@ -17,6 +17,85 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsBlueprintsTest : FunSpec({
+    test("authored vegetation is detached off thread and its geometry cache follows rotation and upgrades") {
+        val pending = ArrayDeque<Runnable>()
+        val materials = setOf("minecraft:birch_log", "minecraft:birch_leaves", "minecraft:snow")
+        val cells = mapOf(
+            ArcSchematicPoint(1, 1, 1) to "minecraft:birch_log[axis=y]",
+            ArcSchematicPoint(1, 2, 1) to "minecraft:birch_leaves[distance=1,persistent=false,waterlogged=false]",
+            ArcSchematicPoint(2, 3, 1) to "minecraft:snow[layers=1]",
+            ArcSchematicPoint(0, 1, 1) to "minecraft:birch_planks",
+            ArcSchematicPoint(1, 1, 2) to "minecraft:barrel[facing=up,open=false]",
+        )
+        val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(2, 3, 2),
+            ArcSchematicPoint(1, 0, 3), cells)
+        var reads = 0
+        val observed = object : ArcSchematicSnapshot by original {
+            override fun blocks(): List<ArcSchematicBlock> { reads++; return original.blocks() }
+        }
+        val building = CivBuilding(UUID(0, 2), BuildingType.TOWN_HALL, 2, CivPosition(20, 63, 20), 0,
+            "fixture/tree", CivBox(CivPosition(19, 63, 17), CivPosition(21, 66, 19)),
+            CivPosition(20, 64, 20), BuildingPhase.ACTIVE)
+        val libraries = BlueprintLibraries(executor = Executor { pending.addLast(it) })
+        every { libraries.source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns
+            CompletableFuture.completedFuture(observed)
+        fun drain() {
+            var steps = 0
+            while (pending.isNotEmpty()) { check(steps++ < 20); pending.removeFirst().run() }
+        }
+        libraries.subject.use { blueprints ->
+            val result = blueprints.authoredVegetation(building, materials)
+            result.isDone shouldBe false
+            reads shouldBe 0
+            drain()
+            result.join() shouldBe setOf(CivPosition(20, 64, 18), CivPosition(20, 65, 18), CivPosition(21, 66, 18))
+            reads shouldBe 1
+            (blueprints.authoredVegetation(building.copy(production = "changed", control = building.anchor), materials) === result) shouldBe true
+            pending.size shouldBe 0
+
+            val rotated = building.copy(rotation = 90,
+                bounds = CivBox(CivPosition(21, 63, 19), CivPosition(23, 66, 21)))
+            val rotatedResult = blueprints.authoredVegetation(rotated, materials)
+            drain()
+            rotatedResult.join() shouldBe setOf(CivPosition(22, 64, 20), CivPosition(22, 65, 20), CivPosition(22, 66, 21))
+            reads shouldBe 2
+
+            val upgraded = BlueprintCellsSnapshot(original.minimum, original.maximum, original.origin,
+                cells + (ArcSchematicPoint(2, 1, 1) to "minecraft:birch_log[axis=y]"))
+            every { libraries.source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns
+                CompletableFuture.completedFuture(upgraded)
+            val upgradedResult = blueprints.authoredVegetation(building.copy(level = 3), materials)
+            drain()
+            upgradedResult.join() shouldBe result.join() + CivPosition(21, 64, 18)
+            verify(exactly = 3) { libraries.source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) }
+            verify(exactly = 0) { libraries.source.transform(any(), any()) }
+            verify(exactly = 0) { libraries.source.captureSource(any(), any()) }
+        }
+    }
+
+    test("failed authored vegetation source is retried and a mismatched source envelope fails closed") {
+        val snapshot = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(2, 3, 2),
+            ArcSchematicPoint(1, 0, 3), mapOf(ArcSchematicPoint(1, 1, 1) to "minecraft:birch_log[axis=y]"))
+        val building = CivBuilding(UUID(0, 2), BuildingType.TOWN_HALL, 3, CivPosition(20, 63, 20), 0,
+            "fixture/tree", CivBox(CivPosition(19, 63, 17), CivPosition(21, 66, 19)),
+            CivPosition(20, 64, 20), BuildingPhase.ACTIVE)
+        val libraries = BlueprintLibraries()
+        val materials = setOf("minecraft:birch_log")
+        every { libraries.source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns
+            CompletableFuture.failedFuture(IllegalStateException("source unavailable"))
+        libraries.subject.use { blueprints ->
+            shouldThrow<java.util.concurrent.CompletionException> { blueprints.authoredVegetation(building, materials).join() }
+            every { libraries.source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns
+                CompletableFuture.completedFuture(snapshot)
+            blueprints.authoredVegetation(building, materials).join() shouldBe setOf(CivPosition(20, 64, 18))
+            verify(exactly = 2) { libraries.source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) }
+            val changed = building.copy(bounds = building.bounds.copy(max = building.bounds.max.copy(y = 67)))
+            shouldThrow<java.util.concurrent.CompletionException> {
+                blueprints.authoredVegetation(changed, materials).join()
+            }.cause?.let { (it as CivsRejection).reason } shouldBe "vegetation-source-geometry"
+        }
+    }
+
     test("sleep room extraction stays on the source executor and returns detached floor coordinates") {
         val pending = ArrayDeque<Runnable>()
         val cells = buildMap {

@@ -440,8 +440,13 @@ internal class CivsRoadWorld(
     private fun validateRoadCut(city: Settlement, upkeep: CivRoadUpkeep, repair: CivRoadRouteOverride,
         run: IntRange, world: World, settlements: List<Settlement>) {
         val section = repair.route.subList(run.first - 1, run.last + 2)
-        val profile = CivsAutonomousTerraform.roadProfile(section)
-        val levels = profile.mapValues { it.value.y }
+        val columns = CivsAutonomousTerraform.roadProfile(section).keys
+        // A section's endpoint shoulder may belong to the next rise in this same accepted
+        // terrace. Keep the bounded columns, but never project a second, clipped grade there.
+        val accepted = CivsAutonomousTerraform.roadProfile(repair.route)
+        val profile = accepted.filterKeys { it in columns }
+        val levels = accepted.mapValues { it.value.y }
+        val turns = CivsSettlementLayout.turnFloors(repair.route)
         val pavement = CivsRoadMaintenance.ownedPavement(city, upkeep)
         val projected = hashMapOf<CivPosition, BlockData>()
         fun read(p: CivPosition): Block {
@@ -465,7 +470,7 @@ internal class CivsRoadWorld(
             }
             val block = read(floor)
             val finish = Bukkit.createBlockData(CivsSettlementLayout.pathPavement(floor, levels, city.style,
-                atTurn = floor in CivsSettlementLayout.turnFloors(section), downhill = CivsSettlementLayout.routeDownhill(floor, section)))
+                atTurn = floor in turns, downhill = CivsSettlementLayout.routeDownhill(floor, repair.route)))
             requireCivs(roadUpkeepReplaceable(block) || sameConstructionState(block.blockData, finish), "protected-terrain")
             requireCivs(block.state !is TileState && !block.isLiquid && (block.blockData as? Waterlogged)?.isWaterlogged != true,
                 "protected-terrain")
@@ -523,7 +528,8 @@ internal class CivsRoadWorld(
     /** These ordinary plants attach below, never to the side of the changed column. */
     private fun roadUpkeepSideSafe(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||
         civsRetainedRouteStep(block.blockData) || CivsRoadMaintenance.landing(block.blockData.asString) ||
-        block.type == Material.SHORT_GRASS || block.type == Material.FERN || block.type == Material.WILDFLOWERS
+        block.type == Material.SHORT_GRASS || block.type == Material.FERN || block.type == Material.WILDFLOWERS ||
+        block.type == Material.LEAF_LITTER || block.type == Material.BUSH
 
     private fun roadUpkeepReplaceable(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||
         CivsRoadMaintenance.surface(block.blockData.asString) && civsRetainedRouteStep(block.blockData)

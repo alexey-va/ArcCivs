@@ -84,6 +84,7 @@ class CivsBlueprints(
     private val captured = service.open("arccivs-construction", capturedRoot)
     private data class Builtin(val bytes: ByteArray, val sha256: String)
     private val builtins = mutableMapOf<String, CompletableFuture<Builtin>>()
+    private val vegetationMasks = linkedMapOf<Pair<CivBuilding, Set<String>>, CompletableFuture<Set<CivPosition>>>()
     private var fortificationRequest: CompletableFuture<CivFortificationTemplate?>? = null
     private var closed = false
     @Volatile private var catalog = CivBlueprintCatalog.EMPTY
@@ -207,6 +208,51 @@ class CivsBlueprints(
             requireVolume(snapshot)
             CivSleepingFloorMask(CivsBuildingControls.sleepingFloors(building, snapshot))
         }, executor)
+
+    /** Current authored protection only; original construction terrain and paid roads keep their retained plans. */
+    @Synchronized
+    internal fun authoredVegetation(building: CivBuilding, materials: Set<String>): CompletableFuture<Set<CivPosition>> {
+        if (closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
+        val key = building.copy(phase = BuildingPhase.ACTIVE, control = null, production = null) to materials.toSet()
+        vegetationMasks[key]?.takeUnless { it.isCompletedExceptionally }?.let { return it }
+        vegetationMasks.remove(key)
+        if (vegetationMasks.size >= 64) vegetationMasks.remove(vegetationMasks.keys.first())
+        val result: CompletableFuture<Set<CivPosition>> = catalogLoad.thenCompose { sourceSnapshot(building.schematicId) }.thenApplyAsync({ snapshot ->
+            requireVolume(snapshot)
+            fun local(point: ArcSchematicPoint) = CivPosition(point.x - snapshot.origin.x,
+                point.y - snapshot.origin.y, point.z - snapshot.origin.z)
+            if (CivsWorksiteLayouts.worldBounds(building, local(snapshot.minimum), local(snapshot.maximum)) != building.bounds)
+                throw CivsRejection("vegetation-source-geometry")
+            snapshot.blocks().asSequence().filter { it.blockData.substringBefore('[') in key.second }
+                .map { CivsWorksiteLayouts.point(building, local(it.position)) }.toHashSet()
+        }, executor)
+        vegetationMasks[key] = result
+        return result
+    }
+
+    /** One explicit repair gets exact current states without growing the long-lived coordinate-only mask. */
+    internal fun authoredVegetationRepair(building: CivBuilding, region: CivBox): CompletableFuture<CivAuthoredVegetationSource> {
+        CivAuthoredVegetationReceipt.validateRegion(building, region)
+        return catalogLoad.thenCompose { sourceSnapshot(building.schematicId) }.thenComposeAsync({ original ->
+            requireVolume(original)
+            source.transform(original, ArcSchematicTransform(building.rotation / 90, false)).thenApplyAsync({ transformed ->
+                val bounds = CivBox(
+                    CivPosition(building.anchor.x + transformed.minimum.x, building.anchor.y + transformed.minimum.y, building.anchor.z + transformed.minimum.z),
+                    CivPosition(building.anchor.x + transformed.maximum.x, building.anchor.y + transformed.maximum.y, building.anchor.z + transformed.maximum.z))
+                if (bounds != building.bounds) throw CivsRejection("vegetation-source-geometry")
+                val cells = worldCells(transformed, building.anchor).asSequence().filter { cell ->
+                    region.contains(cell.position.x, cell.position.y, cell.position.z) && CivAuthoredVegetationReceipt.tree(cell.blockData)
+                }.take(CivAuthoredVegetationReceipt.MAX_SOURCE_CELLS + 1).map { cell ->
+                    CivPlanBlock(CivPosition(cell.position.x, cell.position.y, cell.position.z), "minecraft:air", cell.blockData)
+                }.toList()
+                if (cells.isEmpty() || cells.size > CivAuthoredVegetationReceipt.MAX_SOURCE_CELLS)
+                    throw CivsRejection("vegetation-repair-size")
+                if (cells.any { CivAuthoredVegetationReceipt.waterlogged(it.after) })
+                    throw CivsRejection("vegetation-repair-waterlogged")
+                CivAuthoredVegetationSource(original.fileSha256, cells)
+            }, executor)
+        }, executor)
+    }
 
     /** One reviewed optional style. Source reads, native-state transforms and the pure merge stay off Main. */
     @Synchronized
@@ -467,7 +513,11 @@ class CivsBlueprints(
     fun repair(worldId: UUID, blocks: List<ArcSchematicBlock>): ArcSchematicOperation = captured.repairConnections(worldId, blocks)
 
     override fun close() {
-        synchronized(this) { closed = true; builtins.clear(); fortificationRequest = null }
+        synchronized(this) {
+            closed = true; builtins.clear(); fortificationRequest = null
+            vegetationMasks.values.forEach { it.cancel(false) }
+            vegetationMasks.clear()
+        }
         source.close(); captured.close()
     }
 

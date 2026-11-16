@@ -1,5 +1,7 @@
 package ru.arc.civs
 
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
 import org.bukkit.Material
 import org.bukkit.block.data.BlockData
 import java.util.AbstractMap.SimpleImmutableEntry
@@ -10,6 +12,32 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.floor
 
 private val unavailableSnapshotBlock = CitizenTerrainBlock.UNAVAILABLE.copy(cost = 1.0)
+private typealias SnapshotCell = SimpleImmutableEntry<CivPosition, CitizenTerrainBlock>
+
+/** Replaces this route's cell map; exact X/Z and Y keys do not truncate world coordinates. */
+internal class CitizenSnapshotCells : AbstractMap<CivPosition, CitizenTerrainBlock>() {
+    private val columns = Long2ObjectOpenHashMap<Int2ObjectOpenHashMap<SnapshotCell>>()
+    override var size: Int = 0
+        private set
+
+    fun cell(x: Int, y: Int, z: Int): SimpleImmutableEntry<CivPosition, CitizenTerrainBlock>? =
+        columns[civsTerrainKey(x, z)]?.get(y)
+
+    override fun get(key: CivPosition): CitizenTerrainBlock? = cell(key.x, key.y, key.z)?.value
+
+    fun add(point: CivPosition, block: CitizenTerrainBlock): SimpleImmutableEntry<CivPosition, CitizenTerrainBlock> {
+        val key = civsTerrainKey(point.x, point.z)
+        val column = columns[key] ?: Int2ObjectOpenHashMap<SnapshotCell>(8).also { columns.put(key, it) }
+        check(!column.containsKey(point.y)) { "Captured navigation cells are immutable" }
+        return SnapshotCell(point, block).also { column.put(point.y, it); size++ }
+    }
+
+    override val entries: Set<Map.Entry<CivPosition, CitizenTerrainBlock>> = object : AbstractSet<Map.Entry<CivPosition, CitizenTerrainBlock>>() {
+        override val size: Int get() = this@CitizenSnapshotCells.size
+        override fun iterator(): Iterator<Map.Entry<CivPosition, CitizenTerrainBlock>> =
+            columns.values.asSequence().flatMap { it.values.asSequence() }.iterator()
+    }
+}
 
 /** One route's worker-owned immutable inputs and derived cells; never exposed as mutable Main state. */
 internal class CitizenSnapshotTerrain {
@@ -20,7 +48,7 @@ internal class CitizenSnapshotTerrain {
     private val resolvedPalettes = Collections.newSetFromMap(IdentityHashMap<Map<BlockData, CivPosition>, Boolean>())
     val dynamics = hashMapOf<CivPosition, List<CitizenTerrainBox>>()
     val costs = hashMapOf<CivPosition, Double>()
-    val blocks = hashMapOf<CivPosition, CitizenTerrainBlock>()
+    val blocks = CitizenSnapshotCells()
     val sections = hashMapOf<CitizenSnapshotSectionKey, Long>()
 
     fun collectMissingStates(palette: Map<BlockData, CivPosition>, missing: MutableMap<BlockData, CivPosition>) {
@@ -58,24 +86,23 @@ internal data class CitizenSnapshotRequest(
 internal operator fun Map<CivPosition, CitizenTerrainBlock>.get(x: Int, y: Int, z: Int): CitizenTerrainBlock? =
     if (this is CitizenSnapshotBlocks) get(x, y, z) else get(CivPosition(x, y, z))
 
-/** Fixed x/z/y order, with owned immutable keys and cell references instead of sixty-three map nodes. */
+/** Fixed x/z/y order; overlapping probes share immutable cells from this route only. */
 private class CitizenSnapshotBlocks(
-    private val positions: List<CivPosition>,
-    private val cells: Array<CitizenTerrainBlock>,
+    private val cells: Array<SnapshotCell>,
 ) : AbstractMap<CivPosition, CitizenTerrainBlock>() {
-    private val origin = positions.firstOrNull()
+    private val origin = cells.firstOrNull()?.key
     override val size: Int get() = cells.size
 
     override fun get(key: CivPosition): CitizenTerrainBlock? = get(key.x, key.y, key.z)
 
     fun get(worldX: Int, worldY: Int, worldZ: Int): CitizenTerrainBlock? {
         val index = indexOf(worldX, worldY, worldZ)
-        return if (index < 0) null else cells[index]
+        return if (index < 0) null else cells[index].value
     }
 
     fun key(worldX: Int, worldY: Int, worldZ: Int): CivPosition {
         val index = indexOf(worldX, worldY, worldZ)
-        return if (index < 0) CivPosition(worldX, worldY, worldZ) else positions[index]
+        return if (index < 0) CivPosition(worldX, worldY, worldZ) else cells[index].key
     }
 
     private fun indexOf(worldX: Int, worldY: Int, worldZ: Int): Int {
@@ -97,22 +124,22 @@ private class CitizenSnapshotBlocks(
             override fun next(): Map.Entry<CivPosition, CitizenTerrainBlock> {
                 if (!hasNext()) throw NoSuchElementException()
                 val index = next++
-                return SimpleImmutableEntry(positions[index], cells[index])
+                return cells[index]
             }
         }
     }
 
     /** Copy references only when needed; an older published capture never observes later cost knowledge. */
-    fun withCosts(resolve: (CivPosition, CitizenTerrainBlock) -> CitizenTerrainBlock): CitizenSnapshotBlocks {
-        var resolved: Array<CitizenTerrainBlock>? = null
+    fun withCosts(resolve: (SnapshotCell) -> SnapshotCell): CitizenSnapshotBlocks {
+        var resolved: Array<SnapshotCell>? = null
         for (index in cells.indices) {
-            val block = resolve(positions[index], cells[index])
-            if (block !== cells[index]) {
+            val cell = resolve(cells[index])
+            if (cell !== cells[index]) {
                 if (resolved == null) resolved = cells.copyOf()
-                resolved[index] = block
+                resolved[index] = cell
             }
         }
-        return resolved?.let { CitizenSnapshotBlocks(positions, it) } ?: this
+        return resolved?.let(::CitizenSnapshotBlocks) ?: this
     }
 }
 
@@ -137,6 +164,7 @@ internal class CitizenSnapshotCapture(
     private val requiredCosts = hashSetOf<CivPosition>()
     private val newSections = linkedMapOf<CitizenSnapshotSectionKey, Long>()
     private val probeStates = arrayOfNulls<CitizenSnapshotState>(3 * 3 * 7)
+    private val probePositions = arrayOfNulls<CivPosition>(3 * 3 * 7)
     private val cancelled = AtomicBoolean()
     private var next = 0
 
@@ -179,14 +207,15 @@ internal class CitizenSnapshotCapture(
                 terrain.chunks[key]?.states(ys.first, ys.last)?.let { terrain.collectMissingStates(it, missingStates) }
             }
             if (missingStates.isNotEmpty()) return request(states = missingStates)
-            val positions = buildList(probeStates.size) {
-                for (x in xs) for (z in zs) for (by in ys) add(CivPosition(x, by, z))
-            }
-            val cells = Array<CitizenTerrainBlock?>(positions.size) { terrain.blocks[positions[it]] }
+            val cells = arrayOfNulls<SnapshotCell>(if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) 0 else probeStates.size)
             val dynamic = linkedMapOf<CivPosition, BlockData>()
-            for (index in positions.indices) {
-                if (cells[index] != null) continue
-                val point = positions[index]
+            var positionIndex = 0
+            for (x in xs) for (z in zs) for (by in ys) {
+                val index = positionIndex++
+                val cached = terrain.blocks.cell(x, by, z)
+                if (cached != null) { cells[index] = cached; continue }
+                val point = CivPosition(x, by, z)
+                probePositions[index] = point
                 val chunk = if (point.y in minimumY until maximumY)
                     terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)] else null
                 val cell = chunk?.passability(point)
@@ -195,9 +224,9 @@ internal class CitizenSnapshotCapture(
                 if (cell != null && state?.dynamic == true && point !in terrain.dynamics) dynamic[point] = cell.data
             }
             if (dynamic.isNotEmpty()) return request(dynamics = dynamic)
-            for (index in positions.indices) {
+            for (index in cells.indices) {
                 if (cells[index] != null) continue
-                val point = positions[index]
+                val point = requireNotNull(probePositions[index])
                 if (terrain.blocks.size >= maximumBlocks) {
                     if (next < requestedCount) throw CitizenNavigationCaptureLimit()
                     next = probes.size
@@ -210,10 +239,9 @@ internal class CitizenSnapshotCapture(
                         policy.allowed(point, ::material), 1.0,
                         if (state.dynamic) terrain.dynamics.getValue(point) else shape.boxes)
                 }
-                terrain.blocks[point] = block
-                cells[index] = block
+                cells[index] = terrain.blocks.add(point, block)
             }
-            val blocks = CitizenSnapshotBlocks(positions, cells.requireNoNulls())
+            val blocks = CitizenSnapshotBlocks(cells.requireNoNulls())
             val edges = citizenSearchCandidates(probe, blocks, minimumY, maximumY).map { edge ->
                 val point = edge.node.point()
                 val permitted = if (probe.incoming) policy.stepAllowed(point, probe.from)
@@ -243,12 +271,14 @@ internal class CitizenSnapshotCapture(
             if (cost == null) missing += point else terrain.costs[point] = cost
         }
         if (missing.isNotEmpty()) return request(costs = missing.take(512).toSet())
-        val resolved = hashMapOf<CivPosition, CitizenTerrainBlock>()
+        val resolved = hashMapOf<CivPosition, SnapshotCell>()
         return request(captures = completed.map { capture ->
-            val blocks = capture.blocks.withCosts { point, block ->
+            val blocks = capture.blocks.withCosts { cell ->
+                val point = cell.key
+                val block = cell.value
                 val cost = terrain.costs[point]
-                if (cost == null || cost.toBits() == block.cost.toBits()) block
-                else resolved.getOrPut(point) { block.copy(cost = cost) }
+                if (cost == null || cost.toBits() == block.cost.toBits()) cell
+                else resolved.getOrPut(point) { SnapshotCell(point, block.copy(cost = cost)) }
             }
             CitizenSearchCapture(capture.probe, blocks, capture.edges)
         })

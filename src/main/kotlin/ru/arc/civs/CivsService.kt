@@ -93,6 +93,7 @@ class CivsService(
         it.validateUpkeepNative = ::validateUpkeepNative
         it.validateMineNative = ::validateMineNative
         it.validateMineOpeningNative = { tx -> mineMaintenance.validateNative(tx) }
+        it.validateAuthoredVegetationNative = { tx -> authoredVegetationRepair.validateNative(tx) }
         it.validateGateRefitNative = { tx -> gateMaintenance.validateNative(tx) }
         it.validateWarehouseRefitNative = { tx -> warehouseMaintenance.validateNative(tx) }
     }
@@ -202,7 +203,8 @@ class CivsService(
         verifyGateCaptures = { tx -> gateMaintenance.verifyCaptures(tx) },
         verifyHallCaptures = { tx -> cityPlans.verifyHallCaptures(tx) },
         verifyWarehouseCaptures = { tx -> warehouseMaintenance.verifyCaptures(tx) },
-        requireBufferedPickupArrival = citizens::requireStorageArrival)
+        requireBufferedPickupArrival = citizens::requireStorageArrival,
+        verifyAuthoredVegetationSource = { tx -> authoredVegetationRepair.verifySource(tx) })
 
     private val gateMaintenance: CivsGateMaintenance = CivsGateMaintenance(plugin, this, records, tasks, executor, store, blueprints,
         world, storage, inventoryJournal, { city -> cityPlans.loadAutonomousPlans(city) }, construction::isPlacing,
@@ -216,13 +218,16 @@ class CivsService(
         { city, building, point, before -> cityPlans.initialMineBlock(city, building, point, before) },
         construction::isPlacing, citizens::growthBlocked)
 
+    private val authoredVegetationRepair = CivsAuthoredVegetationRepair(this, records, tasks,
+        blueprints::authoredVegetationRepair, world, storage, inventoryJournal, construction::isPlacing, citizens::growthBlocked)
+
     private val vegetation = CivsVillageVegetation(plugin, tasks, planningExecutor,
         { city -> cityPlans.loadAutonomousPlans(city).thenCombine(
             city.construction?.let { store.loadPlan(it.id) } ?: CompletableFuture.completedFuture(null)
         ) { retained, accepted -> retained + listOfNotNull(accepted) } },
         { id -> cities[id]?.takeUnless { closed || id in unhealthy } },
         { city, block -> world.canModify(city.owner, block, Material.AIR) }, storage::isWorldLocked,
-        citizens::growthBlocked, citizens::terrainChanged, clock)
+        citizens::growthBlocked, citizens::terrainChanged, clock, loadAuthored = blueprints::authoredVegetation)
 
     private val controlRelocations = CivsControlRelocations(plugin, tasks, world, storage, controlInstallations,
         blueprints::interiorControls, { cities.values }, { city -> ready() && city.id !in busy && city.id !in unhealthy &&
@@ -1578,6 +1583,11 @@ class CivsService(
     internal fun repairMineOpening(cityId: UUID, buildingId: UUID): CompletableFuture<Map<String, Any?>> =
         action("mine_opening_repair", null, "city" to cityId, "building" to buildingId) {
             afterCityAvailable(cityId) { mineMaintenance.request(cityId, buildingId) }
+        }
+
+    internal fun repairAuthoredVegetation(cityId: UUID, buildingId: UUID, region: CivBox): CompletableFuture<Map<String, Any?>> =
+        action("authored_vegetation_repair", null, "city" to cityId, "building" to buildingId) {
+            afterCityAvailable(cityId) { authoredVegetationRepair.request(cityId, buildingId, region) }
         }
 
     internal fun refitWarehouse(cityId: UUID, buildingId: UUID, proof: String?): CompletableFuture<Map<String, Any?>> =

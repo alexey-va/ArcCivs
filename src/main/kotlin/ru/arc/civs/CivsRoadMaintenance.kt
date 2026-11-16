@@ -998,7 +998,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             data.substringBefore('[') == "minecraft:grass_block"
 
         internal fun bankBefore(data: String): Boolean = air(data) || forecourtSoil(data) || data == "minecraft:dirt_path" ||
-            data == "minecraft:short_grass" || data == "minecraft:fern" || data.startsWith("minecraft:wildflowers[")
+            data == "minecraft:short_grass" || data == "minecraft:fern" || data.startsWith("minecraft:wildflowers[") ||
+            data.startsWith("minecraft:leaf_litter[") || data == "minecraft:bush"
 
         fun eligible(city: Settlement): Boolean = city.autonomy?.paused == false &&
             (city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) &&

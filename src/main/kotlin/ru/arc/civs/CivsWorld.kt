@@ -215,6 +215,33 @@ class CivsWorld(
             MineOpeningCapture(city, building, initialBlock)
         }
 
+    /** The shared scan budget captures exact native before-images; only the durable journal may place them. */
+    internal fun captureAuthoredVegetation(city: Settlement, building: CivBuilding,
+        cells: List<CivPlanBlock>): CompletableFuture<List<CivPlanBlock>> = admit(cells.map { it.position }, loadedOnly = true) {
+        requireCivs(cells.size in 1..CivAuthoredVegetationReceipt.MAX_SOURCE_CELLS &&
+            cells.map { it.position }.distinct().size == cells.size && cells.all { CivAuthoredVegetationReceipt.tree(it.after) }, "invalid-plan")
+        AuthoredVegetationCapture(city, building, cells.toList())
+    }
+
+    internal fun checkAuthoredVegetationCell(city: Settlement, building: CivBuilding, block: Block, after: Material) {
+        val point = CivPosition(block.x, block.y, block.z)
+        requireCivs(building.bounds.contains(point.x, point.y, point.z) && city.contains(point.x, point.z) &&
+            block.world.worldBorder.isInside(block.location), "outside-city")
+        requireCivs(scanCities().filter { it.worldId == city.worldId }.none { other ->
+            other.id != city.id && other.contains(point.x, point.z) ||
+                other.inventory?.containers?.contains(point) == true ||
+                civsProtectedBuildings(other).any { protected ->
+                    protected.control == point || (other.id != city.id || protected.id != building.id) &&
+                        protected.bounds.contains(point.x, point.y, point.z)
+                } || other.pendingControls.orEmpty().any { pending -> pending.position == point ||
+                    (other.id != city.id || pending.buildingId != building.id) && pending.approach.orEmpty().any { it.position == point }
+                }
+        }, "building-overlap")
+        requireCivs(block.getState(false) !is TileState && !block.isLiquid &&
+            (block.blockData as? Waterlogged)?.isWaterlogged != true, "vegetation-obstructed")
+        requireCivs(canModify(city.owner, block, after), "lands-denied")
+    }
+
     internal fun checkMineOpeningCell(city: Settlement, building: CivBuilding, block: Block, initial: Boolean) {
         val point = CivPosition(block.x, block.y, block.z)
         requireCivs(city.contains(point.x, point.z) && block.world.worldBorder.isInside(block.location), "outside-city")
@@ -832,6 +859,23 @@ class CivsWorld(
         private fun dispatch(captured: List<CitizenSearchCapture>) {
             val solver = requireNotNull(search)
             searching = CompletableFuture.supplyAsync({ solver.advance(captured) }, executor)
+        }
+    }
+
+    private inner class AuthoredVegetationCapture(private val snapshot: Settlement, building: CivBuilding,
+        private val expected: List<CivPlanBlock>) :
+        CivsWorldScan<List<CivPlanBlock>>(this@CivsWorld, snapshot.id, snapshot.owner, snapshot.worldId, building) {
+        private val cells = mutableListOf<CivPlanBlock>()
+        override fun validateIdentity(city: Settlement?) {
+            requireCivs(city != null && city == snapshot && city.pendingDeletion == null && city.building(building.id) == building &&
+                city.construction?.buildingId != building.id && building.id !in city.constructionQueue.orEmpty(), "stale-building")
+        }
+        override fun step() {
+            if (index == expected.size) return finish(cells.toList())
+            val cell = expected[index++]
+            val block = read(cell.position)
+            if (block.type.isAir) checkAuthoredVegetationCell(snapshot, building, block, parse(cell.after).material)
+            cells += cell.copy(before = block.blockData.asString)
         }
     }
 

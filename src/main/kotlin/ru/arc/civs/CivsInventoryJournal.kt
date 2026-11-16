@@ -33,6 +33,8 @@ internal class CivsInventoryJournal(
     private val verifyHallCaptures: (CivInventoryTransaction) -> CompletableFuture<Unit> = { CompletableFuture.failedFuture(CivsRejection("stale-worksite")) },
     private val verifyWarehouseCaptures: (CivInventoryTransaction) -> CompletableFuture<Unit> = { CompletableFuture.completedFuture(Unit) },
     private val requireBufferedPickupArrival: (UUID, UUID, UUID) -> Unit = { _, _, _ -> throw CivsRejection("route-unreachable") },
+    private val verifyAuthoredVegetationSource: (CivInventoryTransaction) -> CompletableFuture<Unit> = {
+        CompletableFuture.failedFuture(CivsRejection("vegetation-source-unavailable")) },
 ) {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -270,6 +272,13 @@ internal class CivsInventoryJournal(
                 }
             return
         }
+        if (tx.authoredVegetation != null && !gateVerified) {
+            runCatching { verifyAuthoredVegetationSource(tx) }.getOrElse { CompletableFuture.failedFuture(it) }
+                .whenCompleteSync(tasks) { _, failure ->
+                    if (failure != null) fail(failure) else applyInventory(tx, result, gateVerified = true)
+                }
+            return
+        }
         runCatching {
             if (tx.collected != null || tx.containerRelocation != null || tx.cargoPickup != null || tx.trade != null || tx.mixedBufferPickup()) {
                 if (result != null) {
@@ -451,7 +460,7 @@ internal class CivsInventoryJournal(
             storage.lock(tx)
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
-                if (tx.gateRefit != null || tx.warehouseRefit != null || tx.upkeep?.work?.upkeep?.hall != null ||
+                if (tx.gateRefit != null || tx.warehouseRefit != null || tx.authoredVegetation != null || tx.upkeep?.work?.upkeep?.hall != null ||
                     tx.containerRelocation?.buffer != null || tx.bufferPickup != null) {
                     rejectIf(city != tx.after, "stale-city")
                     applyInventory(tx, null)

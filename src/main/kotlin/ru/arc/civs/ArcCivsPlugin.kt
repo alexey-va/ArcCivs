@@ -244,7 +244,8 @@ open class ArcCivsPlugin : JavaPlugin() {
                 service::foundVillages, service::cancelVillageSearch, service::villageSearchStatus, service::refitGate, service::infillWall, service::refitWarehouse,
                 { owner, world, style, name, anchor -> service.foundVillageAt(owner, world, style, name, anchor) },
                 refoundVillageAt = service::foundVillageAt, labGrowth = service::configureLabGrowth,
-                repairMineOpening = service::repairMineOpening)
+                repairMineOpening = service::repairMineOpening,
+                repairAuthoredVegetation = service::repairAuthoredVegetation)
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)

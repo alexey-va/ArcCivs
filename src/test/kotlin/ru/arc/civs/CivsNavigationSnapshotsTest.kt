@@ -626,6 +626,10 @@ class CivsNavigationSnapshotsTest : FunSpec({
                     CitizenSearchProbe(node, node.point())
                 }
                 val captures = completeSnapshotCapture(terrain, probes, 1.0)
+                for (point in captures.first().blocks.keys.intersect(captures.last().blocks.keys)) {
+                    captures.first().blocks.keys.single { it == point } shouldBeSameInstanceAs
+                        captures.last().blocks.keys.single { it == point }
+                }
                 for (capture in captures) {
                     val node = capture.probe.node
                     val expected = buildMap {

@@ -283,6 +283,7 @@ class CivsStore(
             worldChanges = transaction.worldChanges?.toList(),
             mine = transaction.mine?.detached(),
             mineOpening = transaction.mineOpening?.detached(),
+            authoredVegetation = transaction.authoredVegetation?.detached(),
             upkeep = transaction.upkeep?.detached(),
             cargoDropoff = transaction.cargoDropoff?.detached(),
             cargoPickup = transaction.cargoPickup?.detached(),
@@ -360,7 +361,19 @@ class CivsStore(
     fun deleteInventoryTransaction(id: UUID): CompletableFuture<Boolean> = submit {
         val trustedRoot = trustedRoot()
         val store = inventoryTransactionStore(trustedRoot, id)
-        val deleted = if (store.loadOrNull() == null) false else store.deleteIfExists()
+        val transaction = store.loadOrNull()?.transaction
+        transaction?.authoredVegetation?.let { receipt ->
+            // Keep this explicit repair's exact AIR/source images after normal journal retirement, without a city export.
+            val bytes = gson.toJson(mapOf("transaction" to id, "city" to transaction.cityId,
+                "world" to transaction.after.worldId, "before_revision" to transaction.beforeRevision,
+                "after_revision" to transaction.after.revision, "receipt" to receipt)).toByteArray(StandardCharsets.UTF_8)
+            val audit = AtomicFileStore(trustedRoot, Path.of("authored-vegetation-repairs", "$id.json"),
+                1024L * 1024L, { value: ByteArray -> value }, { it })
+            val previous = audit.loadOrNull()
+            require(previous == null || previous.contentEquals(bytes)) { "Authored vegetation audit differs from its receipt" }
+            if (previous == null) audit.write(bytes)
+        }
+        val deleted = if (transaction == null) false else store.deleteIfExists()
         // A retry after an uncertain delete must acknowledge the directory even when the file is now absent.
         forceInventoryDirectories(trustedRoot)
         deleted

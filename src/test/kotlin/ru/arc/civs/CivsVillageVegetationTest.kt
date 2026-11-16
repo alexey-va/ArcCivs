@@ -36,6 +36,57 @@ class CivsVillageVegetationTest : FunSpec({
         civsVillageVegetationCandidates(found, mapOf(stump.position to "minecraft:birch_log[axis=y]")) shouldBe emptyList()
     }
 
+    test("current level three authored tree survives a level one retained plan while an outside natural tree is cleared") {
+        VillageVegetationFixture().use { h ->
+            val initial = h.city.buildings.single()
+            h.retained[initial.id] = CivPlacementPlan(initial.id, h.city.id, h.city.worldId, initial, emptyList())
+            h.city = h.city.copy(buildings = listOf(initial.copy(level = 3, schematicId = "test-level3")))
+            val root = CivPosition(0, 64, 0)
+            val authored = h.tree(root)
+            h.put(root.copy(y = 63), Material.COBBLESTONE)
+            h.authored[initial.id] = authored.toSet()
+            val natural = h.tree(CivPosition(5, 64, 5))
+
+            h.startCapture()
+            h.finishCapture()
+            h.drain()
+
+            authored.forEachIndexed { i, p ->
+                h.type(p) shouldBe if (i == authored.lastIndex) Material.OAK_LEAVES else Material.OAK_LOG
+            }
+            natural.forEach { h.type(it) shouldBe Material.AIR }
+            h.type(root.copy(y = 63)) shouldBe Material.COBBLESTONE
+            h.notifications shouldBe natural.toSet()
+            h.retained.getValue(initial.id).building.level shouldBe 1
+        }
+    }
+
+    test("failed current authored source prevents native clearing and a later source retry recovers") {
+        VillageVegetationFixture().use { h ->
+            val initial = h.city.buildings.single()
+            h.retained[initial.id] = CivPlacementPlan(initial.id, h.city.id, h.city.worldId, initial, emptyList())
+            h.city = h.city.copy(buildings = listOf(initial.copy(level = 3, schematicId = "test-level3")))
+            val authored = h.tree(CivPosition(0, 64, 0))
+            h.authored[initial.id] = authored.toSet()
+            val natural = h.tree(CivPosition(5, 64, 5))
+            h.sourceFailures = 1
+
+            h.startCapture()
+            h.pending.size shouldBe 0
+            h.drain()
+            (authored + natural).forEach { h.type(it).isAir shouldBe false }
+            h.notifications shouldBe emptySet()
+
+            h.now = 120_001
+            h.startCapture()
+            h.finishCapture()
+            h.drain()
+            authored.forEach { h.type(it).isAir shouldBe false }
+            natural.forEach { h.type(it) shouldBe Material.AIR }
+            h.sourceAttempts shouldBe 2
+        }
+    }
+
     test("a retained construction cut clears only a detached branch with no live or paid continuation") {
         VillageVegetationFixture().use { h ->
             val hall = h.city.buildings.single()
@@ -272,7 +323,8 @@ class CivsVillageVegetationTest : FunSpec({
             CivsVillageVegetation(plugin, tasks, Executor { pending += it },
                 { CompletableFuture.completedFuture(listOf(retained)) }, { city },
                 { _, block -> block.x != 4 }, { _, _ -> false }, { _, _ -> false },
-                { _, positions -> notifications += positions }, clock = { 0L }).use { owner ->
+                { _, positions -> notifications += positions }, clock = { 0L },
+                loadAuthored = { _, _ -> error("Matching retained geometry needs no current source") }).use { owner ->
                 owner.pulse(listOf(city))
                 paper.server.scheduler.performOneTick()
                 pending.size shouldBe 1
@@ -313,10 +365,13 @@ private class VillageVegetationFixture : AutoCloseable {
     var now = 0L
     var rejectCaptures = 0
     var captureAttempts = 0
+    var sourceFailures = 0
+    var sourceAttempts = 0
     val pending = ArrayDeque<Runnable>()
     val blocked = hashSetOf<CivPosition>()
     val notifications = hashSetOf<CivPosition>()
     val retained = hashMapOf<UUID, CivPlacementPlan>()
+    val authored = hashMapOf<UUID, Set<CivPosition>>()
     var owner = newOwner()
         private set
 
@@ -329,7 +384,14 @@ private class VillageVegetationFixture : AutoCloseable {
     }, { current -> CompletableFuture.completedFuture(current.buildings.map {
         retained[it.id] ?: CivPlacementPlan(it.id, current.id, current.worldId, it, emptyList())
     }) }, { city }, { _, _ -> true }, { _, p -> p in blocked }, { _, _ -> false },
-        { _, positions -> notifications += positions }, clock = { now }, nanoTime = { 0L })
+        { _, positions -> notifications += positions }, clock = { now }, nanoTime = { 0L },
+        loadAuthored = { building, _ ->
+            sourceAttempts++
+            if (sourceFailures > 0) {
+                sourceFailures--
+                CompletableFuture.failedFuture(IllegalStateException("source unavailable"))
+            } else CompletableFuture.completedFuture(authored[building.id].orEmpty())
+        })
 
     fun tree(root: CivPosition): List<CivPosition> = ((0..3).map { root.copy(y = root.y + it) } +
         root.copy(y = root.y + 4)).also { cells -> cells.forEachIndexed { i, p ->

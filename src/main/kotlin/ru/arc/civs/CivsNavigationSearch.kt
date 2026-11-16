@@ -225,8 +225,15 @@ internal class CitizenNavigationSearch(
     private fun progressEndpoint(minimumGain: Double): CitizenSearchNode? {
         val distance = sqrt(origin.distanceSquared(target))
         return costs.keys.asSequence().filter { it != start && it in parents }
-            .filter { distance - sqrt(it.point().distanceSquared(target)) >= minimumGain }
-            .minWithOrNull(compareBy<CitizenSearchNode> { it.point().distanceSquared(target) }.thenBy { costs.getValue(it) })
+            .filter { distance - sqrt(distanceToTargetSquared(it)) >= minimumGain }
+            .minWithOrNull(compareBy<CitizenSearchNode> { distanceToTargetSquared(it) }.thenBy { costs.getValue(it) })
+    }
+
+    private fun distanceToTargetSquared(node: CitizenSearchNode): Double {
+        val dx = node.x + .5 - target.x
+        val dy = node.y - target.y
+        val dz = node.z + .5 - target.z
+        return dx * dx + dy * dy + dz * dz
     }
 
     private fun atGoal(node: CitizenSearchNode): Boolean = node.x == floor(target.x).toInt() &&
@@ -355,16 +362,33 @@ internal class CitizenNavigationSearch(
 internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivPosition, CitizenTerrainBlock>,
                                      minimumY: Int, maximumY: Int): List<CitizenSearchEdge> {
     val node = probe.node
-    val result = linkedSetOf<CitizenSearchNode>()
+    val result = ArrayList<CitizenSearchEdge>(16)
     val base = floor(node.y).toInt()
+    val onLadder = blocks[node.x, base, node.z]?.climbable == true
+    fun add(x: Int, y: Double, z: Int, climbing: Boolean, first: Int) {
+        // A column has only its few supported heights. Keep first occurrence/order without hash nodes.
+        for (index in first until result.size) {
+            val present = result[index].node
+            if (present.x == x && present.z == z && present.y.toBits() == y.toBits() && present.climbing == climbing) return
+        }
+        val action = when {
+            climbing && onLadder && x == node.x && z == node.z -> CitizenRouteAction.CLIMB
+            climbing -> CitizenRouteAction.LADDER_ENTER
+            node.climbing || onLadder -> CitizenRouteAction.LADDER_EXIT
+            abs(y - node.y) > .0001 -> CitizenRouteAction.STEP
+            else -> CitizenRouteAction.WALK
+        }
+        result += CitizenSearchEdge(CitizenSearchNode(x, y, z, climbing), action, true)
+    }
     fun standing(x: Int, z: Int) {
+        val first = result.size
         for (by in base - 2..base + 1) {
             if (by < minimumY || by + 2 >= maximumY) continue
             val block = blocks[x, by, z] ?: continue
             // Opening a passage must never remove the foothold selected by the planner.
             if (!block.loaded || block.liquid || block.door) continue
             if (block.climbable && block.allowed && citizenStepHeightAllowed(node.y, by.toDouble()))
-                result += CitizenSearchNode(x, by.toDouble(), z, climbing = true)
+                add(x, by.toDouble(), z, true, first)
             for (box in block.boxes) {
                 if (box.maxY <= 0 || box.minX > .5 || box.maxX < .5 || box.minZ > .5 || box.maxZ < .5) continue
                 val height = by + box.maxY
@@ -380,28 +404,18 @@ internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivP
                                 .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ
                         }) continue
                 }
-                result += CitizenSearchNode(x, height, z)
+                add(x, height, z, false, first)
             }
         }
     }
     if (node.initial) standing(node.x, node.z)
     for (dx in -1..1) for (dz in -1..1) if (dx != 0 || dz != 0) standing(node.x + dx, node.z + dz)
-    val onLadder = blocks[node.x, base, node.z]?.climbable == true
     if (onLadder) for (dy in -1..1) {
         val next = blocks[node.x, base + dy, node.z] ?: continue
         if (next.loaded && next.climbable && next.allowed && citizenStepHeightAllowed(node.y, (base + dy).toDouble()))
-            result += CitizenSearchNode(node.x, (base + dy).toDouble(), node.z, climbing = true)
+            add(node.x, (base + dy).toDouble(), node.z, true, 0)
     }
-    return result.map { next ->
-        val action = when {
-            next.climbing && onLadder && next.x == node.x && next.z == node.z -> CitizenRouteAction.CLIMB
-            next.climbing -> CitizenRouteAction.LADDER_ENTER
-            node.climbing || onLadder -> CitizenRouteAction.LADDER_EXIT
-            abs(next.y - node.y) > .0001 -> CitizenRouteAction.STEP
-            else -> CitizenRouteAction.WALK
-        }
-        CitizenSearchEdge(next, action, true)
-    }
+    return result
 }
 
 private class CitizenSearchGeometry(
