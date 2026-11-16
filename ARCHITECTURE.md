@@ -450,37 +450,67 @@ disappear on clients as well as on the server.
 
 ## Network authority
 
-Every backend has an explicit, stable typed `server-id` and the same shared SQL
-configuration. Core's `PaperSqlServices` owns the provider lease; blocking runtime
-creation, migration and JDBC work run on workers. Shutdown seals admissions,
-drains admitted file-to-SQL chains and SQL work, then releases the lease. There
-is no local write fallback when SQL fails and no supported mixed old/new writer
-deployment. Missing identity/SQL configuration stops startup with an actionable
-error; settings changes and initial SQL failure recovery require a restart.
+Every backend keeps its stable typed `server-id` and the shared SQL configuration.
+A city has one immutable home backend and one running writer for that home. Complete
+`Settlement` state is canonical in `settlements/cities/<UUID>.json`, through the
+existing bounded Core AtomicFileStore. Every accepted revision still commits and
+acknowledges its exact local file before publication or item-journal retirement.
+Normal work, construction, resident state and inventory revisions do not read or
+write SQL. There is no periodic SQL checkpoint or asynchronous city mirror.
 
-`arc_civs_city` stores the canonical validated settlement snapshot, immutable
-home server/owner, revision and update time. `arc_civs_member.player_id` is globally
-unique for both owners and members. A short registry row lock serializes writes
-and multi-city imports; each save still enforces home and revision CAS. The only
-successful same-revision retry is the exact committed state. Membership conflict
-rolls the transaction back before any publication, world changes or start grant.
-An unknown commit result suspends the affected authority until canonical reload.
-`CivsStore` owns the one defensive snapshot copy before async admission;
-`CivsNetworkStore` persists that same immutable revision without making a second copy.
+`arc_civs_city` contains only city/home/owner/name/autonomous directory fields, the
+last directory revision and its update time. `arc_civs_member.player_id` remains
+globally unique for personal-city owners and members. Autonomous villages do not
+claim personal membership. Existing personal and autonomous deletion histories
+retain UUID fences and the one-time personal founding-reserve rule.
 
-Existing city JSON imports atomically, preserving originals. An existing SQL
-city with the same home/owner wins over its stale JSON; conflicting identity or
-membership fails closed. SQL city writes never update the legacy files. Immutable
-construction plans and captured schematics remain local to the home backend.
-`maximum-settlements` is per home backend, as the old file limit was per runtime.
+Founding and directory changes use the existing registry lock to validate home,
+owner, membership and founding history. Their exact accepted after-city briefly
+occupies `pending_snapshot` on that same SQL row. After that transaction commits,
+an existing SQL worker writes and acknowledges the local city, then clears the
+pending payload under its directory revision fence. Only this complete chain may
+report success. Pending payloads recover the same accepted city after interruption;
+a newer or different same-revision local file fails closed instead of being
+replaced. A settled directory row has `pending_snapshot = NULL`. A missing or
+inconsistent acknowledged local file is an error, not a reason to recreate a city
+from an old snapshot. Local files without a directory entry are preserved and
+rejected rather than automatically registered. Same-revision local retries remain
+exact; local revisions advance by one. The SQL revision advances only with a
+directory change and may therefore trail the local revision.
 
-Only `loadOwned(server-id)` records reach protection, construction and resident actors.
-Foreign snapshots occupy a separate UI-only map and cannot be mutated or paid
-out locally. `/civs` reads membership afresh on every open; Refresh repeats it,
-with no background sync. Read failure shows an inline error and never presents
-founding from unknown membership. The remote overview offers Refresh and a
-typed Core Bungee backend request. SENT means requested, not arrival or teleport
-to the city. Empty allowed-worlds makes a backend view-only.
+Deletion checks the complete expected local city before atomically releasing SQL
+membership and retaining the global tombstone. Local tombstones precede file
+cleanup. On startup, SQL tombstones reach the local loader before old city files
+are considered, so interrupted cleanup cannot resurrect a retired city. Immutable
+plans, captured schematics, construction buffers and exact item receipts remain on
+the same home filesystem. Only owned local cities reach protection, construction
+and resident actors; remote lookups return just a city identity, name and home.
+
+Migration 4 renames the former canonical `snapshot` column to `pending_snapshot`,
+preserving its exact current contents until each home writes and acknowledges them
+locally. Conditional DDL supports interrupted migration. The old column is removed
+from the active schema, so older writers fail instead of restoring the previous
+SQL authority. All old writers sharing a schema must stop before this migration;
+there is no supported mixed-version or old-binary fallback. Preserve a consistent
+pre-cutover backup of SQL, home settlement files and native worlds. A rollback after
+new gameplay must first stop all writers and export each current local city and
+its directory/deletion state back into a compatible old SQL schema; merely
+restoring an old JAR or the pre-cutover database would lose acknowledged progress.
+
+Core's PaperSqlServices still owns the provider lease. Blocking runtime creation,
+migration, JDBC and file work run on workers. One admitted directory chain covers
+SQL reservation, off-main local acknowledgement and finalization; shutdown drains
+that whole chain before releasing SQL. Missing identity/SQL configuration stops
+startup. Initialization failures require a restart. After a successful load,
+ordinary local city work does not depend on an available SQL connection, while
+founding, membership changes, deletion and remote lookups still require it.
+`maximum-settlements` remains per home backend.
+
+`/civs` refreshes network membership on every open without background sync. Read
+failure shows an inline error and never offers founding from unknown membership.
+The remote card shows name and home, with the existing typed Bungee backend request.
+SENT means requested, not arrival or teleport to the city. Empty allowed-worlds
+keeps a backend view-only. Player-facing progress is read on the home backend.
 
 ## Domain
 
@@ -940,8 +970,8 @@ through its item receipt. It checks all
 changed slots before any writes; restart may finish only known before/after states.
 Drift is an explicit conflict. The city revision commits after native application;
 only an exact same-revision retry is accepted. Unknown outcomes retain the receipt,
-freeze city mutations and reconcile against canonical SQL on reload. Native chunk
-persistence and SQL are separate systems: this is guarded replay, not a distributed
+freeze city mutations and reconcile against the canonical home file on reload. Native chunk
+persistence and city files are separate systems: this is guarded replay, not a distributed
 atomic transaction; a power-loss rollback of already-acknowledged chunk data remains
 a platform persistence boundary. No blind repeat after an unknown result.
 
@@ -1118,7 +1148,7 @@ all writes and placements to drain.
 
 All loaded inventory receipts acquire native container locks before the service
 publishes readiness. Recovery may process one receipt per pulse, but players
-cannot alter later receipts' before/after slots while they wait. A known SQL
+cannot alter later receipts' before/after slots while they wait. A known directory
 rejection preserves the founding preview; an unknown commit result freezes
 changes until canonical reload.
 

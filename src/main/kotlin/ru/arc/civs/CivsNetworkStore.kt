@@ -13,7 +13,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
-data class CivsNetworkCity(val server: BackendServerId, val city: Settlement, val updatedAt: Long)
+data class CivsNetworkCity(val server: BackendServerId, val id: UUID, val owner: UUID, val name: String, val updatedAt: Long)
 
 /** A deleted UUID is never reusable; owner history also fences the one-time founding reserve. */
 internal data class CivsDeletedCity(
@@ -34,7 +34,7 @@ internal data class CivsDeletedCity(
     }
 }
 
-/** SQL is the sole city authority; placement plans stay on the immutable home server. */
+/** SQL owns the small global directory; complete cities and world receipts belong to their immutable home. */
 class CivsNetworkStore internal constructor(
     val server: BackendServerId,
     private val maximumCities: Int,
@@ -46,140 +46,154 @@ class CivsNetworkStore internal constructor(
     private var closed = false
     private var drain: CompletableFuture<Unit>? = null
 
-    /** Imports old JSON without changing the originals; existing canonical SQL always wins. */
-    fun loadOwned(legacy: List<Settlement>): CompletableFuture<List<Settlement>> = loadOwned(legacy, emptyList())
+    private data class DirectoryCity(
+        val summary: CivsNetworkCity, val autonomous: Boolean, val revision: Long,
+        val participants: Set<UUID>, val pending: Settlement?,
+    ) {
+        fun matches(city: Settlement): Boolean = summary.id == city.id && summary.owner == city.owner &&
+            summary.name == city.name && autonomous == (city.autonomy != null) && participants == CivsMembership.participants(city)
+    }
 
-    internal fun loadOwned(legacy: List<Settlement>, deleted: List<CivsDeletedCity>,
-        verifyBuffers: (Settlement) -> Unit = { require(it.inventory?.constructionBuffers.isNullOrEmpty()) }): CompletableFuture<List<Settlement>> =
-        admit("load_owned", "legacy_count" to legacy.size, "deleted_count" to deleted.size) { runtime ->
+    /** Tombstones reach the file loader before any old city file can become live again. */
+    internal fun loadOwned(
+        deleted: List<CivsDeletedCity>,
+        loadLocal: (List<CivsDeletedCity>) -> CompletableFuture<List<Settlement>>,
+        writeLocal: (Settlement) -> CompletableFuture<Settlement>,
+    ): CompletableFuture<List<Settlement>> = admit("load_owned", "deleted_count" to deleted.size) { runtime ->
         runtime.executor.transaction { connection ->
             lockRegistry(connection)
             deleted.forEach { tombstone ->
                 tombstone.validated()
-                check(tombstone.server == null || tombstone.server == server.value) { "Legacy deletion has a different home server" }
+                check(tombstone.server == null || tombstone.server == server.value) { "Local deletion has a different home server" }
                 val imported = tombstone.copy(server = server.value)
                 val existing = findDeleted(connection, imported.cityId)
                 if (existing != null) {
                     check(existing.owner == imported.owner && existing.server == imported.server && existing.revision == imported.revision &&
-                        existing.autonomous == imported.autonomous) {
-                        "Legacy deletion conflicts with canonical deletion history"
-                    }
+                        existing.autonomous == imported.autonomous) { "Local deletion conflicts with network deletion history" }
                 } else {
-                    check(findCity(connection, imported.cityId) == null) { "Legacy deletion conflicts with a canonical live city" }
+                    check(findCity(connection, imported.cityId) == null) { "Local deletion conflicts with a live network city" }
                     insertDeleted(connection, imported)
                 }
             }
-            legacy.forEach { city ->
-                CivsRules.validate(city)
-                if (findDeleted(connection, city.id) != null) return@forEach
-                val existing = findCity(connection, city.id)
-                if (existing == null) { verifyBuffers(city); save(connection, city, importing = true) }
-                else check(existing.server == server && existing.city.owner == city.owner &&
-                    (existing.city.autonomy != null) == (city.autonomy != null)) {
-                    "Legacy city ${city.id} conflicts with the network home or owner; originals were preserved"
-                }
-            }
-            connection.prepareStatement("SELECT * FROM arc_civs_city WHERE server_id = ? ORDER BY city_id").use { statement ->
+            val cities = connection.prepareStatement("SELECT city_id FROM arc_civs_city WHERE server_id = ? ORDER BY city_id").use { statement ->
                 statement.setString(1, server.value)
                 statement.executeQuery().use { rows -> buildList {
                     while (rows.next()) {
                         check(size < maximumCities) { "Home settlement capacity exceeds maximum-settlements" }
-                        add(readCity(rows).city.also(verifyBuffers))
+                        add(UUID.fromString(rows.getString(1)))
                     }
                 } }
+            }.map { requireNotNull(findCity(connection, it)) }
+            val retired = listOf(false, true).flatMap { autonomous ->
+                connection.prepareStatement("SELECT * FROM ${deletionTable(autonomous)} WHERE server_id = ?").use { statement ->
+                    statement.setString(1, server.value)
+                    statement.executeQuery().use { rows -> buildList {
+                        while (rows.next()) {
+                            check(size < CivsStore.MAX_DELETED_CITIES) { "City deletion history exceeds its limit" }
+                            add(readDeleted(rows, autonomous))
+                        }
+                    } }
+                }
+            }
+            check(retired.map { it.cityId }.distinct().size == retired.size) { "City appears in both deletion histories" }
+            check(retired.size <= CivsStore.MAX_DELETED_CITIES) { "City deletion history exceeds its limit" }
+            check(cities.none { city -> retired.any { it.cityId == city.summary.id } }) { "City is both live and deleted" }
+            cities to retired
+        }.thenCompose { (directory, retired) ->
+            runtime.executor.submit { loadLocal(retired) }.thenCompose { it }.thenCompose { locals ->
+                val local = locals.associateBy(Settlement::id)
+                check(local.keys.all { id -> directory.any { it.summary.id == id } }) {
+                    "Local city is missing from the network directory; refusing automatic re-registration"
+                }
+                var chain = CompletableFuture.completedFuture(emptyList<Settlement>())
+                directory.forEach { record ->
+                    chain = chain.thenCompose { result ->
+                        val saved = local[record.summary.id]
+                        val accepted = record.pending
+                        if (accepted == null) {
+                            check(saved != null) { "Acknowledged local city ${record.summary.id} is missing" }
+                            check(record.matches(saved) && saved.revision >= record.revision) {
+                                "Local city ${record.summary.id} disagrees with its network directory"
+                            }
+                            CompletableFuture.completedFuture(result + saved)
+                        } else {
+                            check(saved == null || saved.revision < accepted.revision || saved == accepted) {
+                                "Pending directory state would overwrite acknowledged local city ${record.summary.id}"
+                            }
+                            runtime.executor.submit { writeLocal(accepted) }.thenCompose { it }.thenCompose { written ->
+                                check(written == accepted) { "Local city acknowledgement differs from its accepted directory state" }
+                                finishPending(runtime, record, accepted).thenApply { result + written }
+                            }
+                        }
+                    }
+                }
+                chain
             }
         }
     }
 
     fun lookup(playerId: UUID): CompletableFuture<CivsNetworkCity?> = admit("lookup", "player" to playerId) { runtime ->
         runtime.executor.read { connection ->
-            connection.prepareStatement("SELECT c.* FROM arc_civs_city c JOIN arc_civs_member m ON m.city_id = c.city_id WHERE m.player_id = ?").use { statement ->
+            connection.prepareStatement("""SELECT c.city_id, c.server_id, c.owner_id, c.city_name, c.autonomous, c.updated_at_ms
+                FROM arc_civs_city c JOIN arc_civs_member m ON m.city_id = c.city_id WHERE m.player_id = ?""").use { statement ->
                 statement.setString(1, playerId.toString())
-                statement.executeQuery().use { rows -> if (rows.next()) readCity(rows).also {
-                    check(it.city.autonomy == null && it.city.canManage(playerId)) { "Network membership and snapshot disagree" }
+                statement.executeQuery().use { rows -> if (rows.next()) {
+                    check(!rows.getBoolean("autonomous")) { "Autonomous village has personal membership" }
+                    readSummary(rows)
                 } else null }
             }
         }
     }
 
-    /** CivsStore owns the one defensive copy before asynchronous SQL admission. */
-    internal fun save(city: Settlement, verifyBuffers: (Settlement?, Settlement) -> Unit = { old, next ->
-        require(old?.inventory?.constructionBuffers == next.inventory?.constructionBuffers)
-    }): CompletableFuture<Settlement> {
-        val snapshot = city
-        return admit("save", "city" to snapshot.id, "revision" to snapshot.revision,
-            "owner" to snapshot.owner, "members" to snapshot.members.size, "construction" to snapshot.construction?.id) { runtime ->
+    /** One admitted chain includes the local ACK and final SQL clear, including during shutdown. */
+    internal fun save(city: Settlement, previous: Settlement?,
+        writeLocal: (Settlement) -> CompletableFuture<Settlement>): CompletableFuture<Settlement> =
+        admit("directory_save", "city" to city.id, "revision" to city.revision) { runtime ->
             runtime.executor.transaction { connection ->
                 lockRegistry(connection)
-                save(connection, snapshot, importing = false, verifyBuffers = verifyBuffers)
+                reserve(connection, city, previous)
+            }.thenCompose { record ->
+                val accepted = requireNotNull(record.pending)
+                runtime.executor.submit { writeLocal(accepted) }.thenCompose { it }.thenCompose { written ->
+                    check(written == accepted) { "Local city acknowledgement differs from its directory reservation" }
+                    finishPending(runtime, record, accepted).thenApply { written }
+                }
             }
         }
-    }
 
-    /** Deletes only the complete expected home snapshot; retries retain the durable deletion fence. */
-    internal fun delete(city: Settlement): CompletableFuture<Unit> {
-        require(city.inventory?.constructionBuffers.isNullOrEmpty()) { "Construction storage must be returned before deletion" }
-        val snapshot = city
-        return admit("delete", "city" to snapshot.id, "revision" to snapshot.revision, "owner" to snapshot.owner) { runtime ->
-            runtime.executor.transaction { connection ->
-                CivsRules.validate(snapshot)
-                lockRegistry(connection)
-                val deleted = findDeleted(connection, snapshot.id)
-                if (deleted != null) {
-                    deleted.verify(snapshot, server.value)
-                    return@transaction Unit
-                }
-                val existing = findCity(connection, snapshot.id) ?: throw CivsRejection("stale-city")
-                if (existing.city.owner != snapshot.owner) throw CivsRejection("owner-required")
-                if (existing.server != server) throw CivsRejection("remote-city", mapOf("server" to existing.server.value))
-                if (existing.city != snapshot) throw CivsRejection("stale-city")
-                connection.prepareStatement("DELETE FROM arc_civs_member WHERE city_id = ?").use {
-                    it.setString(1, snapshot.id.toString()); it.executeUpdate()
-                }
-                connection.prepareStatement("DELETE FROM arc_civs_city WHERE city_id = ? AND server_id = ? AND owner_id = ? AND revision = ?").use {
-                    it.setString(1, snapshot.id.toString()); it.setString(2, server.value)
-                    it.setString(3, snapshot.owner.toString()); it.setLong(4, snapshot.revision)
-                    check(it.executeUpdate() == 1) { "Home/revision fence rejected settlement deletion" }
-                }
-                insertDeleted(connection, CivsDeletedCity(snapshot.id, snapshot.owner, server.value, snapshot.revision,
-                    System.currentTimeMillis(), snapshot.autonomy != null))
-                Unit
-            }
-        }
-    }
-
-    private fun save(connection: Connection, proposed: Settlement, importing: Boolean,
-        verifyBuffers: (Settlement?, Settlement) -> Unit = { _, _ -> }): Settlement {
+    private fun reserve(connection: Connection, proposed: Settlement, previous: Settlement?): DirectoryCity {
         CivsRules.validate(proposed)
         if (findDeleted(connection, proposed.id) != null) throw CivsRejection("city-deleted")
-        val previous = findCity(connection, proposed.id)
-        verifyBuffers(previous?.city, proposed)
-        if (previous != null) {
-            check(previous.server == server) { "Only the home server may change settlement ${proposed.id}" }
-            check(previous.city.owner == proposed.owner) { "City owner cannot change" }
-            check((previous.city.autonomy != null) == (proposed.autonomy != null)) { "City autonomy cannot change" }
-            if (previous.city == proposed) return previous.city
-        }
-        val city = if (!importing && proposed.autonomy == null && proposed.revision == 0L && hasDeletedOwner(connection, proposed.owner))
-            proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
-        val json = gson.toJson(city)
-        require(json.toByteArray(Charsets.UTF_8).size <= CivsStore.MAX_CITY_BYTES) { "City snapshot exceeds 256 KiB" }
-        if (previous != null) {
-            if (previous.city.revision == city.revision) {
-                check(previous.city == city) { "Same-revision retry differs from the committed snapshot" }
-                return previous.city
+        val current = findCity(connection, proposed.id)
+        if (current != null) {
+            check(current.summary.server == server) { "Only the home server may change settlement ${proposed.id}" }
+            check(current.summary.owner == proposed.owner) { "City owner cannot change" }
+            check(current.autonomous == (proposed.autonomy != null)) { "City autonomy cannot change" }
+            current.pending?.let { accepted ->
+                check(accepted == proposed || proposed.revision == 0L && previous == null &&
+                    proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) == accepted) {
+                    "Directory retry differs from its accepted state"
+                }
+                return current
             }
-            check(previous.city.revision < Long.MAX_VALUE && city.revision == previous.city.revision + 1) {
-                "Settlement revision is stale or skips a committed revision"
+            if (previous == proposed && current.matches(proposed) && proposed.revision >= current.revision)
+                return current.copy(pending = proposed)
+            check(previous != null && current.matches(previous) && previous.revision >= current.revision &&
+                previous.revision < Long.MAX_VALUE && proposed.revision == previous.revision + 1) {
+                "Local before-city disagrees with the directory or revision"
             }
         } else {
-            check(importing || city.revision == 0L) { "New settlement revision must start at zero" }
+            check(previous == null && proposed.revision == 0L) { "New settlement revision must start at zero" }
             val count = connection.prepareStatement("SELECT COUNT(*) FROM arc_civs_city WHERE server_id = ?").use { statement ->
                 statement.setString(1, server.value)
                 statement.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
             }
             if (count >= maximumCities) throw CivsRejection("settlement-limit")
         }
+        val city = if (current == null && proposed.autonomy == null && hasDeletedOwner(connection, proposed.owner))
+            proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
+        val json = gson.toJson(city)
+        require(json.toByteArray(Charsets.UTF_8).size <= CivsStore.MAX_CITY_BYTES) { "City snapshot exceeds 256 KiB" }
         val participants = CivsMembership.participants(city).sortedBy(UUID::toString)
         connection.prepareStatement("SELECT city_id FROM arc_civs_member WHERE player_id = ?").use { statement ->
             participants.forEach { player ->
@@ -190,32 +204,85 @@ class CivsNetworkStore internal constructor(
             }
         }
         val at = System.currentTimeMillis()
-        if (previous == null) {
-            connection.prepareStatement("INSERT INTO arc_civs_city(city_id, server_id, owner_id, revision, snapshot, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)").use { statement ->
+        if (current == null) {
+            connection.prepareStatement("""INSERT INTO arc_civs_city
+                (city_id, server_id, owner_id, revision, pending_snapshot, updated_at_ms, city_name, autonomous)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""").use { statement ->
                 statement.setString(1, city.id.toString()); statement.setString(2, server.value)
                 statement.setString(3, city.owner.toString()); statement.setLong(4, city.revision)
-                statement.setString(5, json); statement.setLong(6, at)
+                statement.setString(5, json); statement.setLong(6, at); statement.setString(7, city.name)
+                statement.setBoolean(8, city.autonomy != null)
                 check(statement.executeUpdate() == 1)
             }
         } else {
-            connection.prepareStatement("UPDATE arc_civs_city SET revision = ?, snapshot = ?, updated_at_ms = ? WHERE city_id = ? AND server_id = ? AND revision = ?").use { statement ->
+            connection.prepareStatement("""UPDATE arc_civs_city SET revision = ?, pending_snapshot = ?, updated_at_ms = ?, city_name = ?
+                WHERE city_id = ? AND server_id = ? AND revision = ? AND pending_snapshot IS NULL""").use { statement ->
                 statement.setLong(1, city.revision); statement.setString(2, json); statement.setLong(3, at)
-                statement.setString(4, city.id.toString()); statement.setString(5, server.value)
-                statement.setLong(6, previous.city.revision)
-                check(statement.executeUpdate() == 1) { "Home/revision fence rejected settlement update" }
+                statement.setString(4, city.name); statement.setString(5, city.id.toString()); statement.setString(6, server.value)
+                statement.setLong(7, current.revision)
+                check(statement.executeUpdate() == 1) { "Home/directory revision fence rejected settlement update" }
             }
         }
-        connection.prepareStatement("DELETE FROM arc_civs_member WHERE city_id = ?").use {
-            it.setString(1, city.id.toString()); it.executeUpdate()
-        }
-        connection.prepareStatement("INSERT INTO arc_civs_member(player_id, city_id) VALUES (?, ?)").use { statement ->
-            participants.forEach { player ->
-                statement.setString(1, player.toString()); statement.setString(2, city.id.toString()); statement.addBatch()
+        if (current?.participants != participants.toSet()) {
+            connection.prepareStatement("DELETE FROM arc_civs_member WHERE city_id = ?").use {
+                it.setString(1, city.id.toString()); it.executeUpdate()
             }
-            statement.executeBatch()
+            connection.prepareStatement("INSERT INTO arc_civs_member(player_id, city_id) VALUES (?, ?)").use { statement ->
+                participants.forEach { player ->
+                    statement.setString(1, player.toString()); statement.setString(2, city.id.toString()); statement.addBatch()
+                }
+                statement.executeBatch()
+            }
         }
-        return city
+        return DirectoryCity(CivsNetworkCity(server, city.id, city.owner, city.name, at), city.autonomy != null,
+            city.revision, participants.toSet(), city)
     }
+
+    private fun finishPending(runtime: SqlRuntime, expected: DirectoryCity, city: Settlement): CompletableFuture<Unit> =
+        runtime.executor.transaction { connection ->
+            lockRegistry(connection)
+            val current = requireNotNull(findCity(connection, city.id)) { "Accepted directory city disappeared" }
+            check(current.summary.server == server && current.revision == expected.revision && current.matches(city)) {
+                "Accepted directory identity changed before local acknowledgement"
+            }
+            if (current.pending == null) return@transaction Unit
+            check(current.pending == city) { "Accepted directory snapshot changed before local acknowledgement" }
+            connection.prepareStatement("UPDATE arc_civs_city SET pending_snapshot = NULL WHERE city_id = ? AND server_id = ? AND revision = ?").use {
+                it.setString(1, city.id.toString()); it.setString(2, server.value); it.setLong(3, city.revision)
+                check(it.executeUpdate() == 1)
+            }
+            Unit
+        }
+
+    /** Complete local equality is checked by CivsStore before this rare global directory deletion. */
+    internal fun delete(city: Settlement, deleteLocal: () -> CompletableFuture<Unit>): CompletableFuture<Unit> =
+        admit("delete", "city" to city.id, "revision" to city.revision, "owner" to city.owner) { runtime ->
+            runtime.executor.transaction { connection ->
+                CivsRules.validate(city)
+                require(city.inventory?.constructionBuffers.isNullOrEmpty()) { "Construction storage must be returned before deletion" }
+                lockRegistry(connection)
+                val deleted = findDeleted(connection, city.id)
+                if (deleted != null) {
+                    deleted.verify(city, server.value)
+                    return@transaction Unit
+                }
+                val existing = findCity(connection, city.id) ?: throw CivsRejection("stale-city")
+                if (existing.summary.owner != city.owner) throw CivsRejection("owner-required")
+                if (existing.summary.server != server) throw CivsRejection("remote-city", mapOf("server" to existing.summary.server.value))
+                check(existing.pending == null) { "Directory acknowledgement is pending" }
+                if (!existing.matches(city) || existing.revision > city.revision) throw CivsRejection("stale-city")
+                connection.prepareStatement("DELETE FROM arc_civs_member WHERE city_id = ?").use {
+                    it.setString(1, city.id.toString()); it.executeUpdate()
+                }
+                connection.prepareStatement("DELETE FROM arc_civs_city WHERE city_id = ? AND server_id = ? AND revision = ?").use {
+                    it.setString(1, city.id.toString()); it.setString(2, server.value); it.setLong(3, existing.revision)
+                    check(it.executeUpdate() == 1) { "Home/directory fence rejected settlement deletion" }
+                }
+                insertDeleted(connection, CivsDeletedCity(city.id, city.owner, server.value, city.revision,
+                    System.currentTimeMillis(), city.autonomy != null))
+                Unit
+            }.thenCompose { runtime.executor.submit { deleteLocal() }.thenCompose { it } }
+        }
 
     private fun hasDeletedOwner(connection: Connection, owner: UUID): Boolean =
         connection.prepareStatement("SELECT 1 FROM arc_civs_deleted WHERE owner_id = ? LIMIT 1").use {
@@ -250,21 +317,39 @@ class CivsNetworkStore internal constructor(
         }
     }
 
-    private fun findCity(connection: Connection, id: UUID): CivsNetworkCity? =
-        connection.prepareStatement("SELECT * FROM arc_civs_city WHERE city_id = ?").use { statement ->
-            statement.setString(1, id.toString())
-            statement.executeQuery().use { if (it.next()) readCity(it) else null }
-        }
+    private fun readDeleted(rows: ResultSet, autonomous: Boolean): CivsDeletedCity = CivsDeletedCity(
+        UUID.fromString(rows.getString("city_id")), UUID.fromString(rows.getString("owner_id")),
+        BackendServerId.of(rows.getString("server_id")).value, rows.getLong("revision"), rows.getLong("deleted_at_ms"), autonomous,
+    ).validated()
 
-    private fun readCity(rows: ResultSet): CivsNetworkCity {
-        val json = rows.getString("snapshot")
-        check(json.toByteArray(Charsets.UTF_8).size <= CivsStore.MAX_CITY_BYTES) { "Network city snapshot exceeds 256 KiB" }
-        val city = requireNotNull(gson.fromJson(json, Settlement::class.java))
-        CivsRules.validate(city)
-        check(city.id.toString() == rows.getString("city_id") && city.owner.toString() == rows.getString("owner_id") &&
-            city.revision == rows.getLong("revision")) { "Network city index and snapshot disagree" }
-        return CivsNetworkCity(BackendServerId.of(rows.getString("server_id")), city, rows.getLong("updated_at_ms"))
+    private fun findCity(connection: Connection, id: UUID): DirectoryCity? {
+        val row = connection.prepareStatement("SELECT * FROM arc_civs_city WHERE city_id = ?").use { statement ->
+            statement.setString(1, id.toString())
+            statement.executeQuery().use { rows -> if (rows.next()) {
+                val json = rows.getString("pending_snapshot")
+                val accepted = json?.let {
+                    check(it.toByteArray(Charsets.UTF_8).size <= CivsStore.MAX_CITY_BYTES) { "Pending city exceeds 256 KiB" }
+                    CivsRules.validate(requireNotNull(gson.fromJson(it, Settlement::class.java)))
+                }
+                DirectoryCity(readSummary(rows), rows.getBoolean("autonomous"), rows.getLong("revision"), emptySet(), accepted)
+            } else null }
+        } ?: return null
+        val participants = connection.prepareStatement("SELECT player_id FROM arc_civs_member WHERE city_id = ?").use { statement ->
+            statement.setString(1, id.toString())
+            statement.executeQuery().use { rows -> buildSet { while (rows.next()) add(UUID.fromString(rows.getString(1))) } }
+        }
+        return row.copy(participants = participants).also { city ->
+            check(city.revision >= 0 && if (city.autonomous) participants.isEmpty() else city.summary.owner in participants) {
+                "Network directory membership is invalid"
+            }
+            city.pending?.let { check(city.matches(it) && city.revision == it.revision) { "Pending city and directory disagree" } }
+        }
     }
+
+    private fun readSummary(rows: ResultSet): CivsNetworkCity = CivsNetworkCity(
+        BackendServerId.of(rows.getString("server_id")), UUID.fromString(rows.getString("city_id")),
+        UUID.fromString(rows.getString("owner_id")), rows.getString("city_name"), rows.getLong("updated_at_ms"),
+    ).also { require(it.name.isNotBlank() && it.name.length <= 48 && it.name.none(Char::isISOControl)) { "Invalid directory city name" } }
 
     private fun lockRegistry(connection: Connection) {
         // ponytail: one short transaction lock covers cross-city membership; shard only if contention is measured.
@@ -283,9 +368,9 @@ class CivsNetworkStore internal constructor(
         pending += future
         future.whenComplete { value, failure ->
             synchronized(lifecycle) { pending -= future }
-            val committed = when (value) { is Settlement -> value; is CivsNetworkCity -> value.city; else -> null }
+            val committed = value as? Settlement
             CivsDiagnostics.event("sql_end", "operation" to operation, "request" to request, "server" to server.value, *fields,
-                "outcome" to if (failure == null) if (operation == "save" || operation == "delete") "committed" else "read" else if (CivsDiagnostics.rejection(failure) != null) "rejected" else "failed",
+                "outcome" to if (failure == null) if (operation == "directory_save" || operation == "delete") "committed" else "read" else if (CivsDiagnostics.rejection(failure) != null) "rejected" else "failed",
                 "owner_server" to if (value is CivsNetworkCity) value.server.value else server.value,
                 "result_city" to committed?.id, "result_revision" to committed?.revision,
                 "participants" to committed?.let { CivsMembership.participants(it).size },
@@ -317,7 +402,7 @@ class CivsNetworkStore internal constructor(
         internal fun create(server: BackendServerId, maximumCities: Int, runtime: CompletableFuture<SqlRuntime>): CivsNetworkStore {
             require(maximumCities > 0)
             val initialized = runtime.thenCompose { sql ->
-                sql.executor.submit { MySqlMigrator(sql.dataSource, "arc_civs").migrate(listOf(MIGRATION, DELETION_MIGRATION, AUTONOMY_MIGRATION)); sql }
+                sql.executor.submit { MySqlMigrator(sql.dataSource, "arc_civs").migrate(listOf(MIGRATION, DELETION_MIGRATION, AUTONOMY_MIGRATION, LOCAL_CITY_MIGRATION)); sql }
                     .handle { result, failure ->
                         if (failure == null) CompletableFuture.completedFuture(result)
                         else sql.executor.closeAsync().thenCompose {
@@ -365,5 +450,26 @@ class CivsNetworkStore internal constructor(
                 INDEX arc_civs_autonomous_deleted_owner(owner_id)
             ) ENGINE=InnoDB""".trimIndent(),
         ))
+
+        // MySQL DDL commits independently. Each conditional statement survives a partially applied migration.
+        private fun addColumnIfMissing(column: String, definition: String): List<String> = conditionalDdl(column,
+            "ALTER TABLE arc_civs_city ADD COLUMN $column $definition")
+
+        private fun conditionalDdl(column: String, sql: String): List<String> = listOf(
+            "SET @arc_civs_ddl = IF(EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'arc_civs_city' AND COLUMN_NAME = '$column'), 'DO 0', '$sql')",
+            "PREPARE arc_civs_local_migration FROM @arc_civs_ddl",
+            "EXECUTE arc_civs_local_migration",
+            "DEALLOCATE PREPARE arc_civs_local_migration",
+        )
+
+        private val LOCAL_CITY_MIGRATION = SqlMigration(4, "Home-local cities and minimal network directory",
+            conditionalDdl("pending_snapshot", "ALTER TABLE arc_civs_city CHANGE COLUMN snapshot pending_snapshot MEDIUMTEXT NULL") +
+                addColumnIfMissing("city_name", "VARCHAR(48) NULL") +
+                addColumnIfMissing("autonomous", "BOOLEAN NULL") + listOf(
+                    """UPDATE arc_civs_city SET city_name = JSON_UNQUOTE(JSON_EXTRACT(pending_snapshot, '$.name')),
+                        autonomous = COALESCE(JSON_TYPE(JSON_EXTRACT(pending_snapshot, '$.autonomy')) = 'OBJECT', FALSE)
+                        WHERE city_name IS NULL OR autonomous IS NULL""".trimIndent(),
+                    "ALTER TABLE arc_civs_city MODIFY city_name VARCHAR(48) NOT NULL, MODIFY autonomous BOOLEAN NOT NULL",
+                ))
     }
 }

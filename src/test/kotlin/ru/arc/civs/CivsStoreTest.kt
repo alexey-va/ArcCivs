@@ -502,9 +502,9 @@ class CivsStoreTest : FreeSpec({
         val largeRoot = root.resolve("large")
         val large = largeRoot.resolve("cities/${UUID.randomUUID()}.json")
         Files.createDirectories(large.parent)
-        Files.write(large, ByteArray(MAX_CITY_BYTES + 1))
+        Files.write(large, ByteArray(CivsStore.MAX_CITY_DOCUMENT_BYTES.toInt() + 1))
         shouldThrow<CompletionException> { CivsStore(largeRoot, directExecutor).load().join() }
-        Files.size(large) shouldBe (MAX_CITY_BYTES + 1).toLong()
+        Files.size(large) shouldBe CivsStore.MAX_CITY_DOCUMENT_BYTES + 1
     }
 
     "rejects an oversized existing placement plan before decoding it" {
@@ -820,7 +820,6 @@ class CivsStoreTest : FreeSpec({
     }
 }) {
     companion object {
-        private const val MAX_CITY_BYTES = 256 * 1024
         private const val MAX_PLAN_BYTES = 32L * 1024 * 1024
         private const val MAX_PLAN_BLOCKS = 150_000
         private val directExecutor = Executor { it.run() }

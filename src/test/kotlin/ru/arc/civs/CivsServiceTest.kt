@@ -6192,7 +6192,7 @@ class CivsServiceTest : FunSpec({
             durable.complete(Unit); h.tick()
             deleted.join() shouldBe Unit
             h.service.city(h.player) shouldBe null
-            lookup.complete(CivsNetworkCity(BackendServerId.of("spawn"), city, 1L)); h.tick()
+            lookup.complete(CivsNetworkCity(BackendServerId.of("spawn"), city.id, city.owner, city.name, 1L)); h.tick()
             pendingLookup.isCompletedExceptionally shouldBe true
             h.service.remoteCity(h.player) shouldBe null
             h.service.ready() shouldBe true
@@ -6520,7 +6520,7 @@ class CivsServiceTest : FunSpec({
         serviceScenario(empty = true) { h ->
             h.start()
             every { h.store.homeServer() } returns BackendServerId.of("spawn")
-            val record = CivsNetworkCity(BackendServerId.of("survival"), h.city, 1000)
+            val record = CivsNetworkCity(BackendServerId.of("survival"), h.city.id, h.city.owner, h.city.name, 1000)
             every { h.store.lookup(h.owner) } returns CompletableFuture.completedFuture(record)
             val loaded = h.service.refreshCity(h.player); h.tick(); loaded.join()
             h.service.city(h.player) shouldBe null
@@ -6537,11 +6537,11 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("fresh network read failure clears remote snapshot and reports an actionable rejection") {
+    test("fresh network read failure clears remote membership and reports an actionable rejection") {
         serviceScenario(empty = true) { h ->
             h.start()
             every { h.store.homeServer() } returns BackendServerId.of("parkour")
-            every { h.store.lookup(h.owner) } returns CompletableFuture.completedFuture(CivsNetworkCity(BackendServerId.of("spawn"), h.city, 1000))
+            every { h.store.lookup(h.owner) } returns CompletableFuture.completedFuture(CivsNetworkCity(BackendServerId.of("spawn"), h.city.id, h.city.owner, h.city.name, 1000))
             val loaded = h.service.refreshCity(h.player); h.tick(); loaded.join()
             every { h.store.lookup(h.owner) } returns CompletableFuture.failedFuture(IllegalStateException("database offline"))
             val failed = h.service.refreshCity(h.player); h.tick()
@@ -6560,9 +6560,9 @@ class CivsServiceTest : FunSpec({
             every { h.store.lookup(h.owner) } returnsMany listOf(old, recent)
             val first = h.service.refreshCity(h.player)
             val second = h.service.refreshCity(h.player)
-            val current = CivsNetworkCity(BackendServerId.of("spawn"), h.city, 2000)
+            val current = CivsNetworkCity(BackendServerId.of("spawn"), h.city.id, h.city.owner, h.city.name, 2000)
             recent.complete(current); h.tick(); second.join()
-            old.complete(CivsNetworkCity(BackendServerId.of("survival"), h.city, 1000)); h.tick()
+            old.complete(CivsNetworkCity(BackendServerId.of("survival"), h.city.id, h.city.owner, h.city.name, 1000)); h.tick()
             first.isCompletedExceptionally shouldBe true
             h.service.remoteCity(h.player) shouldBe current
         }

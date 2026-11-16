@@ -15,7 +15,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicLong
 
-/** Durable, bounded file state. Explicit load rescans external edits; filesystem work runs on the supplied executor. */
+/** Durable, bounded file state. Explicit load rescans external edits; filesystem work runs on storage/SQL workers. */
 class CivsStore(
     root: Path,
     private val executor: Executor,
@@ -29,6 +29,7 @@ class CivsStore(
     private val ioLock = Any()
     private var cityIndex: Map<UUID, CityIndex>? = null
     private var deletedCityIndex: Map<UUID, CivsDeletedCity>? = null
+    private val directoryReady = hashSetOf<UUID>()
     // Recent order/retained/preview plans only, never whole villages. All access stays under ioLock.
     private val planCache = object : LinkedHashMap<UUID, CivPlacementPlan>(4, .75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<UUID, CivPlacementPlan>): Boolean = size > 4
@@ -43,11 +44,41 @@ class CivsStore(
     }
 
     fun load(): CompletableFuture<List<Settlement>> = submitPlanChange {
-        // Explicit reload observes administrator file edits, including after a failed city rescan.
         planCache.clear()
+        directoryReady.clear()
         val root = trustedRoot()
-        reloadCityIndex(root).also { cities -> if (network == null) cities.forEach { verifyBuffers(root, it) } } to requireNotNull(deletedCityIndex).values.toList()
-    }.thenCompose { (legacy, deleted) -> network?.loadOwned(legacy, deleted) { city -> synchronized(ioLock) { verifyBuffers(trustedRoot(), city) } } ?: CompletableFuture.completedFuture(legacy) }
+        if (network == null) CompletableFuture.completedFuture(reloadCityIndex(root).also { cities -> cities.forEach { verifyBuffers(root, it) } })
+        else network.loadOwned(loadDeletedCities(root).values.toList(), { deleted -> fileContinuation {
+            deleted.forEach { tombstone ->
+                val old = deletedCityStore(root, tombstone.cityId).loadOrNull()?.deleted
+                if (old != null) check(old.owner == tombstone.owner && old.revision == tombstone.revision &&
+                    old.autonomous == tombstone.autonomous && (old.server == null || old.server == tombstone.server)) {
+                    "Local and network city deletion histories disagree"
+                }
+                if (old == null || old.server == null) deletedCityStore(root, tombstone.cityId).write(DeletedCityDocument(SCHEMA_VERSION, tombstone))
+            }
+            if (deleted.isNotEmpty()) forceDirectories(root, "deleted-cities")
+            reloadCityIndex(root)
+        } }, { city -> fileContinuation { recoverDirectoryCity(city) } }).thenApply { cities ->
+            synchronized(ioLock) {
+                cities.forEach { verifyBuffers(root, it) }
+                directoryReady.addAll(cities.map(Settlement::id))
+            }
+            cities
+        }
+    }.thenCompose { it }
+
+    /** Only an accepted SQL transition may initialize or replace an older home-local snapshot. */
+    private fun recoverDirectoryCity(city: Settlement): Settlement {
+        CivsRules.validate(city)
+        val root = trustedRoot()
+        check(city.id !in requireNotNull(deletedCityIndex)) { "Pending directory city was already deleted" }
+        val previous = cityStore(root, city.id).loadOrNull()?.city
+        check(previous == null || previous.owner == city.owner && (previous.autonomy != null) == (city.autonomy != null) &&
+            (previous.revision < city.revision || previous == city)) { "Pending directory state conflicts with acknowledged local city" }
+        verifyBuffers(root, city)
+        return writeCity(root, city)
+    }
 
     fun lookup(playerId: UUID): CompletableFuture<CivsNetworkCity?> = synchronized(lifecycleLock) {
         if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
@@ -58,75 +89,112 @@ class CivsStore(
 
     fun save(city: Settlement): CompletableFuture<Settlement> {
         val proposed = snapshotCity(city)
-        if (network != null) return synchronized(lifecycleLock) {
-            if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed")) else network.save(proposed) { old, next -> synchronized(ioLock) { requireBufferTransition(trustedRoot(), old, next) } }
-        }
+        if (network == null) return submit { saveLocal(proposed) }
         return submit {
-            CivsRules.validate(proposed)
-            val trustedRoot = trustedRoot()
-            val index = ensureCityIndex(trustedRoot)
-            val deleted = requireNotNull(deletedCityIndex)
-            if (proposed.id in deleted) throw CivsRejection("city-deleted")
-            val snapshot = if (proposed.autonomy == null && proposed.revision == 0L &&
-                deleted.values.any { it.owner == proposed.owner && !it.autonomous })
-                proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
-            val sameCity = index[snapshot.id]
-            if (sameCity?.buffers != snapshot.inventory?.constructionBuffers ||
-                !sameCity?.buffers.isNullOrEmpty() && sameCity?.mode != snapshot.inventory?.mode) {
-                requireBufferTransition(trustedRoot, cityStore(trustedRoot, snapshot.id).loadOrNull()?.city, snapshot)
-            }
-            require(sameCity == null || sameCity.owner == snapshot.owner) { "City id cannot be reassigned to another owner" }
-            require(sameCity == null || sameCity.autonomous == (snapshot.autonomy != null)) { "City autonomy cannot change" }
-            val otherParticipants = HashSet<UUID>()
-            index.filterKeys { it != snapshot.id }.values.filterNot { it.autonomous }.forEach { existing ->
-                otherParticipants.add(existing.owner)
-                otherParticipants.addAll(existing.members)
-            }
-            require(CivsMembership.participants(snapshot).none(otherParticipants::contains)) {
-                "Player already belongs to another settlement"
-            }
-            require(sameCity != null || index.size < maximumCities) { "Settlement capacity is full" }
-
-            if (sameCity == null) {
-                require(snapshot.revision == 0L) { "New settlement revision must start at zero" }
-            } else if (snapshot.revision == sameCity.revision) {
-                val persisted = try {
-                    requireNotNull(cityStore(trustedRoot, snapshot.id).loadOrNull()) {
-                        "Saved city disappeared during retry"
-                    }
-                } catch (error: Exception) {
-                    cityIndex = null
-                    throw error
-                }
-                if (persisted.city == proposed) return@submit proposed
-                require(persisted.city == snapshot) { "Same-revision city retry does not match saved state" }
-                return@submit snapshot
+            val prepared = saveLocal(proposed, write = false)
+            val root = trustedRoot()
+            val previous = ensureCityIndex(root)[prepared.id]
+            if (prepared.id in directoryReady && previous?.directoryMatches(prepared) == true) {
+                val saved = if (previous.revision == prepared.revision) {
+                    forceDirectories(root, "cities")
+                    prepared
+                } else writeCity(root, prepared)
+                CompletableFuture.completedFuture(saved)
             } else {
-                require(sameCity.revision < Long.MAX_VALUE && snapshot.revision == sameCity.revision + 1) {
-                    "Settlement revision is stale or skips a committed revision"
+                require(gson.toJson(CityDocument(SCHEMA_VERSION, prepared)).toByteArray(StandardCharsets.UTF_8).size <= MAX_CITY_DOCUMENT_BYTES) {
+                    "City snapshot exceeds 256 KiB"
+                }
+                val before = cityStore(root, prepared.id).loadOrNull()?.city
+                val previouslyReady = directoryReady.remove(prepared.id)
+                network.save(prepared, before) { accepted -> fileContinuation { saveLocal(accepted) } }.thenApply { saved ->
+                    synchronized(ioLock) { directoryReady += saved.id }
+                    saved
+                }.whenComplete { _, failure ->
+                    if (previouslyReady && failure != null && CivsDiagnostics.rejection(failure)?.reason == "already-member")
+                        synchronized(ioLock) { directoryReady += prepared.id }
                 }
             }
+        }.thenCompose { it }
+    }
 
-            val saved = try {
-                requireNotNull(cityStore(trustedRoot, snapshot.id).write(CityDocument(SCHEMA_VERSION, snapshot)).city)
+    private fun saveLocal(proposed: Settlement, write: Boolean = true): Settlement {
+        CivsRules.validate(proposed)
+        val trustedRoot = trustedRoot()
+        val index = ensureCityIndex(trustedRoot)
+        val deleted = requireNotNull(deletedCityIndex)
+        if (proposed.id in deleted) throw CivsRejection("city-deleted")
+        val snapshot = if (proposed.autonomy == null && proposed.revision == 0L &&
+            deleted.values.any { it.owner == proposed.owner && !it.autonomous })
+            proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
+        val sameCity = index[snapshot.id]
+        if (sameCity?.buffers != snapshot.inventory?.constructionBuffers ||
+            !sameCity?.buffers.isNullOrEmpty() && sameCity?.mode != snapshot.inventory?.mode) {
+            requireBufferTransition(trustedRoot, cityStore(trustedRoot, snapshot.id).loadOrNull()?.city, snapshot)
+        }
+        require(sameCity == null || sameCity.owner == snapshot.owner) { "City id cannot be reassigned to another owner" }
+        require(sameCity == null || sameCity.autonomous == (snapshot.autonomy != null)) { "City autonomy cannot change" }
+        val otherParticipants = HashSet<UUID>()
+        index.filterKeys { it != snapshot.id }.values.filterNot { it.autonomous }.forEach { existing ->
+            otherParticipants.add(existing.owner)
+            otherParticipants.addAll(existing.members)
+        }
+        if (CivsMembership.participants(snapshot).any(otherParticipants::contains)) throw CivsRejection("already-member")
+        if (sameCity == null && index.size >= maximumCities) throw CivsRejection("settlement-limit")
+
+        if (sameCity == null) {
+            require(snapshot.revision == 0L) { "New settlement revision must start at zero" }
+        } else if (snapshot.revision == sameCity.revision) {
+            val persisted = try {
+                requireNotNull(cityStore(trustedRoot, snapshot.id).loadOrNull()) {
+                    "Saved city disappeared during retry"
+                }
             } catch (error: Exception) {
                 cityIndex = null
                 throw error
             }
-            cityIndex = index + (saved.id to indexEntry(saved))
-            saved
+            require(persisted.city == proposed || persisted.city == snapshot) { "Same-revision city retry does not match saved state" }
+            if (write) forceDirectories(trustedRoot, "cities")
+            return requireNotNull(persisted.city)
+        } else {
+            require(sameCity.revision < Long.MAX_VALUE && snapshot.revision == sameCity.revision + 1) {
+                "Settlement revision is stale or skips a committed revision"
+            }
         }
+
+        return if (write) writeCity(trustedRoot, snapshot) else snapshot
+    }
+
+    private fun writeCity(root: Path, snapshot: Settlement): Settlement {
+        val saved = try {
+            requireNotNull(cityStore(root, snapshot.id).write(CityDocument(SCHEMA_VERSION, snapshot)).city).also {
+                // Persist the cities/settlements directory creation edges before retiring any item receipt.
+                forceDirectories(root, "cities")
+            }
+        } catch (error: Exception) {
+            cityIndex = null
+            throw error
+        }
+        cityIndex = ensureCityIndex(root) + (saved.id to indexEntry(saved))
+        return saved
     }
 
     /** The canonical commit precedes local cleanup; a tombstone is durable before its old JSON disappears. */
     fun delete(city: Settlement): CompletableFuture<Unit> {
         val snapshot = snapshotCity(city)
         require(snapshot.inventory?.constructionBuffers.isNullOrEmpty()) { "Construction storage must be returned before deletion" }
-        if (network != null) return synchronized(lifecycleLock) {
-            if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
-            else network.delete(snapshot).thenCompose { enqueue { deleteLocal(snapshot, network.server.value) } }
-        }
-        return submit { deleteLocal(snapshot, null) }
+        if (network == null) return submit { deleteLocal(snapshot, null) }
+        return submit {
+            val root = trustedRoot()
+            val deleted = loadDeletedCities(root)[snapshot.id]
+            if (deleted != null) deleted.copy(server = deleted.server ?: network.server.value).verify(snapshot, network.server.value)
+            else {
+                val saved = cityStore(root, snapshot.id).loadOrNull()?.city ?: throw CivsRejection("stale-city")
+                if (saved.owner != snapshot.owner) throw CivsRejection("owner-required")
+                if (saved != snapshot) throw CivsRejection("stale-city")
+            }
+            directoryReady -= snapshot.id
+            network.delete(snapshot) { fileContinuation { deleteLocal(snapshot, network.server.value) } }
+        }.thenCompose { it }
     }
 
     private fun deleteLocal(city: Settlement, home: String?) {
@@ -138,15 +206,15 @@ class CivsStore(
             if (existing != null) existing.copy(server = existing.server ?: home).verify(city, home)
             else {
                 val saved = cityStore(trustedRoot, city.id).loadOrNull()?.city
-                if (home == null) {
-                    if (saved == null) throw CivsRejection("stale-city")
-                    if (saved.owner != city.owner) throw CivsRejection("owner-required")
-                    if (saved != city) throw CivsRejection("stale-city")
-                } else if (saved != null && saved.owner != city.owner) throw CivsRejection("owner-required")
+                if (saved == null) throw CivsRejection("stale-city")
+                if (saved.owner != city.owner) throw CivsRejection("owner-required")
+                if (saved != city) throw CivsRejection("stale-city")
                 require(deleted.size < MAX_DELETED_CITIES) { "City deletion history exceeds its limit" }
                 deletedCityStore(trustedRoot, city.id).write(DeletedCityDocument(SCHEMA_VERSION,
                     CivsDeletedCity(city.id, city.owner, home, city.revision, System.currentTimeMillis(), city.autonomy != null)))
+                forceDirectories(trustedRoot, "deleted-cities")
             }
+            forceDirectories(trustedRoot, "deleted-cities")
             cityStore(trustedRoot, city.id).deleteIfExists()
         } finally {
             // A failed atomic write can have an unknown outcome: rescan its durable fence before the next action.
@@ -199,7 +267,7 @@ class CivsStore(
             val stored = file.loadOrNull()
             if (stored == null) file.write(bytes) else require(stored.contentEquals(bytes)) { "Construction storage id was reused" }
             check(readPart(root, snapshot.owner, part) == snapshot)
-            forceInventoryDirectories(root, "construction-buffers")
+            forceDirectories(root, "construction-buffers")
             part
         }
     }
@@ -312,7 +380,7 @@ class CivsStore(
             if (existing != null) {
                 require(existing == snapshot) { "Inventory transaction retry differs from its journal" }
                 // A previous write may have reached rename but failed its parent-directory acknowledgement.
-                forceInventoryDirectories(trustedRoot)
+                forceDirectories(trustedRoot)
                 return@submit existing
             }
             val pending = loadInventoryTransactions(trustedRoot)
@@ -328,13 +396,13 @@ class CivsStore(
             }
             consumedItems.admit(trustedRoot, snapshot, pending)
             val document = InventoryTransactionDocument(SCHEMA_VERSION, snapshot)
-            if (gson.toJson(CityDocument(SCHEMA_VERSION, snapshot.after)).toByteArray(StandardCharsets.UTF_8).size > MAX_CITY_BYTES ||
+            if (gson.toJson(CityDocument(SCHEMA_VERSION, snapshot.after)).toByteArray(StandardCharsets.UTF_8).size > MAX_CITY_DOCUMENT_BYTES ||
                 gson.toJson(document).toByteArray(StandardCharsets.UTF_8).size > MAX_INVENTORY_TRANSACTION_BYTES)
                 throw CivsRejection("storage-transaction-too-large")
             val written = requireNotNull(store.write(document).transaction)
             // AtomicFileStore forces inventory-transactions itself. Also persist its newly-created entry in
             // settlements before native debit; otherwise a crash could lose the entire acknowledged journal.
-            forceInventoryDirectories(trustedRoot)
+            forceDirectories(trustedRoot)
             written
         }
     }
@@ -344,7 +412,7 @@ class CivsStore(
         val transactions = loadInventoryTransactions(trustedRoot)
         transactions.forEach { verifyBufferReceipt(trustedRoot, it) }
         // Recovery may resume a prior uncertain write immediately after this ACK, without saving it again.
-        if (transactions.isNotEmpty()) forceInventoryDirectories(trustedRoot)
+        if (transactions.isNotEmpty()) forceDirectories(trustedRoot)
         transactions
     }
 
@@ -375,14 +443,14 @@ class CivsStore(
         }
         val deleted = if (transaction == null) false else store.deleteIfExists()
         // A retry after an uncertain delete must acknowledge the directory even when the file is now absent.
-        forceInventoryDirectories(trustedRoot)
+        forceDirectories(trustedRoot)
         deleted
     }
 
-    private fun forceInventoryDirectories(trustedRoot: Path, name: String = "inventory-transactions") {
+    private fun forceDirectories(trustedRoot: Path, name: String = "inventory-transactions") {
         val directory = trustedRoot.resolve(name)
         if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return
-        require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) { "Inventory journal directory is not a real directory" }
+        require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) { "State directory is not a real directory" }
         // AtomicFileStore covers the file/rename; include both directory creation edges before native mutation.
         listOf(directory, trustedRoot, requireNotNull(trustedRoot.parent)).forEach {
             FileChannel.open(it, StandardOpenOption.READ).use { channel -> channel.force(true) }
@@ -440,7 +508,7 @@ class CivsStore(
             requireNotNull(cityIndex)
         }
 
-    private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.members.toSet(), city.revision, city.autonomy != null, city.inventory?.constructionBuffers, city.inventory?.mode)
+    private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.name, city.members.toSet(), city.revision, city.autonomy != null, city.inventory?.constructionBuffers, city.inventory?.mode)
 
     private fun loadCities(trustedRoot: Path, deleted: Set<UUID>): List<Settlement> {
         val directory = trustedRoot.resolve("cities")
@@ -538,7 +606,7 @@ class CivsStore(
     private fun cityStore(trustedRoot: Path, id: UUID) = AtomicFileStore(
         root = trustedRoot,
         relativePath = Path.of("cities", "$id.json"),
-        maxBytes = MAX_CITY_BYTES,
+        maxBytes = MAX_CITY_DOCUMENT_BYTES,
         encode = { gson.toJson(it).toByteArray(StandardCharsets.UTF_8) },
         decode = { decodeJson(it, CityDocument::class.java) },
         validate = { record ->
@@ -756,6 +824,14 @@ class CivsStore(
         enqueue(action)
     }
 
+    // Already-admitted SQL chains finish even after the supplied storage executor has sealed admissions.
+    // These continuations run only from a storage/SQL worker and never touch Bukkit state.
+    private fun <T> fileContinuation(action: () -> T): CompletableFuture<T> = try {
+        CompletableFuture.completedFuture(synchronized(ioLock) { action() })
+    } catch (error: Exception) {
+        CompletableFuture.failedFuture(error)
+    }
+
     private fun <T> enqueue(action: () -> T): CompletableFuture<T> = try {
         CompletableFuture.supplyAsync({ synchronized(ioLock) { action() } }, executor)
     } catch (error: RuntimeException) {
@@ -766,11 +842,16 @@ class CivsStore(
     private data class DeletedCityDocument(val schemaVersion: Int, val deleted: CivsDeletedCity?)
     private data class PlanDocument(val schemaVersion: Int, val plan: CivPlacementPlan?)
     private data class InventoryTransactionDocument(val schemaVersion: Int, val transaction: CivInventoryTransaction?)
-    private data class CityIndex(val owner: UUID, val members: Set<UUID>, val revision: Long, val autonomous: Boolean, val buffers: Map<String, CivConstructionStorageBuffer>?, val mode: CivStorageMode?)
+    private data class CityIndex(val owner: UUID, val name: String, val members: Set<UUID>, val revision: Long,
+        val autonomous: Boolean, val buffers: Map<String, CivConstructionStorageBuffer>?, val mode: CivStorageMode?) {
+        fun directoryMatches(city: Settlement) = owner == city.owner && name == city.name && members == city.members && autonomous == (city.autonomy != null)
+    }
 
     internal companion object {
         const val SCHEMA_VERSION = 1
         const val MAX_CITY_BYTES = 256L * 1024L
+        // Schema 1's {"schemaVersion":1,"city":<payload>} adds exactly 27 ASCII bytes.
+        const val MAX_CITY_DOCUMENT_BYTES = MAX_CITY_BYTES + 27
         const val MAX_PLAN_BYTES = 32L * 1024L * 1024L
         const val MAX_SCHEMATIC_BYTES = 16 * 1024 * 1024
         const val MAX_INVENTORY_TRANSACTION_BYTES = 32L * 1024L * 1024L

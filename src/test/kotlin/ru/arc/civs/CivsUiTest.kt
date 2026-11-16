@@ -1187,22 +1187,26 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("a remote town has a read-only overview and a backend request without local mutation controls") {
-        withUi(realHistory = true) { h ->
-            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
-            val remote = CivsNetworkCity(BackendServerId.of("survival"), settlement(h.player), 1000)
+    test("a remote town shows its name and home server with a backend request and no local mutation controls") {
+        for (language in listOf("ru", "en")) withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            val city = settlement(h.player)
+            val remote = CivsNetworkCity(BackendServerId.of("survival"), city.id, city.owner, city.name, 1000)
             every { h.host.remoteCity(h.player) } returns remote
             every { h.host.transferHome(h.player) } returns CompletableFuture.completedFuture(Unit)
             h.open()
             h.screen.id shouldBe "civs.remote"
-            h.body() shouldContain "Ваш город находится на сервере survival"
-            h.body().contains("Дубовое бревно") shouldBe false
-            h.body().contains("общий резерв") shouldBe false
+            h.body() shouldContain city.name
+            h.body() shouldContain "survival"
+            h.body() shouldContain if (language == "ru") "Сервер города" else "Town server"
+            val absent = if (language == "ru") listOf("Уровень", "Радиус города", "Жители", "Постройки", "Стройка", "Дубовое бревно", "общий резерв")
+                else listOf("Level", "Town radius", "Residents", "Buildings", "Construction", "Oak log", "shared reserve")
+            absent.forEach { h.body().contains(it) shouldBe false }
             h.screen.buttons.map { it.id.value } shouldBe listOf("transfer", "visit_villages")
-            plainText(h.screen.buttons.first().label) shouldBe "На сервер survival ›"
+            plainText(h.screen.buttons.first().label) shouldBe if (language == "ru") "На сервер survival ›" else "Go to survival ›"
             h.click("transfer")
             h.paper.performTicks(2)
-            h.body() shouldContain "Запрос перехода на survival отправлен"
+            h.body() shouldContain if (language == "ru") "Запрос перехода на survival отправлен" else "Connection to survival requested"
             h.open()
             verify(exactly = 2) { h.host.refreshCity(h.player) }
             verify(exactly = 1) { h.host.transferHome(h.player) }

@@ -104,6 +104,11 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
             return mapOf("node" to value.node, "from" to value.from, "incoming" to value.incoming,
                 "initial_bounds" to (value.bounds != null))
         }
+        fun edge(value: CitizenSearchEdge): List<Any> {
+            val node = value.node
+            if (!node.y.isFinite()) throw CivsRejection("invalid-navigation-edge")
+            return listOf(node.x, node.y, node.z, node.climbing, node.initial, value.action.name, value.permitted)
+        }
         fun capture(value: CitizenSearchCapture): Map<String, Any?> {
             val node = value.probe.node
             val y = floor(node.y).toInt()
@@ -112,7 +117,7 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
                 for (x in node.x - 1..node.x + 1) for (z in node.z - 1..node.z + 1) for (by in y - 3..y + 3)
                     add(block(value.blocks[CivPosition(x, by, z)] ?: throw CivsRejection("incomplete-navigation-neighbourhood")))
             }
-            return mapOf("probe" to probe(value.probe), "cells" to cells, "edges" to value.edges)
+            return mapOf("probe" to probe(value.probe), "cells" to cells, "edges" to value.edges.map(::edge))
         }
         val rounds = frame.rounds.map { round -> mapOf("captures" to round.captures.map(::capture),
             "probes" to round.probes.map(::probe), "nodes" to round.nodes) }
@@ -154,7 +159,7 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
             mapOf("point" to point, "block_data" to chunk.data(point).asString,
                 "support_cost_resolved" to (point in costsKnown))
         }
-        return linkedMapOf("schema" to 1, "source" to "selected-detached-failed-search", "request" to frame.request,
+        return linkedMapOf("schema" to 2, "source" to "selected-detached-failed-search", "request" to frame.request,
             "navigation_owner" to frame.generation, "context" to mapOf("identity" to frame.context.identity,
                 "city_revision" to frame.context.cityRevision, "plugin_version" to frame.context.pluginVersion,
                 "origin" to frame.context.origin, "target" to frame.context.target, "started_at_ms" to frame.context.startedAtMillis),
@@ -174,6 +179,7 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
                 "cost" to value.cost.takeIf(Double::isFinite), "boxes" to value.boxes) },
             "cells" to cells, "resolved_costs" to resolvedCosts, "block_states" to states,
             "rounds" to rounds, "pending_cursor" to cursor,
+            "edge_format" to listOf("x", "y", "z", "climbing", "initial", "action", "permitted"),
             "cell_order" to "x,z,y; each capture has x/z +/-1 and floor(y) +/-3",
             "missing_cell" to "not-captured; never air or native-unloaded", "null_cost" to "positive-infinity",
             "unresolved_cost" to "absent from resolved_costs; raw cell cost is not a support-cost proof")

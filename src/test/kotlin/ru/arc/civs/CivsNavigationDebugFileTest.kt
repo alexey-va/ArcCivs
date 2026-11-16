@@ -78,6 +78,61 @@ class CivsNavigationDebugFileTest : FunSpec({
         }
     }
 
+    test("a full supported capture fits the unchanged file limit and replays every original search round") {
+        navigationFileFixture(fullCapture = true) { h ->
+            val arm = h.arm()
+            val route = h.request(); h.attach(route); h.finish(route)
+            route.failure shouldBe "capture-budget"
+            h.io.runNext()
+            val receipt = arm.completion.join()
+            receipt["actual_blocks"] shouldBe 32_768
+            ((receipt["reported_blocks"] as Int) < 32_768) shouldBe true
+            val bytes = Files.readAllBytes(h.root.resolve(receipt["path"] as String))
+            (bytes.size <= 16 * 1024 * 1024) shouldBe true
+            val json = JsonParser.parseString(bytes.toString(Charsets.UTF_8)).asJsonObject
+            json["schema"].asInt shouldBe 2
+            replayNavigationCapture(json)
+        }
+    }
+
+    test("edge tuples preserve all actions flags permissions and double values and reject malformed values") {
+        navigationFileFixture { h ->
+            val edges = buildList {
+                for (action in CitizenRouteAction.entries) for (climbing in listOf(false, true))
+                    for (initial in listOf(false, true)) for (permitted in listOf(false, true))
+                        for (y in listOf(-0.0, 86.125))
+                            add(CitizenSearchEdge(CitizenSearchNode(-30_000_000, y, 29_999_999, climbing, initial), action, permitted))
+            }
+            fun withEdges(frame: CitizenNavigationDebugFrame, values: List<CitizenSearchEdge>): CitizenNavigationDebugFrame {
+                val index = frame.rounds.indexOfFirst { it.captures.isNotEmpty() }
+                require(index >= 0)
+                return frame.copy(rounds = frame.rounds.mapIndexed { i, round -> if (i != index) round else
+                    round.copy(captures = listOf(round.captures.first().copy(edges = values)) + round.captures.drop(1)) })
+            }
+            val file = CivsNavigationDebugFile(h.root, h.io)
+            var captured: CitizenNavigationDebugFrame? = null
+            val arm = h.arm { frame -> captured = frame; file.save(withEdges(frame, edges)) }
+            val route = h.request(); h.attach(route); h.finish(route)
+            h.io.runNext()
+            val receipt = arm.completion.join()
+            val json = JsonParser.parseString(Files.readString(h.root.resolve(receipt["path"] as String))).asJsonObject
+            json["schema"].asInt shouldBe 2
+            json["edge_format"].asJsonArray.map { it.asString } shouldBe navigationEdgeFormat
+            val encoded = json["rounds"].asJsonArray.first { !it.asJsonObject["captures"].asJsonArray.isEmpty }
+                .asJsonObject["captures"].asJsonArray.first().asJsonObject["edges"].asJsonArray
+            encoded.map(::navigationCaptureEdge) shouldBe edges
+            val invalid = file.save(withEdges(requireNotNull(captured), listOf(edges.first().copy(node = edges.first().node.copy(y = Double.NaN)))))
+            h.io.runNext()
+            navigationFileFailure(invalid) shouldBe "invalid-navigation-edge"
+        }
+        for (value in listOf(
+            "[1,2,3,false,false,\"WALK\"]", "[1.5,2,3,false,false,\"WALK\",true]",
+            "[1,\"NaN\",3,false,false,\"WALK\",true]", "[1,1e309,3,false,false,\"WALK\",true]",
+            "[1,2,3,\"false\",false,\"WALK\",true]", "[1,2,3,false,false,\"UNKNOWN\",true]",
+            "[1,2,3,false,false,\"WALK\",\"false\"]"))
+            shouldThrow<IllegalArgumentException> { navigationCaptureEdge(JsonParser.parseString(value)) }
+    }
+
     test("one slot expires without an active search and rejects stale intents and unsupported requests without cancelling gameplay") {
         navigationFileFixture { h ->
             val expired = h.arm()
@@ -218,11 +273,11 @@ class CivsNavigationDebugFileTest : FunSpec({
     }
 })
 
-private fun navigationFileFixture(run: (NavigationFileFixture) -> Unit) {
-    MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper -> NavigationFileFixture(paper).use(run) }
+private fun navigationFileFixture(fullCapture: Boolean = false, run: (NavigationFileFixture) -> Unit) {
+    MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper -> NavigationFileFixture(paper, fullCapture).use(run) }
 }
 
-private class NavigationFileFixture(private val paper: MockBukkitTestRuntime) : AutoCloseable {
+private class NavigationFileFixture(private val paper: MockBukkitTestRuntime, fullCapture: Boolean) : AutoCloseable {
     val root = Files.createTempDirectory("arccivs-navigation-file-")
     var nativeReads = 0
     private val main = Thread.currentThread()
@@ -233,13 +288,15 @@ private class NavigationFileFixture(private val paper: MockBukkitTestRuntime) : 
             return super.getBlockAt(x, y, z)
         }
     }.also(paper.server::addWorld)
-    val city = Settlement(UUID(0, 1), UUID(0, 900), "PRIVATE_CITY", world.uid, CivPosition(0, 64, 0),
+    val origin = if (fullCapture) CitizenPoint(12283.5, 64.0, 8342.211999999974) else CitizenPoint(.5, 64.0, .5)
+    val target = if (fullCapture) CitizenPoint(12307.5, 67.0, 8312.5) else CitizenPoint(20.5, 64.0, .5)
+    private val anchor = CivPosition(floor(origin.x).toInt(), 64, floor(origin.z).toInt())
+    val city = Settlement(UUID(0, 1), UUID(0, 900), "PRIVATE_CITY", world.uid, anchor,
         96, "fixture", Stock(wood = 12345), emptyList(), emptyList())
     val identity = CitizenNavigationDebugIdentity(city.id, UUID(0, 2), UUID(0, 3), world.uid,
-        CitizenToken(UUID(0, 4), 1692, 1_000, null, UUID(0, 5)), CivPosition(20, 64, 0))
-    val origin = CitizenPoint(.5, 64.0, .5)
-    val target = CitizenPoint(20.5, 64.0, .5)
-    val settings = CivsNavigationSettings(searchNodesPerBatch = 8, maximumCapturedBlocks = 512)
+        CitizenToken(UUID(0, 4), 1692, 1_000, null, UUID(0, 5)),
+        CivPosition(floor(target.x).toInt(), floor(target.y).toInt(), floor(target.z).toInt()))
+    val settings = if (fullCapture) CivsNavigationSettings() else CivsNavigationSettings(searchNodesPerBatch = 8, maximumCapturedBlocks = 512)
     val paths = CivsPaths()
     private val plugin = paper.createSimplePlugin("NavigationFile")
     private val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
@@ -252,10 +309,19 @@ private class NavigationFileFixture(private val paper: MockBukkitTestRuntime) : 
     val io = NavigationFileExecutor()
     private val file = CivsNavigationDebugFile(root, io)
     init {
-        for (x in -2..2) for (z in -2..2) world.loadChunk(x, z)
-        for (z in -20..20) for (y in 64..68) world.getBlockAt(1, y, z).type = Material.STONE
-        world.getBlockAt(-1, 63, 0).type = Material.DIRT_PATH
-        paths.begin(city).network.cells += CivPosition(0, 63, 1)
+        val chunkRadius = if (fullCapture) 8 else 2
+        for (x in -chunkRadius..chunkRadius) for (z in -chunkRadius..chunkRadius)
+            world.loadChunk((anchor.x shr 4) + x, (anchor.z shr 4) + z)
+        val wallRadius = if (fullCapture) 128 else 20
+        for (z in anchor.z - wallRadius..anchor.z + wallRadius) for (y in 64..68)
+            world.getBlockAt(anchor.x + 1, y, z).type = Material.STONE
+        if (fullCapture) {
+            for (x in anchor.x - wallRadius..anchor.x + wallRadius) for (y in 64..68)
+                world.getBlockAt(x, y, anchor.z - 2).type = Material.STONE
+        } else {
+            world.getBlockAt(-1, 63, 0).type = Material.DIRT_PATH
+            paths.begin(city).network.cells += CivPosition(0, 63, 1)
+        }
     }
     fun arm(save: (CitizenNavigationDebugFrame) -> CompletableFuture<Map<String, Any?>> = file::save) =
         owner.armDebug(identity, { current }, save)
@@ -298,6 +364,8 @@ private fun navigationFileReceipt(line: String) = JsonParser.parseString(line.re
 
 /** Deserialize only the artifact, then use the actual private search class; no original object supplies replay data. */
 private fun replayNavigationCapture(json: JsonObject) {
+    require(json["schema"].asInt == 2)
+    require(json["edge_format"].asJsonArray.map { it.asString } == navigationEdgeFormat)
     val gson = Gson()
     fun point(value: JsonElement) = gson.fromJson(value, CitizenPoint::class.java)
     val context = json["context"].asJsonObject
@@ -324,7 +392,7 @@ private fun replayNavigationCapture(json: JsonObject) {
             for (x in node.x - 1..node.x + 1) for (z in node.z - 1..node.z + 1) for (by in y - 3..y + 3)
                 put(CivPosition(x, by, z), palette[cells[index++].asInt])
         }
-        CitizenSearchCapture(probe, blocks, it["edges"].asJsonArray.map { edge -> gson.fromJson(edge, CitizenSearchEdge::class.java) })
+        CitizenSearchCapture(probe, blocks, it["edges"].asJsonArray.map(::navigationCaptureEdge))
     }
     fun signature(probe: CitizenSearchProbe) = listOf(probe.node, probe.from, probe.incoming, probe.bounds != null)
     val search = CitizenNavigationSearch(origin, target, json["minimum_y"].asInt, json["maximum_y"].asInt, emptyList(), settings)
@@ -342,4 +410,20 @@ private fun replayNavigationCapture(json: JsonObject) {
     last.path shouldBe null
     last.continuation shouldBe false
     last.blockedPositions shouldBe terminal["blocked_positions"].asJsonArray.map { gson.fromJson(it, CivPosition::class.java) }
+}
+
+private val navigationEdgeFormat = listOf("x", "y", "z", "climbing", "initial", "action", "permitted")
+
+private fun navigationCaptureEdge(value: JsonElement): CitizenSearchEdge {
+    require(value.isJsonArray && value.asJsonArray.size() == 7) { "Invalid navigation edge tuple" }
+    val edge = value.asJsonArray
+    fun primitive(index: Int) = edge[index].also { require(it.isJsonPrimitive) }.asJsonPrimitive
+    fun number(index: Int): Double = primitive(index).let { require(it.isNumber); it.asDouble.also { number -> require(number.isFinite()) } }
+    fun integer(index: Int): Int = number(index).let {
+        require(it % 1.0 == 0.0 && it >= Int.MIN_VALUE && it <= Int.MAX_VALUE)
+        it.toInt()
+    }
+    fun boolean(index: Int): Boolean = primitive(index).let { require(it.isBoolean); it.asBoolean }
+    val action = primitive(5).let { require(it.isString); CitizenRouteAction.valueOf(it.asString) }
+    return CitizenSearchEdge(CitizenSearchNode(integer(0), number(1), integer(2), boolean(3), boolean(4)), action, boolean(6))
 }

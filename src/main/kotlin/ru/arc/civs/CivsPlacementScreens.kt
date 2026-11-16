@@ -40,19 +40,13 @@ internal fun CivsUi.showWelcome(player: Player): Unit { present(player, "civs.we
 
 internal fun CivsUi.showRemote(player: Player, feedback: Component? = null) {
     val remote = host.remoteCity(player) ?: return showEntry(player)
-    val city = remote.city
     present(player, "civs.remote", "city.title", listOfNotNull(
-        body(tint(tr(player, "city.intro", "name" to city.name), LAND)),
+        body(tint(tr(player, "city.intro", "name" to remote.name), LAND)),
         body(tr(player, "network.remote-help", "server" to remote.server.value)),
         facts(player, listOf(
             tr(player, "network.server-label") to text.literal(remote.server.value),
-            tr(player, "label.level") to text.literal(city.level()),
-            tr(player, "label.radius") to tr(player, "city.radius", "radius" to city.radius),
-            tr(player, "label.population") to tr(player, "common.fraction", "value" to city.workers.size, "limit" to CivsRules.residentLimit(city)),
-            tr(player, "label.buildings") to text.literal(CivsRules.buildingCount(city)),
-            tr(player, "label.construction") to constructionText(player, city),
         )),
-        body(player, "network.snapshot-help"), feedback?.let(::body),
+        feedback?.let(::body),
     ), listOf(
         valueButton(player, "transfer", "network.transfer", text.literal(remote.server.value), NAVIGATION) {
             perform(player, "civs.remote", "city.title", { host.transferHome(player) },
@@ -60,7 +54,7 @@ internal fun CivsUi.showRemote(player: Player, feedback: Component? = null) {
                 failure = { showRemote(player, it) }, workingKey = "network.connecting")
         },
         button(player, "visit_villages", "villages.open", NAVIGATION) { showVillages(player) },
-    ), reopen = { showRemote(player) }, cityId = city.id)
+    ), reopen = { showRemote(player) }, cityId = remote.id)
 }
 
 

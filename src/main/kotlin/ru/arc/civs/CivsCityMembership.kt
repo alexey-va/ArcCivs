@@ -29,7 +29,7 @@ internal class CivsCityMembership(
     fun recoveredNames(names: Map<UUID, String>) { recoveredMemberNames = names }
     fun forget(playerId: UUID) { lookups.remove(playerId); remoteCities.remove(playerId) }
     fun forgetCity(city: Settlement) {
-        remoteCities.entries.removeIf { it.value.city.id == city.id }
+        remoteCities.entries.removeIf { it.value.id == city.id }
     }
     fun clear() { remoteCities.clear(); lookups.clear() }
 
@@ -57,7 +57,7 @@ internal class CivsCityMembership(
                         remoteCities[player.uniqueId] = record
                         result.complete(Unit)
                     }
-                    record != null && authority.city(player)?.id != record.city.id -> {
+                    record != null && authority.city(player)?.id != record.id -> {
                         authority.invalidateReadiness("storage-unavailable")
                         authority.updateHealth()
                         result.completeExceptionally(CivsRejection("storage-unavailable"))
