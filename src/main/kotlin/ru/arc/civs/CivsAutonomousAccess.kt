@@ -24,11 +24,16 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     val perimeterCaptures: Map<UUID, CivPerimeterCapture> = emptyMap(),
     private val surveyedHallApron: Map<Long, CivPosition> = emptyMap(),
     val hallWitness: CivHallApproach? = null,
-    val wallPavement: Map<UUID, CivWallApproachCapture> = emptyMap()) {
+    val wallPavement: Map<UUID, CivWallApproachCapture> = emptyMap(),
+    val sharedRoadCaptures: Map<UUID, CivSharedRoadCapture> = emptyMap()) {
     /** Retained construction journals stay immutable; only their public street view is filtered. */
     fun publicRoutes(city: Settlement): Map<UUID, List<CivPosition>> {
         val retired = CivsWallApproachCleanup.retired(city, routes)
-        return if (retired.isEmpty()) routes else routes.filterKeys { it !in retired }
+        val public = if (retired.isEmpty()) routes else routes.filterKeys { it !in retired }
+        val hall = hallApproach(city) ?: return public
+        return public.mapValues { (id, route) ->
+            if (hall.witness.branches.any { it.owner == id }) hall.travel(route) else route
+        }
     }
 
     fun hallApproach(city: Settlement): CivsTownHallApproach? {
@@ -212,7 +217,8 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                     plot.fortification?.let { CivsSettlementPlans.portReservations(it.proof) }.orEmpty()
                 }, paidHallLeadOut(city, routes), wallApproachWrites, perimeterCaptures,
                 hallWitness = CivsTownHallApproach.capture(city, retained, routes),
-                wallPavement = CivsWallApproachCleanup.captures(city, retained, routes))
+                wallPavement = CivsWallApproachCleanup.captures(city, retained, routes),
+                sharedRoadCaptures = CivsGateSharedApproaches.captures(city, retained))
         }
 
         /** Only an exact, corroborated paid centreline can replace the Hall's synthetic flat apron. */

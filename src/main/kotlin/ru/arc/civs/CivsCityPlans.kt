@@ -168,10 +168,18 @@ internal class CivsCityPlans(
     /** Reuse the sealed projection for a fresh receipt; a restarted server reopens the retained plan journals. */
     fun verifyHallCaptures(tx: CivInventoryTransaction): CompletableFuture<Unit> {
         val upkeep = requireNotNull(tx.upkeep?.work?.upkeep)
-        val proof = requireNotNull(upkeep.hall)
         val before = requireNotNull(tx.upkeep).before(tx.after)
         fun verify(access: CivAutonomousAccess) {
-            require(access.hallWitness == proof && access.hallApproach(before)?.surfaces?.get(upkeep.floor) == upkeep.after)
+            val shared = CivsGateSharedApproaches.repair(before, upkeep)
+            if (shared != null) {
+                require(CivsGateSharedApproaches.current(before, shared, access))
+                upkeep.wallCleanup?.let { cleanup ->
+                    require(cleanup.authored in requireNotNull(access.sharedRoadCaptures[upkeep.source.id]).pavement)
+                }
+            } else {
+                val proof = requireNotNull(upkeep.hall)
+                require(access.hallWitness == proof && access.hallApproach(before)?.surfaces?.get(upkeep.floor) == upkeep.after)
+            }
         }
         val cached = retainedRoutes[before.id]?.takeIf { it.matchesAccess(before, store.planGeneration, retainedEpoch) }
         if (cached != null) return try { verify(cached.access); CompletableFuture.completedFuture(Unit) }

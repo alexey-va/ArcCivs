@@ -54,6 +54,7 @@ internal class CivsRoadWorld(
             p.y !in world.minHeight + 1 until world.maxHeight - CivsRoadMaintenance.MAX_CLEARANCE) return null
         val block = world.getBlockAt(p.x, p.y, p.z)
         val after = Bukkit.createBlockData(upkeep.after)
+        val shared = CivsGateSharedApproaches.repair(city, upkeep)
         val path = upkeep.route?.let { CivsEntrancePath.from(upkeep.source, it) }
             ?.takeIf { upkeep.routeOverride == null && upkeep.junction == null && it.surface(p, city.style) == upkeep.after }
         val hall = upkeep.hall?.let { CivsTownHallApproach.from(city, upkeep.source, it) }
@@ -73,7 +74,10 @@ internal class CivsRoadWorld(
         }
         val foundation = mutableListOf<CivPlanBlock>()
         val below = world.getBlockAt(p.x, p.y - 1, p.z)
-        if (hall?.retiredShoulder(p) == true) {
+        if (shared != null) {
+            // Reusing an already walkable corridor never licenses new foundations or an open cut.
+            if (!roadUpkeepSupport(below)) return null
+        } else if (hall?.retiredShoulder(p) == true) {
             if (change == null || !roadUpkeepSupport(below)) return null
         } else if (hall != null && !forecourt) {
             for (depth in 1..CivsAutonomousTerraform.MAXIMUM_CHANGE) {
@@ -116,7 +120,16 @@ internal class CivsRoadWorld(
         val clearance = (1..if (forecourt || bank && hall == null) 2 else CivsRoadMaintenance.MAX_CLEARANCE).map { dy ->
             world.getBlockAt(p.x, p.y + dy, p.z).blockData.asString
         }
-        val cover = if (hall?.retiredShoulder(p) == true) {
+        val cover = if (shared != null) {
+            val changes = mutableListOf<CivPlanBlock>()
+            for ((index, data) in clearance.withIndex()) {
+                if (data in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")) continue
+                if (bank && data == "minecraft:snow[layers=1]") continue
+                if (bank || index >= 2 || data !in setOf("minecraft:snow[layers=1]", "minecraft:short_grass", "minecraft:fern")) return null
+                changes += CivPlanBlock(p.copy(y = p.y + index + 1), data, "minecraft:air")
+            }
+            changes
+        } else if (hall?.retiredShoulder(p) == true) {
             if (clearance.any { !CivsTownHallApproach.air(it) }) return null
             emptyList()
         } else if (hall != null) {
@@ -189,6 +202,7 @@ internal class CivsRoadWorld(
             return world.getBlockAt(p.x, p.y, p.z)
         }
         val p = upkeep.floor
+        val shared = CivsGateSharedApproaches.repair(city, upkeep)
         val hall = upkeep.hall?.let { CivsTownHallApproach.from(city, upkeep.source, it) }
         val forecourt = if (hall != null) hall.yard(p) else
             upkeep.source.bounds.contains(p.x, p.y, p.z) && CivsWorksiteLayouts.forecourt(upkeep.source)[p] == upkeep.after
@@ -249,7 +263,8 @@ internal class CivsRoadWorld(
         for (dy in 1..maxOf(2, cover.keys.maxOfOrNull { it.y - p.y } ?: 0)) {
             val head = read(p.copy(y = p.y + dy))
             val clear = cover[CivPosition(head.x, head.y, head.z)]
-            if (clear == null) requireCivs(head.type.isAir || hall != null && bank && head.type == Material.SNOW, "world-changed")
+            if (clear == null) requireCivs(head.type.isAir || hall != null && bank && head.type == Material.SNOW ||
+                shared != null && bank && head.blockData.asString == "minecraft:snow[layers=1]", "world-changed")
             else {
                 requireCivs(head.blockData.asString == clear.before || head.blockData.asString == clear.after, "world-changed")
                 requireCivs(head.state !is TileState && !head.isLiquid &&
@@ -289,6 +304,17 @@ internal class CivsRoadWorld(
         if (!(hall != null && bank && read(p.copy(y = p.y + 1)).type == Material.SNOW))
             requireCivs(citizenPacketBodyClear(world, future, false, collision = ::collision), "autonomy-no-path")
         requireCivs(citizenPacketCampfireClear(world, future), "autonomy-no-path")
+        if (shared != null) {
+            requireCivs(shared.route.all { step -> (((step.x - 2) shr 4)..((step.x + 2) shr 4)).all { x ->
+                (((step.z - 2) shr 4)..((step.z + 2) shr 4)).all { z -> citizenChunkReady(world, x, z) }
+            } }, "chunks-unloaded")
+            val connector = CivsGateSharedApproaches.connector(shared)
+            // Pave the terminal first. A healthy terminal may instead publish the route with the
+            // first exact obsolete-floor receipt; no empty work or free resource credit is created.
+            if (connector != p) requireCivs(read(connector).blockData.asString == "minecraft:dirt_path", "world-changed")
+            requireCivs(roadHalfStepWalk(world, shared.route, ::collision) != null &&
+                roadHalfStepWalk(world, shared.route.asReversed(), ::collision) != null, "autonomy-no-path")
+        }
         if (hall != null) {
             for (check in hall.crossingChecks(p,work.changes)) {
                 requireCivs((check.before+check.after).all { step -> (-1..1).all { dx -> (-1..1).all { dz ->

@@ -68,7 +68,8 @@ internal class CivsInventoryJournal(
             val walks = upkeep.hall?.let { proof ->
                 CivsTownHallApproach.from(tx.after, upkeep.source, proof)?.crossingChecks(upkeep.floor, work.changes)?.map { it.before + it.after }
             }.orEmpty()
-            val floors = listOf(upkeep.floor, work.standing) + upkeep.neighbours + cut + walks.flatten()
+            val sharedWalk = CivsGateSharedApproaches.repair(tx.after, upkeep)?.route.orEmpty()
+            val floors = listOf(upkeep.floor, work.standing) + upkeep.neighbours + cut + walks.flatten() + sharedWalk
             for (floor in floors) for (x in ((floor.x - 2) shr 4)..((floor.x + 2) shr 4))
                 for (z in ((floor.z - 2) shr 4)..((floor.z + 2) shr 4)) keys += PaperChunkKey(tx.after.worldId, x, z)
         }
@@ -251,7 +252,7 @@ internal class CivsInventoryJournal(
             val before = tx.containerRelocation?.before(tx.after) ?: requireNotNull(tx.bufferPickup).before(tx.after)
             if (cities[tx.cityId] != before && cities[tx.cityId] != tx.after) return fail(CivsRejection("stale-city"))
         }
-        if (tx.upkeep?.work?.upkeep?.hall != null && !gateVerified) {
+        if (tx.upkeep?.work?.upkeep?.let { it.hall != null || CivsGateSharedApproaches.repair(tx.after, it) != null } == true && !gateVerified) {
             runCatching { verifyHallCaptures(tx) }.getOrElse { CompletableFuture.failedFuture(it) }
                 .whenCompleteSync(tasks) { _, failure ->
                     if (failure != null) fail(failure) else applyInventory(tx, result, gateVerified = true)
@@ -460,7 +461,8 @@ internal class CivsInventoryJournal(
             storage.lock(tx)
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
-                if (tx.gateRefit != null || tx.warehouseRefit != null || tx.authoredVegetation != null || tx.upkeep?.work?.upkeep?.hall != null ||
+                if (tx.gateRefit != null || tx.warehouseRefit != null || tx.authoredVegetation != null ||
+                    tx.upkeep?.work?.upkeep?.let { it.hall != null || CivsGateSharedApproaches.repair(tx.after, it) != null } == true ||
                     tx.containerRelocation?.buffer != null || tx.bufferPickup != null) {
                     rejectIf(city != tx.after, "stale-city")
                     applyInventory(tx, null)

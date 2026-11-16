@@ -62,6 +62,9 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
                                 hall?.takeIf { h -> h.witness.branches.any { it.owner == building.id } }?.travel(terminal) ?: terminal
                             }
                         for (feet in route.orEmpty()) add(feet.copy(y = feet.y - 1))
+                        if (building.type == BuildingType.GATE &&
+                            CivsGateSharedApproaches.proof(city.roadRouteOverrides?.get(building.id.toString())) != null)
+                            for (feet in access.routes[building.id].orEmpty()) add(feet.copy(y = feet.y - 1))
                         if (building.type == BuildingType.GUARD_TOWER && route != null)
                             guardApproaches[building.id] = java.util.List.copyOf(route)
                     }

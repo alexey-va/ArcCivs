@@ -175,6 +175,7 @@ data class CivRoadUpkeep(
         require(city.id == cityId && city.worldId == worldId && city.owner == owner && city.pendingDeletion == null)
         require(planId == source.id && source.phase == BuildingPhase.ACTIVE && city.building(source.id) == source)
         wallCleanup?.let { it.validated(city, this); return }
+        CivsGateSharedApproaches.repair(city, this)?.let { CivsGateSharedApproaches.validateWork(city, this, it); return }
         hall?.let { proof ->
             require(route == null && routeOverride == null && linkedRouteOverrides == null && previousRouteOverrides == null &&
                 authoredAfter == null && junction == null && neighbours.isEmpty() && city.contains(floor.x, floor.z))
@@ -947,6 +948,17 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             require(changes.size in 1..CivsAutonomousTerraform.MAXIMUM_CHANGE + MAX_CLEARANCE &&
                 changes.map { it.position }.distinct().size == changes.size)
             require(changes.all { it.before != it.after })
+            if (CivsGateSharedApproaches.repair(city, upkeep) != null && upkeep.wallCleanup == null) {
+                val floor = changes.firstOrNull()?.takeIf { it.position == upkeep.floor }
+                require(floor == null || floor.after == upkeep.after &&
+                    (forecourtSoil(floor.before) || floor.before in setOf("minecraft:coarse_dirt", "minecraft:dirt_path")))
+                val cover = changes.drop(if (floor == null) 0 else 1)
+                require(cover.size <= 2 && cover.all { it.position.x == upkeep.floor.x && it.position.z == upkeep.floor.z &&
+                    it.position.y in upkeep.floor.y + 1..upkeep.floor.y + 2 && it.after == "minecraft:air" &&
+                    it.before in setOf("minecraft:snow[layers=1]", "minecraft:short_grass", "minecraft:fern") } &&
+                    cover.zipWithNext().all { (a, b) -> a.position.y < b.position.y })
+                return
+            }
             upkeep.wallCleanup?.let { proof ->
                 val change = changes.single()
                 require(change.position == upkeep.floor && change.after == CivsEntrancePath.GRASS &&
@@ -1406,6 +1418,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             // committed terrace. Finish one doorway's admitted apron before travelling to another.
             return CivRoadUpkeepNetwork(city.id, city.worldId, city.buildings.toList(),
                 gradeTargets.filterNot { touchesHall(it, hallColumns) } + preservedGrades +
+                    (if (proposeCuts) CivsGateSharedApproaches.targets(city, access) else emptyList()) +
                     (if (proposeCuts) CivsWallApproachCleanup.targets(city, access) else emptyList()) +
                     entrances.values.flatten() + remaining,
                 city.roadRouteOverrides, deferredDescent)

@@ -395,11 +395,9 @@ class CivsStore(
                 "Ground item already has an inventory transaction"
             }
             consumedItems.admit(trustedRoot, snapshot, pending)
-            val document = InventoryTransactionDocument(SCHEMA_VERSION, snapshot)
-            if (gson.toJson(CityDocument(SCHEMA_VERSION, snapshot.after)).toByteArray(StandardCharsets.UTF_8).size > MAX_CITY_DOCUMENT_BYTES ||
-                gson.toJson(document).toByteArray(StandardCharsets.UTF_8).size > MAX_INVENTORY_TRANSACTION_BYTES)
+            if (gson.toJson(CityDocument(SCHEMA_VERSION, snapshot.after)).toByteArray(StandardCharsets.UTF_8).size > MAX_CITY_DOCUMENT_BYTES)
                 throw CivsRejection("storage-transaction-too-large")
-            val written = requireNotNull(store.write(document).transaction)
+            val written = requireNotNull(store.write(InventoryTransactionDocument(SCHEMA_VERSION, snapshot)).transaction)
             // AtomicFileStore forces inventory-transactions itself. Also persist its newly-created entry in
             // settlements before native debit; otherwise a crash could lose the entire acknowledged journal.
             forceDirectories(trustedRoot)
@@ -657,7 +655,12 @@ class CivsStore(
         root = trustedRoot,
         relativePath = Path.of("inventory-transactions", "$id.json"),
         maxBytes = MAX_INVENTORY_TRANSACTION_BYTES,
-        encode = { gson.toJson(it).toByteArray(StandardCharsets.UTF_8) },
+        encode = {
+            gson.toJson(it).toByteArray(StandardCharsets.UTF_8).also { bytes ->
+                // Preserve the typed admission rejection before AtomicFileStore creates a temporary file.
+                if (bytes.size > MAX_INVENTORY_TRANSACTION_BYTES) throw CivsRejection("storage-transaction-too-large")
+            }
+        },
         decode = { decodeJson(it, InventoryTransactionDocument::class.java) },
         validate = { record ->
             require(record.schemaVersion == SCHEMA_VERSION) { "Unsupported inventory transaction schema" }

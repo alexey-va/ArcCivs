@@ -102,6 +102,45 @@ class CivsNavigationSearchTest : FunSpec({
         result.path?.last()?.point shouldBe target
     }
 
+    test("one expansion rejects swept contacts and missing cells without blocking later clear edges") {
+        val origin = CitizenPoint(.5, 64.0, .5)
+        val air = CitizenTerrainBlock(true, false, false, false, false, true, 1.0, emptyList())
+        val blocks = buildMap {
+            for (x in -1..1) for (z in -1..1) for (y in 62..67) put(CivPosition(x, y, z), air)
+            put(CivPosition(-1, 64, -1), air.copy(climbable = true, boxes = listOf(
+                CitizenTerrainBox(.02, .05, .02, .08, .10, .08),
+                CitizenTerrainBox(.90, .05, .05, .95, .10, .10),
+                // This overhang is captured by the diagonal, outside the north edge's cell range.
+                CitizenTerrainBox(1.21, .05, .32, 1.30, .10, .40))))
+            // The diagonal contacts this thin post only between its discrete body samples.
+            put(CivPosition(-1, 64, 0), air.copy(boxes = listOf(CitizenTerrainBox(.72, .05, .32, .73, .10, .33))))
+            put(CivPosition(0, 63, -1), air.copy(liquid = true))
+            put(CivPosition(0, 64, -1), air.copy(climbable = true, boxes = listOf(
+                // The north edge only touches this face. The east edge does not capture its cell.
+                CitizenTerrainBox(.5 + .299, .05, 1.32, .91, .10, 1.40))))
+            put(CivPosition(1, 64, 0), air.copy(climbable = true))
+            put(CivPosition(0, 63, 1), air.copy(boxes = listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, .9, 1.0))))
+            put(CivPosition(0, 65, 1), CitizenTerrainBlock.UNAVAILABLE)
+            put(CivPosition(1, 64, 1), air.copy(climbable = true))
+            put(CivPosition(1, 64, -1), air.copy(boxes = List(3) { i ->
+                CitizenTerrainBox(i / 3.0, 0.0, 0.0, (i + 1) / 3.0, .5, 1.0)
+            }))
+        }
+        fun enter(x: Int, z: Int) =
+            CitizenSearchEdge(CitizenSearchNode(x, 64.0, z, climbing = true), CitizenRouteAction.LADDER_ENTER, true)
+        val north = enter(0, -1)
+        val east = enter(1, 0)
+        val step = CitizenSearchEdge(CitizenSearchNode(1, 64.5, -1), CitizenRouteAction.STEP, true)
+        val search = CitizenNavigationSearch(origin, CitizenPoint(10.5, 64.5, -.5), 0, 256, emptyList())
+        val probe = search.advance(emptyList()).probes.single()
+        val result = search.advance(listOf(CitizenSearchCapture(probe, blocks,
+            listOf(enter(-1, -1), north, east, enter(1, 1), step))))
+
+        result.probes.map(CitizenSearchProbe::node) shouldBe listOf(east.node, step.node, north.node)
+        result.nodes shouldBe 4
+        result.failure shouldBe null
+    }
+
     test("the configured search batch limits detached frontier requests") {
         for (batch in listOf(1, 8)) {
             val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), CitizenPoint(90.5, 64.0, .5),

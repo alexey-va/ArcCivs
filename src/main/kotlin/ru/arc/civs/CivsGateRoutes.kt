@@ -3,10 +3,11 @@ package ru.arc.civs
 import java.util.UUID
 import kotlin.math.abs
 
-/** A short detour belongs to one immutable refitted gate, never to arbitrary surrounding terrain. */
+/** A short detour binds a refitted gate interior or two exact immutable paid approaches. */
 data class CivGateRouteDetour(val gateId: UUID, val captureId: UUID,
-    val before: List<CivPosition>, val after: List<CivPosition>) {
-    internal fun detached() = copy(before = before.toList(), after = after.toList())
+    val before: List<CivPosition>, val after: List<CivPosition>,
+    val sharedApproach: CivGateSharedApproach? = null) {
+    internal fun detached() = copy(before = before.toList(), after = after.toList(), sharedApproach = sharedApproach?.detached())
 
     internal fun validated(city: Settlement, owner: CivBuilding) {
         val gate = requireNotNull(city.building(gateId))
@@ -14,6 +15,7 @@ data class CivGateRouteDetour(val gateId: UUID, val captureId: UUID,
             CivsGateRefit.retainedPlanId(gate) == captureId)
         require(before.size in 3..30 && after.size in 3..30 && before != after &&
             before.first() == after.first() && before.last() == after.last())
+        sharedApproach?.let { it.validated(city, owner, before, after); return }
         for (route in listOf(before, after)) {
             require(route.map { it.x to it.z }.distinct().size == route.size)
             require(route.all { gate.bounds.contains(it.x, it.y, it.z) && it.y in gate.bounds.min.y + 1..gate.bounds.max.y - 4 })
@@ -24,7 +26,7 @@ data class CivGateRouteDetour(val gateId: UUID, val captureId: UUID,
     }
 }
 
-/** Reuses the existing route-override owner; only a gate's own approach may detour inside its paid floor. */
+/** Reuses the route-override owner and preserves every previously accepted grade. */
 internal object CivsGateRoutes {
     fun refit(city: Settlement, old: CivBuilding, target: CivBuilding, original: List<CivPosition>): CivRoadRouteOverride? {
         val prior = city.roadRouteOverrides?.get(old.id.toString())

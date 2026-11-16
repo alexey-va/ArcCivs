@@ -121,10 +121,10 @@ internal fun civsPlanBoardSnapshot(city: Settlement, saved: List<CivPlacementPla
         it.id == CivsWarehouseRefit.retainedPlanId(it.building)
     })
     val retired = CivsWallApproachCleanup.retired(city, access.routes)
-    val publicRoutes = access.routes - retired
+    val publicRoutes = access.publicRoutes(city)
     val retiredKeys = retired.mapTo(hashSetOf(), UUID::toString)
     val publicPlan = CivsSettlementPlans.detached(CivsSettlementPlans.current(city))?.let { plan ->
-        plan.copy(routes = plan.routes - retiredKeys)
+        plan.copy(routes = (plan.routes - retiredKeys).mapValues { (id, route) -> publicRoutes[UUID.fromString(id)] ?: route })
     }
     return CivPlanBoardSnapshot(city.id, city.name, civsPlanBoardLayoutKey(city), city.worldId, city.center, city.radius,
         city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map { it.boardCopy() }, planned.values.toList(),

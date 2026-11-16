@@ -4,6 +4,10 @@ import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FreeSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.MockKMatcherScope
+import io.mockk.every
+import io.mockk.mockkConstructor
+import io.mockk.verify
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.io.RandomAccessFile
 import java.nio.file.Files
@@ -578,13 +582,18 @@ class CivsStoreTest : FreeSpec({
 
     "inventory journal allows only an exact retry, retains one pending receipt per city and reloads after reopen" {
         val transaction = inventoryTransaction(settlement())
-        val store = CivsStore(root, directExecutor)
-        store.saveInventoryTransaction(transaction).join() shouldBe transaction
-        store.saveInventoryTransaction(transaction).join() shouldBe transaction
-        shouldThrow<CompletionException> {
-            store.saveInventoryTransaction(transaction.copy(after = transaction.after.copy(name = "Changed retry"))).join()
+        val json = inventoryJournalJson(transaction)
+        mockkConstructor(Gson::class, localToThread = true) {
+            val store = CivsStore(root, directExecutor)
+            store.saveInventoryTransaction(transaction).join() shouldBe transaction
+            store.saveInventoryTransaction(transaction).join() shouldBe transaction
+            shouldThrow<CompletionException> {
+                store.saveInventoryTransaction(transaction.copy(after = transaction.after.copy(name = "Changed retry"))).join()
+            }
+            shouldThrow<CompletionException> { store.saveInventoryTransaction(transaction.copy(id = UUID.randomUUID())).join() }
+            verify(exactly = 1) { anyConstructed<Gson>().toJson(inventoryJournalDocument()) }
         }
-        shouldThrow<CompletionException> { store.saveInventoryTransaction(transaction.copy(id = UUID.randomUUID())).join() }
+        Files.readString(root.resolve("inventory-transactions/${transaction.id}.json")) shouldBe json
         val reopened = CivsStore(root, directExecutor)
         reopened.loadInventoryTransactions().join() shouldBe listOf(transaction)
         reopened.deleteInventoryTransaction(transaction.id).join() shouldBe true
@@ -806,6 +815,26 @@ class CivsStoreTest : FreeSpec({
         store.load().join() shouldBe listOf(initial)
     }
 
+    "inventory admission rejects oversized journal bytes with a committable after-city" {
+        val initial = settlement()
+        val transaction = inventoryTransaction(initial)
+        val oversized = inventoryJournalJson(transaction).padEnd(CivsStore.MAX_INVENTORY_TRANSACTION_BYTES.toInt() + 1)
+        CivsStore(root, directExecutor).save(initial).join() shouldBe initial
+        mockkConstructor(Gson::class, localToThread = true) {
+            every { anyConstructed<Gson>().toJson(inventoryJournalDocument()) } returns oversized
+            val failure = shouldThrow<CompletionException> {
+                CivsStore(root, directExecutor).saveInventoryTransaction(transaction).join()
+            }
+            (failure.cause as CivsRejection).reason shouldBe "storage-transaction-too-large"
+            verify(exactly = 1) { anyConstructed<Gson>().toJson(inventoryJournalDocument()) }
+        }
+        val directory = root.resolve("inventory-transactions")
+        if (Files.exists(directory)) Files.list(directory).use { it.count() } shouldBe 0L
+        val reopened = CivsStore(root, directExecutor)
+        reopened.loadInventoryTransactions().join() shouldBe emptyList()
+        reopened.load().join() shouldBe listOf(initial)
+    }
+
     "oversized inventory journals fail before decoding and identity mismatch never deletes the receipt" {
         val transaction = inventoryTransaction(settlement())
         val path = root.resolve("inventory-transactions/${transaction.id}.json")
@@ -873,6 +902,12 @@ class CivsStoreTest : FreeSpec({
                 CivInventorySlotChange(control, "BARREL", 0, CivPlainItem("OAK_LOG", 2), CivPlainItem("OAK_LOG", 1)),
             ))
         }
+
+        private fun inventoryJournalJson(transaction: CivInventoryTransaction): String =
+            Gson().toJson(mapOf("schemaVersion" to CivsStore.SCHEMA_VERSION, "transaction" to transaction))
+
+        private fun MockKMatcherScope.inventoryJournalDocument(): Any =
+            match { it.javaClass.simpleName == "InventoryTransactionDocument" }
 
         private fun writeCity(path: Path, city: Settlement) {
             Files.writeString(path, Gson().toJson(TestCityDocument(1, city)))
