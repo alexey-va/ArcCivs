@@ -50,6 +50,39 @@ internal class CitizenSnapshotTerrain {
     val costs = hashMapOf<CivPosition, Double>()
     val blocks = CitizenSnapshotCells()
     val sections = hashMapOf<CitizenSnapshotSectionKey, Long>()
+    private val seeded = hashMapOf<CitizenSnapshotSectionKey, CitizenSnapshotSection>()
+    private var publishedPayloads = emptyList<CitizenSnapshotSection>()
+    private var payloadsChanged = true
+
+    fun merge(key: CitizenSnapshotKey, chunk: CitizenSnapshotChunk) {
+        chunks[key]?.merge(chunk) ?: run { chunks[key] = chunk }
+        payloadsChanged = true
+    }
+    fun unavailable(keys: Set<CitizenSnapshotKey>) {
+        // A later partial-section request can observe a downgrade without a native unload event.
+        // Previously consumed geometry cannot be mixed with that unavailable reply.
+        if (keys.any { it in chunks }) throw CitizenSnapshotUnavailable()
+        unavailable += keys
+        seeded.keys.removeIf { CitizenSnapshotKey(it.x, it.z) in keys }
+        if (keys.isNotEmpty()) payloadsChanged = true
+    }
+    fun seed(values: List<CitizenSnapshotSection>) {
+        for (value in values) if (value.key !in sections) seeded[value.key] = value
+        if (values.isNotEmpty()) payloadsChanged = true
+    }
+    fun activate(section: CitizenSnapshotSectionKey, minimumY: Int, maximumY: Int) {
+        if (CitizenSnapshotKey(section.x, section.z) in unavailable) return
+        val value = seeded.remove(section) ?: return
+        val key = CitizenSnapshotKey(section.x, section.z)
+        merge(key, CitizenSnapshotChunk.detached(key, minimumY, maximumY, listOf(value)))
+    }
+    fun payloads(changed: Boolean = false): List<CitizenSnapshotSection> {
+        if (payloadsChanged || changed) {
+            publishedPayloads = chunks.values.flatMap { it.payloads() } + seeded.values
+            payloadsChanged = false
+        }
+        return publishedPayloads
+    }
 
     fun collectMissingStates(palette: Map<BlockData, CivPosition>, missing: MutableMap<BlockData, CivPosition>) {
         if (palette in resolvedPalettes) return
@@ -70,6 +103,7 @@ internal data class CitizenSnapshotInput(
     val states: Map<BlockData, CitizenSnapshotState> = emptyMap(),
     val dynamics: Map<CivPosition, List<CitizenTerrainBox>> = emptyMap(),
     val costs: Map<CivPosition, Double> = emptyMap(),
+    val seeded: List<CitizenSnapshotSection> = emptyList(),
 )
 
 internal data class CitizenSnapshotRequest(
@@ -80,6 +114,9 @@ internal data class CitizenSnapshotRequest(
     val captures: List<CitizenSearchCapture>? = null,
     val capturedBlocks: Int = 0,
     val sections: Map<CitizenSnapshotSectionKey, Long> = emptyMap(),
+    val requestedSections: Set<CitizenSnapshotSectionKey> = emptySet(),
+    val decoded: Map<CitizenSnapshotSectionKey, CitizenSnapshotSection> = emptyMap(),
+    val payloads: List<CitizenSnapshotSection> = emptyList(),
 )
 
 /** The existing dense neighbourhood needs no temporary key; ordinary maps keep their exact lookup. */
@@ -176,9 +213,35 @@ internal class CitizenSnapshotCapture(
     @JvmOverloads
     fun advance(input: CitizenSnapshotInput,
                 captured: ((CitizenSearchProbe) -> CitizenSearchCapture?)? = null): CitizenSnapshotRequest {
-        checkCancelled()
-        terrain.chunks.putAll(input.chunks)
-        terrain.unavailable += input.unavailable
+        try {
+            checkCancelled()
+            for ((key, chunk) in input.chunks) {
+                chunk.prepare()
+                // A direct test fixture can supply an undecoded handoff; production inputs name their sections.
+                if (chunk.retainsNativeSnapshot && chunk.payloads().isEmpty()) probes.getOrNull(next)?.let { probe ->
+                    val y = floor(probe.node.y).toInt()
+                    if (y - 3 < maximumY && y + 3 >= minimumY) chunk.states(y - 3, y + 3)
+                }
+                extracted.putAll(chunk.drainExtracted())
+                terrain.merge(key, chunk)
+            }
+            return advancePrepared(input, captured)
+        } catch (missing: CitizenSnapshotSectionMissing) {
+            return request(chunks = setOf(CitizenSnapshotKey(missing.section.x, missing.section.z)),
+                requestedSections = setOf(missing.section))
+        } finally {
+            // Futures and route inputs can outlive a worker slice, but never retain its whole native column copy.
+            input.chunks.values.forEach(CitizenSnapshotChunk::releaseSource)
+            terrain.chunks.values.forEach(CitizenSnapshotChunk::releaseSource)
+        }
+    }
+
+    private val extracted = linkedMapOf<CitizenSnapshotSectionKey, CitizenSnapshotSection>()
+
+    private fun advancePrepared(input: CitizenSnapshotInput,
+        captured: ((CitizenSearchProbe) -> CitizenSearchCapture?)?): CitizenSnapshotRequest {
+        terrain.seed(input.seeded)
+        terrain.unavailable(input.unavailable)
         terrain.states.putAll(input.states)
         terrain.dynamics.putAll(input.dynamics)
         terrain.costs.putAll(input.costs)
@@ -202,18 +265,23 @@ internal class CitizenSnapshotCapture(
                 for (cx in (xs.first shr 4)..(xs.last shr 4))
                     for (cz in (zs.first shr 4)..(zs.last shr 4)) add(CitizenSnapshotKey(cx, cz))
             }
-            val missingChunks = if (minimumY < maximumY && y - 3 < maximumY && y + 3 >= minimumY)
-                chunkKeys.filterTo(linkedSetOf()) { it !in terrain.chunks && it !in terrain.unavailable }
-                else emptySet()
-            if (missingChunks.isNotEmpty()) return request(chunks = missingChunks)
-            for (key in chunkKeys) {
-                val chunk = terrain.chunks[key] ?: continue
-                for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4)) {
-                    val section = CitizenSnapshotSectionKey(key.x, sy, key.z)
-                    if (section !in terrain.sections) {
-                        terrain.sections[section] = chunk.revision
-                        newSections[section] = chunk.revision
-                    }
+            val needed = if (minimumY < maximumY && y - 3 < maximumY && y + 3 >= minimumY) buildSet {
+                for (key in chunkKeys) for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4))
+                    add(CitizenSnapshotSectionKey(key.x, sy, key.z))
+            } else emptySet()
+            needed.forEach { terrain.activate(it, minimumY, maximumY) }
+            val missing = needed.filterTo(linkedSetOf()) { section ->
+                val key = CitizenSnapshotKey(section.x, section.z)
+                key !in terrain.unavailable && terrain.chunks[key]?.available(section.y) != true
+            }
+            if (missing.isNotEmpty()) return request(
+                chunks = missing.mapTo(linkedSetOf()) { CitizenSnapshotKey(it.x, it.z) }, requestedSections = missing)
+            for (section in needed) {
+                val chunk = terrain.chunks[CitizenSnapshotKey(section.x, section.z)] ?: continue
+                if (section !in terrain.sections) {
+                    val revision = chunk.stamp(section.y)
+                    terrain.sections[section] = revision
+                    newSections[section] = revision
                 }
             }
             val missingStates = linkedMapOf<BlockData, CivPosition>()
@@ -303,16 +371,29 @@ internal class CitizenSnapshotCapture(
 
     private fun material(point: CivPosition): Material? = blockData(point)?.material
 
-    private fun blockData(point: CivPosition, copyCached: Boolean = false): BlockData? =
-        if (point.y !in minimumY until maximumY) null
-        else terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)]?.data(point, copyCached)
+    private fun blockData(point: CivPosition, copyCached: Boolean = false): BlockData? {
+        if (point.y !in minimumY until maximumY) return null
+        val chunk = terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)] ?: return null
+        val section = CitizenSnapshotSectionKey(point.x shr 4, point.y shr 4, point.z shr 4)
+        terrain.activate(section, minimumY, maximumY)
+        if (section !in terrain.sections) {
+            val revision = chunk.stamp(section.y)
+            terrain.sections[section] = revision
+            newSections[section] = revision
+        }
+        return chunk.data(point, copyCached)
+    }
 
     private fun request(chunks: Set<CitizenSnapshotKey> = emptySet(), states: Map<BlockData, CivPosition> = emptyMap(),
         dynamics: Map<CivPosition, BlockData> = emptyMap(), costs: Set<CivPosition> = emptySet(),
-        captures: List<CitizenSearchCapture>? = null): CitizenSnapshotRequest {
+        captures: List<CitizenSearchCapture>? = null, requestedSections: Set<CitizenSnapshotSectionKey> = emptySet()): CitizenSnapshotRequest {
         val sections = newSections.toMap()
         newSections.clear()
-        return CitizenSnapshotRequest(chunks, states, dynamics, costs, captures, terrain.blocks.size, sections)
+        terrain.chunks.values.forEach { extracted.putAll(it.drainExtracted()) }
+        val decoded = extracted.toMap()
+        extracted.clear()
+        return CitizenSnapshotRequest(chunks, states, dynamics, costs, captures, terrain.blocks.size, sections,
+            requestedSections, decoded, terrain.payloads(decoded.isNotEmpty()))
     }
 
     private fun checkCancelled() { if (cancelled.get()) throw CancellationException("Navigation snapshot retired") }

@@ -319,6 +319,8 @@ internal class CivsCitizenWork(
                 "distance" to sqrt(actual.distanceSquared(route.target.point())),
                 "elapsed_ms" to now - route.startedAt)
         }
+        // The work pulse can prove native arrival before the next movement frame.
+        actor.route?.motion?.observeAcceptedArrival(actor.npc.location.point())
         routes.captureCourierReturnHint(actor, city)
         routes.cancelRoute(actor)
         if (actor.cycle.phase == CitizenPhase.TO_STORAGE && city.inventory != null && actor.plan.courier == null &&

@@ -246,7 +246,7 @@ class CivsService(
     private val residentLife = CivsResidentLifeRuntime(plugin, tasks, citizens, chunkLoading, settings.viewerRange,
         { cities }, busy, unhealthy, ::settlementActive,
         { id, action -> afterCityAvailable(id, action) }, { id, action -> afterCityAvailable(id, action) },
-        { id, transform -> mutate(id, transform = transform) }, clock, residentFoods,
+        { id, transform -> mutateCity(id, allowDeletion = false, buffered = true, transform = transform) }, clock, residentFoods,
         maintenanceAssignment = roadMaintenance::maintenanceAssignment,
         maintenanceHeld = roadMaintenance::holdsAssignment)
 
@@ -437,6 +437,7 @@ class CivsService(
             val residentChunks = if (ready()) citizens.chunkPositions() else emptyMap()
             chunkLoading.pulse(activeCities, if (ready()) inventoryJournal.pendingNativeChunks() else emptyList(),
                 activeCities.associate { city -> city.id to (residentChunks[city.id].orEmpty() + cityPlans.chunkPositions(city.id)) })
+            citizens.prepareNavigation(activeCities, chunkLoading::active)
             testingPermissions.pulse(if (ready()) cities.values.filter { it.pendingDeletion == null }.mapNotNull { city ->
                 plugin.server.getWorld(city.worldId)?.let { city.owner to it.name }
             } + villageSites.bootstrapSubjects() else emptyList())
@@ -454,6 +455,7 @@ class CivsService(
             }
         }
         tasks.runTimer(20, 20) { pulse() }
+        tasks.runTimer(20, 20) { flushCities() }
     }
 
     fun start(): CompletableFuture<Unit> = loadCities()
@@ -759,6 +761,7 @@ class CivsService(
         rejectIf(!player.hasPermission("arccivs.admin"), "not-authorized")
         rejectIf(busy.isNotEmpty() || construction.activeCount != 0 || placement.loadingCount != 0, "city-busy")
         plugin.reloadConfig()
+        // Store.load also flushes before replacing its RAM generation.
         loadCities(CivsSettings.chunkLoadingMaximum(plugin.config, plugin.logger::warning))
     }
 
@@ -1120,7 +1123,11 @@ class CivsService(
         return current
     }
 
-    internal fun mutate(cityId: UUID, allowDeletion: Boolean = false, transform: (Settlement) -> Settlement): CompletableFuture<Settlement> {
+    internal fun mutate(cityId: UUID, allowDeletion: Boolean = false, transform: (Settlement) -> Settlement): CompletableFuture<Settlement> =
+        mutateCity(cityId, allowDeletion, buffered = false, transform)
+
+    private fun mutateCity(cityId: UUID, allowDeletion: Boolean, buffered: Boolean,
+        transform: (Settlement) -> Settlement): CompletableFuture<Settlement> {
         checkMain()
         rejectIf(closed, "not-ready")
         rejectIf(cityId in unhealthy, "storage-unavailable")
@@ -1131,7 +1138,7 @@ class CivsService(
         if (next == city) return CompletableFuture.completedFuture(city)
         busy += cityId
         val result = tracked<Settlement>()
-        store.save(next).whenCompleteSync(tasks) { saved, failure ->
+        (if (buffered) store.stage(next) else store.save(next)).whenCompleteSync(tasks) { saved, failure ->
             if (failure == null) {
                 publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
                     busy -= cityId
@@ -1152,6 +1159,24 @@ class CivsService(
             updateHealth()
         }
         return result
+    }
+
+    private var cityFlush: CompletableFuture<Unit>? = null
+    private var persistenceDrain: CompletableFuture<Unit> = CompletableFuture.completedFuture(Unit)
+
+    private fun flushCities() {
+        if (!ready() || cityFlush?.isDone == false) return
+        val flush = store.flushNext()
+        cityFlush = flush
+        flush.whenCompleteSync(tasks) { _, failure ->
+            if (failure != null) {
+                // A failed checkpoint retains the RAM state and its receipts; maintenance reload retries it.
+                val checkpoint = generateSequence(failure) { it.cause }.filterIsInstance<CivsCheckpointFailure>().firstOrNull()
+                unhealthy.addAll(checkpoint?.failures?.keys ?: cities.keys)
+                log("checkpoint settlements", failure)
+                updateHealth()
+            }
+        }
     }
 
     private fun loadCities(maximumLoadedChunks: Int = settings.maximumLoadedChunks): CompletableFuture<Unit> {
@@ -1524,6 +1549,9 @@ class CivsService(
         if (closed) return
         closed = true
         initialized = false
+        persistenceDrain = store.flush().whenComplete { _, failure ->
+            if (failure != null) log("flush settlements during shutdown", failure)
+        }
         villageSites.close()
         layoutDebug.close()
         planBoardSnapshots.close()
@@ -1566,7 +1594,7 @@ class CivsService(
     }
 
     fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), boundary.drained(), citizenDrain,
-        supply.drained(), layoutDebug.drained(), planBoardDrain, planBoardSnapshots.drained(), controlRelocations.drained())
+        supply.drained(), layoutDebug.drained(), planBoardDrain, planBoardSnapshots.drained(), controlRelocations.drained(), persistenceDrain)
 
     internal fun reserveCity(cityId: UUID) { busy += cityId }
     internal fun releaseCity(cityId: UUID) { busy -= cityId }
@@ -1686,6 +1714,14 @@ class CivsService(
     internal fun debugTerrainAt(cityId: UUID, workerId: UUID, origin: CivPosition): Map<String, Any?> = diagnostics.debugTerrainAt(cityId, workerId, origin)
 
     fun debugState(system: String, cityId: UUID?, workerId: UUID?): Map<String, Any?> = diagnostics.debugState(system, cityId, workerId)
+
+    internal fun checkpointDebug(): Map<String, Any> = store.checkpointStats().let { stats -> mapOf(
+        "interval_seconds" to CivsStore.CHECKPOINT_INTERVAL_MILLIS / 1_000,
+        "dirty_cities" to stats.dirtyCities,
+        "full_city_writes" to stats.fullCityWrites.values.sum(),
+        "full_city_writes_by_reason" to stats.fullCityWrites.mapKeys { it.key.name.lowercase() },
+        "measurement" to "last-published-storage-lane-snapshot",
+    ) }
 
     override fun remoteCity(player: Player): CivsNetworkCity? = membership.remoteCity(player)
 

@@ -369,8 +369,9 @@ Hunger at or below six doubles work time. Family, hunger and
 member-name changes use the existing city write queue, without starving behind work.
 `CivsResidentNavigation` separates terrain capture, an asynchronous A* job and
 the packet movement controller. Up to 48 pending routes share one Core bounded
-worker. The worker consumes detached numeric collision shapes and captured
-permission/cost decisions; it never calls Bukkit or route-policy callbacks.
+worker. The worker consumes detached section palettes and collision shapes and
+can run explicitly detached permission and support-cost callbacks. Main owns
+Bukkit access and native route callbacks.
 Small demanded neighbourhoods are captured on the owner thread through the
 service's shared `BudgetedTaskQueue` (by default 10,000 operations or four milliseconds per
 tick across native work). A standalone navigation owner uses the same configured
@@ -385,10 +386,30 @@ minimum-cost routes are not guaranteed there. A node/capture limit on a long tri
 return a validated segment that makes meaningful progress toward the original goal;
 reaching its end requests the next segment and never reports arrival or earns work credit.
 Preconstruction access proof requires a complete route and rejects such a partial segment.
-Preparation times out only without capture/search progress. Route-local terrain is released
-on completion or cancellation, while the bounded shared shape cache survives replanning.
-Known native changes refresh their local cells; an unannounced physical blockage refreshes
-at most 64 observed obstruction cells, without clearing whole chunks or policy decisions.
+Preparation times out only without capture/search progress. Route-local terrain is
+released on completion or cancellation. The shared cache retains immutable 16×16×16
+sections with per-city LRU membership. Overlapping cities share section payloads.
+`navigation.snapshot-sections-per-city` defaults to 1,024 sections and
+`navigation.snapshot-sections-maximum` defaults to 8,192 across all cities and worlds.
+`navigation.terrain-cache-blocks` bounds the legacy native-cell fallback.
+
+Startup warming covers a sparse band near the city center and developed building,
+worksite and mining footprints inside the loaded area. `navigation.snapshot-warm-radius`
+defaults to 48 blocks and zero disables warming. One warm item shares the existing
+native queue and worker and uses spare cache capacity. The Paper API supplies a
+temporary full-column snapshot. A warm batch decodes at most four requested sections,
+releases that native snapshot and resolves shared static collision shapes. Searches
+seed their initial corridor and probe halo from current cached sections. Missing
+sections use the normal bounded capture path. Dynamic shapes and native caller costs
+keep their live checks.
+
+Terrain changes invalidate affected sections. TTL expiry uses `navigation.terrain-refresh-ticks`
+and recaptures on demand. Chunk and world unload discard the associated cache entries.
+An unannounced physical blockage refreshes at most 64 observed obstruction cells.
+`snapshot_cache` and `snapshot_warmup` report cache membership, capacity and warming
+progress. Cache and active-job byte and MiB fields measure exact primitive section-index
+payload. Heap totals remain unknown and the payload excludes palettes, objects and
+route data.
 Cancellation and lifecycle
 tokens fence late results; shutdown observes the owned worker's drain.
 Edges retain a 0.6-by-1.8-block body, fractional support and the existing step
@@ -452,9 +473,48 @@ disappear on clients as well as on the server.
 
 Every backend keeps its stable typed `server-id` and the shared SQL configuration.
 A city has one immutable home backend and one running writer for that home. Complete
-`Settlement` state is canonical in `settlements/cities/<UUID>.json`, through the
-existing bounded Core AtomicFileStore. Every accepted revision still commits and
-acknowledges its exact local file before publication or item-journal retirement.
+`Settlement` is authoritative in RAM while the backend is running. Ordinary resident
+life, carried-food consumption, rest, education, regeneration and assignments replace
+only the latest dirty snapshot. Once per second the existing storage executor may
+checkpoint one eligible dirty city, with at most one periodic task in flight. The first
+deadline is spread over five minutes by the city's UUID; the next deadline is five
+minutes after actual checkpoint completion. There is no catch-up batch, and a failed
+periodic attempt also waits five minutes before retrying. Explicit reload and stopping
+drain every remaining dirty city. A crash may roll back this
+ordinary suffix; revisions are still admitted consecutively in RAM, while file snapshots
+may skip intermediate revisions. Founding, directory changes, deletion and world mutation
+intents retain their durable save boundary.
+
+Durable city state is the newer of `settlements/cities/<UUID>.json` and its completed
+item checkpoint. Native item intent still commits its exact immutable receipt before
+any native mutation. After the existing native persistence fences acknowledge the
+after-state, `inventory-completed/<cityUUID>.json` atomically records the receipt UUID
+and after-revision. Its already durable receipt contains the complete city snapshot;
+there is no second full city serialization at item completion. Only then may publication
+and native lock retirement complete. One completed receipt and at most one pending
+receipt can coexist per city. Before admitting the next pending receipt, intervening
+ordinary RAM changes are checkpointed so recovery retains the exact before-revision.
+These native barriers and explicit durable saves may write sooner than the background
+five-minute deadline. Successful full city writes are counted separately by reason
+(`PERIODIC`, `BEFORE_NATIVE`, `EXPLICIT_SAVE`, `RELOAD`, `DRAIN`); the schedule is not
+an absolute cap on durable writes. Counters advance after the full file and its
+directory are acknowledged, even if subsequent completed-receipt cleanup fails.
+
+A completed receipt never replays native changes. Replacing its durable completion head
+allows removal of the older payload; writing a full city checkpoint allows removal of
+the current payload. The small head remains a revision watermark so interrupted cleanup
+cannot turn old completed receipts into pending work. A missing head target is valid
+only when the durable city file covers its revision; otherwise bootstrap fails closed.
+All snapshots, receipts and heads use the existing bounded Core AtomicFileStore. Pending
+receipts retain their existing reconciliation, source freshness and construction-buffer
+proofs. Normal runtime reads use owned RAM snapshots and pending receipt metadata;
+explicit reload rescans disk. Failed checkpoints retain their latest RAM state and
+quarantine the affected cities. Shutdown drains file work without awaiting stopped Main
+callbacks.
+Before downgrading to a binary without completed checkpoints, drain a clean full
+checkpoint so no head is ahead of its city file. An old binary cannot recover this
+new checkpoint format after an unclean shutdown; deleting its heads or receipts is
+not a valid rollback procedure.
 Normal work, construction, resident state and inventory revisions do not read or
 write SQL. There is no periodic SQL checkpoint or asynchronous city mirror.
 
@@ -475,7 +535,7 @@ replaced. A settled directory row has `pending_snapshot = NULL`. A missing or
 inconsistent acknowledged local file is an error, not a reason to recreate a city
 from an old snapshot. Local files without a directory entry are preserved and
 rejected rather than automatically registered. Same-revision local retries remain
-exact; local revisions advance by one. The SQL revision advances only with a
+exact; accepted local revisions advance by one. The SQL revision advances only with a
 directory change and may therefore trail the local revision.
 
 Deletion checks the complete expected local city before atomically releasing SQL

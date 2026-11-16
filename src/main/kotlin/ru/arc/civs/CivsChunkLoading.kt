@@ -47,13 +47,16 @@ internal data class CivsChunkArea(val world: UUID, val minX: Int, val maxX: Int,
         }
 
         /** Keep the current travel rectangle; unused city expansion land is a temporary survey demand. */
-        fun developed(city: Settlement): CivsChunkArea {
+        fun developed(city: Settlement, visit: ((Iterable<CivPosition>, Boolean) -> Unit)? = null): CivsChunkArea {
             var area = requireNotNull(around(city.worldId, listOf(
                 city.center.copy(x = city.center.x - 1, z = city.center.z - 1),
                 city.center.copy(x = city.center.x + 1, z = city.center.z + 1))))
-            fun points(values: Iterable<CivPosition>) { around(city.worldId, values)?.let { area = area.union(it) } }
+            fun points(values: Iterable<CivPosition>, volume: Boolean = false) {
+                around(city.worldId, values)?.let { area = area.union(it) }
+                visit?.invoke(values, volume)
+            }
             fun building(value: CivBuilding, state: CivMinePlanState?) {
-                points(listOfNotNull(value.bounds.min, value.bounds.max, value.entrance, value.control))
+                points(listOfNotNull(value.bounds.min, value.bounds.max, value.entrance, value.control), volume = true)
                 points(CivsWorksiteLayouts.field(value)); points(CivsWorksiteLayouts.irrigation(value))
                 CivsWorksiteLayouts.site(value)?.getAsJsonObject("forester")?.getAsJsonObject("searchBounds")?.let { bounds ->
                     val low = CivsWorksiteLayouts.vector(bounds["min"])

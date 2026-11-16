@@ -274,7 +274,8 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                         }
                         restartService()
                         repeat(80) {
-                            if (store.loadInventoryTransactions().join().isNotEmpty()) paper.performTicks(1)
+                            // A completed checkpoint is durable before its Main publication callback.
+                            if (current() != durable.after || store.loadInventoryTransactions().join().isNotEmpty()) paper.performTicks(1)
                         }
                         store.loadInventoryTransactions().join() shouldBe emptyList()
                         current() shouldBe durable.after

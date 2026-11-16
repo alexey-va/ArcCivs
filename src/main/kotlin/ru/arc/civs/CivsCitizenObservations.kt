@@ -195,7 +195,7 @@ internal class CivsCitizenObservations(
         val now = navigationClock()
         return linkedMapOf("closed" to runtime.closed.get(), "maximum_active" to maxActive, "viewer_range" to viewerRange,
             "navigation_tick" to runtime.navigationTick,
-            "cadence_ms" to runtime.navigationCadenceMillis, "planner_global" to navigation.debug(),
+            "cadence_ms" to runtime.navigationCadenceMillis, "planner_global" to navigation.debug(cityId),
             "admission" to admission.debug(cityId, workerId),
             "total" to selected.size, "truncated" to (selected.size > 8), "entries" to selected.take(8).map { actor ->
                 val valid = actor.npc.isValid
@@ -204,7 +204,7 @@ internal class CivsCitizenObservations(
                 val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId }
                 val meal = actor.mealVisit
                 val guest = city?.workers?.firstOrNull { it.id == actor.workerId }
-                linkedMapOf("city" to actor.cityId, "worker" to actor.workerId, "valid" to valid,
+                val details = linkedMapOf("city" to actor.cityId, "worker" to actor.workerId, "valid" to valid,
                     "status" to runtime.statuses[actor.workerId],
                     "observed_status" to if (valid && city != null && guest != null) activityStatus(actor, city, guest) else null,
                     "phase" to actor.cycle.phase,
@@ -293,7 +293,14 @@ internal class CivsCitizenObservations(
                     "social" to mapOf("visit" to (actor.social.visit != null), "arrived_at" to actor.social.visit?.arrivedAt,
                         "partner" to actor.social.visit?.partnerId, "seat" to actor.social.visit?.seat,
                         "conversation_at" to actor.social.visit?.conversationAt))
+                if (workerId == null) withoutNullFields(details) else details
             })
+    }
+
+    private fun <K> withoutNullFields(fields: Map<K, *>): Map<K, Any> = buildMap {
+        for ((key, value) in fields) {
+            if (value != null) put(key, if (value is Map<*, *>) withoutNullFields(value) else value)
+        }
     }
 
     /** Sleeping and absent residents do not accrue hunger; awake idle residents still do. */

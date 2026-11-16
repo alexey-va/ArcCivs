@@ -194,10 +194,66 @@ class CivsTavernServiceDiagnosticsTest : FunSpec({
             }.single()
             withClue("city history clips at 16384 characters, actual=${line.length}") { (line.length <= 16_384) shouldBe true }
             val payload = com.google.gson.JsonParser.parseString(line.removePrefix("ARCCIVS_DEBUG ")).asJsonObject
-            val entries = payload.getAsJsonObject("state").getAsJsonArray("entries")
+            val state = payload.getAsJsonObject("state")
+            val planner = state.getAsJsonObject("planner_global")
+            val cache = planner.getAsJsonObject("snapshot_cache")
+            cache.getAsJsonPrimitive("index_payload_bytes").isNumber shouldBe true
+            cache.getAsJsonPrimitive("index_payload_mib").isNumber shouldBe true
+            planner.getAsJsonPrimitive("active_job_section_payload_bytes").isNumber shouldBe true
+            planner.getAsJsonObject("snapshot_warmup").has("entries") shouldBe true
+            val entries = state.getAsJsonArray("entries")
             entries.size() shouldBe 8
-            entries.forEach { it.asJsonObject.getAsJsonObject("meal").has("service_keepers") shouldBe false }
+            entries.forEach {
+                val meal = it.asJsonObject.getAsJsonObject("meal")
+                meal.has("service_keepers") shouldBe false
+                meal.has("building") shouldBe false
+                meal.get("pending").asBoolean shouldBe false
+                meal.get("retry_at").asLong shouldBe 0L
+            }
+            h.mealState().containsKey("building") shouldBe true
             h.mealState().containsKey("service_keepers") shouldBe true
+
+            val globalState = h.owner.debug(null, null)
+            val globalPlanner = globalState.getValue("planner_global") as Map<*, *>
+            val globalCache = globalPlanner["snapshot_cache"] as Map<*, *>
+            val globalWarmup = globalPlanner["snapshot_warmup"] as Map<*, *>
+            for (cityCount in listOf(5, 8)) {
+                val cityIds = List(cityCount) { UUID(321, it.toLong() + 1) }
+                val cached = cityIds.map { cityId -> mapOf("city" to cityId, "chunks" to 142,
+                    "sections" to 1000, "maximum_sections" to 1024, "warm_sections_limit" to 512,
+                    "index_payload_bytes" to 8_192_000L, "index_payload_mib" to 7.8125, "shared_sections" to 121,
+                    "hits" to 532_410L, "cold" to 6582, "evictions" to 13_251, "refreshes" to 1451,
+                    "warm_hits" to 1564, "warm_capacity_rejections" to 321) }
+                val warmed = cityIds.map { cityId -> mapOf("city" to cityId, "active" to true,
+                    "target_sections" to 600, "target_truncated" to false, "processed_sections" to 417,
+                    "remaining_batches" to 16, "remaining_states" to 81, "dynamic_states_on_demand" to 316,
+                    "unavailable_sections" to 27, "failed_sections" to 11, "capacity_limited" to true,
+                    "capacity_skipped_sections" to 126) }
+                val populated = globalPlanner + mapOf(
+                    "snapshot_main_requests" to 412_000L,
+                    "snapshot_cache" to (globalCache + mapOf("sections" to cityCount * 1000,
+                        "index_payload_bytes" to cityCount * 8_192_000L, "index_payload_mib" to cityCount * 7.8125,
+                        "cities_total" to cityCount, "cities" to cached)),
+                    "snapshot_warmup" to (globalWarmup + mapOf("cities_total" to cityCount, "entries" to warmed)))
+                val globalLine = CivsDebug.lines(listOf("citizens")) { _, _, _ ->
+                    globalState + ("planner_global" to populated)
+                }.single()
+                withClue("$cityCount populated city rows, actual=${globalLine.length}") {
+                    (globalLine.length <= 16_384) shouldBe true
+                }
+                val globalPayload = com.google.gson.JsonParser.parseString(globalLine.removePrefix("ARCCIVS_DEBUG ")).asJsonObject
+                    .getAsJsonObject("state")
+                globalPayload.getAsJsonArray("entries").size() shouldBe 8
+                val parsedPlanner = globalPayload.getAsJsonObject("planner_global")
+                val parsedCache = parsedPlanner.getAsJsonObject("snapshot_cache")
+                parsedCache.get("index_payload_bytes").asLong shouldBe cityCount * 8_192_000L
+                val parsedCities = parsedCache.getAsJsonArray("cities")
+                parsedCities.size() shouldBe cityCount
+                parsedCities.forEach { it.asJsonObject.get("hits").asLong shouldBe 532_410L }
+                val parsedWarmup = parsedPlanner.getAsJsonObject("snapshot_warmup").getAsJsonArray("entries")
+                parsedWarmup.size() shouldBe cityCount
+                parsedWarmup.forEach { it.asJsonObject.get("processed_sections").asInt shouldBe 417 }
+            }
         }
     }
 })

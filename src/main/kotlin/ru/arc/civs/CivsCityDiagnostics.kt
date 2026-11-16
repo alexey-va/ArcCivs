@@ -91,6 +91,7 @@ internal class CivsCityDiagnostics(
                 CivsTerrainDebug.capture(city, worker, citizens.residentFeet(workerId), worksites.plan(city, worker), authority.now())
             }
             "citizens" -> citizens.debug(cityId, workerId)
+            "route-cache" -> citizens.debugSharedRoutes(cityId)
             "roads" -> if (cityId == null || workerId == null) mapOf("error" to "roads-requires-city-and-worker")
                 else roadMaintenanceDebug(cityId, workerId)
             "worksites" -> worksites.debug(selectedWorkers?.mapTo(hashSetOf()) { it.id },
@@ -100,7 +101,7 @@ internal class CivsCityDiagnostics(
                 supply.debug(cityId, workerId, focus) + ("forestrySurplus" to authority.forestrySurplusDebug(cityId)) +
                     ("road_maintenance" to roadMaintenanceDebug(cityId, workerId))
             }
-            "storage" -> storage.debug(cityId)
+            "storage" -> storage.debug(cityId) + ("checkpoints" to authority.checkpointDebug())
             "chunks" -> chunkLoading.debug(cityId, if (cityId == null) null else selected.mapTo(hashSetOf()) { it.owner })
             "construction" -> rows(construction::debug)
             "resources" -> rows { city ->

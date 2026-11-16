@@ -352,7 +352,7 @@ internal class CargoRedirectionFixture : AutoCloseable {
         set(value) { cities[value.id] = value; storage.updateCity(value) }
     val worker get() = city.workers.single()
     val cargo get() = requireNotNull(worker.cargo)
-    val store = mockk<CivsStore>()
+    val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     val busy = mutableSetOf<UUID>()
     val unhealthy = mutableSetOf<UUID>()
     val denied = mutableSetOf<CivPosition>()

@@ -17,12 +17,21 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicLong
 
-/** Durable, bounded file state. Explicit load rescans external edits; filesystem work runs on storage/SQL workers. */
+internal class CivsCheckpointFailure(val failures: Map<UUID, Throwable>) :
+    IllegalStateException("Could not checkpoint settlements ${failures.keys}", failures.values.first()) {
+    init { failures.values.drop(1).forEach(::addSuppressed) }
+}
+
+internal enum class CivsCheckpointReason { EXPLICIT_SAVE, PERIODIC, BEFORE_NATIVE, RELOAD, DRAIN }
+internal data class CivsCheckpointStats(val dirtyCities: Int, val fullCityWrites: Map<CivsCheckpointReason, Long>)
+
+/** Owned RAM state with bounded durable checkpoints. Explicit load rescans disk; IO stays on storage/SQL workers. */
 class CivsStore(
     root: Path,
     private val executor: Executor,
     private val maximumCities: Int = 500,
     private val network: CivsNetworkStore? = null,
+    private val checkpointClock: () -> Long = System::currentTimeMillis,
 ) : AutoCloseable {
     private val root = root.toAbsolutePath().normalize()
     private val gson = Gson()
@@ -30,7 +39,17 @@ class CivsStore(
     // ponytail: one bounded global lock serializes store paths; use keyed locks only if disk contention is measured.
     private val ioLock = Any()
     private var cityIndex: Map<UUID, CityIndex>? = null
+    private var citySnapshots: MutableMap<UUID, Settlement>? = null
     private var deletedCityIndex: Map<UUID, CivsDeletedCity>? = null
+    private val dirtyCities = linkedMapOf<UUID, Settlement>()
+    private val checkpointDueAt = hashMapOf<UUID, Long>()
+    private val fullCityWrites = java.util.EnumMap<CivsCheckpointReason, Long>(CivsCheckpointReason::class.java)
+    @Volatile private var publishedCheckpointStats = CivsCheckpointStats(0, CivsCheckpointReason.entries.associateWith { 0L })
+    private val durableRevisions = hashMapOf<UUID, Long>()
+    private val fileRevisions = hashMapOf<UUID, Long>()
+    private var inventoryHeads: MutableMap<UUID, InventoryCompletionHead>? = null
+    private var pendingReceipts: MutableMap<UUID, CivInventoryTransaction>? = null
+    private val completedReceipts = linkedMapOf<UUID, UUID>()
     private val directoryReady = hashSetOf<UUID>()
     // Recent order/retained/preview plans only, never whole villages. All access stays under ioLock.
     private val planCache = object : LinkedHashMap<UUID, CivPlacementPlan>(4, .75f, true) {
@@ -40,14 +59,18 @@ class CivsStore(
     private val planChanges = AtomicLong()
     internal val planGeneration: Long get() = planChanges.get()
     private var closed = false
+    private var closeDrain: CompletableFuture<Unit>? = null
 
     init {
         require(maximumCities > 0) { "maximumCities must be positive" }
     }
 
     fun load(): CompletableFuture<List<Settlement>> = submitPlanChange {
+        flushDirtyLocal(CivsCheckpointReason.RELOAD)
         planCache.clear()
         directoryReady.clear()
+        inventoryHeads = null
+        pendingReceipts = null
         val root = trustedRoot()
         if (network == null) CompletableFuture.completedFuture(reloadCityIndex(root).also { cities -> cities.forEach { verifyBuffers(root, it) } })
         else network.loadOwned(loadDeletedCities(root).values.toList(), { deleted -> fileContinuation {
@@ -75,7 +98,7 @@ class CivsStore(
         CivsRules.validate(city)
         val root = trustedRoot()
         check(city.id !in requireNotNull(deletedCityIndex)) { "Pending directory city was already deleted" }
-        val previous = cityStore(root, city.id).loadOrNull()?.city
+        val previous = currentCity(root, city.id)
         check(previous == null || previous.owner == city.owner && (previous.autonomy != null) == (city.autonomy != null) &&
             (previous.revision < city.revision || previous == city)) { "Pending directory state conflicts with acknowledged local city" }
         verifyBuffers(root, city)
@@ -89,6 +112,104 @@ class CivsStore(
 
     fun homeServer() = network?.server
 
+    /** Accepted ordinary simulation state. Only its latest revision is checkpointed by flush(). */
+    internal fun stage(city: Settlement): CompletableFuture<Settlement> {
+        val snapshot = snapshotCity(city)
+        return submit {
+            val root = trustedRoot()
+            val before = requireNotNull(currentCity(root, snapshot.id)) { "Buffered city must already exist" }
+            require(indexEntry(before).directoryMatches(snapshot)) { "Directory changes require a durable save" }
+            require(before.inventory?.constructionBuffers == snapshot.inventory?.constructionBuffers &&
+                before.inventory?.mode == snapshot.inventory?.mode) {
+                "Construction storage changes require their durable inventory receipt"
+            }
+            require(before.pendingControls == snapshot.pendingControls && before.pendingDeletion == snapshot.pendingDeletion &&
+                before.construction == snapshot.construction && before.buildings == snapshot.buildings) {
+                "World mutation intents require a durable save"
+            }
+            require(loadInventoryTransactions(root).none { it.cityId == snapshot.id }) { "Pending inventory owns its city revision" }
+            val accepted = saveLocal(snapshot, write = false)
+            rememberCity(accepted)
+            markDirty(accepted)
+            accepted
+        }
+    }
+
+    /** Lifecycle drain only. Periodic work admits one city through flushNext(), never this whole batch. */
+    internal fun flush(): CompletableFuture<Unit> = submit { flushDirtyLocal(CivsCheckpointReason.DRAIN) }
+
+    /** Last published counters only; Main never waits for the storage lane. */
+    internal fun checkpointStats(): CivsCheckpointStats = publishedCheckpointStats
+
+    private fun publishCheckpointStats() {
+        publishedCheckpointStats = CivsCheckpointStats(dirtyCities.size,
+            CivsCheckpointReason.entries.associateWith { fullCityWrites[it] ?: 0L })
+    }
+
+    /** One eligible dirty city per pulse; no catch-up loop or queued copies of intermediate revisions. */
+    internal fun flushNext(): CompletableFuture<Unit> = submit {
+        if (dirtyCities.isEmpty()) return@submit
+        val now = checkpointClock()
+        val id = dirtyCities.keys.asSequence().filter { requireNotNull(checkpointDueAt[it]) <= now }
+            .minByOrNull { requireNotNull(checkpointDueAt[it]) } ?: return@submit
+        var index = cityIndex
+        var snapshots = citySnapshots
+        try {
+            val root = trustedRoot()
+            ensureCityIndex(root)
+            index = cityIndex
+            snapshots = citySnapshots
+            dirtyCities[id]?.let { writeCity(root, it, CivsCheckpointReason.PERIODIC) }
+        } catch (failure: Exception) {
+            // Only the already accepted RAM revision was written. Keep unrelated cities independent
+            // of this failed path; explicit load still rescans uncertain disk outcomes.
+            cityIndex = index
+            citySnapshots = snapshots
+            throw CivsCheckpointFailure(mapOf(id to failure))
+        } finally {
+            // A slow or failed write starts a fresh interval instead of repeating its overdue attempt.
+            checkpointDueAt[id] = checkpointClock() + CHECKPOINT_INTERVAL_MILLIS
+        }
+    }
+
+    private fun markDirty(city: Settlement) {
+        val newlyDirty = dirtyCities.put(city.id, city) == null
+        checkpointDueAt.getOrPut(city.id) {
+            checkpointClock() + Math.floorMod(city.id.hashCode().toLong(), CHECKPOINT_INTERVAL_MILLIS)
+        }
+        if (newlyDirty) publishCheckpointStats()
+    }
+
+    private fun flushDirtyLocal(reason: CivsCheckpointReason) {
+        if (dirtyCities.isEmpty()) return
+        val root = trustedRoot()
+        ensureCityIndex(root)
+        val failures = linkedMapOf<UUID, Throwable>()
+        dirtyCities.keys.toList().forEach { id -> dirtyCities[id]?.let { city ->
+            val index = cityIndex
+            val snapshots = citySnapshots
+            try { writeCity(root, city, reason) } catch (failure: Exception) {
+                failures[id] = failure
+                cityIndex = index
+                citySnapshots = snapshots
+            }
+        } }
+        if (failures.isNotEmpty()) {
+            cityIndex = null // Rescan uncertain outcomes after the other independent cities have drained.
+            throw CivsCheckpointFailure(failures)
+        }
+    }
+
+    private fun currentCity(root: Path, id: UUID): Settlement? {
+        ensureCityIndex(root)
+        return citySnapshots?.get(id)
+    }
+
+    private fun rememberCity(city: Settlement) {
+        cityIndex = requireNotNull(cityIndex) + (city.id to indexEntry(city))
+        requireNotNull(citySnapshots)[city.id] = city
+    }
+
     fun save(city: Settlement): CompletableFuture<Settlement> {
         val proposed = snapshotCity(city)
         if (network == null) return submit { saveLocal(proposed) }
@@ -97,7 +218,8 @@ class CivsStore(
             val root = trustedRoot()
             val previous = ensureCityIndex(root)[prepared.id]
             if (prepared.id in directoryReady && previous?.directoryMatches(prepared) == true) {
-                val saved = if (previous.revision == prepared.revision) {
+                val saved = if (previous.revision == prepared.revision &&
+                    (durableRevisions[prepared.id] ?: -1L) >= prepared.revision) {
                     forceDirectories(root, "cities")
                     prepared
                 } else writeCity(root, prepared)
@@ -106,7 +228,7 @@ class CivsStore(
                 require(gson.toJson(CityDocument(SCHEMA_VERSION, prepared)).toByteArray(StandardCharsets.UTF_8).size <= MAX_CITY_DOCUMENT_BYTES) {
                     "City snapshot exceeds 256 KiB"
                 }
-                val before = cityStore(root, prepared.id).loadOrNull()?.city
+                val before = currentCity(root, prepared.id)
                 val previouslyReady = directoryReady.remove(prepared.id)
                 network.save(prepared, before) { accepted -> fileContinuation { saveLocal(accepted) } }.thenApply { saved ->
                     synchronized(ioLock) { directoryReady += saved.id }
@@ -131,7 +253,7 @@ class CivsStore(
         val sameCity = index[snapshot.id]
         if (sameCity?.buffers != snapshot.inventory?.constructionBuffers ||
             !sameCity?.buffers.isNullOrEmpty() && sameCity?.mode != snapshot.inventory?.mode) {
-            requireBufferTransition(trustedRoot, cityStore(trustedRoot, snapshot.id).loadOrNull()?.city, snapshot)
+            requireBufferTransition(trustedRoot, currentCity(trustedRoot, snapshot.id), snapshot)
         }
         require(sameCity == null || sameCity.owner == snapshot.owner) { "City id cannot be reassigned to another owner" }
         require(sameCity == null || sameCity.autonomous == (snapshot.autonomy != null)) { "City autonomy cannot change" }
@@ -146,17 +268,11 @@ class CivsStore(
         if (sameCity == null) {
             require(snapshot.revision == 0L) { "New settlement revision must start at zero" }
         } else if (snapshot.revision == sameCity.revision) {
-            val persisted = try {
-                requireNotNull(cityStore(trustedRoot, snapshot.id).loadOrNull()) {
-                    "Saved city disappeared during retry"
-                }
-            } catch (error: Exception) {
-                cityIndex = null
-                throw error
-            }
-            require(persisted.city == proposed || persisted.city == snapshot) { "Same-revision city retry does not match saved state" }
+            val accepted = requireNotNull(currentCity(trustedRoot, snapshot.id))
+            require(accepted == proposed || accepted == snapshot) { "Same-revision city retry does not match saved state" }
+            if (write && (durableRevisions[snapshot.id] ?: -1L) < snapshot.revision) return writeCity(trustedRoot, snapshot)
             if (write) forceDirectories(trustedRoot, "cities")
-            return requireNotNull(persisted.city)
+            return accepted
         } else {
             require(sameCity.revision < Long.MAX_VALUE && snapshot.revision == sameCity.revision + 1) {
                 "Settlement revision is stale or skips a committed revision"
@@ -166,7 +282,7 @@ class CivsStore(
         return if (write) writeCity(trustedRoot, snapshot) else snapshot
     }
 
-    private fun writeCity(root: Path, snapshot: Settlement): Settlement {
+    private fun writeCity(root: Path, snapshot: Settlement, reason: CivsCheckpointReason = CivsCheckpointReason.EXPLICIT_SAVE): Settlement {
         val saved = try {
             requireNotNull(cityStore(root, snapshot.id).write(CityDocument(SCHEMA_VERSION, snapshot)).city).also {
                 // Persist the cities/settlements directory creation edges before retiring any item receipt.
@@ -176,17 +292,30 @@ class CivsStore(
             cityIndex = null
             throw error
         }
-        cityIndex = ensureCityIndex(root) + (saved.id to indexEntry(saved))
-        return saved
+        fullCityWrites[reason] = (fullCityWrites[reason] ?: 0L) + 1
+        if (snapshot.id in checkpointDueAt) checkpointDueAt[snapshot.id] = checkpointClock() + CHECKPOINT_INTERVAL_MILLIS
+        try {
+            ensureCityIndex(root)
+            rememberCity(saved)
+            durableRevisions[saved.id] = saved.revision
+            fileRevisions[saved.id] = saved.revision
+            dirtyCities.remove(saved.id)
+            retireCompletedReceipts(root, saved.id)
+            return saved
+        } finally { publishCheckpointStats() }
     }
 
     /** The canonical commit precedes local cleanup; a tombstone is durable before its old JSON disappears. */
     fun delete(city: Settlement): CompletableFuture<Unit> {
         val snapshot = snapshotCity(city)
         require(snapshot.inventory?.constructionBuffers.isNullOrEmpty()) { "Construction storage must be returned before deletion" }
-        if (network == null) return submit { deleteLocal(snapshot, null) }
+        if (network == null) return submit {
+            dirtyCities[snapshot.id]?.let { writeCity(trustedRoot(), it) }
+            deleteLocal(snapshot, null)
+        }
         return submit {
             val root = trustedRoot()
+            dirtyCities[snapshot.id]?.let { writeCity(root, it) }
             val deleted = loadDeletedCities(root)[snapshot.id]
             if (deleted != null) deleted.copy(server = deleted.server ?: network.server.value).verify(snapshot, network.server.value)
             else {
@@ -218,9 +347,17 @@ class CivsStore(
             }
             forceDirectories(trustedRoot, "deleted-cities")
             cityStore(trustedRoot, city.id).deleteIfExists()
+            inventoryHeadStore(trustedRoot, city.id).deleteIfExists()
+            inventoryHeads?.remove(city.id)
+            dirtyCities.remove(city.id)
+            checkpointDueAt.remove(city.id)
+            durableRevisions.remove(city.id)
+            fileRevisions.remove(city.id)
+            publishCheckpointStats()
         } finally {
             // A failed atomic write can have an unknown outcome: rescan its durable fence before the next action.
             cityIndex = null
+            citySnapshots = null
             deletedCityIndex = null
         }
     }
@@ -383,8 +520,19 @@ class CivsStore(
         return submit {
             snapshot.validated()
             val trustedRoot = trustedRoot()
+            // A completed receipt already supplies a durable before-city. Only intervening ordinary
+            // RAM changes need a full checkpoint before this next immutable native intent.
+            ensureCityIndex(trustedRoot)
+            dirtyCities[snapshot.cityId]?.takeIf {
+                it.revision > (durableRevisions[it.id] ?: -1L)
+            }?.let { writeCity(trustedRoot, it, CivsCheckpointReason.BEFORE_NATIVE) }
             val store = inventoryTransactionStore(trustedRoot, snapshot.id)
-            val existing = store.loadOrNull()?.transaction
+            val existing = loadInventoryTransactions(trustedRoot).firstOrNull { it.id == snapshot.id }
+            require(snapshot.id !in completedReceipts && loadInventoryHeads(trustedRoot).values.none { it.transactionId == snapshot.id }) {
+                "Inventory transaction is already completed"
+            }
+            // Finish interrupted completed-receipt cleanup before admitting the next pending file.
+            retireCompletedReceipts(trustedRoot, snapshot.cityId)
             verifyBufferReceipt(trustedRoot, snapshot, admitting = existing == null)
             if (existing != null) {
                 require(existing == snapshot) { "Inventory transaction retry differs from its journal" }
@@ -406,17 +554,72 @@ class CivsStore(
             consumedItems.admit(trustedRoot, snapshot, pending)
             if (gson.toJson(CityDocument(SCHEMA_VERSION, snapshot.after)).toByteArray(StandardCharsets.UTF_8).size > MAX_CITY_DOCUMENT_BYTES)
                 throw CivsRejection("storage-transaction-too-large")
-            val written = requireNotNull(store.write(InventoryTransactionDocument(SCHEMA_VERSION, snapshot)).transaction)
-            // AtomicFileStore forces inventory-transactions itself. Also persist its newly-created entry in
-            // settlements before native debit; otherwise a crash could lose the entire acknowledged journal.
-            forceDirectories(trustedRoot)
-            written
+            try {
+                val written = requireNotNull(store.write(InventoryTransactionDocument(SCHEMA_VERSION, snapshot)).transaction)
+                // Also persist the new directory entry in settlements before native debit.
+                forceDirectories(trustedRoot)
+                requireNotNull(pendingReceipts)[written.id] = written
+                written
+            } catch (failure: Exception) {
+                pendingReceipts = null // An uncertain rename must be read back before retrying its UUID.
+                throw failure
+            }
         }
+    }
+
+    /** Native persistence has acknowledged its after-state; the existing receipt now owns the city checkpoint. */
+    internal fun completeInventoryTransaction(transaction: CivInventoryTransaction): CompletableFuture<Settlement> = submit {
+        val root = trustedRoot()
+        val current = requireNotNull(currentCity(root, transaction.cityId)) { "Inventory city disappeared" }
+        val heads = loadInventoryHeads(root)
+        val old = heads[transaction.cityId]
+        if (old?.transactionId == transaction.id) {
+            require(old.afterRevision == transaction.after.revision && current.revision >= old.afterRevision &&
+                (current.revision != old.afterRevision || current == transaction.after)) { "Completed inventory retry differs" }
+            forceDirectories(root, "inventory-completed")
+            return@submit current
+        }
+        val receipt = loadInventoryTransactions(root).singleOrNull { it.id == transaction.id }
+            ?: error("Inventory completion requires its durable pending receipt")
+        require(receipt == transaction) { "Inventory completion differs from its durable receipt" }
+        val accepted = if (current.revision == receipt.beforeRevision) saveLocal(receipt.after, write = false)
+            else current.also {
+                require(it.revision >= receipt.after.revision && (it.revision != receipt.after.revision || it == receipt.after)) {
+                    "Inventory completion has a different city revision"
+                }
+            }
+        require(indexEntry(current).directoryMatches(accepted)) { "Inventory completion cannot change the city directory" }
+        require(old == null || old.afterRevision < receipt.after.revision) { "Inventory completion moved backwards" }
+        writeAuthoredVegetationAudit(root, receipt)
+        val head = InventoryCompletionHead(SCHEMA_VERSION, receipt.cityId, receipt.id, receipt.after.revision)
+        try {
+            inventoryHeadStore(root, receipt.cityId).write(head)
+            forceDirectories(root, "inventory-completed")
+        } catch (failure: Exception) {
+            inventoryHeads = null
+            pendingReceipts = null
+            cityIndex = null
+            throw failure
+        }
+        heads[receipt.cityId] = head
+        pendingReceipts?.remove(receipt.id)
+        completedReceipts[receipt.id] = receipt.cityId
+        rememberCity(accepted)
+        durableRevisions[accepted.id] = maxOf(durableRevisions[accepted.id] ?: -1L, receipt.after.revision)
+        if ((fileRevisions[accepted.id] ?: -1L) < accepted.revision) markDirty(accepted)
+        accepted
     }
 
     fun loadInventoryTransactions(): CompletableFuture<List<CivInventoryTransaction>> = submit {
         val trustedRoot = trustedRoot()
+        inventoryHeads = null
+        pendingReceipts = null
         val transactions = loadInventoryTransactions(trustedRoot)
+        loadInventoryHeads(trustedRoot).forEach { (id, head) ->
+            completedCity(trustedRoot, requireNotNull(cityStore(trustedRoot, id).loadOrNull()?.city) {
+                "Completed inventory city is missing"
+            }, head)
+        }
         transactions.forEach { verifyBufferReceipt(trustedRoot, it) }
         // Recovery may resume a prior uncertain write immediately after this ACK, without saving it again.
         if (transactions.isNotEmpty()) forceDirectories(trustedRoot)
@@ -427,7 +630,7 @@ class CivsStore(
 
     internal fun markConsumedItems(transaction: CivInventoryTransaction): CompletableFuture<CivConsumedItemIndex> = submit {
         val root = trustedRoot()
-        require(inventoryTransactionStore(root, transaction.id).loadOrNull()?.transaction == transaction) {
+        require(loadInventoryTransactions(root).singleOrNull { it.id == transaction.id } == transaction) {
             "Consumed item marker requires its exact durable inventory receipt"
         }
         consumedItems.mark(root, transaction.after.worldId, transaction.collected?.ground.orEmpty().map(CivGroundItemChange::entityId))
@@ -435,9 +638,26 @@ class CivsStore(
 
     fun deleteInventoryTransaction(id: UUID): CompletableFuture<Boolean> = submit {
         val trustedRoot = trustedRoot()
+        loadInventoryTransactions(trustedRoot)
+        completedReceipts[id]?.let { cityId ->
+            // Logical retirement releases native locks, but its payload remains the checkpoint until
+            // a later completed receipt or a full city snapshot durably covers it.
+            retireCompletedReceipts(trustedRoot, cityId)
+            return@submit true
+        }
         val store = inventoryTransactionStore(trustedRoot, id)
-        val transaction = store.loadOrNull()?.transaction
-        transaction?.authoredVegetation?.let { receipt ->
+        val transaction = pendingReceipts?.get(id)
+        transaction?.let { writeAuthoredVegetationAudit(trustedRoot, it) }
+        val deleted = if (transaction == null) false else store.deleteIfExists()
+        // A retry after an uncertain delete must acknowledge the directory even when the file is now absent.
+        forceDirectories(trustedRoot)
+        pendingReceipts?.remove(id)
+        deleted
+    }
+
+    private fun writeAuthoredVegetationAudit(trustedRoot: Path, transaction: CivInventoryTransaction) {
+        val id = transaction.id
+        transaction.authoredVegetation?.let { receipt ->
             // Keep this explicit repair's exact AIR/source images after normal journal retirement, without a city export.
             val bytes = gson.toJson(mapOf("transaction" to id, "city" to transaction.cityId,
                 "world" to transaction.after.worldId, "before_revision" to transaction.beforeRevision,
@@ -448,10 +668,17 @@ class CivsStore(
             require(previous == null || previous.contentEquals(bytes)) { "Authored vegetation audit differs from its receipt" }
             if (previous == null) audit.write(bytes)
         }
-        val deleted = if (transaction == null) false else store.deleteIfExists()
-        // A retry after an uncertain delete must acknowledge the directory even when the file is now absent.
-        forceDirectories(trustedRoot)
-        deleted
+    }
+
+    private fun retireCompletedReceipts(root: Path, cityId: UUID) {
+        val head = loadInventoryHeads(root)[cityId] ?: return
+        val covered = (fileRevisions[cityId] ?: -1L) >= head.afterRevision
+        val retired = completedReceipts.filter { (id, city) -> city == cityId && (covered || id != head.transactionId) }.keys.toList()
+        for (id in retired) {
+            inventoryTransactionStore(root, id).deleteIfExists()
+            forceDirectories(root)
+            completedReceipts.remove(id)
+        }
     }
 
     private fun forceDirectories(trustedRoot: Path, name: String = "inventory-transactions") {
@@ -496,7 +723,16 @@ class CivsStore(
     }
 
     override fun close() {
-        synchronized(lifecycleLock) { closed = true }
+        synchronized(lifecycleLock) {
+            if (closed) return
+            closed = true
+            // The owning executor is drained after this store. No stopped Main callback is needed.
+            closeDrain = enqueue { flushDirtyLocal(CivsCheckpointReason.DRAIN) }
+        }
+    }
+
+    internal fun drained(): CompletableFuture<Unit> = synchronized(lifecycleLock) {
+        closeDrain ?: CompletableFuture.completedFuture(Unit)
     }
 
     private fun reloadCityIndex(trustedRoot: Path): List<Settlement> {
@@ -505,8 +741,20 @@ class CivsStore(
         val deleted = loadDeletedCities(trustedRoot)
         deletedCityIndex = deleted
         val cities = loadCities(trustedRoot, deleted.keys)
-        cityIndex = cities.associate { it.id to indexEntry(it) }
-        return cities
+        val effective = cities.associateByTo(linkedMapOf(), Settlement::id)
+        for ((id, buffered) in dirtyCities.toMap()) {
+            val durable = effective[id]
+            if (id in deleted || durable != null && durable.revision > buffered.revision) dirtyCities.remove(id)
+            else {
+                require(durable != null && indexEntry(durable).directoryMatches(buffered) &&
+                    (durable.revision != buffered.revision || durable == buffered)) { "Buffered city conflicts with durable state" }
+                effective[id] = buffered
+            }
+        }
+        citySnapshots = effective
+        cityIndex = effective.mapValues { indexEntry(it.value) }
+        publishCheckpointStats()
+        return effective.values.toList()
     }
 
     private fun ensureCityIndex(trustedRoot: Path): Map<UUID, CityIndex> =
@@ -518,8 +766,13 @@ class CivsStore(
     private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.name, city.members.toSet(), city.revision, city.autonomy != null, city.inventory?.constructionBuffers, city.inventory?.mode)
 
     private fun loadCities(trustedRoot: Path, deleted: Set<UUID>): List<Settlement> {
+        durableRevisions.clear()
+        fileRevisions.clear()
         val directory = trustedRoot.resolve("cities")
-        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return emptyList()
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            require(loadInventoryHeads(trustedRoot).keys.all { it in deleted }) { "Completed inventory city is missing" }
+            return emptyList()
+        }
         require(!Files.isSymbolicLink(directory)) { "City directory must not be a symbolic link" }
         require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) { "City path is not a directory" }
 
@@ -535,12 +788,21 @@ class CivsStore(
 
         val ids = HashSet<UUID>(files.size)
         val participants = HashSet<UUID>()
-        return files.sortedBy { it.fileName.toString() }.map { file ->
+        val heads = loadInventoryHeads(trustedRoot)
+        val cities = files.sortedBy { it.fileName.toString() }.map { file ->
             val id = idFromJsonFilename(file)
             val record = requireNotNull(cityStore(trustedRoot, id).loadOrNull()) {
                 "City record disappeared during load"
             }
-            val city = requireNotNull(record.city)
+            val checkpoint = requireNotNull(record.city)
+            fileRevisions[id] = checkpoint.revision
+            val head = heads[id]
+            val city = if (head == null || checkpoint.revision >= head.afterRevision) checkpoint else {
+                completedCity(trustedRoot, checkpoint, head).also { recovered ->
+                    if ((dirtyCities[id]?.revision ?: -1L) < recovered.revision) markDirty(recovered)
+                }
+            }
+            durableRevisions[id] = city.revision
             require(city.id == id) { "City id does not match its filename" }
             require(ids.add(city.id)) { "Duplicate city id" }
             require(CivsMembership.participants(city).all(participants::add)) {
@@ -548,6 +810,8 @@ class CivsStore(
             }
             city
         }
+        require(heads.keys.all { it in ids || it in deleted }) { "Completed inventory city is missing" }
+        return cities
     }
 
     private fun loadDeletedCities(trustedRoot: Path): Map<UUID, CivsDeletedCity> {
@@ -583,8 +847,13 @@ class CivsStore(
     }
 
     private fun loadInventoryTransactions(trustedRoot: Path): List<CivInventoryTransaction> {
+        pendingReceipts?.let { return it.values.toList() }
+        val heads = loadInventoryHeads(trustedRoot)
         val directory = trustedRoot.resolve("inventory-transactions")
-        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return emptyList()
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            pendingReceipts = linkedMapOf()
+            return emptyList()
+        }
         require(!Files.isSymbolicLink(directory) && Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
             "Inventory transaction directory is invalid"
         }
@@ -592,23 +861,81 @@ class CivsStore(
         Files.newDirectoryStream(directory).use { files ->
             files.forEach { file ->
                 if (file.fileName.toString().endsWith(".json")) {
-                    require(ids.size < maximumCities) { "Inventory transaction directory exceeds its limit" }
+                    require(ids.size.toLong() < maximumCities.toLong() * 2) { "Inventory transaction directory exceeds its limit" }
                     ids += idFromJsonFilename(file)
                 }
             }
         }
-        val records = ids.sortedBy(UUID::toString).map { id ->
-            requireNotNull(inventoryTransactionStore(trustedRoot, id).loadOrNull()?.transaction) {
+        completedReceipts.clear()
+        val completedIds = heads.values.associateBy(InventoryCompletionHead::transactionId)
+        val records = ids.sortedBy(UUID::toString).mapNotNull { id ->
+            completedIds[id]?.let { head ->
+                completedReceipts[id] = head.cityId
+                return@mapNotNull null
+            }
+            val receipt = requireNotNull(inventoryTransactionStore(trustedRoot, id).loadOrNull()?.transaction) {
                 "Inventory transaction disappeared during load"
             }
+            if ((heads[receipt.cityId]?.afterRevision ?: -1L) >= receipt.after.revision) {
+                completedReceipts[id] = receipt.cityId
+                null
+            } else receipt
         }
         require(records.map { it.cityId }.distinct().size == records.size) { "City has multiple pending inventory transactions" }
         val players = records.mapNotNull(CivInventoryTransaction::playerId)
         require(players.distinct().size == players.size) { "Player has multiple pending inventory transactions" }
         val ground = records.flatMap { it.collected?.ground.orEmpty() }.map(CivGroundItemChange::entityId)
         require(ground.distinct().size == ground.size) { "Ground item has multiple pending inventory transactions" }
+        pendingReceipts = records.associateByTo(linkedMapOf(), CivInventoryTransaction::id)
         return records
     }
+
+    private fun loadInventoryHeads(root: Path): MutableMap<UUID, InventoryCompletionHead> {
+        inventoryHeads?.let { return it }
+        val directory = root.resolve("inventory-completed")
+        val heads = linkedMapOf<UUID, InventoryCompletionHead>()
+        val deleted = deletedCityIndex ?: loadDeletedCities(root)
+        if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            require(!Files.isSymbolicLink(directory) && Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+                "Inventory completion directory is invalid"
+            }
+            Files.newDirectoryStream(directory).use { files -> files.forEach { file ->
+                if (file.fileName.toString().endsWith(".json")) {
+                    val id = idFromJsonFilename(file)
+                    if (id !in deleted) {
+                        require(heads.size < maximumCities) { "Inventory completion directory exceeds its limit" }
+                        heads[id] = requireNotNull(inventoryHeadStore(root, id).loadOrNull())
+                    }
+                }
+            } }
+        }
+        inventoryHeads = heads
+        return heads
+    }
+
+    private fun completedCity(root: Path, checkpoint: Settlement, head: InventoryCompletionHead): Settlement {
+        if (checkpoint.revision >= head.afterRevision) return checkpoint
+        val receipt = inventoryTransactionStore(root, head.transactionId).loadOrNull()?.transaction
+        if (receipt != null) require(receipt.cityId == checkpoint.id && receipt.after.revision == head.afterRevision) {
+            "Completed inventory checkpoint has a different receipt identity"
+        }
+        requireNotNull(receipt) {
+            "Completed inventory checkpoint is missing its receipt"
+        }
+        require(indexEntry(checkpoint).directoryMatches(receipt.after)) { "Completed inventory checkpoint conflicts with city" }
+        completedReceipts[receipt.id] = receipt.cityId
+        return receipt.after
+    }
+
+    private fun inventoryHeadStore(root: Path, id: UUID) = AtomicFileStore(
+        root, Path.of("inventory-completed", "$id.json"), 1_024L,
+        { value: InventoryCompletionHead -> gson.toJson(value).toByteArray(StandardCharsets.UTF_8) },
+        { decodeJson(it, InventoryCompletionHead::class.java) },
+        { head -> requireNotNull(head.transactionId)
+            require(head.schemaVersion == SCHEMA_VERSION && head.cityId == id && head.afterRevision > 0) {
+            "Invalid inventory completion checkpoint"
+        } },
+    )
 
     private fun cityStore(trustedRoot: Path, id: UUID) = AtomicFileStore(
         root = trustedRoot,
@@ -857,12 +1184,14 @@ class CivsStore(
     private data class DeletedCityDocument(val schemaVersion: Int, val deleted: CivsDeletedCity?)
     private data class PlanDocument(val schemaVersion: Int, val plan: CivPlacementPlan?)
     private data class InventoryTransactionDocument(val schemaVersion: Int, val transaction: CivInventoryTransaction?)
+    private data class InventoryCompletionHead(val schemaVersion: Int, val cityId: UUID, val transactionId: UUID, val afterRevision: Long)
     private data class CityIndex(val owner: UUID, val name: String, val members: Set<UUID>, val revision: Long,
         val autonomous: Boolean, val buffers: Map<String, CivConstructionStorageBuffer>?, val mode: CivStorageMode?) {
         fun directoryMatches(city: Settlement) = owner == city.owner && name == city.name && members == city.members && autonomous == (city.autonomy != null)
     }
 
     internal companion object {
+        const val CHECKPOINT_INTERVAL_MILLIS = 300_000L
         const val SCHEMA_VERSION = 1
         const val MAX_CITY_BYTES = 256L * 1024L
         // Schema 1's {"schemaVersion":1,"city":<payload>} adds exactly 27 ASCII bytes.

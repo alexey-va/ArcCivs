@@ -46,7 +46,13 @@ navigation:
   close-preparation-ticks: 80
   preparation-ticks: 320
   # Shared native collision shapes for active routes; block/chunk events invalidate locally.
+  # Legacy native-cell fallback only; this no longer sets the detached snapshot cache size.
   terrain-cache-blocks: 131072
+  # Persistent 16x16x16 sections; the global limit is shared by every city and world.
+  snapshot-sections-per-city: 1024
+  snapshot-sections-maximum: 8192
+  # Blocks around the center, plus developed building/worksite footprints. 0 disables startup warming.
+  snapshot-warm-radius: 48
   terrain-refresh-ticks: 6000
 native-work:
   # Shared by all queued native work, including geometry capture. Whichever limit is hit first wins.

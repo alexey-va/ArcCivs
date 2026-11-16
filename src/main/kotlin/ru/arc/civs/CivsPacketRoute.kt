@@ -322,8 +322,9 @@ internal class CitizenPacketRoute(
     internal fun captureSnapshots(request: CitizenSnapshotRequest, snapshots: CivsNavigationSnapshots): CitizenSnapshotInput {
         val chunks = linkedMapOf<CitizenSnapshotKey, CitizenSnapshotChunk>()
         val unavailable = linkedSetOf<CitizenSnapshotKey>()
-        for (key in request.chunks.take(16)) {
-            val chunk = snapshots.capture(world, key, org.bukkit.Bukkit.getCurrentTick().toLong())
+        for (key in request.chunks.take(1)) {
+            val wanted = request.requestedSections.filter { it.x == key.x && it.z == key.z }.mapTo(linkedSetOf()) { it.y }
+            val chunk = snapshots.capture(world, key, org.bukkit.Bukkit.getCurrentTick().toLong(), wanted, snapshotPolicy?.cityId)
             if (chunk == null) unavailable += key else chunks[key] = chunk
         }
         fun requireLoaded(point: CivPosition) {
@@ -338,6 +339,35 @@ internal class CitizenPacketRoute(
         }
         snapshots.supportCosts(costs.size)
         return CitizenSnapshotInput(chunks, unavailable, states, dynamics, costs)
+    }
+
+    /** Immutable compact references only; each worker promotes a section when its own probe first consumes it. */
+    internal fun seedSnapshots(snapshots: CivsNavigationSnapshots, probes: List<CitizenSearchProbe>, initial: Boolean): CitizenSnapshotInput {
+        val city = snapshotPolicy?.cityId
+        val selected = if (initial) snapshots.seed(world, city, org.bukkit.Bukkit.getCurrentTick().toLong(), ::initialSnapshotSection)
+            else snapshots.cached(world, probes.flatMap { probe ->
+                val y = kotlin.math.floor(probe.node.y).toInt()
+                buildList {
+                    for (x in ((probe.node.x - 1) shr 4)..((probe.node.x + 1) shr 4))
+                        for (z in ((probe.node.z - 1) shr 4)..((probe.node.z + 1) shr 4))
+                            for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4))
+                                add(CitizenSnapshotSectionKey(x, sy, z))
+                }
+            }, org.bukkit.Bukkit.getCurrentTick().toLong(), city)
+        val payloads = selected.values.flatMap { it.payloads() }
+        return CitizenSnapshotInput(states = snapshots.knownStates(payloads), seeded = payloads)
+    }
+
+    private fun initialSnapshotSection(section: CitizenSnapshotSectionKey): Boolean {
+        if (corridor != null) return corridor.snapshotSection(section)
+        val horizontal = settings.initialHorizontalMargin + 1
+        val vertical = settings.initialVerticalMargin + 3
+        return section.x in ((kotlin.math.floor(minOf(origin.x, target.x)).toInt() - horizontal) shr 4)..
+            ((kotlin.math.floor(maxOf(origin.x, target.x)).toInt() + horizontal) shr 4) &&
+            section.z in ((kotlin.math.floor(minOf(origin.z, target.z)).toInt() - horizontal) shr 4)..
+            ((kotlin.math.floor(maxOf(origin.z, target.z)).toInt() + horizontal) shr 4) &&
+            section.y in ((kotlin.math.floor(minOf(origin.y, target.y)).toInt() - vertical) shr 4)..
+            ((kotlin.math.floor(maxOf(origin.y, target.y)).toInt() + vertical) shr 4)
     }
 
     internal fun recordSnapshotCapture(blocks: Int) { capturedBlocks = blocks }

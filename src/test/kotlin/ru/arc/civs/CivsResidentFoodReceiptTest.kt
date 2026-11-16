@@ -1663,7 +1663,7 @@ private class ResidentFoodFixture : AutoCloseable {
     val feet = Location(world, 1.5, 64.0, .5)
     val source get() = CivResidentFoodSource(hall.id, point, CivPosition(1, 64, 0))
     val barrel get() = (world.getBlockAt(0, 64, 0).state as Barrel).inventory
-    val store = mockk<CivsStore>()
+    val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     val busy = mutableSetOf<UUID>()
     val unhealthy = mutableSetOf<UUID>()
     var time = 10_000L

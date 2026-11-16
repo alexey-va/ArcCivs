@@ -245,7 +245,7 @@ internal class CivsCitizenRoutes(
                 !actor.sheltering && actor.attacker == null && actor.combatDestination == null &&
                 actor.foodSource == null && actor.mealVisit == null && actor.workDetour == null &&
                 actor.collectionSeek == null && actor.collectionHome == null && actor.tavernService == null && actor.social.visit == null)
-                CitizenRouteReuseKey.of(routeCosts, allowed) else null, supportCost = supportCost)
+                CitizenRouteReuseKey.of(routeCosts, allowed) else null, supportCost = supportCost, cityId = city.id)
         val motion = navigation.request(world, from, to, { point -> policy.allowed(point) { p ->
             if (p.y in minimumY until maximumY && world.isChunkLoaded(p.x shr 4, p.z shr 4)) world.getBlockAt(p.x, p.y, p.z).type
             else null

@@ -11,7 +11,9 @@ import java.util.UUID
 
 class CivsCourierReturnHintTest : FunSpec({
     for (warehouseX in listOf(10, -25, -45)) for (completeUnrelated in listOf(false, true))
-        test("a real walked courier source leg to warehouseX=$warehouseX survives unrelated completion=$completeUnrelated and its pending pickup") {
+        for (immediateWorkPulse in if (warehouseX == 10 && !completeUnrelated) listOf(false, true) else listOf(false))
+        test("a real walked courier source leg to warehouseX=$warehouseX survives unrelated completion=$completeUnrelated and its pending pickup" +
+            if (immediateWorkPulse) " when the work pulse observes arrival first" else "") {
         residentRuntime { h ->
             val startAtBuilder = warehouseX != 10
             val (source, courierId) = h.courierSource(material = "WHEAT", amount = 1)
@@ -106,7 +108,7 @@ class CivsCourierReturnHintTest : FunSpec({
                         requireNotNull(h.city.building(offered.cargo.warehouseId)?.control)) shouldBe false
                     completed = true
                 }
-                if (tick % 5 == 0) h.owner.pulseFieldWork(now)
+                if (immediateWorkPulse || tick % 5 == 0) h.owner.pulseFieldWork(now)
                 if (h.pickups == 1) break
             }
             withClue(h.navigationState(courierId)) { h.pickups shouldBe 1 }

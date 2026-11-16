@@ -149,7 +149,7 @@ private class TradeJournalFixture : AutoCloseable {
         playerSaves += player.inventory.storageContents.map { it?.clone() }
     }) { emptyArray() }
     val barrel get() = (world.getBlockAt(0, 64, 0).state as Barrel).inventory
-    val store = mockk<CivsStore>()
+    val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     private val cities = mutableMapOf<UUID, Settlement>()
     var city: Settlement
         get() = cities.values.single()

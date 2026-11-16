@@ -50,6 +50,9 @@ internal class CivsResidentNavigation(
         var snapshotWorker: CompletableFuture<CitizenSnapshotRequest>? = null
         var snapshotResult: List<CitizenSearchCapture>? = null
         var snapshotPending: CitizenSnapshotRequest? = null
+        var seededInitial = false
+        var publishedPayloads = emptyList<CitizenSnapshotSection>()
+        var snapshotNative: CompletableFuture<Unit>? = null
         val snapshotRevisions = hashMapOf<CitizenSnapshotSectionKey, Long>()
         var reuse: ReuseAttempt? = null
         var debugTrace: DebugTrace? = null
@@ -75,7 +78,7 @@ internal class CivsResidentNavigation(
 
     private data class RouteSection(val world: UUID, val x: Int, val y: Int, val z: Int)
     private class CachedRoute(val steps: List<CitizenPlannedStep>, val ground: Set<CivPosition>,
-        val sections: Set<RouteSection>) {
+        val sections: Set<RouteSection>, val cityId: UUID?) {
         val suffixLength = DoubleArray(steps.size).also { lengths ->
             for (index in steps.lastIndex - 1 downTo 0)
                 lengths[index] = lengths[index + 1] + kotlin.math.sqrt(steps[index].point.distanceSquared(steps[index + 1].point))
@@ -89,6 +92,20 @@ internal class CivsResidentNavigation(
         var cost = 0.0
     }
     private data class Suffix(val source: CitizenRouteIdentity, val cached: CachedRoute, val index: Int)
+    private enum class SharedRouteCounter {
+        ELIGIBLE, EXCLUDED_NO_REUSE_POLICY, EXCLUDED_EXPLICIT_CORRIDOR, EXCLUDED_BODY_DETOUR,
+        EXACT_CANDIDATES, SUFFIX_CANDIDATES, EXACT_HITS, SUFFIX_HITS, REJECTED, REJECTED_CONNECTORS, LEARNED,
+        MISS_NO_NEARBY_ENTRIES, MISS_NO_MATCHING_ENDPOINT, MISS_NO_COMPATIBLE_ENTRY, MISS_NO_JOIN_POINT,
+        SUFFIX_CANDIDATE_LIMIT_REACHED,
+        REMOVED_CAPACITY, REMOVED_REPLACEMENT, REMOVED_NATIVE_CHANGE, REMOVED_REPLAN,
+        REMOVED_REPLAY_OR_ROUTE_FAILURE, REMOVED_UNLOAD;
+
+        val field = name.lowercase()
+    }
+    private class CityRouteCounters {
+        val values = LongArray(SharedRouteCounter.entries.size)
+        var lastRoster = 0L
+    }
     private val owner = Thread.currentThread()
     private val epoch = tasks.token()
     private val ownsWork = nativeWork == null
@@ -98,23 +115,23 @@ internal class CivsResidentNavigation(
     private val executor = executor ?: requireNotNull(ownedExecutor)
     private val jobs = linkedMapOf<CitizenPacketRoute, Job>()
     private val terrain = CivsNavigationTerrain(settings.terrainCacheBlocks, settings.terrainRefreshTicks)
-    private val snapshots = snapshotCache ?: CivsNavigationSnapshots(settings.terrainCacheBlocks, settings.terrainRefreshTicks, tasks, snapshotContextFree)
+    private val snapshots = snapshotCache ?: CivsNavigationSnapshots(settings.terrainCacheBlocks, settings.terrainRefreshTicks, tasks, snapshotContextFree,
+        maximumSectionsPerCity = settings.snapshotSectionsPerCity, maximumSections = settings.snapshotSectionsMaximum)
+    private val warmup = CivsNavigationWarmup(settings, snapshots, tasks, work, this.executor)
     private val sharedRoutes = LinkedHashMap<CitizenRouteIdentity, CachedRoute>(64, .75f, true)
     private val routeSections = hashMapOf<RouteSection, MutableSet<CitizenRouteIdentity>>()
-    private var reusedRoutes = 0L
-    private var reuseMisses = 0L
-    private var learnedRoutes = 0L
-    private var rejectedReuse = 0L
-    private var invalidatedRoutes = 0L
+    private val sharedRouteTotals = LongArray(SharedRouteCounter.entries.size)
+    private val unknownCityRoutes = LongArray(SharedRouteCounter.entries.size)
+    private val sharedRouteCities = linkedMapOf<UUID, CityRouteCounters>()
+    private var sharedRouteRoster = 0L
     private var replayChecks = 0L
     private var rejectedSnapshotSections = 0L
-    private var suffixHits = 0L
     private var joinCandidates = 0L
     private var joinSteps = 0L
-    private var rejectedConnectors = 0L
     private var lastReplayCost = 0.0
     private var closed = false
     private var staleSnapshotRestarts = 0L
+    private var snapshotMainRequests = 0L
     private var readyPreparations = 0L
     private var failedPreparations = 0L
     private var cancelledPreparations = 0L
@@ -221,23 +238,40 @@ internal class CivsResidentNavigation(
         }
     }
 
-    internal fun debug(): Map<String, Any?> {
+    internal fun debug(cityId: UUID? = null): Map<String, Any?> {
         checkOwner()
+        val suffixHits = sharedRouteTotal(SharedRouteCounter.SUFFIX_HITS)
+        val owned = jobs.values.filter { cityId == null || it.route.snapshotPolicy?.cityId == cityId }
+        val jobPayloads = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<CitizenSnapshotSection, Boolean>())
+        owned.forEach { jobPayloads.addAll(it.publishedPayloads) }
+        val cachedPayloads = snapshots.retainedPayloads().toSet()
         return mapOf("closed" to closed, "jobs" to jobs.size, "maximum_jobs" to settings.maximumJobs,
             "native_pending" to jobs.values.count { it.capturing?.isDone == false && it.snapshotCapture == null },
             "worker_pending" to jobs.values.count { it.searching?.isDone == false || it.snapshotWorker?.isDone == false },
             "bulk_jobs" to jobs.values.count { it.route.snapshotPolicy != null },
             "captured_blocks" to jobs.values.sumOf { it.route.capturedBlocks }, "terrain_cache" to terrain.debug(),
-            "snapshot_cache" to snapshots.debug(), "stale_snapshot_restarts" to staleSnapshotRestarts,
+            "snapshot_cache" to snapshots.debug(cityId), "snapshot_warmup" to warmup.debug(cityId), "snapshot_main_requests" to snapshotMainRequests,
+            "active_job_section_payload_bytes" to jobPayloads.sumOf { it.indexPayloadBytes },
+            "active_job_section_payload_mib" to jobPayloads.sumOf { it.indexPayloadBytes } / 1048576.0,
+            "active_job_exclusive_section_payload_bytes" to jobPayloads.filter { it !in cachedPayloads }.sumOf { it.indexPayloadBytes },
+            "active_job_payload_scope" to "immutable-last-worker-publication; includes local unconsumed seed sections",
+            "stale_snapshot_restarts" to staleSnapshotRestarts,
             "used_snapshot_sections" to jobs.values.sumOf { it.snapshotRevisions.size },
             "section_snapshot_rejects" to rejectedSnapshotSections,
             "shared_routes" to mapOf("entries" to sharedRoutes.size, "maximum_entries" to MAXIMUM_SHARED_ROUTES,
-                "maximum_steps" to CivsPaths.MAX_TRIP_CELLS, "learned" to learnedRoutes,
-                "hits" to reusedRoutes, "misses" to reuseMisses, "rejected" to rejectedReuse,
-                "invalidated" to invalidatedRoutes, "native_step_checks" to replayChecks,
+                "maximum_steps" to CivsPaths.MAX_TRIP_CELLS, "learned" to sharedRouteTotal(SharedRouteCounter.LEARNED),
+                "hits" to (sharedRouteTotal(SharedRouteCounter.EXACT_HITS) + suffixHits),
+                "misses" to (sharedRouteTotal(SharedRouteCounter.MISS_NO_NEARBY_ENTRIES) +
+                    sharedRouteTotal(SharedRouteCounter.MISS_NO_MATCHING_ENDPOINT) +
+                    sharedRouteTotal(SharedRouteCounter.MISS_NO_COMPATIBLE_ENTRY) +
+                    sharedRouteTotal(SharedRouteCounter.MISS_NO_JOIN_POINT)),
+                "rejected" to sharedRouteTotal(SharedRouteCounter.REJECTED),
+                "invalidated" to (sharedRouteTotal(SharedRouteCounter.REMOVED_NATIVE_CHANGE) +
+                    sharedRouteTotal(SharedRouteCounter.REMOVED_REPLAN)), "native_step_checks" to replayChecks,
                 "last_validated_cost" to lastReplayCost),
             "shared_route_suffixes" to mapOf("hits" to suffixHits, "candidates" to joinCandidates,
-                "steps_examined" to joinSteps, "rejected_connectors" to rejectedConnectors,
+                "steps_examined" to joinSteps,
+                "rejected_connectors" to sharedRouteTotal(SharedRouteCounter.REJECTED_CONNECTORS),
                 "maximum_candidates" to MAXIMUM_JOIN_CANDIDATES, "maximum_join_distance" to MAXIMUM_JOIN_DISTANCE),
             "preparation_lifetime" to mapOf("source" to "all-admitted-planner-jobs", "ready" to readyPreparations,
                 "failed" to failedPreparations, "cancelled" to cancelledPreparations,
@@ -252,6 +286,42 @@ internal class CivsResidentNavigation(
                 "buckets_ms" to preparationBuckets.indices.associate { index ->
                     (if (index == preparationBuckets.lastIndex) ">10000" else "<=${preparationBoundsMillis[index]}") to preparationBuckets[index]
                 }))
+    }
+
+    private fun sharedRouteTotal(counter: SharedRouteCounter): Long = sharedRouteTotals[counter.ordinal]
+
+    private fun countSharedRoute(counter: SharedRouteCounter, cityId: UUID?) {
+        val index = counter.ordinal
+        sharedRouteTotals[index]++
+        val counters = if (cityId == null) unknownCityRoutes else sharedRouteCities[cityId]?.values
+        if (counters != null) counters[index]++
+    }
+
+    internal fun debugSharedRoutes(cityId: UUID? = null): Map<String, Any> {
+        checkOwner()
+        fun counts(values: LongArray) = SharedRouteCounter.entries.associate { it.field to values[it.ordinal] }
+        val selected = if (cityId == null) sharedRouteCities else sharedRouteCities[cityId]?.let { mapOf(cityId to it) }.orEmpty()
+        val occupancy = sharedRoutes.values.groupingBy { it.cityId }.eachCount()
+        return mapOf("entries" to sharedRoutes.size, "maximum_entries" to MAXIMUM_SHARED_ROUTES,
+            "request_scope" to "planner-admitted-requests",
+            "city_scope" to "counters reset when the city leaves the navigation roster",
+            "totals" to counts(sharedRouteTotals),
+            "unknown_city" to mapOf("entries" to (occupancy[null] ?: 0), "counters" to counts(unknownCityRoutes)),
+            "cities_total" to selected.size, "cities_truncated" to (selected.size > 8),
+            "cities" to selected.entries.take(8).map { (id, counters) ->
+                mapOf("city" to id, "entries" to (occupancy[id] ?: 0), "counters" to counts(counters.values))
+            })
+    }
+
+    internal fun prepareNavigation(cities: Collection<Settlement>, active: (UUID) -> Boolean) {
+        checkOwner()
+        if (closed) return
+        if (sharedRouteCities.isNotEmpty()) {
+            val roster = ++sharedRouteRoster
+            for (city in cities) if (city.pendingDeletion == null) sharedRouteCities[city.id]?.lastRoster = roster
+            sharedRouteCities.values.removeIf { it.lastRoster != roster }
+        }
+        warmup.prepare(cities, active)
     }
 
     fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
@@ -279,15 +349,18 @@ internal class CivsResidentNavigation(
                     destination?.let { CivPosition(it.blockX, it.blockY, it.blockZ) })
             points.forEach { terrain.changed(world.uid, it) }
             // Resident bodies belong to this search, not to the shared native chunk generation.
-            if (refreshSnapshots) points.forEach { snapshots.changed(world.uid, it); invalidateShared(world.uid, it) }
+            if (refreshSnapshots) points.forEach {
+                snapshots.changed(world.uid, it)
+                invalidateShared(world.uid, it, SharedRouteCounter.REMOVED_REPLAN)
+            }
         }
         // Replacing an unfinished search releases its admission slot. A ready previous path
         // remains with the caller so a blocked-person detour can fall back to waiting on it.
         if (route.searching) route.cancel()
-        return admit(route.replan(from, bodies, destination))
+        return admit(route.replan(from, bodies, destination), bodyDetour = bodies.isNotEmpty())
     }
 
-    private fun admit(route: CitizenPacketRoute): CitizenPacketRoute {
+    private fun admit(route: CitizenPacketRoute, bodyDetour: Boolean = false): CitizenPacketRoute {
         checkOwner()
         retireCancelled()
         if (closed || !tasks.isCurrent(epoch)) { route.planningFailed("cancelled"); return route }
@@ -296,11 +369,23 @@ internal class CivsResidentNavigation(
         jobs[route] = job
         route.attachAsync { job.search.cancel() }
         val key = route.reuseIdentity()
+        val cityId = route.snapshotPolicy?.cityId
+        if (cityId != null) sharedRouteCities.getOrPut(cityId, ::CityRouteCounters)
+        // Production corridors also omit the reuse key. Count the explicit request constraint first.
+        countSharedRoute(when {
+            key != null -> SharedRouteCounter.ELIGIBLE
+            route.hasCourierCorridorHint -> SharedRouteCounter.EXCLUDED_EXPLICIT_CORRIDOR
+            bodyDetour -> SharedRouteCounter.EXCLUDED_BODY_DETOUR
+            else -> SharedRouteCounter.EXCLUDED_NO_REUSE_POLICY
+        }, cityId)
         if (key != null) {
-            route.attachReuseObserver({ steps, walked -> rememberRoute(key, steps, walked) }, { removeShared(key) })
+            route.attachReuseObserver({ steps, walked -> rememberRoute(key, steps, walked, cityId) },
+                { removeShared(key, SharedRouteCounter.REMOVED_REPLAY_OR_ROUTE_FAILURE) })
             val cached = sharedRoutes[key]
-            val suffix = if (cached == null) findSuffix(key, route.reuseOrigin) else null
+            val suffix = if (cached == null) findSuffix(key, route.reuseOrigin, cityId) else null
             if (cached != null || suffix != null) {
+                val candidate = if (suffix == null) SharedRouteCounter.EXACT_CANDIDATES else SharedRouteCounter.SUFFIX_CANDIDATES
+                countSharedRoute(candidate, cityId)
                 val source = suffix?.source ?: key
                 val entry = cached ?: requireNotNull(suffix).cached
                 val steps = if (suffix == null) entry.steps else
@@ -320,7 +405,8 @@ internal class CivsResidentNavigation(
                         val cost = route.validatedCachedStepCost(attempt.previous, step)
                         if (!cost.isFinite()) {
                             attempt.valid = false
-                            if (attempt.splice && attempt.next == 0) rejectedConnectors++
+                            if (attempt.splice && attempt.next == 0)
+                                countSharedRoute(SharedRouteCounter.REJECTED_CONNECTORS, cityId)
                             refreshFailedReplay(route, attempt.previous, step.point)
                             true
                         } else {
@@ -332,7 +418,6 @@ internal class CivsResidentNavigation(
                 }
                 return route
             }
-            reuseMisses++
         }
         dispatch(job, emptyList())
         return route
@@ -352,15 +437,20 @@ internal class CivsResidentNavigation(
     }
 
     /** One nearby join from the existing section index; no second spatial search or new voxel grid. */
-    private fun findSuffix(request: CitizenRouteIdentity, from: CitizenPoint): Suffix? {
+    private fun findSuffix(request: CitizenRouteIdentity, from: CitizenPoint, cityId: UUID?): Suffix? {
         val candidates = linkedSetOf<CitizenRouteIdentity>()
+        var nearby = false
+        var matchingEndpoint = false
         val x = floor(from.x).toInt()
         val z = floor(from.z).toInt()
         val y = citizenSupportY(from.y) shr 4
         sections@ for (cx in ((x - MAXIMUM_JOIN_DISTANCE) shr 4)..((x + MAXIMUM_JOIN_DISTANCE) shr 4))
             for (cz in ((z - MAXIMUM_JOIN_DISTANCE) shr 4)..((z + MAXIMUM_JOIN_DISTANCE) shr 4)) {
                 for (key in routeSections[RouteSection(request.world, cx, y, cz)].orEmpty()) {
-                    if (key.world == request.world && key.to == request.to && key.settings == request.settings &&
+                    nearby = true
+                    if (key.world != request.world || key.to != request.to) continue
+                    matchingEndpoint = true
+                    if (key.settings == request.settings &&
                         key.policy.geometry == request.policy.geometry &&
                         key.policy.allowedBuildings == request.policy.allowedBuildings) {
                         candidates += key
@@ -368,6 +458,8 @@ internal class CivsResidentNavigation(
                     }
                 }
             }
+        if (candidates.size == MAXIMUM_JOIN_CANDIDATES)
+            countSharedRoute(SharedRouteCounter.SUFFIX_CANDIDATE_LIMIT_REACHED, cityId)
         var best: Suffix? = null
         var score = Double.POSITIVE_INFINITY
         for (key in candidates) {
@@ -387,11 +479,17 @@ internal class CivsResidentNavigation(
                 }
             }
         }
+        if (best == null) countSharedRoute(when {
+            !nearby -> SharedRouteCounter.MISS_NO_NEARBY_ENTRIES
+            !matchingEndpoint -> SharedRouteCounter.MISS_NO_MATCHING_ENDPOINT
+            candidates.isEmpty() -> SharedRouteCounter.MISS_NO_COMPATIBLE_ENTRY
+            else -> SharedRouteCounter.MISS_NO_JOIN_POINT
+        }, cityId)
         return best
     }
 
     /** Native accepted arrival follows continuous observed movement; replay still validates the whole geometry. */
-    private fun rememberRoute(key: CitizenRouteIdentity, steps: List<CitizenPlannedStep>, walked: Set<CivPosition>) {
+    private fun rememberRoute(key: CitizenRouteIdentity, steps: List<CitizenPlannedStep>, walked: Set<CivPosition>, cityId: UUID?) {
         checkOwner()
         if (closed || !tasks.isCurrent(epoch) || steps.size !in 1..CivsPaths.MAX_TRIP_CELLS || walked.size < 2) return
         val ground = walked.toMutableSet()
@@ -401,29 +499,30 @@ internal class CivsResidentNavigation(
         for (point in ground) for (x in (point.x - 1 shr 4)..(point.x + 1 shr 4))
             for (z in (point.z - 1 shr 4)..(point.z + 1 shr 4))
                 for (y in (point.y - 2 shr 4)..(point.y + 4 shr 4)) sections += RouteSection(key.world, x, y, z)
-        removeShared(key)
-        sharedRoutes[key] = CachedRoute(steps.toList(), ground.toSet(), sections)
+        removeShared(key, SharedRouteCounter.REMOVED_REPLACEMENT)
+        sharedRoutes[key] = CachedRoute(steps.toList(), ground.toSet(), sections, cityId)
         sections.forEach { routeSections.getOrPut(it) { hashSetOf() }.add(key) }
-        learnedRoutes++
-        while (sharedRoutes.size > MAXIMUM_SHARED_ROUTES) removeShared(sharedRoutes.keys.first())
+        countSharedRoute(SharedRouteCounter.LEARNED, cityId)
+        while (sharedRoutes.size > MAXIMUM_SHARED_ROUTES)
+            removeShared(sharedRoutes.keys.first(), SharedRouteCounter.REMOVED_CAPACITY)
     }
 
-    private fun removeShared(key: CitizenRouteIdentity) {
+    private fun removeShared(key: CitizenRouteIdentity, reason: SharedRouteCounter) {
         val entry = sharedRoutes.remove(key) ?: return
+        countSharedRoute(reason, entry.cityId)
         for (section in entry.sections) routeSections[section]?.let { keys ->
             keys.remove(key)
             if (keys.isEmpty()) routeSections.remove(section)
         }
     }
 
-    private fun invalidateShared(world: UUID, point: CivPosition) {
+    private fun invalidateShared(world: UUID, point: CivPosition, reason: SharedRouteCounter) {
         val section = RouteSection(world, point.x shr 4, point.y shr 4, point.z shr 4)
         for (key in routeSections[section]?.toList().orEmpty()) {
             val entry = sharedRoutes[key] ?: continue
             if (entry.ground.any { ground -> kotlin.math.abs(point.x.toLong() - ground.x) <= 1 &&
                 kotlin.math.abs(point.z.toLong() - ground.z) <= 1 && point.y.toLong() in ground.y.toLong() - 2..ground.y.toLong() + 4 }) {
-                removeShared(key)
-                invalidatedRoutes++
+                removeShared(key, reason)
             }
         }
     }
@@ -472,20 +571,25 @@ internal class CivsResidentNavigation(
                         job.capturing = null
                         job.reuse = null
                         validation.join()
+                        val cityId = job.route.snapshotPolicy?.cityId
                         if (reuse.valid && sharedRoutes[reuse.source] === reuse.cached) {
-                            reusedRoutes++
+                            val hit = if (reuse.splice) SharedRouteCounter.SUFFIX_HITS else SharedRouteCounter.EXACT_HITS
+                            countSharedRoute(hit, cityId)
                             lastReplayCost = reuse.cost
-                            if (reuse.splice) suffixHits++
                             val requestKey = reuse.request
                             val sourceKey = reuse.source
                             job.route.attachReuseObserver(
-                                { steps, walked -> rememberRoute(requestKey, steps, walked) },
-                                { removeShared(requestKey); removeShared(sourceKey) })
+                                { steps, walked -> rememberRoute(requestKey, steps, walked, cityId) },
+                                {
+                                    removeShared(requestKey, SharedRouteCounter.REMOVED_REPLAY_OR_ROUTE_FAILURE)
+                                    removeShared(sourceKey, SharedRouteCounter.REMOVED_REPLAY_OR_ROUTE_FAILURE)
+                                })
                             job.route.acceptSearch(CitizenSearchResult(emptyList(), 0, path = reuse.steps))
                         } else {
                             // A bad C-to-join connector says nothing about the already validated A-to-B path.
-                            if (!reuse.splice || reuse.next > 0) removeShared(reuse.source)
-                            rejectedReuse++
+                            if (!reuse.splice || reuse.next > 0)
+                                removeShared(reuse.source, SharedRouteCounter.REMOVED_REPLAY_OR_ROUTE_FAILURE)
+                            countSharedRoute(SharedRouteCounter.REJECTED, cityId)
                             dispatch(job, emptyList())
                         }
                     }
@@ -510,7 +614,9 @@ internal class CivsResidentNavigation(
                             val cursor = job.route.snapshotCapture(result.probes, job.snapshotTerrain)
                             job.snapshotCapture = cursor
                             job.capturing = CompletableFuture()
-                            captureSnapshot(job, cursor)
+                            val seeded = job.route.seedSnapshots(snapshots, result.probes, !job.seededInitial)
+                            job.seededInitial = true
+                            captureSnapshot(job, cursor, seeded)
                         } else {
                             val cursor = CitizenNavigationCapture(job.route, result.probes, job.terrain, terrain)
                             job.capture = cursor
@@ -567,7 +673,10 @@ internal class CivsResidentNavigation(
         job.route.phase("snapshot-processing")
         val search = job.search
         val future = try { CompletableFuture.supplyAsync({ cursor.advance(input, search::captured) }, executor) }
-        catch (failure: RejectedExecutionException) { CompletableFuture.failedFuture(failure) }
+        catch (failure: RejectedExecutionException) {
+            input.chunks.values.forEach(CitizenSnapshotChunk::releaseSource)
+            CompletableFuture.failedFuture(failure)
+        }
         job.snapshotWorker = future
         future.whenCompleteSync(tasks) { request, failure ->
             if (closed || !tasks.isCurrent(epoch) || !job.route.searching || job.snapshotCapture !== cursor) return@whenCompleteSync
@@ -575,7 +684,10 @@ internal class CivsResidentNavigation(
             job.progressTick = Bukkit.getCurrentTick().toLong()
             if (failure != null) { job.capturing?.completeExceptionally(failure); return@whenCompleteSync }
             val prepared = requireNotNull(request)
+            snapshots.publish(job.route.worldId, prepared.decoded.values, job.route.snapshotPolicy?.cityId)
+            job.publishedPayloads = prepared.payloads
             job.snapshotRevisions.putAll(prepared.sections)
+            snapshots.touched(job.route.worldId, prepared.sections, job.route.snapshotPolicy?.cityId)
             if (!snapshots.currentSections(job.route.worldId, job.snapshotRevisions)) {
                 rejectedSnapshotSections++
                 restartSnapshot(job)
@@ -593,18 +705,27 @@ internal class CivsResidentNavigation(
     }
 
     private fun captureSnapshotMain(job: Job, cursor: CitizenSnapshotCapture, request: CitizenSnapshotRequest) {
-        runCatching {
-            job.route.phase("snapshot-capturing")
+        snapshotMainRequests++
+        job.route.phase("snapshot-capturing")
+        var input: CitizenSnapshotInput? = null
+        job.snapshotNative = work.submit({ !closed && tasks.isCurrent(epoch) && job.route.searching && job.snapshotCapture === cursor }) {
             val before = snapshots.shapeReads
-            val captured = job.route.captureSnapshots(request, snapshots)
+            input = job.route.captureSnapshots(request, snapshots)
             job.route.recordSnapshotNativeReads((snapshots.shapeReads - before).toInt())
-            captureSnapshot(job, cursor, captured)
-        }.onFailure { failure ->
-            if (failure is CitizenSnapshotPending) {
-                job.snapshotPending = request
-                job.route.phase("snapshot-refresh")
-            } else job.capturing?.completeExceptionally(failure)
-        }
+            true
+        }.also { native -> native.whenCompleteSync(tasks) { _, failure ->
+            job.snapshotNative = null
+            if (closed || !tasks.isCurrent(epoch) || !job.route.searching || job.snapshotCapture !== cursor) return@whenCompleteSync
+            if (failure == null) captureSnapshot(job, cursor, requireNotNull(input))
+            else {
+                var cause: Throwable = failure
+                while (cause is CompletionException && cause.cause != null) cause = requireNotNull(cause.cause)
+                if (cause is CitizenSnapshotPending) {
+                    job.snapshotPending = request
+                    job.route.phase("snapshot-refresh")
+                } else job.capturing?.completeExceptionally(cause)
+            }
+        } }
     }
 
     /** Never let an old worker graph reach movement after an observed native block change. */
@@ -612,7 +733,7 @@ internal class CivsResidentNavigation(
         if (debugRequest?.job === job) failDebug("navigation-snapshot-restarted")
         job.search.cancel()
         job.snapshotCapture?.cancel()
-        job.snapshotWorker?.cancel(false)
+        job.snapshotNative?.cancel(false)
         job.searching?.cancel(false)
         job.capturing?.cancel(false)
         job.snapshotCapture = null
@@ -621,6 +742,8 @@ internal class CivsResidentNavigation(
         job.snapshotPending = null
         job.capturing = null
         job.snapshotTerrain = CitizenSnapshotTerrain()
+        job.seededInitial = false
+        job.publishedPayloads = emptyList()
         job.snapshotRevisions.clear()
         job.search = job.route.newSearch()
         job.lastNodes = 0
@@ -656,7 +779,7 @@ internal class CivsResidentNavigation(
             work[3] += job.route.nativeShapeReads
             job.search.cancel()
             job.snapshotCapture?.cancel()
-            job.snapshotWorker?.cancel(false)
+                job.snapshotNative?.cancel(false)
             job.capturing?.cancel(false)
             job.searching?.cancel(false)
             job.capture = null
@@ -680,9 +803,12 @@ internal class CivsResidentNavigation(
         jobs.keys.toList().forEach(CitizenPacketRoute::cancel)
         retireCancelled()
         terrain.clear()
+        warmup.close()
         snapshots.clear()
         sharedRoutes.clear()
         routeSections.clear()
+        sharedRouteCities.clear()
+        unknownCityRoutes.fill(0L)
         if (ownsWork) work.close()
         val searchDrain = ownedExecutor?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
         terminal = CompletableFuture.allOf(searchDrain, debugDrain).thenApply { Unit }
@@ -691,16 +817,20 @@ internal class CivsResidentNavigation(
     fun drained(): CompletableFuture<Unit> = terminal.copy()
 
     fun changed(world: UUID, point: CivPosition) {
-        checkOwner(); invalidateShared(world, point); terrain.changed(world, point); snapshots.changed(world, point)
+        checkOwner()
+        invalidateShared(world, point, SharedRouteCounter.REMOVED_NATIVE_CHANGE)
+        terrain.changed(world, point)
+        snapshots.changed(world, point)
     }
     fun removeChunk(world: UUID, x: Int, z: Int) {
         checkOwner()
         sharedRoutes.entries.filter { it.key.world == world && it.value.sections.any { s -> s.x == x && s.z == z } }
-            .map { it.key }.forEach(::removeShared)
+            .map { it.key }.forEach { removeShared(it, SharedRouteCounter.REMOVED_UNLOAD) }
         terrain.removeChunk(world, x, z); snapshots.removeChunk(world, x, z)
     }
     fun removeWorld(world: UUID) {
-        checkOwner(); sharedRoutes.keys.filter { it.world == world }.forEach(::removeShared)
+        checkOwner()
+        sharedRoutes.keys.filter { it.world == world }.forEach { removeShared(it, SharedRouteCounter.REMOVED_UNLOAD) }
         terrain.removeWorld(world); snapshots.removeWorld(world)
     }
 

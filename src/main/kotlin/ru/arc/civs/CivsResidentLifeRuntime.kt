@@ -7,7 +7,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.logging.Level
 
-/** Main-thread resident lifecycle; city authority keeps the durable mutation and tick-stage ordering. */
+/** Main-thread resident lifecycle; city authority accepts RAM updates in order and checkpoints their latest state. */
 internal class CivsResidentLifeRuntime(
     private val plugin: Plugin,
     private val tasks: LifecycleTaskScope,
@@ -63,7 +63,7 @@ internal class CivsResidentLifeRuntime(
                 citizens.validateResidentMeal(cityId, meal)
                 CivsResidentLife.finishMeal(current, meal, foods)
             }.also { receipt ->
-                // Observability must not turn a durable success into a failed meal.
+                // Observability must not turn an accepted meal into a failed one.
                 receipt.thenAccept { committed ->
                     val worker = committed.workers.firstOrNull { it.id == meal.workerId }
                     CivsDiagnostics.event("resident_meal", "city" to cityId, "worker" to meal.workerId,

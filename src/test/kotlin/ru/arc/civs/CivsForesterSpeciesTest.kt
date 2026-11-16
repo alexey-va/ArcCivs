@@ -210,7 +210,7 @@ private class SpeciesService(val paper: MockBukkitTestRuntime, autonomous: Boole
     var admin = true
         set(value) { field = value; permissions.setPermission("arccivs.admin", value) }
     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-    val store = mockk<CivsStore>()
+    val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     val city = forestryCity(autonomous).copy(worldId = world.uid, owner = player.uniqueId,
         memberNames = mapOf(player.uniqueId.toString() to player.name), settings = CivSettlementSettings(chunkLoading = false),
         autonomy = if (autonomous) CivAutonomy(paused = true) else null)

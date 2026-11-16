@@ -130,7 +130,7 @@ private class WarehouseJournalFixture : AutoCloseable {
         set(value) { cities[value.id] = value }
     val busy = mutableSetOf<UUID>()
     val unhealthy = mutableSetOf<UUID>()
-    val store = mockk<CivsStore>()
+    val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     val storage = CivsStorage(plugin) { chunk -> f.receipt.containers.filter {
         it.position.x shr 4 == chunk.x && it.position.z shr 4 == chunk.z
     }.map { world.getBlockAt(it.position.x, it.position.y, it.position.z).state }.toTypedArray() }

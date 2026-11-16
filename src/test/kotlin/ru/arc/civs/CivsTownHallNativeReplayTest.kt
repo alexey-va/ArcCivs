@@ -275,7 +275,7 @@ private fun replayHall(spec: JsonObject, out: Path) {
                     val tx=CivInventoryTransaction(UUID.randomUUID(),city.id,city.revision,after,emptyList(),worldChanges=work.changes,upkeep=receipt)
                     tx.validated()
                     if (receipts.isEmpty()) {
-                        val store=mockk<CivsStore>()
+                        val store=mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
                         val storage=mockk<CivsStorage>(relaxed=true)
                         every { store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
                         every { store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)

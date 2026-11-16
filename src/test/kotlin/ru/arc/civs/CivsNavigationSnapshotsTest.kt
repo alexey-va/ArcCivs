@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import com.google.gson.JsonParser
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
@@ -83,7 +84,107 @@ class CivsNavigationSnapshotsTest : FunSpec({
             warm.capturedBlocks shouldBe 0
             h.cache()["hits"] shouldBe 1L
             ((h.cache()["native_step_checks"] as Long) > 0) shouldBe true
+            val cost = h.cache()["last_validated_cost"] as Double
+            (kotlin.math.abs(cost - (h.target.x - .7) * CivsPaths.ORDINARY_COST) < 1e-9) shouldBe true
+            h.routeCounters()["exact_candidates"] shouldBe 1L
+            h.routeCounters()["exact_hits"] shouldBe 1L
             h.walk(warm, CitizenPoint(.7, 64.0, .5)).distanceSquared(h.target) shouldBe 0.0
+            h.routeCounters()["removed_replacement"] shouldBe 1L
+        }
+    }
+
+    test("shared route diagnostics follow the requesting city and attribute removal to the learned entry") {
+        sharedRouteRuntime { h ->
+            val other = UUID(0, 3)
+            val first = h.request(); h.finish(first); h.walk(first)
+            val second = h.request(cityId = other); h.finish(second)
+            second.nodeCount shouldBe 0 // City attribution does not enter the existing route identity.
+            h.walk(second)
+            h.diagnostics()["cities_total"] shouldBe 2
+            h.diagnostics(other)["cities_total"] shouldBe 1
+            h.routeCounters()["exact_hits"] shouldBe 0L
+            h.routeCounters()["removed_replacement"] shouldBe 1L
+            h.routeCounters(other)["exact_hits"] shouldBe 1L
+            h.routeCounters(other)["removed_replacement"] shouldBe 0L
+            h.routeCity()["entries"] shouldBe 0
+            h.routeCity(other)["entries"] shouldBe 1
+
+            repeat(2) { h.owner.changed(h.world.uid, CivPosition(4, 63, 0)) }
+            h.cache()["entries"] shouldBe 0
+            h.cache()["invalidated"] shouldBe 1L
+            h.routeCounters(other)["removed_native_change"] shouldBe 1L
+            h.routeCounters()["removed_native_change"] shouldBe 0L
+            val again = h.request(cityId = other); h.finish(again); h.walk(again)
+            h.request(reuseKey = null, cityId = null).cancel()
+            val unknown = h.diagnostics()["unknown_city"] as Map<*, *>
+            (unknown["counters"] as Map<*, *>)["excluded_no_reuse_policy"] shouldBe 1L
+
+            h.owner.prepareNavigation(listOf(h.city)) { false }
+            h.diagnostics(other)["cities_total"] shouldBe 0
+            h.cache()["entries"] shouldBe 1
+            repeat(2) { h.owner.removeWorld(h.world.uid) }
+            (h.diagnostics()["totals"] as Map<*, *>)["removed_unload"] shouldBe 1L
+            h.diagnostics(other)["cities_total"] shouldBe 0
+            h.routeCounters()["removed_unload"] shouldBe 0L
+
+            h.request(reuseKey = null, cityId = other).cancel()
+            h.routeCounters(other)["learned"] shouldBe 0L
+            h.routeCounters(other)["excluded_no_reuse_policy"] shouldBe 1L
+            val extraCities = (4L..10L).map { UUID(0, it) }
+            extraCities.forEach { h.request(reuseKey = null, cityId = it).cancel() }
+            val line = CivsDebug.lines(listOf("route-cache")) { _, cityId, _ -> h.diagnostics(cityId) }.single()
+            withClue("route-cache line length=${line.length}") { (line.length <= 16_384) shouldBe true }
+            val state = JsonParser.parseString(line.removePrefix("ARCCIVS_DEBUG ")).asJsonObject.getAsJsonObject("state")
+            state["cities_total"].asInt shouldBe 9
+            state["cities_truncated"].asBoolean shouldBe true
+            state.getAsJsonArray("cities").size() shouldBe 8
+            h.routeCounters(extraCities.last())["excluded_no_reuse_policy"] shouldBe 1L
+            h.owner.clear()
+            h.diagnostics()["cities_total"] shouldBe 0
+            (h.diagnostics()["totals"] as Map<*, *>)["removed_unload"] shouldBe 1L
+        }
+    }
+
+    test("route cache debug dispatches the city filter through the service") {
+        serviceScenario { h ->
+            h.start()
+            every { h.citizens.debugSharedRoutes(h.city.id) } returns mapOf("maximum_entries" to 64)
+            val line = CivsDebug.lines(listOf("route-cache", h.city.id.toString()), h.service::debugState).single()
+            val payload = JsonParser.parseString(line.removePrefix("ARCCIVS_DEBUG ")).asJsonObject
+            payload["system"].asString shouldBe "route-cache"
+            payload["city"].asString shouldBe h.city.id.toString()
+            payload.getAsJsonObject("state")["maximum_entries"].asInt shouldBe 64
+        }
+    }
+
+    test("shared suffix lookup reports one miss per request and examines a route indexed in two sections just once") {
+        sharedRouteRuntime { h ->
+            val distantOrigin = CitizenPoint(5.5, 64.0, .5)
+            val first = h.request(from = distantOrigin); h.finish(first); h.walk(first, distantOrigin)
+            h.request(target = h.target.copy(x = 7.5)).cancel()
+            h.request(reuseKey = h.key(setOf(UUID(0, 8)))).cancel()
+            h.request().cancel() // Indexed from both z sections, with every candidate step over three blocks away.
+            h.routeCounters()["miss_no_nearby_entries"] shouldBe 1L
+            h.routeCounters()["miss_no_matching_endpoint"] shouldBe 1L
+            h.routeCounters()["miss_no_compatible_entry"] shouldBe 1L
+            h.routeCounters()["miss_no_join_point"] shouldBe 1L
+            h.routeCounters()["suffix_candidate_limit_reached"] shouldBe 0L
+            h.cache()["misses"] shouldBe 4L
+            h.suffixes()["candidates"] shouldBe 1L
+
+            // Eight distinct cost identities with the same endpoint, geometry and allowed buildings.
+            val network = h.paths.begin(h.city).network
+            for (x in 1..7) {
+                network.cells += CivPosition(x, 63, 0)
+                val route = h.request(from = distantOrigin); h.finish(route); h.walk(route, distantOrigin)
+            }
+            val candidates = h.suffixes()["candidates"] as Long
+            h.request().cancel()
+            h.cache()["entries"] shouldBe 8
+            h.cache()["misses"] shouldBe 5L
+            h.routeCounters()["miss_no_join_point"] shouldBe 2L
+            h.routeCounters()["suffix_candidate_limit_reached"] shouldBe 1L
+            h.suffixes()["candidates"] shouldBe candidates + 8L
         }
     }
 
@@ -97,6 +198,8 @@ class CivsNavigationSnapshotsTest : FunSpec({
             joined.nodeCount shouldBe 0
             joined.capturedBlocks shouldBe 0
             h.suffixes()["hits"] shouldBe 1L
+            h.routeCounters()["suffix_candidates"] shouldBe 1L
+            h.routeCounters()["suffix_hits"] shouldBe 1L
             ((h.suffixes()["candidates"] as Long) in 1..8) shouldBe true
             ((h.suffixes()["steps_examined"] as Long) <= 8 * 256) shouldBe true
             ((h.cache()["last_validated_cost"] as Double) > 0.0) shouldBe true
@@ -121,6 +224,11 @@ class CivsNavigationSnapshotsTest : FunSpec({
             h.finish(route)
             h.suffixes()["hits"] shouldBe 0L
             h.suffixes()["rejected_connectors"] shouldBe 1L
+            h.routeCounters()["suffix_candidates"] shouldBe 1L
+            h.routeCounters()["rejected"] shouldBe 1L
+            h.routeCounters()["rejected_connectors"] shouldBe 1L
+            h.routeCounters()["removed_replay_or_route_failure"] shouldBe 0L
+            h.cache()["misses"] shouldBe 1L
             (route.nodeCount > 0) shouldBe true
             h.cache()["entries"] shouldBe 1
             h.walk(route, from).distanceSquared(h.target) shouldBe 0.0
@@ -181,7 +289,12 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 listOf(BoundingBox(4.0, 64.0, 3.0, 4.6, 65.8, 3.6)), refreshSnapshots = false)
             h.finish(body)
             (body.nodeCount > 0) shouldBe true
+            h.request(reuseKey = null, corridor = corridor).cancel()
             h.cache()["hits"] shouldBe 0L
+            h.routeCounters()["eligible"] shouldBe 1L
+            h.routeCounters()["excluded_explicit_corridor"] shouldBe 2L
+            h.routeCounters()["excluded_body_detour"] shouldBe 1L
+            h.routeCounters()["excluded_no_reuse_policy"] shouldBe 0L
         }
     }
 
@@ -198,10 +311,13 @@ class CivsNavigationSnapshotsTest : FunSpec({
             h.finish(bodyRetry)
             val nativeRetry = h.owner.replan(bodyRetry, CitizenPoint(.5, 64.0, .5).location(h.world))
             h.cache()["entries"] shouldBe 0
+            h.routeCounters()["removed_native_change"] shouldBe 0L
+            h.routeCounters()["removed_replan"] shouldBe 1L
             h.finish(nativeRetry); h.walk(nativeRetry)
             h.cache()["entries"] shouldBe 1
             h.owner.removeChunk(h.world.uid, 0, 0)
             h.cache()["entries"] shouldBe 0
+            h.routeCounters()["removed_unload"] shouldBe 1L
             val again = h.request(); h.finish(again); h.walk(again)
             h.owner.clear()
             h.cache()["entries"] shouldBe 0
@@ -218,6 +334,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
             denied.failure shouldBe "no-path"
             h.cache()["rejected"] shouldBe 1L
             h.cache()["entries"] shouldBe 0
+            h.routeCounters()["removed_replay_or_route_failure"] shouldBe 1L
             val next = h.request(); h.finish(next); h.walk(next)
             val warm = h.request(); h.finish(warm)
             warm.nodeCount shouldBe 0
@@ -226,6 +343,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
             (stopped.x < 3.8) shouldBe true
             (warm.failure != null) shouldBe true
             h.cache()["entries"] shouldBe 0
+            h.routeCounters()["removed_replay_or_route_failure"] shouldBe 2L
             val ordinary = h.owner.replan(warm, stopped.location(h.world)); h.finish(ordinary)
             (ordinary.failure ?: ordinary.continuationReason) shouldBe "no-path"
             (ordinary.nodeCount > 0) shouldBe true
@@ -245,13 +363,26 @@ class CivsNavigationSnapshotsTest : FunSpec({
             }
             discontinuous.cancel()
             h.cache()["entries"] shouldBe 0
-            for (index in 0..64) {
-                val route = h.request(target = CitizenPoint(2.5, 64.0, .5), reuseKey = h.key(setOf(UUID(0, index.toLong()))))
+            val target = CitizenPoint(2.5, 64.0, .5)
+            fun routeWith(index: Long) = h.request(target = target, reuseKey = h.key(setOf(UUID(0, index))))
+            for (index in 0L..64L) {
+                if (index == 64L) {
+                    val recentlyUsed = routeWith(0); h.finish(recentlyUsed)
+                    recentlyUsed.nodeCount shouldBe 0
+                    recentlyUsed.cancel()
+                    h.routeCounters()["removed_capacity"] shouldBe 0L
+                }
+                val route = routeWith(index)
                 h.finish(route)
-                h.walk(route, target = CitizenPoint(2.5, 64.0, .5))
+                h.walk(route, target = target)
             }
             h.cache()["entries"] shouldBe 64
             h.cache()["maximum_steps"] shouldBe 256
+            h.routeCounters()["removed_capacity"] shouldBe 1L
+            val kept = routeWith(0); h.finish(kept)
+            kept.nodeCount shouldBe 0
+            val evicted = routeWith(1); h.finish(evicted)
+            (evicted.nodeCount > 0) shouldBe true
         }
     }
 
@@ -306,7 +437,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
             val snapshots = CivsNavigationSnapshots(131072, 5, tasks, contextFree = { true })
             try {
                 val chunkKey = CitizenSnapshotKey(0, 0)
-                val old = requireNotNull(snapshots.capture(world, chunkKey, 0))
+                val old = requireNotNull(snapshots.extracted(world, chunkKey, 0, setOf(2, 4)))
                 val surfacePalette = old.states(64, 79)
                 old.states(32, 47).keys.map { it.material } shouldBe listOf(Material.STONE)
                 val surface = mapOf(CitizenSnapshotSectionKey(0, 4, 0) to old.revision)
@@ -318,13 +449,13 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 snapshots.currentSections(world.uid, mine) shouldBe false
                 paper.performTicks(2)
                 snapshots.currentSections(world.uid, surface) shouldBe true
-                val updated = requireNotNull(snapshots.capture(world, chunkKey, 2))
+                val updated = requireNotNull(snapshots.extracted(world, chunkKey, 2, setOf(2, 4)))
                 updated.states(64, 79) shouldBeSameInstanceAs surfacePalette
                 updated.states(32, 47).keys.map { it.material } shouldBe listOf(Material.STONE, Material.AIR)
                 snapshots.debug()["chunk_captures"] shouldBe 2L
                 snapshots.debug()["chunk_captures_dirty"] shouldBe 1L
                 snapshots.debug()["detached_section_decodes"] shouldBe 3L
-                snapshots.debug()["retained_sections_on_refresh"] shouldBe 1L
+                snapshots.debug()["index_payload_bytes"] shouldBe 16384L
                 val terrain = CitizenSnapshotTerrain().also { it.chunks[chunkKey] = old }
                 val node = CitizenSearchNode(8, 38.0, 8)
                 val request = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), terrain,
@@ -332,11 +463,11 @@ class CivsNavigationSnapshotsTest : FunSpec({
                     .advance(CitizenSnapshotInput())
                 request.sections[CitizenSnapshotSectionKey(0, 2, 0)] shouldBe old.revision
                 snapshots.currentSections(world.uid, request.sections) shouldBe false
-                val expired = requireNotNull(snapshots.capture(world, chunkKey, 5))
+                val expired = requireNotNull(snapshots.extracted(world, chunkKey, 5))
                 snapshots.currentSections(world.uid, surface) shouldBe false // An unrelated edit cannot extend the geometry TTL.
                 (expired.states(64, 79) === surfacePalette) shouldBe false
                 snapshots.removeChunk(world.uid, 0, 0)
-                val reloaded = requireNotNull(snapshots.capture(world, chunkKey, 6))
+                val reloaded = requireNotNull(snapshots.extracted(world, chunkKey, 6))
                 (reloaded.states(64, 79) === expired.states(64, 79)) shouldBe false
                 snapshots.currentSections(world.uid, mapOf(CitizenSnapshotSectionKey(0, 4, 0) to expired.revision)) shouldBe false
                 val counts = snapshots.debug()
@@ -358,19 +489,19 @@ class CivsNavigationSnapshotsTest : FunSpec({
             try {
                 val key = CitizenSnapshotKey(0, 0)
                 val point = CivPosition(8, 64, 8)
-                val first = requireNotNull(snapshots.capture(world, key, 0))
+                val first = requireNotNull(snapshots.extracted(world, key, 0))
                 val palette = first.states(64, 79)
                 world.getBlockAt(8, 64, 8).type = Material.STONE // Simulates a plugin edit without an event.
                 world.getBlockAt(8, 37, 8).type = Material.AIR
                 snapshots.changed(world.uid, CivPosition(8, 37, 8))
                 paper.performTicks(2)
-                val inherited = requireNotNull(snapshots.capture(world, key, 2))
+                val inherited = requireNotNull(snapshots.extracted(world, key, 2))
                 inherited.states(64, 79) shouldBeSameInstanceAs palette
                 inherited.data(point).material shouldBe Material.AIR
                 snapshots.refreshObstacles(world.uid, listOf(point))
                 snapshots.currentSections(world.uid, mapOf(CitizenSnapshotSectionKey(0, 4, 0) to inherited.revision)) shouldBe false
                 paper.performTicks(2)
-                val updated = requireNotNull(snapshots.capture(world, key, 4))
+                val updated = requireNotNull(snapshots.extracted(world, key, 4))
                 updated.data(point).material shouldBe Material.STONE
             } finally { snapshots.clear(); tasks.close() }
         }
@@ -1074,7 +1205,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
-    test("whole chunk snapshots keep negative coordinates and detached contents after native edits") {
+    test("compact section snapshots keep negative coordinates and detached contents after native edits") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val main = Thread.currentThread()
             val world = object : CivsWorksiteWorldFixture("negative-snapshot") {
@@ -1088,7 +1219,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
             world.getBlockAt(point.x, point.y, point.z).type = Material.COBBLESTONE
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("DetachedSnapshot")))
             val snapshots = CivsNavigationSnapshots(131072, 6000, tasks, contextFree = { true })
-            val chunk = requireNotNull(snapshots.capture(world, CitizenSnapshotKey(-2, -1), 0))
+            val chunk = requireNotNull(snapshots.extracted(world, CitizenSnapshotKey(-2, -1), 0))
             world.getBlockAt(point.x, point.y, point.z).type = Material.AIR
             val worker = Executors.newSingleThreadExecutor()
             try {
@@ -1110,7 +1241,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SnapshotBatch")))
             val snapshots = CivsNavigationSnapshots(131072, 6000, tasks, contextFree = { true })
             try {
-                val captured = keys.associateWith { requireNotNull(snapshots.capture(world, it, 0)) }
+                val captured = keys.associateWith { requireNotNull(snapshots.extracted(world, it, 0)) }
                 val old = captured.mapValues { it.value.revision }
                 val at = CivPosition(-1, 64, 5)
                 world.getBlockAt(at.x, at.y, at.z).type = Material.STONE
@@ -1119,24 +1250,24 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 snapshots.debug()["dirty_chunks"] shouldBe 2
                 snapshots.debug()["chunk_captures"] shouldBe 3L
                 tasks.trackedTaskCount() shouldBe 1
-                shouldThrow<CitizenSnapshotPending> { snapshots.capture(world, keys.first(), 0) }
+                shouldThrow<CitizenSnapshotPending> { snapshots.extracted(world, keys.first(), 0) }
                 paper.performTicks(1)
                 snapshots.debug()["chunk_captures"] shouldBe 3L
                 paper.performTicks(1)
-                snapshots.debug()["chunk_captures"] shouldBe 4L
-                snapshots.debug()["deferred_native_recaptures"] shouldBe 1L
+                snapshots.debug()["chunk_captures"] shouldBe 3L
+                snapshots.debug()["deferred_native_recaptures"] shouldBe 2L
                 snapshots.debug()["refresh_batches"] shouldBe 1L
                 snapshots.debug()["dirty_chunks"] shouldBe 0
                 snapshots.current(world.uid, old) shouldBe false
-                val fresh = requireNotNull(snapshots.capture(world, keys.first(), 2))
+                val fresh = requireNotNull(snapshots.extracted(world, keys.first(), 2))
                 fresh.data(at).material shouldBe Material.STONE
                 captured.getValue(keys.first()).data(at).material shouldBe Material.AIR
-                snapshots.capture(world, keys.last(), 2) shouldBe captured.getValue(keys.last())
-                (snapshots.capture(world, keys[1], 2) === captured.getValue(keys[1])) shouldBe false
+                snapshots.extracted(world, keys.last(), 2)?.states(64, 79) shouldBeSameInstanceAs captured.getValue(keys.last()).states(64, 79)
+                (snapshots.extracted(world, keys[1], 2) === captured.getValue(keys[1])) shouldBe false
                 snapshots.debug()["chunk_captures"] shouldBe 5L
                 // Re-loading an evicted generation must never make a retired worker snapshot current again.
                 snapshots.removeChunk(world.uid, -1, 0)
-                snapshots.capture(world, keys.first(), 3)
+                snapshots.extracted(world, keys.first(), 3)
                 snapshots.current(world.uid, mapOf(keys.first() to old.getValue(keys.first()))) shouldBe false
             } finally { snapshots.clear(); tasks.close() }
         }
@@ -1173,23 +1304,23 @@ class CivsNavigationSnapshotsTest : FunSpec({
             val world = CivsWorksiteWorldFixture("snapshot-lru").also(paper.server::addWorld)
             world.loadChunk(0, 0); world.loadChunk(1, 0)
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SnapshotLru")))
-            val snapshots = CivsNavigationSnapshots(4096, 5, tasks, contextFree = { true })
+            val snapshots = CivsNavigationSnapshots(8192, 5, tasks, contextFree = { true })
             try {
                 val a = CitizenSnapshotKey(0, 0)
                 val b = CitizenSnapshotKey(1, 0)
-                val first = requireNotNull(snapshots.capture(world, a, 0))
-                snapshots.capture(world, a, 0) shouldBeSameInstanceAs first
-                snapshots.capture(world, b, 0)
+                val first = requireNotNull(snapshots.extracted(world, a, 0))
+                snapshots.extracted(world, a, 0)?.states(64, 79) shouldBeSameInstanceAs first.states(64, 79)
+                snapshots.extracted(world, b, 0)
                 snapshots.debug()["chunks"] shouldBe 1
-                snapshots.capture(world, a, 1)?.revision shouldBe first.revision
+                snapshots.extracted(world, a, 1)?.revision shouldBe first.revision
                 snapshots.current(world.uid, mapOf(a to first.revision)) shouldBe true
-                snapshots.capture(world, a, 6)
+                snapshots.extracted(world, a, 6)
                 snapshots.current(world.uid, mapOf(a to first.revision)) shouldBe false
                 // A native edit after eviction marks the next capture dirty.
                 world.getBlockAt(24, 64, 8).type = Material.STONE
                 snapshots.changed(world.uid, CivPosition(24, 64, 8))
                 paper.performTicks(2)
-                requireNotNull(snapshots.capture(world, b, 7))
+                requireNotNull(snapshots.extracted(world, b, 7))
                 val counts = snapshots.debug()
                 counts["chunk_cache_hits"] shouldBe 1L
                 counts["chunk_captures"] shouldBe 5L
@@ -1329,12 +1460,12 @@ private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, setti
     fun request(from: CitizenPoint = CitizenPoint(.5, 64.0, .5), target: CitizenPoint = this.target,
         reuseKey: CitizenRouteReuseKey? = key(), corridor: CitizenSearchCorridor? = null,
         permitted: () -> Boolean = { true }, allowedPoint: (CivPosition) -> Boolean = { true },
-        world: org.bukkit.World = this.world, surfaceSpeed: (Block) -> Double = { 1.0 }): CitizenPacketRoute {
+        world: org.bukkit.World = this.world, surfaceSpeed: (Block) -> Double = { 1.0 }, cityId: UUID? = city.id): CitizenPacketRoute {
         val trip = paths.begin(city)
         fun allowed(p: CivPosition) = permitted() && allowedPoint(p) && p.x in 0..8 && p.y in allowedY && p.z in allowedZ
         val supportCost = (surfaceSpeed as? CivsFootTraffic)?.detachedSupportCost(trip.weights, Tag.LOGS.values.toSet(),
             Tag.LEAVES.values.toSet())
-        val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> permitted() }, reuseKey, supportCost)
+        val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> permitted() }, reuseKey, supportCost, cityId)
         return owner.request(world, Location(world, from.x, from.y, from.z), Location(world, target.x, target.y, target.z),
             ::allowed, policy.stepAllowed, { trip.cost(it, surfaceSpeed) }, corridor, policy)
     }
@@ -1393,6 +1524,12 @@ private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, setti
     @Suppress("UNCHECKED_CAST")
     fun suffixes() = owner.debug()["shared_route_suffixes"] as Map<String, Any>
 
+    fun diagnostics(cityId: UUID? = null) = owner.debugSharedRoutes(cityId)
+
+    fun routeCity(cityId: UUID = city.id) = (diagnostics(cityId)["cities"] as List<*>).single() as Map<*, *>
+
+    fun routeCounters(cityId: UUID = city.id) = routeCity(cityId)["counters"] as Map<*, *>
+
     fun supportCostReads() = (owner.debug()["snapshot_cache"] as Map<*, *>)["support_cost_reads"] as Long
 
     fun enableTrails(api: TrailsFootTrafficService) {
@@ -1411,3 +1548,14 @@ private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, setti
 }
 
 private fun CitizenPoint.location(world: org.bukkit.World) = Location(world, x, y, z)
+
+/** Mirrors the runtime handoff: native copy on owner, extraction on worker, owner publication of compact values only. */
+private fun CivsNavigationSnapshots.extracted(world: org.bukkit.World, key: CitizenSnapshotKey, tick: Long,
+    wanted: Set<Int> = setOf(3, 4)): CitizenSnapshotChunk? {
+    val handoff = capture(world, key, tick, wanted) ?: return null
+    CompletableFuture.runAsync {
+        try { handoff.prepare() } finally { handoff.releaseSource() }
+    }.get(20, TimeUnit.SECONDS)
+    publish(world.uid, handoff.payloads())
+    return handoff
+}

@@ -347,7 +347,7 @@ internal class CivsInventoryJournal(
                     }
                 }
                 if (changedHolders.isNotEmpty()) storage.invalidateSupplyPositions(tx.after.worldId, changedHolders)
-                store.save(tx.after).whenCompleteSync(tasks) { saved, failure ->
+                store.completeInventoryTransaction(tx).whenCompleteSync(tasks) { saved, failure ->
                     if (failure != null) return@whenCompleteSync fail(CivsRejection("inventory-recovery").also { it.initCause(failure) })
                     publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
                         if (publishFailure != null) return@whenCompleteSync fail(publishFailure)

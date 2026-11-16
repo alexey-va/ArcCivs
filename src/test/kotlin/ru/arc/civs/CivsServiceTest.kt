@@ -8031,7 +8031,7 @@ internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean,
     val plugin = paper.createSimplePlugin("CivsServiceTest")
     val world = if (nativeGeometry) CivsWorksiteWorldFixture(worldName).also(paper.server::addWorld) else paper.addSimpleWorld(worldName)
     val player = mockk<Player>(relaxed = true)
-    val store = mockk<CivsStore>()
+    val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     val blueprints = mockk<CivsBlueprints>()
     val worldAdapter = mockk<CivsWorld>(relaxed = true)
     val renderer = mockk<CivsPreviewRenderer>(relaxed = true)

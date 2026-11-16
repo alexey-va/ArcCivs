@@ -59,6 +59,9 @@ data class CivsNavigationSettings(
     val nativeBudgetMillis: Double = 4.0,
     val terrainCacheBlocks: Int = 131072,
     val terrainRefreshTicks: Int = 6000,
+    val snapshotSectionsPerCity: Int = 1024,
+    val snapshotSectionsMaximum: Int = 8192,
+    val snapshotWarmRadius: Int = 48,
 ) {
     init {
         require(searchNodesPerBatch in 1..65536)
@@ -70,6 +73,8 @@ data class CivsNavigationSettings(
         require(closePreparationTicks in 1..1200 && preparationTicks in 1..1200)
         require(nativeOperationsPerTick in 1..100000 && nativeBudgetMillis in 0.1..20.0)
         require(terrainCacheBlocks in 256..1048576 && terrainRefreshTicks in 1..72000)
+        require(snapshotSectionsPerCity in 1..8192 && snapshotSectionsMaximum in 1..32768)
+        require(snapshotWarmRadius in 0..128)
     }
 
     companion object {
@@ -87,6 +92,9 @@ data class CivsNavigationSettings(
             config.decimal("native-work.budget-millis", 4.0, 0.1..20.0),
             config.limit("navigation.terrain-cache-blocks", 131072, 256..1048576),
             config.limit("navigation.terrain-refresh-ticks", 6000, 1..72000),
+            config.limit("navigation.snapshot-sections-per-city", 1024, 1..8192),
+            config.limit("navigation.snapshot-sections-maximum", 8192, 1..32768),
+            config.limit("navigation.snapshot-warm-radius", 48, 0..128),
         )
     }
 }

@@ -201,7 +201,7 @@ private class MineOpeningFixture(tall: Boolean = false) : AutoCloseable {
     private val busy = hashSetOf<UUID>()
     private val unhealthy = hashSetOf<UUID>()
     val quarantined get() = city.id in unhealthy
-    private val store = mockk<CivsStore>()
+    private val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     val storage = CivsStorage(plugin) { emptyArray() }
     private val access = CivsWorld(plugin, tasks, nanoTime = { 0L }) { cities.values }
     val journal: CivsInventoryJournal

@@ -63,7 +63,28 @@ class CivsSettingsTest : FunSpec({
         settings.worksites shouldBe CivsWorksiteSettings(128, 24, 96, 512, 32, 3.0)
     }
 
+    test("legacy terrain size does not constrain explicit section budgets and warm radius") {
+        val config = YamlConfiguration().apply {
+            set("schematics-root", "schematics")
+            set("navigation.terrain-cache-blocks", 524288)
+        }
+        val defaults = CivsSettings.read(config).navigation
+        defaults.snapshotSectionsPerCity shouldBe 1024
+        defaults.snapshotSectionsMaximum shouldBe 8192
+        defaults.snapshotWarmRadius shouldBe 48
+        config.set("navigation.snapshot-sections-per-city", 128)
+        config.set("navigation.snapshot-sections-maximum", 512)
+        config.set("navigation.snapshot-warm-radius", 32)
+        val changed = CivsSettings.read(config).navigation
+        changed.snapshotSectionsPerCity shouldBe 128
+        changed.snapshotSectionsMaximum shouldBe 512
+        changed.snapshotWarmRadius shouldBe 32
+    }
+
     for ((path, value) in listOf(
+        "navigation.snapshot-sections-per-city" to 0,
+        "navigation.snapshot-sections-maximum" to 32769,
+        "navigation.snapshot-warm-radius" to -1,
         "navigation.nodes-per-batch" to 0,
         "navigation.maximum-nodes" to "4096",
         "navigation.maximum-captured-blocks" to -1,

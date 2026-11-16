@@ -343,7 +343,7 @@ private class SharedGateFixture : AutoCloseable {
     fun recovery(tx: CivInventoryTransaction, saved: List<CivPlacementPlan> = plans) = Recovery(tx, saved)
     inner class Recovery(tx: CivInventoryTransaction, saved: List<CivPlacementPlan>) : AutoCloseable {
         private val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-        private val store = mockk<CivsStore>()
+        private val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
         private val storage = CivsStorage(plugin) { emptyArray() }
         private val unhealthy = hashSetOf<UUID>()
         private val busy = hashSetOf<UUID>()

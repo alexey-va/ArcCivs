@@ -410,7 +410,12 @@ class CivsSleepingFloorsTest : FunSpec({
             val third = CivWorker(UUID(2306, 3), "Third", null, homeId = home.id)
             // All remaining standing cells acquire a low ceiling while the occupied place stays clear.
             val occupiedCell = requireNotNull(guest.sleepOrigin).let { CivPosition(it.blockX, 64, it.blockZ) }
-            for (cell in hallRoom - occupiedCell) h.world.getBlockAt(cell.x, 65, cell.z).type = Material.STONE
+            // Accepted sleep feet can straddle cell edges; protect the whole standing footprint.
+            val occupiedBody = citizenStandingBounds(requireNotNull(guest.sleepOrigin), guest.npc.scale)
+            val occupiedX = kotlin.math.floor(occupiedBody.minX).toInt()..kotlin.math.floor(occupiedBody.maxX - 1e-7).toInt()
+            val occupiedZ = kotlin.math.floor(occupiedBody.minZ).toInt()..kotlin.math.floor(occupiedBody.maxZ - 1e-7).toInt()
+            for (cell in hallRoom) if (cell.x !in occupiedX || cell.z !in occupiedZ)
+                h.world.getBlockAt(cell.x, 65, cell.z).type = Material.STONE
             h.city = h.city.copy(workers = h.city.workers + third)
             val now = requireNotNull(h.navigationNow)
             for (i in 1..8) {
@@ -420,12 +425,15 @@ class CivsSleepingFloorsTest : FunSpec({
             }
             val hallFeet = requireNotNull(guest.sleepOrigin).point()
             val ceiling = h.world.getBlockAt(occupiedCell.x, 65, occupiedCell.z)
+            citizenPacketBodyClear(h.world, hallFeet, false) shouldBe true
             ceiling.type = Material.STONE
+            citizenPacketBodyClear(h.world, hallFeet, false) shouldBe false
             h.world.time = 1_000
             h.owner.pulse(now + 9_000)
             guest.npc.pose shouldBe PacketNpcPose.SLEEPING
             requireNotNull(guest.sleepOrigin).point() shouldBe hallFeet
             ceiling.type = Material.AIR
+            citizenPacketBodyClear(h.world, hallFeet, false) shouldBe true
             h.owner.pulse(now + 10_000)
             guest.npc.pose shouldBe PacketNpcPose.STANDING
             guest.npc.location.point() shouldBe hallFeet

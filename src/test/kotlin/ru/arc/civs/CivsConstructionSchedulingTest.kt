@@ -150,7 +150,7 @@ private class ConstructionSchedulingFixture(private val paper: MockBukkitTestRun
     private val native = paper.addSimpleWorld("construction-yield")
     private val adapter = mockk<CivsWorld>(relaxed = true)
     private val blueprints = mockk<CivsBlueprints>()
-    private val store = mockk<CivsStore>()
+    private val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     private val citizens = mockk<CivsCitizens>(relaxed = true)
     private val cities = linkedMapOf<UUID, Settlement>()
     val arrived = mutableSetOf<UUID>()

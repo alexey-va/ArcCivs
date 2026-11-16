@@ -293,7 +293,7 @@ private class VegetationRepairFixture(large: Boolean = false) : AutoCloseable {
         set(value) { cities[value.id] = value }
     private val busy = hashSetOf<UUID>()
     private val unhealthy = hashSetOf<UUID>()
-    private val store = mockk<CivsStore>()
+    private val store = mockk<CivsStore>().also { it.stubCheckpointAcknowledgements() }
     val storage = CivsStorage(plugin) { emptyArray() }
     private val access = CivsWorld(plugin, tasks, nanoTime = { 0L }) { cities.values }
     val journal: CivsInventoryJournal

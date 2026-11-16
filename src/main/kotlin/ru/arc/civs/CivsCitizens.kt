@@ -1033,6 +1033,9 @@ class CivsCitizens(
 
     internal fun nudgeResident(npc: PacketPlayerNpc, impulse: Vector): Boolean = collisions.nudgeResident(npc, impulse)
 
+    internal fun prepareNavigation(cities: Collection<Settlement>, active: (UUID) -> Boolean) =
+        navigation.prepareNavigation(cities, active)
+
     fun activateNavigating() = motion.activateNavigating()
 
     internal fun courierSources(cityId: UUID, courierId: UUID): Map<UUID, CivPosition> = couriers.courierSources(cityId, courierId)
@@ -1071,6 +1074,8 @@ class CivsCitizens(
 
     internal fun debug(cityId: UUID?, workerId: UUID?): Map<String, Any?> =
         observations.debug(cityId, workerId) + ("road_travel" to paths.roadTravel(cityId))
+
+    internal fun debugSharedRoutes(cityId: UUID?): Map<String, Any> = navigation.debugSharedRoutes(cityId)
 
     internal fun awakeResidentIds(cityId: UUID): Set<UUID> = observations.awakeResidentIds(cityId)
 

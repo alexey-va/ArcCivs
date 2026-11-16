@@ -139,8 +139,9 @@ class CivsTerrainDebugTest : FunSpec({
         val requested = mutableListOf<String>()
         CivsDebug.lines(listOf("all", city, worker)) { system, _, _ -> requested += system; emptyMap() }
         requested shouldBe CivsDebug.systems
-        requested.size shouldBe 12
+        requested.size shouldBe 13
         ("autonomy" in requested) shouldBe true
+        ("route-cache" in requested) shouldBe true
         ("terrain" in requested) shouldBe false
         CivsDebug.lines(listOf("terrain", city, worker)) { system, cityId, workerId ->
             system shouldBe "terrain"

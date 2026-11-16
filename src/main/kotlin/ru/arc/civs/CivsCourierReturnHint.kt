@@ -13,6 +13,19 @@ internal class CitizenSearchCorridor private constructor(
     fun contains(point: CitizenPoint): Boolean = point.y in minimumY..maximumY &&
         civsTerrainKey(floor(point.x).toInt(), floor(point.z).toInt()) in columns
 
+    private val snapshotChunks by lazy {
+        buildSet {
+            for (column in columns) {
+                val x = (column shr 32).toInt(); val z = column.toInt()
+                for (cx in ((x - 1) shr 4)..((x + 1) shr 4))
+                    for (cz in ((z - 1) shr 4)..((z + 1) shr 4)) add(CitizenSnapshotKey(cx, cz))
+            }
+        }
+    }
+    internal fun snapshotSection(section: CitizenSnapshotSectionKey): Boolean =
+        CitizenSnapshotKey(section.x, section.z) in snapshotChunks &&
+            section.y in ((floor(minimumY).toInt() - 3) shr 4)..((floor(maximumY).toInt() + 3) shr 4)
+
     companion object {
         private const val ANCHOR_DISTANCE = 12
         private const val WAREHOUSE_ANCHOR_DISTANCE = 64
