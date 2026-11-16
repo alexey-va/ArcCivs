@@ -830,13 +830,14 @@ internal class CivsCitizenRoutes(
     /** Retry changed geometry from observed feet; a bounded person snapshot allows a real detour. */
     fun replanNavigation(actor: CitizenActor, route: CitizenRoute, reason: String, now: Long,
         destination: Location? = null): Boolean {
+        if (!runtime.entityCollisions && reason in setOf("player-blocked", "resident-blocked")) return false
         if (route.wanderWalk != null) return false
         if (route.previousMotion != null) return true
         if (reason !in setOf("movement-blocked", "path-changed", "no-progress", "turn-loop", "player-blocked", "resident-blocked") ||
             route.replanAttempts >= 2 || actor.workerId in runtime.pendingHarm) return false
         val npc = actor.npc
         val from = npc.location
-        val bodies = if (reason in setOf("player-blocked", "resident-blocked")) npc.world.getNearbyPlayers(from, 2.5, 2.5, 2.5)
+        val bodies = if (runtime.entityCollisions && reason in setOf("player-blocked", "resident-blocked")) npc.world.getNearbyPlayers(from, 2.5, 2.5, 2.5)
             .asSequence().filter { it.isOnline && it.isValid && !it.isDead && it.gameMode != GameMode.SPECTATOR &&
                 !it.isInsideVehicle && !it.isSleeping && it.isCollidable }.take(8).map { it.boundingBox.clone() }.toList()
                 .plus(collisions.shelterOccupied(actor).filter { it.overlaps(citizenStandingBounds(from, npc.scale).expand(2.5)) })
@@ -870,6 +871,7 @@ internal class CivsCitizenRoutes(
 
     /** Resident contact stays local; players retain their bounded detour and strict arrival checks. */
     fun handleBodyContact(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
+        if (!runtime.entityCollisions) return false
         val since = route.bodyBlockedSince ?: return false
         if (navigationHeld(actor)) return true
         if (collisions.passingBodies(actor)) return false

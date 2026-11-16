@@ -130,6 +130,7 @@ internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16, atomicP
     val changed = plan.blocks.filter { it.before != it.after }.sortedWith(compareBy({ it.position.y }, { it.position.z }, { it.position.x }))
     val result = mutableListOf<CivBuildBatch>()
     var cost: Map<String, Long>? = null
+    val costsByState = hashMapOf<String, Map<String, Long>>()
     val cells = if (atomicPairs) plan.blocks.associateBy { it.position } else emptyMap()
     val consumed = hashSetOf<CivPosition>()
     for (cell in changed) {
@@ -146,7 +147,7 @@ internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16, atomicP
             cost = null
             continue
         }
-        val required = CivsMaterials.batchKey(cell.after)
+        val required = costsByState.getOrPut(cell.after) { CivsMaterials.batchKey(cell.after) }
         val previous = result.lastOrNull()
         if (previous != null && required == cost && cell.position.y == previous.maximum.y &&
             cell.position.z == previous.maximum.z && cell.position.x == previous.maximum.x + 1 &&
@@ -196,9 +197,11 @@ internal fun civsPairedPosition(p: CivPosition, state: String): CivPosition? {
 internal object CivsMaterials {
     fun required(plan: CivPlacementPlan): Map<String, Long> {
         val result = sortedMapOf<String, Long>()
+        val costsByState = hashMapOf<String, Map<String, Long>>()
         for (cell in plan.blocks) {
             if (cell.before == cell.after) continue
-            requirements(cell.after).forEach { (material, count) -> result.merge(material, count, Math::addExact) }
+            costsByState.getOrPut(cell.after) { requirements(cell.after) }
+                .forEach { (material, count) -> result.merge(material, count, Math::addExact) }
         }
         return result
     }

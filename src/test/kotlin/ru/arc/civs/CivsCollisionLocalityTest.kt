@@ -3,6 +3,7 @@ package ru.arc.civs
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Location
+import org.bukkit.Material
 import org.bukkit.util.BoundingBox
 import org.bukkit.util.Vector
 import java.util.UUID
@@ -72,6 +73,88 @@ class CivsCollisionLocalityTest : FunSpec({
             reserved.npc.teleport(resting)
             collisions.shelterOccupied(actor, sweep).size shouldBe 1
             collisions.routeMoveAllowed(actor, from, to) shouldBe false
+        }
+    }
+
+    test("disabled entity collisions pass residents and players without nudges but keep terrain support and permissions") {
+        residentRuntime(workerId = UUID(0, 1)) { h ->
+            val neighbourId = UUID(0, 2)
+            h.city = h.city.copy(workers = h.city.workers + CivWorker(neighbourId, "Neighbour", null))
+            h.owner.pulse(2_000L)
+            val actor = h.actor()
+            val neighbour = h.actor(neighbourId)
+            val routes = localityOwner(h, "routes") as CivsCitizenRoutes
+            for (resident in listOf(actor, neighbour)) {
+                routes.cancelRoute(resident)
+                resident.mealVisit = null
+                resident.idleNap = null
+                resident.sleeping = false
+                resident.sheltering = false
+            }
+            val from = Location(h.world, 3.5, 64.0, .5, -90f, 0f)
+            val to = from.clone().add(1.0, 0.0, 0.0)
+            actor.npc.teleport(from)
+            neighbour.npc.teleport(to)
+            val player = h.paper.addPlayer("CollisionPolicyPlayer")
+            player.teleport(to)
+            h.world.threatEntities += player
+            h.nativeCollisions().use { native ->
+                // The same resident and native-player geometry blocks the enabled policy.
+                val enabled = localityOwner(h, "collisions") as CivsCitizenCollisions
+                h.owner.residentStepAllowed = native::canResidentMove
+                enabled.routeMoveAllowed(actor, from, to) shouldBe false
+                neighbour.npc.teleport(to.clone().add(20.0, 0.0, 0.0))
+                enabled.routeMoveAllowed(actor, from, to) shouldBe false
+                neighbour.npc.teleport(to)
+
+                val runtime = CitizenRuntime(h.paper.createSimplePlugin("CollisionPolicyTest"), entityCollisions = false) { listOf(h.city) }
+                runtime.actors[actor.workerId] = actor
+                runtime.actors[neighbour.workerId] = neighbour
+                val disabled = CivsCitizenCollisions(runtime,
+                    routesOwner = { error("Body policy must not replan") },
+                    leisureOwner = { error("Body policy must not change leisure") },
+                    workOwner = { error("Body policy must not change work") },
+                    logisticsOwner = { error("Body policy must not change cargo") },
+                    audienceOwner = { error("Body policy must not request admission") },
+                    lifeOwner = { error("Body policy must not change life") },
+                    recoveryClock = { 0L },
+                    residentStepAllowed = { _, _, _ -> error("Disabled policy must not query player bodies") })
+                disabled.shelterOccupied(actor) shouldBe emptyList()
+                disabled.idleDestinationFree(actor, to) shouldBe true
+                disabled.residentMoveAllowed(actor, to, to) shouldBe true
+                disabled.routeMoveAllowed(actor, from, to) shouldBe true
+                disabled.residentMoveAllowed(actor, from, from.clone().add(3.0, 0.0, 0.0)) shouldBe false
+                disabled.residentMoveAllowed(actor, from, to.clone().also { it.x = Double.NaN }) shouldBe false
+                disabled.nudgeResident(actor.npc, Vector(.05, 0.0, 0.0)) shouldBe false
+                disabled.beginResidentYield(actor) shouldBe false
+                disabled.advanceResidentYield(actor) shouldBe false
+                disabled.separateResident(actor) shouldBe null
+                actor.npc.location shouldBe from
+                neighbour.npc.location shouldBe to
+                player.location shouldBe to
+
+                fun route(permitted: Boolean = true) = CitizenPacketRoute(h.world, from, to,
+                    { true }, { _, _ -> permitted }, { 1.0 }).also { it.readyWanderStep() }
+                fun advance(motion: CitizenPacketRoute) = motion.move(from, 5.0,
+                    { a, b -> disabled.routeMoveAllowed(actor, a, b) }) { true }
+                advance(route())?.point() shouldBe to.point()
+                h.world.getBlockAt(4, 64, 0).type = Material.STONE
+                val wall = route()
+                advance(wall) shouldBe null
+                wall.failure shouldBe "movement-blocked"
+                h.world.getBlockAt(4, 64, 0).type = Material.AIR
+                h.world.getBlockAt(4, 63, 0).type = Material.AIR
+                val unsupported = route()
+                advance(unsupported) shouldBe null
+                unsupported.failure shouldBe "path-changed"
+                h.world.getBlockAt(4, 63, 0).type = Material.STONE
+                val forbidden = route(permitted = false)
+                advance(forbidden) shouldBe null
+                forbidden.failure shouldBe "movement-blocked"
+                h.deliveries shouldBe 0
+                h.pickups shouldBe 0
+                h.unloads shouldBe 0
+            }
         }
     }
 })

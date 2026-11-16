@@ -317,18 +317,26 @@ internal class CitizenSnapshotCapture(
             val cells = arrayOfNulls<CitizenSnapshotCell>(if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) 0 else probeStates.size)
             val dynamic = linkedMapOf<CivPosition, BlockData>()
             var positionIndex = 0
-            for (x in xs) for (z in zs) for (by in ys) {
-                val index = positionIndex++
-                val cached = terrain.blocks.cell(x, by, z)
-                if (cached != null) { cells[index] = cached; continue }
-                val point = CivPosition(x, by, z)
-                probePositions[index] = point
-                val chunk = if (point.y in minimumY until maximumY)
-                    terrain.chunks[CitizenSnapshotKey(point.x shr 4, point.z shr 4)] else null
-                val cell = chunk?.passability(point)
-                val state = cell?.state(terrain.states)
-                probeStates[index] = state
-                if (cell != null && state?.dynamic == true && point !in terrain.dynamics) dynamic[point] = cell.data
+            for (x in xs) for (z in zs) {
+                var chunk: CitizenSnapshotChunk? = null
+                var chunkResolved = false
+                for (by in ys) {
+                    val index = positionIndex++
+                    val cached = terrain.blocks.cell(x, by, z)
+                    if (cached != null) { cells[index] = cached; continue }
+                    val point = CivPosition(x, by, z)
+                    probePositions[index] = point
+                    val cell = if (by in minimumY until maximumY) {
+                        if (!chunkResolved) {
+                            chunk = terrain.chunks[CitizenSnapshotKey(x shr 4, z shr 4)]
+                            chunkResolved = true
+                        }
+                        chunk?.passability(point)
+                    } else null
+                    val state = cell?.state(terrain.states)
+                    probeStates[index] = state
+                    if (cell != null && state?.dynamic == true && point !in terrain.dynamics) dynamic[point] = cell.data
+                }
             }
             if (dynamic.isNotEmpty()) return request(dynamics = dynamic)
             for (index in cells.indices) {

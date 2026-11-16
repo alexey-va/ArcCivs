@@ -7,7 +7,11 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Owning-thread resident identities, lifecycle fences and aggregate native-work budgets. */
-internal class CitizenRuntime(val plugin: Plugin, val cityProvider: () -> Collection<Settlement>) {
+internal class CitizenRuntime(
+    val plugin: Plugin,
+    val entityCollisions: Boolean = true,
+    val cityProvider: () -> Collection<Settlement>,
+) {
     val actors = linkedMapOf<UUID, CitizenActor>()
     val statuses = mutableMapOf<UUID, String>()
     val closed = AtomicBoolean()

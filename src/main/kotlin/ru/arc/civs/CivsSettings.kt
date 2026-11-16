@@ -28,7 +28,7 @@ data class CivsSettings(
             return 2048
         }
 
-        fun read(config: FileConfiguration): CivsSettings = CivsSettings(
+        fun read(config: FileConfiguration, defaultEntityCollisions: Boolean = true): CivsSettings = CivsSettings(
             Path.of(requireNotNull(config.getString("schematics-root"))).toAbsolutePath().normalize(),
             config.getStringList("allowed-worlds").toSet(),
             config.getInt("settlement-radius", 96).also { require(it in 64..128) },
@@ -39,7 +39,7 @@ data class CivsSettings(
             config.getInt("maximum-active-npcs", DEFAULT_NPCS).also { require(it in 1..MAXIMUM_NPCS) },
             config.getInt("npc-viewer-range", 96).also { require(it in 24..96) },
             chunkLoadingMaximum(config),
-            CivsNavigationSettings.read(config),
+            CivsNavigationSettings.read(config, defaultEntityCollisions),
             CivsWorksiteSettings.read(config),
         )
     }
@@ -62,6 +62,7 @@ data class CivsNavigationSettings(
     val snapshotSectionsPerCity: Int = 1024,
     val snapshotSectionsMaximum: Int = 8192,
     val snapshotWarmRadius: Int = 48,
+    val entityCollisions: Boolean = true,
 ) {
     init {
         require(searchNodesPerBatch in 1..65536)
@@ -78,7 +79,7 @@ data class CivsNavigationSettings(
     }
 
     companion object {
-        fun read(config: FileConfiguration): CivsNavigationSettings = CivsNavigationSettings(
+        fun read(config: FileConfiguration, defaultEntityCollisions: Boolean = true): CivsNavigationSettings = CivsNavigationSettings(
             config.limit("navigation.nodes-per-batch", 256, 1..65536),
             config.limit("navigation.maximum-nodes", 4096, 64..65536),
             config.limit("navigation.maximum-captured-blocks", 32768, 256..262144),
@@ -95,6 +96,7 @@ data class CivsNavigationSettings(
             config.limit("navigation.snapshot-sections-per-city", 1024, 1..8192),
             config.limit("navigation.snapshot-sections-maximum", 8192, 1..32768),
             config.limit("navigation.snapshot-warm-radius", 48, 0..128),
+            config.getBoolean("navigation.entity-collisions", defaultEntityCollisions),
         )
     }
 }

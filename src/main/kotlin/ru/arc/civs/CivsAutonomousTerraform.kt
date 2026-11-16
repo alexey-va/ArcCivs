@@ -693,7 +693,8 @@ internal object CivsAutonomousTerraform {
             if (previous == null || distance < requireNotNull(previousDistance) ||
                 distance == previousDistance && point.y < previous.y) owners[key] = point
         }
-        return owners.mapValues { (key, point) -> CivPosition((key shr 32).toInt(), point.y - 1, key.toInt()) }
+        owners.replaceAll { key, point -> CivPosition((key shr 32).toInt(), point.y - 1, key.toInt()) }
+        return owners
     }
 
     /** One apron reservation: the existing shoulder wins, otherwise use the nearest retained grade. */
@@ -1075,9 +1076,10 @@ internal object CivsAutonomousTerraform {
                 // Arrival history is part of Node, so another viable approach to this column is retained.
                 if (n.direction >= 0 && n.direction != direction && (n.climbed || rise < 0)) continue
                 if (n.climbed && rise < 0) continue // A one-column crest would need a full-block jump from one side.
-                val candidate = Node(n.x + dx, n.y + rise, n.z + dz, direction, rise > 0, rise < 0)
-                if (candidate in closed || !allowed(candidate.x, candidate.y, candidate.z) ||
-                    candidate.x == start.x && candidate.z == start.z) continue
+                val x = n.x + dx; val y = n.y + rise; val z = n.z + dz
+                if (!allowed(x, y, z) || x == start.x && z == start.z) continue
+                val candidate = Node(x, y, z, direction, rise > 0, rise < 0)
+                if (candidate in closed) continue
                 val native = requireNotNull(columns.get(civsTerrainKey(candidate.x, candidate.z)))
                 // A brief hummock or hollow should be cut/filled instead of adding two gratuitous climbs.
                 val column = civsTerrainKey(candidate.x, candidate.z)

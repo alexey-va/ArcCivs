@@ -33,6 +33,9 @@ class CivsSettingsTest : FunSpec({
         }
         CivsSettings.read(config).navigation shouldBe CivsNavigationSettings()
         CivsSettings.read(config).worksites shouldBe CivsWorksiteSettings()
+        CivsSettings.read(config, defaultEntityCollisions = false).navigation.entityCollisions shouldBe false
+        config.set("navigation.entity-collisions", true)
+        CivsSettings.read(config, defaultEntityCollisions = false).navigation.entityCollisions shouldBe true
     }
 
     test("all configured search and discovery limits are read") {

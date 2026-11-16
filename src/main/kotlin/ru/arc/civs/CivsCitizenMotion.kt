@@ -58,7 +58,7 @@ internal class CivsCitizenMotion(
                 separationBudget--
                 citizenRotateAfterAdmission(runtime.actors, actor.workerId)
                 if (collisions.escapeTerrain(actor, now)) continue
-                if (!routes.navigationHeld(actor)) {
+                if (runtime.entityCollisions && !routes.navigationHeld(actor)) {
                     if (collisions.advanceResidentYield(actor)) continue
                     val separated = collisions.separateResident(actor)
                     if (separated == true) {
@@ -79,7 +79,7 @@ internal class CivsCitizenMotion(
                     }
                 }
             }
-            if (actor.residentYield != null) {
+            if (runtime.entityCollisions && actor.residentYield != null) {
                 // A skipped separation-budget frame is still owned by the bounded yield.
                 actor.route?.progressTick = runtime.navigationTick
                 continue
@@ -156,7 +156,7 @@ internal class CivsCitizenMotion(
                 route.path = null
             }
             val motion = route.motion
-            motion.bodyContactAllowed = collisions.passingBodies(actor)
+            motion.bodyContactAllowed = !runtime.entityCollisions || collisions.passingBodies(actor)
             // Stop on the first valid arrival tick, including at any usable side of a barrel.
             // Waiting for the coarse work pulse used to keep walking around the barrel after arrival.
             val travelTarget = actor.combatDestination ?: actor.foodSource?.let(city::building)?.control ?:
@@ -312,17 +312,17 @@ internal class CivsCitizenMotion(
                 route.completion = CitizenNavigationCompletion(null)
             }
             else if (runtime.navigationTick - route.progressTick >= 40) {
-                val residentBlocked = motion.waitingForCollision && actor.collisionResident != null
+                val residentBlocked = runtime.entityCollisions && motion.waitingForCollision && actor.collisionResident != null
                 // Dynamic-body work uses the same four admitted actors; do not reset a job or move its neighbour.
-                if (route.bodyBlockedSince != null) continue
+                if (runtime.entityCollisions && route.bodyBlockedSince != null) continue
                 // Two optional walks must not wait forever for each other in a narrow passage.
                 // Give up only this leisure leg; work routes keep their existing bounded detour/wait.
-                if (motion.waitingForCollision && route.idleAnchor != null && actor.social.visit == null) {
+                if (runtime.entityCollisions && motion.waitingForCollision && route.idleAnchor != null && actor.social.visit == null) {
                     routes.cancelRoute(actor)
                     actor.wander.finish(now, false)
                     continue
                 }
-                val playerBlocked = motion.waitingForCollision || route.nativeCollisionTicks > 0
+                val playerBlocked = runtime.entityCollisions && (motion.waitingForCollision || route.nativeCollisionTicks > 0)
                 val reason = if (residentBlocked) "resident-blocked" else if (playerBlocked) "player-blocked"
                     else if (motion.turning) "turn-loop" else "no-progress"
                 if (!routes.replanNavigation(actor, route, reason, now)) {
@@ -350,7 +350,7 @@ internal class CivsCitizenMotion(
             route.planningReported = true
             route.motionReady(runtime.navigationTick, now)
         }
-        val failure = motion.failure ?: if (motion.waitingForCollision) "body-blocked"
+        val failure = motion.failure ?: if (runtime.entityCollisions && motion.waitingForCollision) "body-blocked"
             else if (route.timedOut(now)) "timed-out" else null
         if (failure != null) {
             routes.finishWander(actor, city, walk, now, failure)
@@ -403,6 +403,7 @@ internal class CivsCitizenMotion(
 
     /** The last waypoint inside another body retains its route until an ordinary clear-body exit. */
     private fun waitForArrivalBody(actor: CitizenActor, route: CitizenRoute): Boolean {
+        if (!runtime.entityCollisions) return false
         if (routes.arrivalBodyClear(actor)) return false
         route.completion = null
         route.nativeCollisionTicks = 40

@@ -33,6 +33,8 @@ npc-viewer-range: 96
 chunk-loading:
   maximum-chunks: 2048
 navigation:
+  # NPC/player and NPC/NPC contact. Defaults to false on Lab and true on other servers.
+  # entity-collisions: true
   # Detached A* nodes per worker batch; each node needs several surrounding block reads.
   nodes-per-batch: 256
   maximum-nodes: 4096

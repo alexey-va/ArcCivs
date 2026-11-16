@@ -98,7 +98,7 @@ class CivsCitizens(
     sleepingFloors: (CivBuilding) -> CompletableFuture<CivSleepingFloorMask> = {
         CompletableFuture.completedFuture(CivSleepingFloorMask(emptyList())) },
 ) : Listener, AutoCloseable {
-    private val runtime = CitizenRuntime(plugin, cityProvider)
+    private val runtime = CitizenRuntime(plugin, navigationSettings.entityCollisions, cityProvider)
     internal var residentLifeEnabled: Boolean
         get() = runtime.residentLifeEnabled
         set(value) { runtime.residentLifeEnabled = value }

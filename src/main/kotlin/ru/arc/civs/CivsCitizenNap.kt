@@ -152,9 +152,10 @@ internal class CivsCitizenNap(
     }
 
     private fun clear(actor: CitizenActor, world: World, ground: Location, bounds: BoundingBox): Boolean =
-        citizenDiningVolumeClear(world, bounds) && collisions().shelterOccupied(actor).none(bounds::overlaps) &&
+        citizenDiningVolumeClear(world, bounds) && (!runtime.entityCollisions ||
+            collisions().shelterOccupied(actor).none(bounds::overlaps) &&
             world.players.none { it.isOnline && it.isCollidable && it.location.distanceSquared(ground) < 9.0 &&
-                bounds.overlaps(it.boundingBox) }
+                bounds.overlaps(it.boundingBox) })
 
     private fun hasViewer(world: World, ground: Location, excluding: UUID? = null): Boolean =
         world.players.any { it.uniqueId != excluding && it.isOnline && !it.hasMetadata("NPC") &&

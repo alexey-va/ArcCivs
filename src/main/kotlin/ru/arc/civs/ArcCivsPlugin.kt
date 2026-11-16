@@ -138,7 +138,7 @@ open class ArcCivsPlugin : JavaPlugin() {
             }
             CivsSettings.chunkLoadingMaximum(configuration, logger::warning)
             val serverId = networkServer(configuration)
-            val settings = CivsSettings.read(configuration)
+            val settings = CivsSettings.read(configuration, defaultEntityCollisions = serverId.value != "lab")
             val defaults = requireNotNull(getResource("config.yml")).use {
                 YamlConfiguration.loadConfiguration(it.reader(Charsets.UTF_8))
             }
@@ -180,9 +180,11 @@ open class ArcCivsPlugin : JavaPlugin() {
                 residentFoods = CivsResidentFoods.native(),
                 offlinePlayerData = ru.arc.paper.player.PaperOfflinePlayerData.capture(server),
                 previewRenderer = preview, boundaryRenderer = boundary, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
-                    val collisions = lifecycle.own(CivsResidentCollisions(this, citizens::collisionActors,
-                        citizens::nudgeResident, bodyPassAllowed = citizens::passingBodies))
-                    citizens.residentStepAllowed = collisions::canResidentMove
+                    if (settings.navigation.entityCollisions) {
+                        val collisions = lifecycle.own(CivsResidentCollisions(this, citizens::collisionActors,
+                            citizens::nudgeResident, bodyPassAllowed = citizens::passingBodies))
+                        citizens.residentStepAllowed = collisions::canResidentMove
+                    }
                     val labels = CivsHolograms(this, lifecycle.tasks, text, citizens::hologramSnapshots, queue, citizens::workplaceSnapshots)
                     citizens.showIdleNap = labels.idleNap::show
                     lifecycle.own(AutoCloseable {
@@ -262,7 +264,8 @@ open class ArcCivsPlugin : JavaPlugin() {
             }
             startup.whenCompleteSync(lifecycle.tasks) { _, failure ->
                 if (failure == null) {
-                    lifecycle.ready("settlements" to service.settlements().size)
+                    lifecycle.ready("settlements" to service.settlements().size,
+                        "entity_collisions" to settings.navigation.entityCollisions)
                     CivsDiagnostics.event("startup_ready", "server" to serverId.value, "settlements" to service.settlements().size,
                         "allowed_worlds" to settings.worlds.sorted().joinToString())
                 } else {
