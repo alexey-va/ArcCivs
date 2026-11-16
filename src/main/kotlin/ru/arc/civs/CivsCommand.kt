@@ -55,6 +55,8 @@ class CivsCommand(
         CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
     private val repairAuthoredVegetation: (UUID, UUID, CivBox) -> CompletableFuture<Map<String, Any?>> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
+    private val armNavigationCapture: (UUID, UUID, Long, CivPosition) -> Pair<Map<String, Any?>, CompletableFuture<Map<String, Any?>>> = { _, _, _, _ ->
+        throw CivsRejection("navigation-file-unavailable") },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (args.firstOrNull() == "lab-growth") {
@@ -155,6 +157,36 @@ class CivsCommand(
             val receipt = if (error != null) mapOf("schema" to 1, "state" to "failed", "error" to error)
                 else if (args[1] == "prepare") prepareHotload() else hotloadStatus()
             sender.sendMessage(hotloadLine(receipt))
+            return true
+        }
+        if (args.firstOrNull() == "debug-navigation-file") {
+            val city = args.getOrNull(2)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val worker = args.getOrNull(3)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val cycle = args.getOrNull(4)?.toLongOrNull()
+            val coordinates = args.drop(5).map { it.toIntOrNull() }
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                args.size != 8 || args.getOrNull(1) != "arm" -> "invalid-navigation-arguments"
+                city == null -> "invalid-city-id"
+                worker == null -> "invalid-worker-id"
+                cycle == null || cycle < 0 -> "invalid-navigation-cycle"
+                coordinates.any { it == null } -> "invalid-navigation-goal"
+                hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
+                else -> null
+            }
+            fun reply(receipt: Map<String, Any?>) = sender.sendMessage("ARCCIVS_NAVIGATION_FILE " + Gson().toJson(receipt))
+            fun failed(failure: Throwable) = reply(mapOf("schema" to 1, "state" to "failed", "error" to
+                (CivsDiagnostics.rejection(failure)?.reason ?: "navigation-file-failed")))
+            if (error != null) failed(CivsRejection(error))
+            else runCatching {
+                armNavigationCapture(requireNotNull(city), requireNotNull(worker), requireNotNull(cycle),
+                    CivPosition(requireNotNull(coordinates[0]), requireNotNull(coordinates[1]), requireNotNull(coordinates[2])))
+            }.onSuccess { (receipt, completion) ->
+                reply(receipt)
+                completion.whenCompleteSync(tasks) { result, failure ->
+                    if (failure == null && result != null) reply(result) else failed(failure ?: CivsRejection("navigation-file-failed"))
+                }
+            }.onFailure(::failed)
             return true
         }
         if (args.firstOrNull() == "debug-settlement-file") {
@@ -464,7 +496,7 @@ class CivsCommand(
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
             return (listOf("preview", "villages") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
-                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "found-villages", "found-village-at", "village-search-status", "village-search-cancel", "refit-gate", "refit-warehouse", "infill-wall") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
+                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file", "debug-navigation-file", "found-villages", "found-village-at", "village-search-status", "village-search-cancel", "refit-gate", "refit-warehouse", "infill-wall") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         private fun settlementFileLine(path: Path? = null, failure: Throwable? = null): String =

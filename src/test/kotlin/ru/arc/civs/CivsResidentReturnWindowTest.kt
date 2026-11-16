@@ -126,6 +126,7 @@ private class ResidentReturnWindowFixture(auto: Boolean) : AutoCloseable {
         val blocks = states.mapValues { (_, state) -> mockk<Block> {
             every { type } returns Material.BARREL
             every { this@mockk.state } returns state
+            every { this@mockk.getState(false) } returns state
         } }
         val chunk = mockk<Chunk> {
             every { world } returns nativeWorld

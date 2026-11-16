@@ -170,6 +170,9 @@ internal class CitizenSnapshotCapture(
 
     fun cancel() { cancelled.set(true) }
 
+    /** Called only after this cursor's worker has terminated; no native state is read. */
+    internal fun debugCursor() = CitizenNavigationDebugCursor(requestedCount, next, probes.toList())
+
     fun advance(input: CitizenSnapshotInput): CitizenSnapshotRequest {
         checkCancelled()
         terrain.chunks.putAll(input.chunks)

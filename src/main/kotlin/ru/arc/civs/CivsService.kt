@@ -1674,6 +1674,13 @@ class CivsService(
             result
         }
 
+    internal fun armNavigationDebug(city: UUID, worker: UUID, cycle: Long, goal: CivPosition,
+        save: (CitizenNavigationDebugFrame) -> CompletableFuture<Map<String, Any?>>): CitizenNavigationDebugArm {
+        check(org.bukkit.Bukkit.isPrimaryThread())
+        if (!ready()) throw CivsRejection("not-ready")
+        return citizens.armNavigationDebug(city, worker, cycle, goal, save)
+    }
+
     fun debugLayout(cityId: UUID, terrain: Boolean): CompletableFuture<Map<String, Any?>> = diagnostics.debugLayout(cityId, terrain)
 
     internal fun debugTerrainAt(cityId: UUID, workerId: UUID, origin: CivPosition): Map<String, Any?> = diagnostics.debugTerrainAt(cityId, workerId, origin)

@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonParser
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
@@ -27,6 +28,44 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class CivsRoadMaintenanceTest : FunSpec({
+    test("one preparation validates adopted fallback once for every forecourt and nested standing query") {
+        val base = upkeepCity()
+        val siteId = "civs/v2/fixture/forecourt-validation"
+        val site = JsonParser.parseString("""{"schematicId":"$siteId","level":1,"type":"HOUSE",
+            "schematicBounds":{"min":[-3,-2,-7],"max":[3,8,-1]},
+            "forecourt":["minecraft:dirt_path","minecraft:dirt_path","minecraft:dirt_path"]}""").asJsonObject
+        val houses = listOf(0, 12).mapIndexed { index, x -> base.buildings.last().copy(
+            id = UUID(316, index.toLong()), type = BuildingType.HOUSE, schematicId = siteId, transit = null,
+            anchor = CivPosition(x, 64, 10), entrance = CivPosition(x, 65, 10),
+            bounds = CivBox(CivPosition(x - 3, 62, 3), CivPosition(x + 3, 72, 9))) }
+        val plan = CivSettlementPlan(1, 0, 48, emptyList(), mapOf(base.buildings.first().id.toString() to
+            listOf(CivPosition(0, 65, 5), CivPosition(0, 65, 6))), emptyList(),
+            listOf(CivBox(CivPosition(40, 64, 40), CivPosition(44, 64, 44))), listOf(0))
+        val city = base.copy(buildings = base.buildings.dropLast(1) + houses, autonomy = CivAutonomy(plan = plan))
+        val plans = houses.map { house -> upkeepApproach(city, house,
+            (20 downTo 10).map { CivPosition(house.entrance.x, 65, it) }) }
+        CivsSettlementPlans.current(city) shouldBe plan
+        val access = CivAutonomousAccess.from(city, plans)
+        val before = Gson().toJson(city to access)
+        CivsWorksiteLayouts.installCatalog(mapOf(siteId to site))
+        mockkObject(CivsSettlementPlans)
+        try {
+            val network = CivsRoadMaintenance.prepare(city, access, proposeCuts = false)
+            verify(exactly = 1) { CivsSettlementPlans.current(city) }
+            for (house in houses) {
+                val expected = CivsWorksiteLayouts.forecourt(house).keys.filterTo(hashSetOf()) {
+                    house != houses.first() || it.z != 7
+                }
+                network.targets.filter { it.source.id == house.id && it.floor.z in 7..9 }
+                    .associate { it.floor to it.after } shouldBe expected.associateWith { "minecraft:dirt_path" }
+            }
+            Gson().toJson(city to access) shouldBe before
+        } finally {
+            unmockkObject(CivsSettlementPlans)
+            CivsWorksiteLayouts.installCatalog(emptyMap())
+        }
+    }
+
     test("a straight entrance shares its grades with residents and preserves legacy receipts for its side approach") {
         val base = upkeepCity()
         val source = base.buildings.last().copy(type = BuildingType.HOUSE, rotation = 180, transit = null,
@@ -207,33 +246,80 @@ class CivsRoadMaintenanceTest : FunSpec({
         Gson().toJson(city to network) shouldBe before
     }
 
+    test("a cleanup receipt keeps pending cleanup ahead of drained healthy and transient checks while grades retry first") {
+        val (city, plans) = upkeepGradeCleanupFixture()
+        val network = CivsRoadMaintenance.prepare(city, plans)
+        val grades = network.targets.filter { it.routeOverride != null }
+        val cleanup = network.targets.filter { it.wallCleanup != null }
+        (grades.isNotEmpty() && cleanup.size >= 5) shouldBe true
+        (grades + cleanup).forEach { it.validated(city) }
+        val (healthy0, healthy1, transient, first, pending) = cleanup.take(5)
+        val capturable = mutableSetOf(first, pending)
+        var tick = 0
+        val probes = mutableListOf<Pair<Int, CivRoadUpkeep>>()
+        val native = mockk<CivsWorld>()
+        every { native.captureRoadUpkeep(any(), any(), any(), any()) } answers {
+            val target = thirdArg<CivRoadUpkeep>()
+            val builder = secondArg<CivWorker>()
+            probes += tick to target
+            if (target !in capturable) null else CivWorldWork(builder.id, builder.completedCycles, builder.assignment!!,
+                target.floor.copy(x = target.floor.x + 1, y = target.floor.y + 1),
+                listOf(CivPlanBlock(target.floor, target.wallCleanup!!.authored.after, target.after)),
+                status = "repairing-road", focus = target.floor, upkeep = target)
+        }
+        val maintenance = CivsRoadMaintenance(native, currentTick = { tick })
+        maintenance.publish(city, network)
+        fun nextWork(snapshot: Settlement): CivWorldWork {
+            repeat(network.targets.size + 1) {
+                tick++
+                maintenance.plan(snapshot, snapshot.workers.single())?.let { return it }
+            }
+            error("No cleanup selected within one finite pass")
+        }
+        fun labels(targets: List<CivRoadUpkeep>) = targets.map { target -> when (target) {
+            healthy0 -> "H0"
+            healthy1 -> "H1"
+            transient -> "T"
+            first -> "A"
+            pending -> "B"
+            else -> if (target in grades) "G${grades.indexOf(target)}" else "C${cleanup.indexOf(target)}"
+        } }
+
+        val firstWork = nextWork(city)
+        firstWork.upkeep shouldBe first
+        probes.map { it.second } shouldBe grades + listOf(healthy0, healthy1, transient, first)
+        val afterFirst = CivsRoadMaintenance.complete(city, firstWork, 3_000)
+        CivRoadUpkeepReceipt(city.workers.single(), city.stock, firstWork, 3_000).validated(afterFirst)
+        capturable.remove(first)
+        maintenance.upkeepRetired(afterFirst, first)
+
+        val nextStart = probes.size
+        val pendingWork = nextWork(afterFirst)
+        pendingWork.upkeep shouldBe pending
+        val afterReceiptProbes = probes.drop(nextStart).map { it.second }
+        withClue("gradeCount=${grades.size}, targetCount=${network.targets.size}, after A probes=${labels(afterReceiptProbes)}, expected=${labels(grades + pending)}") {
+            (afterReceiptProbes == grades + pending) shouldBe true
+        }
+        val afterPending = CivsRoadMaintenance.complete(afterFirst, pendingWork, 6_000)
+        CivRoadUpkeepReceipt(afterFirst.workers.single(), afterFirst.stock, pendingWork, 6_000).validated(afterPending)
+        capturable.remove(pending)
+        maintenance.upkeepRetired(afterPending, pending)
+        capturable.add(transient)
+
+        val retryStart = probes.size
+        nextWork(afterPending).upkeep shouldBe transient
+        val retried = probes.drop(retryStart).map { it.second }
+        retried.count { it == transient } shouldBe 1
+        retried.filter { it.wallCleanup != null }.groupingBy { it }.eachCount().values.all { it == 1 } shouldBe true
+        probes.groupBy { it.first }.values.all { it.size <= 8 } shouldBe true
+    }
+
     test("terrain grades precede wall cleanup both on admission and after a cleanup receipt rebuilds the queue") {
-        val base = upkeepCity()
-        // Actual Auto4 forester cross-section, translated only in X/Z for this small city fixture.
+        val (city, plans) = upkeepGradeCleanupFixture()
         val auto4Start = CivPosition(12562, 70, 10386)
-        val route = (10386..10401).map { z -> CivPosition(0, when {
-            z < 10390 -> 70
-            z < 10398 -> 71
-            else -> 72
-        }, z - auto4Start.z) }
-        val source = base.buildings.last().copy(type = BuildingType.HOUSE, rotation = 180, transit = null,
-            anchor = CivPosition(0, 71, 16), entrance = route.last(),
-            bounds = CivBox(CivPosition(-2, 71, 16), CivPosition(2, 77, 20)), schematicId = "fixture/house")
-        val wallRoute = (0..10).map { CivPosition(20, 65, it) }
-        val wall = source.copy(id = UUID(0, 93), type = BuildingType.WALL, anchor = CivPosition(20, 64, 11),
-            entrance = wallRoute.last(), bounds = CivBox(CivPosition(19, 64, 11), CivPosition(21, 69, 13)),
-            schematicId = "fixture/wall")
-        val worker = CivsEquipment.replace(base.workers.single(),
-            MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also {
-                it[CivsEquipment.BAG] = CivResidentItem("COBBLESTONE", 64)
-            })
-        val city = CivsRules.validate(base.copy(style = "original", stock = Stock(),
-            buildings = base.buildings.dropLast(1) + listOf(source, wall), workers = listOf(worker),
-            inventory = CivInventory(CivStorageMode.PHYSICAL)))
-        val wallPlan = upkeepApproach(city, wall, wallRoute).let { plan -> plan.copy(terrain = plan.terrain!!.copy(
-            blocks = wallRoute.map { CivPlanBlock(it.copy(y = 64), "minecraft:grass_block[snowy=false]", "minecraft:coarse_dirt") })) }
-        val plans = listOf(upkeepApproach(city, source, route), wallPlan,
-            upkeepApproach(city, city.buildings[1], listOf(city.buildings[1].entrance)))
+        val worker = city.workers.single()
+        val source = plans.first().building
+        val route = plans.first().terrain!!.route
         val network = CivsRoadMaintenance.prepare(city, plans)
         val grades = network.targets.filter { it.routeOverride != null }
         val cleanup = network.targets.filter { it.wallCleanup != null }
@@ -1493,6 +1579,36 @@ class CivsRoadMaintenanceTest : FunSpec({
         }
     }
 })
+
+private fun upkeepGradeCleanupFixture(): Pair<Settlement, List<CivPlacementPlan>> {
+    val base = upkeepCity()
+    // Actual Auto4 forester cross-section, translated only in X/Z for this small city fixture.
+    val auto4Start = CivPosition(12562, 70, 10386)
+    val route = (10386..10401).map { z -> CivPosition(0, when {
+        z < 10390 -> 70
+        z < 10398 -> 71
+        else -> 72
+    }, z - auto4Start.z) }
+    val source = base.buildings.last().copy(type = BuildingType.HOUSE, rotation = 180, transit = null,
+        anchor = CivPosition(0, 71, 16), entrance = route.last(),
+        bounds = CivBox(CivPosition(-2, 71, 16), CivPosition(2, 77, 20)), schematicId = "fixture/house")
+    val wallRoute = (0..10).map { CivPosition(20, 65, it) }
+    val wall = source.copy(id = UUID(0, 93), type = BuildingType.WALL, anchor = CivPosition(20, 64, 11),
+        entrance = wallRoute.last(), bounds = CivBox(CivPosition(19, 64, 11), CivPosition(21, 69, 13)),
+        schematicId = "fixture/wall")
+    val worker = CivsEquipment.replace(base.workers.single(),
+        MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also {
+            it[CivsEquipment.BAG] = CivResidentItem("COBBLESTONE", 64)
+        })
+    val city = CivsRules.validate(base.copy(style = "original", stock = Stock(),
+        buildings = base.buildings.dropLast(1) + listOf(source, wall), workers = listOf(worker),
+        inventory = CivInventory(CivStorageMode.PHYSICAL)))
+    val wallPlan = upkeepApproach(city, wall, wallRoute).let { plan -> plan.copy(terrain = plan.terrain!!.copy(
+        blocks = wallRoute.map { CivPlanBlock(it.copy(y = 64), "minecraft:grass_block[snowy=false]", "minecraft:coarse_dirt") })) }
+    val plans = listOf(upkeepApproach(city, source, route), wallPlan,
+        upkeepApproach(city, city.buildings[1], listOf(city.buildings[1].entrance)))
+    return city to plans
+}
 
 private fun upkeepCity(): Settlement {
     val hall = CivBuilding(UUID(0, 1), BuildingType.TOWN_HALL, 1, CivPosition(-60, 63, -60), 0, "fixture/hall",

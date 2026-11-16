@@ -349,13 +349,14 @@ class CivsHologramsTest : FunSpec({
         }
     }
 
-    test("movement reuses nameplate text and each changed text input renders again") {
+    test("movement reuses nameplate text and text changes reuse vitals until their inputs change") {
         MockBukkitTestRuntime.open().use { paper ->
             val plugin = paper.createSimplePlugin("CivsHologramTextReuseTest")
             val world = paper.addPlayer("Viewer").world
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
             val displays = mockk<PaperPacketDisplays>(relaxed = true)
             every { displays.closeAsync() } returns CompletableFuture.completedFuture(null)
+            val freshText = CivsText.fromYaml(civsLocaleSource())
             val text = spyk(CivsText.fromYaml(civsLocaleSource()))
             val rendered = mutableListOf<Component>()
             every { text.render("hologram.npc", null, *anyVararg()) } answers {
@@ -364,27 +365,59 @@ class CivsHologramsTest : FunSpec({
             val inputs = mutableListOf("COBBLESTONE")
             var npc = CivsNpcHologramSnapshot(UUID(0, 1), world.uid, 2.0, 64.0, 3.0, "Василий",
                 "workers.status.waiting-inputs", 18.5, 20.0, profession = "farmer", statusInputs = inputs)
-            CivsHolograms(plugin, tasks, text, { listOf(npc) }, displays).use { owner ->
+            var present = true
+            fun assertRendered(nameplates: Int, vitals: Int) {
+                rendered.size shouldBe nameplates
+                verify(exactly = vitals) { text.residentVitals(null, any(), any(), any()) }
+                // Full component equality includes styles, glyph fonts and hover contents.
+                rendered.last() shouldBe civsNpcHologramText(freshText, npc)
+            }
+            val owner = CivsHolograms(plugin, tasks, text, { if (present) listOf(npc) else emptyList() }, displays)
+            var nameplates = 1
+            var vitals = 1
+            owner.use {
                 owner.pulse()
+                assertRendered(nameplates, vitals)
                 plainText(rendered.single()) shouldContain "Булыжник"
                 npc = npc.copy(x = 3.0, yaw = 10f, nativeHeight = 1.5, courierCart = true, cargo = mapOf("DIRT" to 4))
                 owner.pulse()
-                rendered.size shouldBe 1
+                assertRendered(nameplates, vitals)
 
                 inputs[0] = "CHARCOAL"
                 owner.pulse()
-                rendered.size shouldBe 2
+                assertRendered(++nameplates, vitals)
                 plainText(rendered.last()) shouldContain "Древесный уголь"
-                val changes = listOf<(CivsNpcHologramSnapshot) -> CivsNpcHologramSnapshot>(
+                val textChanges = listOf<(CivsNpcHologramSnapshot) -> CivsNpcHologramSnapshot>(
                     { it.copy(name = "Фёдор") }, { it.copy(status = "walking") }, { it.copy(profession = "forester") },
-                    { it.copy(child = true) }, { it.copy(health = 17.0) }, { it.copy(maxHealth = 28.0) }, { it.copy(hunger = 6) },
-                    { it.copy(health = -0.0) }, { it.copy(health = 0.0) },
+                    { it.copy(child = true) },
                 )
-                for ((index, change) in changes.withIndex()) {
+                for (change in textChanges) {
                     npc = change(npc)
                     owner.pulse()
-                    rendered.size shouldBe index + 3
+                    assertRendered(++nameplates, vitals)
                 }
+                val vitalsChanges = listOf<(CivsNpcHologramSnapshot) -> CivsNpcHologramSnapshot>(
+                    { it.copy(health = 17.0) }, { it.copy(maxHealth = 28.0) }, { it.copy(hunger = 6) },
+                    { it.copy(health = -0.0) }, { it.copy(health = 0.0) },
+                )
+                for (change in vitalsChanges) {
+                    npc = change(npc)
+                    owner.pulse()
+                    assertRendered(++nameplates, ++vitals)
+                }
+
+                present = false
+                owner.pulse()
+                assertRendered(nameplates, vitals)
+                present = true
+                owner.pulse()
+                assertRendered(++nameplates, ++vitals)
+            }
+            owner.pulse()
+            assertRendered(nameplates, vitals)
+            CivsHolograms(plugin, tasks, text, { listOf(npc) }, displays).use { recreated ->
+                recreated.pulse()
+                assertRendered(++nameplates, ++vitals)
             }
             tasks.close()
         }

@@ -237,6 +237,7 @@ open class ArcCivsPlugin : JavaPlugin() {
                 nativeDrains += controls.drained()
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
             })
+            val navigationDebugFile = CivsNavigationDebugFile(dataRoot, executor)
             val command = CivsCommand(service, ui, text, lifecycle.tasks, service::debugState, service::configureSettlementSetting,
                 service::repairBuildingStorage, service::retryConstruction, service::debugLayout,
                 this::prepareHotload, this::hotloadStatus, service::debugTerrainAt,
@@ -245,7 +246,10 @@ open class ArcCivsPlugin : JavaPlugin() {
                 { owner, world, style, name, anchor -> service.foundVillageAt(owner, world, style, name, anchor) },
                 refoundVillageAt = service::foundVillageAt, labGrowth = service::configureLabGrowth,
                 repairMineOpening = service::repairMineOpening,
-                repairAuthoredVegetation = service::repairAuthoredVegetation)
+                repairAuthoredVegetation = service::repairAuthoredVegetation,
+                armNavigationCapture = { city, worker, cycle, goal ->
+                    service.armNavigationDebug(city, worker, cycle, goal, navigationDebugFile::save).let { it.receipt() to it.completion }
+                })
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)

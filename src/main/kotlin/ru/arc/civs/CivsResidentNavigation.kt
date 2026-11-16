@@ -52,7 +52,23 @@ internal class CivsResidentNavigation(
         var snapshotPending: CitizenSnapshotRequest? = null
         val snapshotRevisions = hashMapOf<CitizenSnapshotSectionKey, Long>()
         var reuse: ReuseAttempt? = null
+        var debugTrace: DebugTrace? = null
     }
+    private class DebugTrace(val context: CitizenNavigationDebugContext) {
+        val rounds = mutableListOf<CitizenNavigationDebugRound>()
+        var inputs = emptyList<CitizenSearchCapture>()
+        var probes = 0
+        var budgetCall: String? = null
+        var cursor: CitizenNavigationDebugCursor? = null
+    }
+    private class DebugRequest(val arm: CitizenNavigationDebugArm, val expiresNanos: Long,
+        val current: () -> Boolean, val save: (CitizenNavigationDebugFrame) -> CompletableFuture<Map<String, Any?>>) {
+        var job: Job? = null
+        var writing: CompletableFuture<Map<String, Any?>>? = null
+    }
+    private var debugRequest: DebugRequest? = null
+    private val debugGeneration = UUID.randomUUID()
+
     private data class RouteSection(val world: UUID, val x: Int, val y: Int, val z: Int)
     private class CachedRoute(val steps: List<CitizenPlannedStep>, val ground: Set<CivPosition>,
         val sections: Set<RouteSection>) {
@@ -103,6 +119,102 @@ internal class CivsResidentNavigation(
     private val preparationBoundsMillis = longArrayOf(100, 250, 500, 1_000, 2_000, 5_000, 10_000, Long.MAX_VALUE)
     private val preparationBuckets = LongArray(preparationBoundsMillis.size)
     private var terminal = CompletableFuture.completedFuture(Unit)
+
+    /** A single opt-in recorder. Existing requests are never attached halfway through their history. */
+    internal fun armDebug(identity: CitizenNavigationDebugIdentity, current: () -> Boolean,
+        save: (CitizenNavigationDebugFrame) -> CompletableFuture<Map<String, Any?>>): CitizenNavigationDebugArm {
+        checkOwner()
+        pollDebug()
+        if (closed || !tasks.isCurrent(epoch)) throw CivsRejection("not-ready")
+        if (debugRequest != null) throw CivsRejection("navigation-file-busy")
+        if (!current()) throw CivsRejection("stale-navigation-intent")
+        val arm = CitizenNavigationDebugArm(UUID.randomUUID(), identity, System.currentTimeMillis() + 120_000,
+            CompletableFuture())
+        debugRequest = DebugRequest(arm, nanoTime() + 120_000_000_000L, current, save)
+        return arm
+    }
+
+    internal fun debugSelected(city: UUID, worker: UUID): Boolean = debugRequest?.arm?.identity?.let {
+        it.city == city && it.worker == worker
+    } == true
+
+    internal fun attachDebug(route: CitizenPacketRoute, identity: CitizenNavigationDebugIdentity,
+        supported: Boolean, context: () -> CitizenNavigationDebugContext) {
+        checkOwner()
+        pollDebug()
+        val request = debugRequest?.takeIf { it.job == null && it.writing == null && it.arm.identity == identity } ?: return
+        val job = jobs[route]
+        if (!supported || job == null || job.reuse != null || route.snapshotPolicy?.supportCost == null ||
+            route.hasCourierCorridorHint || settings.maximumCapturedBlocks > CivsNavigationDebugFile.MAX_CELLS ||
+            settings.maximumNodes > 4096) {
+            failDebug("unsupported-navigation-request")
+            return
+        }
+        try {
+            job.debugTrace = DebugTrace(context())
+            request.job = job
+        } catch (_: RuntimeException) { failDebug("navigation-context-failed") }
+    }
+
+    private fun failDebug(reason: String) {
+        val request = debugRequest ?: return
+        if (request.writing != null) return
+        request.job?.debugTrace = null
+        request.arm.completion.completeExceptionally(CivsRejection(reason))
+        debugRequest = null
+    }
+
+    private fun pollDebug() {
+        val request = debugRequest ?: return
+        if (request.writing != null) {
+            if (request.writing?.isDone == true) debugRequest = null
+            return
+        }
+        when {
+            request.arm.completion.isCancelled -> failDebug("navigation-capture-cancelled")
+            nanoTime() >= request.expiresNanos -> failDebug("navigation-capture-expired")
+            !runCatching(request.current).getOrDefault(false) -> failDebug("stale-navigation-intent")
+        }
+    }
+
+    private fun recordDebug(job: Job, result: CitizenSearchResult) {
+        val trace = job.debugTrace ?: return
+        if (trace.budgetCall != null) return
+        trace.probes += trace.inputs.size + result.probes.size
+        if (trace.rounds.size >= CivsNavigationDebugFile.MAX_ROUNDS || trace.probes > CivsNavigationDebugFile.MAX_PROBES) {
+            failDebug("navigation-transcript-too-large")
+            return
+        }
+        trace.rounds += CitizenNavigationDebugRound(trace.inputs, result.probes, result.nodes)
+        trace.inputs = emptyList()
+    }
+
+    private fun finishDebug(job: Job, result: CitizenSearchResult) {
+        val request = debugRequest?.takeIf { it.job === job && it.writing == null } ?: return
+        val trace = job.debugTrace ?: return
+        pollDebug()
+        if (debugRequest !== request) return
+        if (result.failure !in setOf("capture-budget", "search-budget") || result.path != null || result.continuation) {
+            job.debugTrace = null
+            debugRequest = null
+            request.arm.completion.complete(request.arm.receipt() + mapOf("state" to "not-captured",
+                "outcome" to when { result.continuation -> "partial"; result.path != null -> "ready"; else -> "failed" },
+                "failure" to result.failure, "nodes" to result.nodes, "reported_blocks" to job.route.capturedBlocks))
+            return
+        }
+        val (minimumY, maximumY) = job.route.captureLimits()
+        val frame = CitizenNavigationDebugFrame(request.arm.request, debugGeneration, trace.context, settings, minimumY, maximumY,
+            trace.rounds.toList(), result, trace.budgetCall, job.route.capturedBlocks, job.snapshotTerrain,
+            trace.cursor, System.currentTimeMillis())
+        job.debugTrace = null
+        request.job = null
+        val writing = try { request.save(frame) } catch (failure: Throwable) { CompletableFuture.failedFuture(failure) }
+        request.writing = writing
+        writing.whenComplete { receipt, failure ->
+            if (failure == null) request.arm.completion.complete(receipt)
+            else request.arm.completion.completeExceptionally(failure)
+        }
+    }
 
     internal fun debug(): Map<String, Any?> {
         checkOwner()
@@ -310,6 +422,7 @@ internal class CivsResidentNavigation(
         checkOwner()
         if (closed) return
         if (!tasks.isCurrent(epoch)) { clear(); return }
+        pollDebug()
         retireCancelled()
         poll()
         work.drainAvailable { Bukkit.getCurrentTick().toLong() }
@@ -373,7 +486,9 @@ internal class CivsResidentNavigation(
                     job.searching = null
                     val result = searching.join() // isDone above; no blocking gameplay-thread wait.
                     job.route.recordSearch(result)
+                    recordDebug(job, result)
                     if (result.probes.isEmpty()) {
+                        finishDebug(job, result)
                         job.route.acceptSearch(result)
                     } else {
                         job.route.phase("capturing")
@@ -403,6 +518,11 @@ internal class CivsResidentNavigation(
             } catch (failure: RuntimeException) {
                 val reason = reason(failure)
                 if (reason == "capture-budget") {
+                    job.debugTrace?.let { trace ->
+                        trace.budgetCall = reason
+                        trace.cursor = job.snapshotCapture?.debugCursor()
+                        if (trace.cursor == null) failDebug("unsupported-navigation-cursor")
+                    }
                     job.capture = null
                     job.snapshotCapture = null
                     job.snapshotResult = null
@@ -422,6 +542,7 @@ internal class CivsResidentNavigation(
     }
 
     private fun dispatch(job: Job, captures: List<CitizenSearchCapture>) {
+        job.debugTrace?.inputs = captures
         job.route.phase("searching")
         val search = job.search
         // The runnable captures these two detached values, not Job/route or the owner callbacks.
@@ -472,6 +593,7 @@ internal class CivsResidentNavigation(
 
     /** Never let an old worker graph reach movement after an observed native block change. */
     private fun restartSnapshot(job: Job) {
+        if (debugRequest?.job === job) failDebug("navigation-snapshot-restarted")
         job.search.cancel()
         job.snapshotCapture?.cancel()
         job.snapshotWorker?.cancel(false)
@@ -495,6 +617,7 @@ internal class CivsResidentNavigation(
         while (iterator.hasNext()) {
             val job = iterator.next().value
             if (job.route.searching) continue
+            if (debugRequest?.job === job) failDebug("navigation-request-retired")
             // Include fast routes absent from the deliberately quiet slow-route log.
             when {
                 job.route.preparationPhase == "cancelled" -> cancelledPreparations++
@@ -528,6 +651,8 @@ internal class CivsResidentNavigation(
         checkOwner()
         if (closed) return
         closed = true
+        val debugDrain = debugRequest?.writing?.handle { _, _ -> Unit } ?: CompletableFuture.completedFuture(Unit)
+        failDebug("navigation-capture-closed")
         jobs.keys.toList().forEach(CitizenPacketRoute::cancel)
         retireCancelled()
         terrain.clear()
@@ -535,7 +660,8 @@ internal class CivsResidentNavigation(
         sharedRoutes.clear()
         routeSections.clear()
         if (ownsWork) work.close()
-        terminal = ownedExecutor?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
+        val searchDrain = ownedExecutor?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
+        terminal = CompletableFuture.allOf(searchDrain, debugDrain).thenApply { Unit }
     }
 
     fun drained(): CompletableFuture<Unit> = terminal.copy()

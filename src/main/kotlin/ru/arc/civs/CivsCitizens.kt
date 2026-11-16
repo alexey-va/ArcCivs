@@ -1041,6 +1041,10 @@ class CivsCitizens(
 
     internal fun courierUnavailable(cityId: UUID, workerId: UUID): Boolean = couriers.courierUnavailable(cityId, workerId)
 
+    internal fun armNavigationDebug(city: UUID, worker: UUID, cycle: Long, goal: CivPosition,
+        save: (CitizenNavigationDebugFrame) -> CompletableFuture<Map<String, Any?>>): CitizenNavigationDebugArm =
+        routes.armNavigationDebug(city, worker, cycle, goal, save)
+
     internal fun residentReadFrame(): CivResidentReadFrame = observations.readFrame()
 
     internal fun courierSupplySources(cityId: UUID, retainedSources: Set<UUID> = emptySet()): Map<UUID, CivPosition> = couriers.courierSupplySources(cityId, retainedSources)

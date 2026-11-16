@@ -3,6 +3,17 @@ package ru.arc.civs
 import java.util.UUID
 import kotlin.math.abs
 
+/** One detached query's fallback reservations, bound to its exact immutable city snapshot. */
+internal class CivAutonomousAccessContext(private val city: Settlement) {
+    val buildings = civsProtectedBuildings(city).toList()
+    private val adoptedRoutes by lazy(LazyThreadSafetyMode.NONE) {
+        CivsSettlementPlans.current(city)?.routes?.mapValues { it.value.toList() }.orEmpty()
+    }
+
+    fun requireCity(city: Settlement) { require(this.city === city) { "Access context belongs to another city snapshot" } }
+    fun adoptedRoute(buildingId: UUID): List<CivPosition>? = adoptedRoutes[buildingId.toString()]
+}
+
 /** Retained completed approaches; this is a detached view of existing journals, not a second registry. */
 internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>> = emptyMap(),
     val infrastructure: List<CivSettlementPiece> = emptyList(),
@@ -26,34 +37,38 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
         return CivsTownHallApproach.from(city, building, proof)?.takeIf { it.admitted(city, this) }
     }
     /** Only the source's paid terminal and reserved approach may be regraded together. */
-    fun entrancePath(city: Settlement, source: CivBuilding, route: List<CivPosition>): CivsEntrancePath? {
+    fun entrancePath(city: Settlement, source: CivBuilding, route: List<CivPosition>,
+        context: CivAutonomousAccessContext = CivAutonomousAccessContext(city)): CivsEntrancePath? {
+        context.requireCity(city)
         val path = CivsEntrancePath.from(source, route) ?: return null
         val cells = path.floors
         if (cells.any { !city.contains(it.x, it.z) } ||
             infrastructure.any { piece -> piece.transit.any { path.contains(it.x, it.z) } } ||
             reservedFortificationPorts.any { box -> cells.any { CivsAutonomousGeometry.horizontalContains(box, it) } }) return null
-        for (building in civsProtectedBuildings(city)) {
+        for (building in context.buildings) {
             val bounds = CivsAutonomousGeometry.futureBounds(city, building)
             if (cells.any { CivsAutonomousGeometry.horizontalContains(bounds, it) || CivsWorksiteLayouts.isField(building, it.x, it.z) })
                 return null
             if (building.id == source.id) continue
             if (CivsAutonomousGeometry.approach(building).any { path.contains(it.x, it.z) }) return null
-            val other = routes[building.id] ?: CivsSettlementPlans.current(city)?.routes?.get(building.id.toString()) ?: continue
+            val other = routes[building.id] ?: context.adoptedRoute(building.id) ?: continue
             if (other.any { feet -> (-1..1).any { dx -> (-1..1).any { dz -> path.contains(feet.x + dx, feet.z + dz) } } })
                 return null
         }
         return path
     }
 
-    fun forecourtClear(city: Settlement, source: CivBuilding, floor: CivPosition): Boolean {
+    fun forecourtClear(city: Settlement, source: CivBuilding, floor: CivPosition,
+        context: CivAutonomousAccessContext = CivAutonomousAccessContext(city)): Boolean {
+        context.requireCity(city)
         if (!city.contains(floor.x, floor.z) || reservedFortificationPorts.any { CivsAutonomousGeometry.horizontalContains(it, floor) } ||
             infrastructure.any { piece -> piece.transit.any { it.x == floor.x && it.z == floor.z } }) return false
-        return civsProtectedBuildings(city).none { building ->
+        return context.buildings.none { building ->
             val other = building.id != source.id
             CivsWorksiteLayouts.isField(building, floor.x, floor.z) ||
                 building.control?.let { it.x == floor.x && it.z == floor.z } == true ||
                 building != source && CivsAutonomousGeometry.horizontalContains(CivsAutonomousGeometry.futureBounds(city, building), floor) ||
-                other && (routes[building.id] ?: CivsSettlementPlans.current(city)?.routes?.get(building.id.toString())).orEmpty()
+                other && (routes[building.id] ?: context.adoptedRoute(building.id)).orEmpty()
                     .any { abs(it.x - floor.x) <= 1 && abs(it.z - floor.z) <= 1 }
         }
     }
@@ -83,13 +98,13 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     }
 
     /** Preserve the full public surface when a civic parcel must borrow an existing street. */
-    fun roadColumns(city: Settlement): Set<Long> = buildSet {
+    fun roadColumns(city: Settlement, context: CivAutonomousAccessContext = CivAutonomousAccessContext(city)): Set<Long> = buildSet {
+        context.requireCity(city)
         routes.values.forEach { addAll(CivsAutonomousTerraform.roadProfile(it).keys) }
         // A missing older journal cannot license writing over the approach still in the
         // adopted plan. This reserves columns only; it supplies no grade or collision proof.
-        val plan = CivsSettlementPlans.current(city)
         city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.id !in routes }.forEach { building ->
-            plan?.routes?.get(building.id.toString())?.let { addAll(CivsAutonomousTerraform.roadProfile(it).keys) }
+            context.adoptedRoute(building.id)?.let { addAll(CivsAutonomousTerraform.roadProfile(it).keys) }
         }
         infrastructure.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }.forEach { piece ->
             piece.transit.forEach { add(civsTerrainKey(it.x, it.z)) }
@@ -97,7 +112,9 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     }
 
     /** Earlier roads win when an older release recorded incompatible heights at the same column. */
-    fun standing(city: Settlement, exceptBuildingId: UUID): Map<Long, CivPosition> = buildMap {
+    fun standing(city: Settlement, exceptBuildingId: UUID,
+        context: CivAutonomousAccessContext = CivAutonomousAccessContext(city)): Map<Long, CivPosition> = buildMap {
+        context.requireCity(city)
         require(city.buildings.size <= CivsRules.MAX_SITES)
         val hall = hallApproach(city)
         if (hall != null && hall.hall.id != exceptBuildingId) for (p in hall.surfaces.keys) {
@@ -109,7 +126,7 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                 else listOf(building.entrance)
             // This is a reservation grade; preserved native capture still has to prove its actual support and clearance.
             val route = routes[building.id]?.takeIf { building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure }
-            val path = route?.let { entrancePath(city, building, it) }
+            val path = route?.let { entrancePath(city, building, it, context) }
             val paidApproach = if (route == null) approach else approach.map { nominal ->
                 (path?.floor(nominal.x, nominal.z) ?: CivsAutonomousTerraform.approachFloor(route, nominal))
                     ?.let { it.copy(y = it.y + 1) } ?: nominal }

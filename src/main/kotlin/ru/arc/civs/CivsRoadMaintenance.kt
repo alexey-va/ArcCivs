@@ -452,8 +452,15 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         val network = networks[city.id]?.takeIf { it.worldId == city.worldId && it.buildings == city.buildings &&
             it.routeOverrides == city.roadRouteOverrides } ?: return
         val grade = gradeTargets(city, network)
-        if (grade.any { it.routeOverride == null && it.floor == upkeep.floor })
-            gradeChecks[city.id] = ArrayDeque(grade)
+        if (grade.none { it.routeOverride == null && it.floor == upkeep.floor }) return
+        // Retry grades first, then pending cleanup before its already inspected prefix.
+        val cleanup = grade.filter { it.wallCleanup != null }
+        val currentCleanup = cleanup.associateBy { it.floor }
+        val pendingCleanup = gradeChecks[city.id].orEmpty().filter { target ->
+            target.wallCleanup != null && currentCleanup[target.floor] == target
+        }
+        val orderedCleanup = (pendingCleanup + cleanup).distinctBy { it.floor }
+        gradeChecks[city.id] = ArrayDeque(grade.filter { it.wallCleanup == null } + orderedCleanup)
     }
 
     fun plan(city: Settlement, worker: CivWorker): CivWorldWork? {
@@ -1116,6 +1123,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         internal fun prepare(city: Settlement, access: CivAutonomousAccess, proposeCuts: Boolean = true,
             restrictTo: Set<Long>? = null): CivRoadUpkeepNetwork {
             require(restrictTo == null || !proposeCuts && restrictTo.size <= 24)
+            val accessContext = CivAutonomousAccessContext(city)
             val routeProfiles = access.routes.mapValues { CivsAutonomousTerraform.roadProfile(it.value) }
             val floors = linkedMapOf<Long, CivPosition>()
             val ambiguous = hashSetOf<Long>()
@@ -1273,7 +1281,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                                 profile[key]?.y?.let { y -> y != point.y } == true &&
                                     !(descending && sharedShoulder(key, point, finalAccess.routes.getValue(id), profile))
                             } }) return@candidate null
-                        val retained = finalAccess.standing(city, source.id)
+                        val retained = finalAccess.standing(city, source.id, accessContext)
                         if (altered.any { (key, point) -> retained[key]?.let { it.y - 1 != point.y } == true }) return@candidate null
                         val floor = repair.route[changes.first()].let { it.copy(y = it.y - 1) }
                         val finalColumns = witness?.targets(city, after = true)?.associateBy { civsTerrainKey(it.floor.x, it.floor.z) }
@@ -1298,10 +1306,10 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }.forEach { source ->
                 val route = access.routes[source.id].orEmpty()
                 if (route.isEmpty()) return@forEach
-                val path = access.entrancePath(city, source, route)
+                val path = access.entrancePath(city, source, route, accessContext)
                 if (path != null) entrancePaths[source.id] = path
-                val retained by lazy(LazyThreadSafetyMode.NONE) { access.standing(city, source.id) }
-                val yard = CivsWorksiteLayouts.forecourt(source).filterKeys { access.forecourtClear(city, source, it) }
+                val retained by lazy(LazyThreadSafetyMode.NONE) { access.standing(city, source.id, accessContext) }
+                val yard = CivsWorksiteLayouts.forecourt(source).filterKeys { access.forecourtClear(city, source, it, accessContext) }
                 if (yard.isNotEmpty()) forecourts[source.id] = yard
                 for (floor in yard.keys) {
                     val key = civsTerrainKey(floor.x, floor.z)
@@ -1334,10 +1342,10 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 CivRoadUpkeep(city.id, city.worldId, city.owner, layout.hall.id, layout.hall, floor, after,
                     null, emptyList(), hall = layout.witness)
             }
-            val bankRoads = access.roadColumns(city)
+            val bankRoads = access.roadColumns(city, accessContext)
             val bankTargets = city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }.flatMap { source ->
                 val route = access.routes[source.id].orEmpty()
-                val bankEntries = access.standing(city, source.id)
+                val bankEntries = access.standing(city, source.id, accessContext)
                 CivsRoadTerraces.banks(route).mapNotNull { (key, floor) ->
                     if (key in floors || key in bankRoads || key in bankEntries || key in held || key in ambiguous || excluded(floor) ||
                         restrictTo != null && key !in restrictTo) return@mapNotNull null

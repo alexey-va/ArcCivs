@@ -40,6 +40,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         private val signature = supports.hashCode()
         operator fun contains(point: CivPosition): Boolean = point in supports
         fun guardApproach(towerId: UUID): List<CivPosition> = guardApproaches[towerId].orEmpty()
+        internal fun debugSupports(): Set<CivPosition> = supports
         override fun hashCode(): Int = signature
         override fun equals(other: Any?): Boolean = this === other || other is RetainedRoads &&
             signature == other.signature && supports == other.supports
@@ -119,6 +120,11 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         private val retainedRoads: RetainedRoads,
         private val territory: CivRouteTerritory? = null,
     ) {
+        internal fun debugPolicy(allowedBuildings: Set<UUID>, logs: Set<Material>, leaves: Set<Material>) = CitizenNavigationDebugPolicy(
+            geometry.center, geometry.radius, (geometry.buildings + listOfNotNull(geometry.planned))
+                .map(CitizenNavigationDebugBuilding::of), allowedBuildings.toSet(), preferred.toSet(),
+            retainedRoads.debugSupports().toSet(), preferCourierRoads, (logs + leaves).mapTo(sortedSetOf(), Material::name))
+
         fun native(ground: Block, recognizedSurface: (Block) -> Double): Double =
             cost(CivPosition(ground.x, ground.y, ground.z), { ground.type }, { ground.blockData },
                 { Tag.LOGS.isTagged(it) || Tag.LEAVES.isTagged(it) }, { recognizedSurface(ground) > 1.0 })

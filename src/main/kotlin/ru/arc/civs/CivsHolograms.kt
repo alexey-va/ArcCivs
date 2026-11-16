@@ -61,12 +61,15 @@ class CivsHolograms internal constructor(
         this(plugin, tasks, text, snapshots, nativeWork?.let { PaperPacketDisplays(plugin, "civs-residents", it) }
             ?: PaperPacketDisplays(plugin, "civs-residents"), nativeWork, workplaces)
 
-    private data class Desired(val snapshot: CivsNpcHologramSnapshot, val text: Component,
+    private data class Desired(val snapshot: CivsNpcHologramSnapshot, val text: Component, val vitals: Component,
         private val textInputs: List<String> = snapshot.statusInputs.toList()) {
+        fun vitalsMatch(next: CivsNpcHologramSnapshot): Boolean =
+            snapshot.hunger == next.hunger && snapshot.health.toBits() == next.health.toBits() &&
+                snapshot.maxHealth.toBits() == next.maxHealth.toBits()
+
         fun textMatches(next: CivsNpcHologramSnapshot): Boolean =
             snapshot.name == next.name && snapshot.profession == next.profession && snapshot.child == next.child &&
-                snapshot.status == next.status && textInputs == next.statusInputs && snapshot.hunger == next.hunger &&
-                snapshot.health.toBits() == next.health.toBits() && snapshot.maxHealth.toBits() == next.maxHealth.toBits()
+                snapshot.status == next.status && textInputs == next.statusInputs && vitalsMatch(next)
     }
     private data class Rendered(val handle: PacketTextDisplay, var value: Desired?,
         var speech: PacketTextDisplay? = null, var bedroll: AutoCloseable? = null)
@@ -96,7 +99,11 @@ class CivsHolograms internal constructor(
                 // The locale catalog is fixed for this owner; the snapshot still tracks pose and cargo every pulse.
                 val last = previous[npc.workerId]
                 npc.workerId to if (last?.textMatches(npc) == true) last.copy(snapshot = npc)
-                    else Desired(npc, civsNpcHologramText(text, npc))
+                    else {
+                        val vitals = if (last?.vitalsMatch(npc) == true) last.vitals
+                            else text.residentVitals(null, npc.health, npc.maxHealth, npc.hunger)
+                        Desired(npc, civsNpcHologramText(text, npc, vitals), vitals)
+                    }
             }
         decor.capture(workplaces())
         if (pending || decor.current() && rendered.size == desired.size && rendered.all { (id, shown) -> samePresentation(shown.value, desired[id]) }) return
@@ -235,7 +242,8 @@ internal const val CIVS_NPC_TEXT_WIDTH = 220
 internal const val CIVS_NPC_TEXT_GAP = .20
 internal const val CIVS_NPC_TEXT_OFFSET = 1.8 + CIVS_NPC_TEXT_GAP
 
-internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): Component {
+internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot,
+    vitals: Component = text.residentVitals(null, npc.health, npc.maxHealth, npc.hunger)): Component {
     val hasWork = !npc.child && npc.profession !in setOf("", "unassigned", "child")
     val action = if (npc.status.removePrefix("workers.status.") == "waiting-tool") {
         when (npc.profession) {
@@ -253,6 +261,6 @@ internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): 
             "name" to Component.text(npc.name, TextColor.color(0xF3EFE5)),
             "profession" to profession.color(TextColor.color(0xE1C58D)),
             "action" to action.color(TextColor.color(0xCDC7BC)),
-            "health" to text.residentVitals(null, npc.health, npc.maxHealth, npc.hunger),
+            "health" to vitals,
         ))
 }

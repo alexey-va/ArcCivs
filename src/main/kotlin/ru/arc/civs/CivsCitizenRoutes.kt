@@ -49,6 +49,28 @@ internal class CivsCitizenRoutes(
     private val logistics get() = logisticsOwner()
     private val life get() = lifeOwner()
 
+    internal fun armNavigationDebug(cityId: UUID, workerId: UUID, cycle: Long, goal: CivPosition,
+        save: (CitizenNavigationDebugFrame) -> java.util.concurrent.CompletableFuture<Map<String, Any?>>): CitizenNavigationDebugArm {
+        checkCitizenMainThread()
+        val actor = runtime.actors[workerId]?.takeIf { it.cityId == cityId }
+            ?: throw CivsRejection("worker-not-active")
+        val identity = navigationDebugIdentity(actor, goal) ?: throw CivsRejection("unsupported-navigation-intent")
+        if (identity.token.completedCycles != cycle) throw CivsRejection("stale-navigation-intent")
+        return navigation.armDebug(identity, {
+            !runtime.closed.get() && runtime.actors[workerId] === actor && navigationDebugIdentity(actor, goal) == identity
+        }, save)
+    }
+
+    private fun navigationDebugIdentity(actor: CitizenActor, goal: CivPosition): CitizenNavigationDebugIdentity? {
+        val courier = actor.plan.courier ?: return null
+        val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return null
+        if (actor.plan.type != BuildingType.WAREHOUSE || city.inventory?.mode != CivStorageMode.PHYSICAL ||
+            !courier.carrying || !courier.cargo.inventoryBacked || courier.cargo.sourceWorkerId != null ||
+            courier.cargo.stockResource != null || actor.plan.token.shipmentId != courier.cargo.id ||
+            actor.plan.storage != goal || actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING, CitizenPhase.CLOSED)) return null
+        return CitizenNavigationDebugIdentity(actor.cityId, actor.workerId, actor.instanceId, actor.worldId, actor.plan.token, goal)
+    }
+
     fun paidGuardApproach(city: Settlement, towerId: UUID): List<CivPosition> =
         workFrame(city.id)?.takeIf { it.territory.matches(city) }?.roads?.guardApproach(towerId).orEmpty()
 
@@ -228,6 +250,17 @@ internal class CivsCitizenRoutes(
             if (p.y in minimumY until maximumY && world.isChunkLoaded(p.x shr 4, p.z shr 4)) world.getBlockAt(p.x, p.y, p.z).type
             else null
         } }, policy.stepAllowed, { ground -> routeCosts.cost(ground, surfaceSpeed) }, corridor, policy)
+        if (navigation.debugSelected(actor.cityId, actor.workerId)) {
+            navigationDebugIdentity(actor, target)?.let { identity ->
+                navigation.attachDebug(motion, identity,
+                    supported = preferCourierRoads && corridor == null && mine == null && waitingMine == null &&
+                        !actor.sheltering && !actor.returningToWarehouse &&
+                        actor.cycle.phase == CitizenPhase.RETURNING) {
+                    CitizenNavigationDebugContext(identity, city.revision, runtime.plugin.pluginMeta.version,
+                        origin, to.point(), now, routeCosts.weights.debugPolicy(allowed, logs, leaves))
+                }
+            }
+        }
         val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = CitizenRoute(from.point(), to, chunks, now, timeout,
             allowed, motion, trip, target, waypoint != null, idleAnchor)
