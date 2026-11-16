@@ -6,7 +6,7 @@ import java.util.UUID
 /** Bounded, read-only operator snapshots. Each section is a separate parseable console line. */
 internal object CivsDebug {
     val systems = listOf("overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents", "research", "industry")
-    val explicitSystems = listOf("terrain")
+    val explicitSystems = listOf("terrain", "roads")
     private const val USAGE = "civs debug [all|system] [city UUID] [worker UUID]"
     private val gson = GsonBuilder().serializeNulls().create()
 
@@ -21,7 +21,7 @@ internal object CivsDebug {
         val worker = id(2)
         if (args.size > 1 && city == null) return error("invalid-city-id")
         if (args.size > 2 && worker == null) return error("invalid-worker-id")
-        if (system == "terrain" && (city == null || worker == null)) return error("terrain-requires-city-and-worker")
+        if (system in explicitSystems && (city == null || worker == null)) return error("$system-requires-city-and-worker")
         return (if (system == "all") systems else listOf(system)).map { section ->
             ("ARCCIVS_DEBUG " + gson.toJson(linkedMapOf(
                 "schema" to 1, "system" to section, "generated_at_ms" to System.currentTimeMillis(),

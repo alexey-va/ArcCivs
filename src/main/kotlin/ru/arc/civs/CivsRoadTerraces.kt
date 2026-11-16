@@ -101,9 +101,10 @@ internal object CivsRoadTerraces {
         }
     }
 
-    /** One grass cheek on either side of a straight flight. Two treads share a little terrace;
-     * the upper cheek joins the high landing instead of exposing an isolated dirt buttress. */
-    fun banks(route: List<CivPosition>): Map<Long, CivPosition> {
+    /** One grass shoulder on either side of a straight flight and its upper landing. The flat
+     * continuation ends at a turn, another grade, the route end or the bounded terrace span.
+     * Native capture leaves matching/higher ground in place; shared-route claims are excluded by upkeep. */
+    fun banks(route: List<CivPosition>, flightsTouching: Set<Int>? = null): Map<Long, CivPosition> {
         if (route.size < 2) return emptyMap()
         val road = CivsAutonomousTerraform.roadProfile(route)
         val banks = linkedMapOf<Long, CivPosition>()
@@ -117,14 +118,29 @@ internal object CivsRoadTerraces {
             var end = at
             while (end + 1 < route.size && route[end + 1].y - route[end].y == rise &&
                 route[end + 1].x - route[end].x == dx && route[end + 1].z - route[end].z == dz) end++
+            if (flightsTouching != null && (at - 1..end).none { it in flightsTouching }) {
+                at = end + 1
+                continue
+            }
+            fun shoulder(high: CivPosition, y: Int) {
+                for (side in listOf(-2, 2)) {
+                    val x = high.x + dz * side; val z = high.z - dx * side
+                    val key = civsTerrainKey(x, z)
+                    if (key in road) continue
+                    val point = CivPosition(x, y, z)
+                    banks[key] = banks[key]?.takeIf { it.y >= y } ?: point
+                }
+            }
             val highFirst = if (rise > 0) (end downTo at).map { route[it] } else (at - 1 until end).map { route[it] }
-            for ((index, high) in highFirst.withIndex()) for (side in listOf(-2, 2)) {
-                val x = high.x + dz * side; val z = high.z - dx * side
-                val key = civsTerrainKey(x, z)
-                if (key in road) continue
-                val y = high.y - 1 + index % 2
-                val point = CivPosition(x, y, z)
-                banks[key] = banks[key]?.takeIf { it.y >= y } ?: point
+            for ((index, high) in highFirst.withIndex()) shoulder(high, high.y - 1 + index % 2)
+            val highIndex = if (rise > 0) end else at - 1
+            val outward = if (rise > 0) 1 else -1
+            val high = route[highIndex]
+            for (step in 1..MAX_SPAN) {
+                val index = highIndex + outward * step
+                val next = route.getOrNull(index) ?: break
+                if (next.y != high.y || next.x != high.x + dx * outward * step || next.z != high.z + dz * outward * step) break
+                shoulder(next, high.y - 1)
             }
             at = end + 1
         }

@@ -72,7 +72,7 @@ class CivsCitizens(
     navigationExecutor: Executor? = null,
     private val navigationClock: () -> Long = System::currentTimeMillis,
     private val courierFailed: (UUID, UUID, CivCargo) -> Unit = { _, _, _ -> },
-    private val workPositionFailed: (Settlement, CivWorker, CivWorldWork) -> Boolean = { _, _, _ -> false },
+    private val workPositionFailed: (Settlement, CivWorker, CivWorldWork, Boolean) -> Boolean = { _, _, _, _ -> false },
     private val craftPlan: (Settlement, CivWorker) -> CivCraftJob? = { _, _ -> null },
     private val craftDelivery: (UUID, UUID, UUID, Long, Long, UUID, Long) -> CompletableFuture<Settlement> = { _, _, _, _, _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("stale-delivery")) },

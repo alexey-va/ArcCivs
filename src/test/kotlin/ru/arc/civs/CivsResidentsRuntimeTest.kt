@@ -5189,6 +5189,166 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 })
 
+class CivsOccupiedFinalEndpointTest : FunSpec({
+    for (alternativeAvailable in listOf(false, true))
+    test("an occupied final work endpoint retains real work and bounded waiting, alternative=$alternativeAvailable") {
+        residentRuntime(workerId = UUID(0, 81)) { h ->
+            val farm = h.assignFarm()
+            val blockerId = UUID(0, 82)
+            h.city = h.city.copy(workers = h.city.workers + CivWorker(blockerId, "Workplace holder", null))
+            // A finite room keeps the two failed body-aware searches local; the native
+            // route is complete, and only the final work stance belongs to another body.
+            for (x in 18..29) for (z in -3..3) if (x in listOf(18, 29) || z in listOf(-3, 3))
+                for (y in 64..66) h.world.getBlockAt(x, y, z).type = Material.STONE
+            val focus = CivPosition(26, 64, 0)
+            h.world.getBlockAt(focus.x, focus.y, focus.z).type = Material.STONE
+            val work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(23, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
+                durationMillis = 1_000, status = "working-field", focus = focus)
+            val alternative = work.copy(standing = CivPosition(24, 64, 2))
+            if (alternativeAvailable) {
+                // The side passage reaches the same focus without cutting across the holder.
+                for (y in 64..66) h.world.getBlockAt(23, y, 1).type = Material.STONE
+                h.onTemporarilyBlockedWorkPosition = { _, worker, failed ->
+                    worker.id shouldBe h.workerId
+                    failed shouldBe work
+                    h.work = alternative
+                    true
+                }
+            }
+            h.work = work
+            h.owner.residentStepAllowed = { npc, _, _ -> npc.uniqueId != blockerId }
+            val actor = h.actor()
+            actor.npc.teleport(Location(h.world, 21.5, 64.0, .5, -90f, 0f))
+            h.navigationNow = 2_000L
+            h.owner.pulse(2_000)
+            val route = requireNotNull(actor.route)
+            val blocker = h.actor(blockerId)
+            blocker.route?.motion?.cancel()
+            blocker.route = null
+            blocker.npc.teleport(Location(h.world, 23.5, 64.0, .5))
+            val heldAt = blocker.npc.location.point()
+            val token = actor.plan.token
+            var paused = false
+            for (tick in 1..600) {
+                val before = actor.npc.location
+                h.navigate()
+                withClue("tick=$tick ${h.owner.debug(h.city.id, h.workerId)}") {
+                    (before.distance(actor.npc.location) <= .172001) shouldBe true
+                    withClue("alternative tick=$tick before=${before.point()} actual=${actor.npc.location.point()} " +
+                        "target=${actor.route?.target?.point()} endpoint=${actor.route?.motion?.endpoint} " +
+                        "phase=${actor.cycle.phase} deliveries=${h.deliveries} observedWork=${h.observedWork()} " +
+                        "passing=${h.owner.passingBodies(actor.npc)} actorBody=${citizenStandingBounds(actor.npc.location, actor.npc.scale)} " +
+                        "holderBody=${citizenStandingBounds(blocker.npc.location, blocker.npc.scale)}") {
+                        citizenStandingBounds(actor.npc.location, actor.npc.scale)
+                            .overlaps(citizenStandingBounds(blocker.npc.location, blocker.npc.scale)) shouldBe false
+                    }
+                    blocker.npc.location.point() shouldBe heldAt
+                    h.owner.passingBodies(actor.npc) shouldBe false
+                    (route.replanAttempts <= 2) shouldBe true
+                    h.deliveries shouldBe 0
+                    h.observedWork() shouldBe 0L
+                }
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (actor.cycle.phase == CitizenPhase.PAUSED) { paused = true; break }
+                if (alternativeAvailable && h.work == alternative && actor.route !== route) break
+            }
+            withClue(h.owner.debug(h.city.id, h.workerId)) {
+                paused shouldBe !alternativeAvailable
+                route.motion.continuation shouldBe false
+                route.replanAttempts shouldBe 2
+                route.completion?.cancelReason shouldBe "resident-blocked"
+                actor.route shouldBe null
+                if (!alternativeAvailable) {
+                    actor.cycle.reason shouldBe "route-unreachable"
+                    actor.cycle.failedAttempts shouldBe 1
+                }
+                actor.plan.token shouldBe token
+                h.failedWorkPositions shouldBe emptyList() // Temporary occupancy is not permanent bad-terrain evidence.
+                h.temporarilyBlockedWorkPositions shouldBe listOf(work)
+            }
+            if (alternativeAvailable) {
+                fun checkAlternativeContact(tick: Int, before: Location) {
+                    val overlaps = citizenStandingBounds(actor.npc.location, actor.npc.scale)
+                        .overlaps(citizenStandingBounds(blocker.npc.location, blocker.npc.scale))
+                    withClue("alternative tick=$tick before=${before.point()} actual=${actor.npc.location.point()} " +
+                        "target=${actor.route?.target?.point()} endpoint=${actor.route?.motion?.endpoint} " +
+                        "phase=${actor.cycle.phase} deliveries=${h.deliveries} observedWork=${h.observedWork()} " +
+                        "passing=${h.owner.passingBodies(actor.npc)} actorBody=${citizenStandingBounds(actor.npc.location, actor.npc.scale)} " +
+                        "holderBody=${citizenStandingBounds(blocker.npc.location, blocker.npc.scale)}") {
+                        if (overlaps) {
+                            // Existing flagged transit may cross a resident; it must never
+                            // earn arrival, work or a receipt while the bodies still overlap.
+                            h.owner.passingBodies(actor.npc) shouldBe true
+                            actor.cycle.phase shouldBe CitizenPhase.TO_WORK
+                            h.observedWork() shouldBe 0L
+                            h.deliveries shouldBe 0
+                            actor.route?.completion shouldBe null
+                        }
+                    }
+                }
+                for (tick in 1..400) {
+                    val before = actor.npc.location
+                    h.navigate()
+                    (before.distance(actor.npc.location) <= .172001) shouldBe true
+                    blocker.npc.location.point() shouldBe heldAt
+                    checkAlternativeContact(tick, before)
+                    if (tick == 1 || tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    checkAlternativeContact(tick, before)
+                    if (h.deliveries == 1) break
+                }
+                withClue(h.owner.debug(h.city.id, h.workerId)) {
+                    h.deliveries shouldBe 1
+                    h.owner.requireWorldWorkArrival(h.city.id, h.workerId, alternative)
+                    citizenStandingBounds(actor.npc.location, actor.npc.scale)
+                        .overlaps(citizenStandingBounds(blocker.npc.location, blocker.npc.scale)) shouldBe false
+                    citizenPacketSupported(h.world, actor.npc.location.point()) shouldBe true
+                    citizenPacketBodyClear(h.world, actor.npc.location.point(), false) shouldBe true
+                    h.work shouldBe alternative
+                    alternative.changes shouldBe work.changes
+                    alternative.inputs shouldBe work.inputs
+                    actor.plan.token shouldBe token
+                    h.city.workers.first { it.id == h.workerId }.completedCycles shouldBe 0L
+                    h.pendingDelivery.isDone shouldBe false
+                }
+                return@residentRuntime
+            }
+            // The owner retains its existing five-second backoff instead of restarting
+            // the same occupied endpoint on every pulse.
+            repeat(99) {
+                h.navigate()
+                h.owner.pulse(requireNotNull(h.navigationNow))
+                actor.route shouldBe null
+                actor.cycle.phase shouldBe CitizenPhase.PAUSED
+                h.deliveries shouldBe 0
+                blocker.npc.location.point() shouldBe heldAt
+            }
+            // The holder leaves independently. No rejection tombstone may poison this
+            // same stance: the original task must now walk, work and submit one receipt.
+            blocker.route?.motion?.cancel()
+            blocker.route = null
+            blocker.npc.teleport(Location(h.world, 21.5, 64.0, 2.5))
+            val releasedAt = blocker.npc.location.point()
+            for (tick in 1..400) {
+                val before = actor.npc.location
+                h.navigate()
+                (before.distance(actor.npc.location) <= .172001) shouldBe true
+                blocker.npc.location.point() shouldBe releasedAt
+                if (tick == 1 || tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (h.deliveries == 1) break
+            }
+            withClue(h.owner.debug(h.city.id, h.workerId)) {
+                h.deliveries shouldBe 1
+                actor.plan.token shouldBe token
+                h.failedWorkPositions shouldBe emptyList()
+                h.city.workers.first { it.id == h.workerId }.completedCycles shouldBe 0L
+                h.pendingDelivery.isDone shouldBe false
+                h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            }
+        }
+    }
+})
+
 /** Native sleeping model envelope from actual handle fields, not the allocated target. */
 private fun runtimeSleepingBody(npc: PacketPlayerNpc): BoundingBox {
     val at = npc.location
@@ -5266,7 +5426,9 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     }
     var workPlans = 0
     val failedWorkPositions = mutableListOf<CivWorldWork>()
+    val temporarilyBlockedWorkPositions = mutableListOf<CivWorldWork>()
     var onWorkPositionFailed: (Settlement, CivWorker, CivWorldWork) -> Boolean = { _, _, _ -> false }
+    var onTemporarilyBlockedWorkPosition: (Settlement, CivWorker, CivWorldWork) -> Boolean = { _, _, _ -> false }
     var surfaceMultiplier = 1.0
     val pendingSupplies = CompletableFuture<Settlement>()
     var courier: CivCourierPlan? = null
@@ -5453,9 +5615,14 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
             },
             foodRecoveryAllowed = { _, point -> foodRecoveryAllowed(point) },
             nightShelterRecoveryAllowed = { _, point -> nightShelterRecoveryAllowed(point) },
-            workPositionFailed = { city, worker, failed ->
-                failedWorkPositions += failed
-                onWorkPositionFailed(city, worker, failed)
+            workPositionFailed = { city, worker, failed, temporary ->
+                if (temporary) {
+                    temporarilyBlockedWorkPositions += failed
+                    onTemporarilyBlockedWorkPosition(city, worker, failed)
+                } else {
+                    failedWorkPositions += failed
+                    onWorkPositionFailed(city, worker, failed)
+                }
             }, constructionSite = { _, order -> constructionSite()?.takeIf { it.orderId == order } },
             collectionAvailable = { collectionEnabled }, collectionHome = { _, _ -> collectionDestination },
             pickupGround = { _, _, ids -> groundRequests += ids; pendingGroundCollection },

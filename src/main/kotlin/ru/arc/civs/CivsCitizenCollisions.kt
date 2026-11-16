@@ -414,10 +414,16 @@ internal class CivsCitizenCollisions(
         return routes.retryDeliveryStanding(actor, route, courier, blocker.workerId, now)
     }
 
-    /** A search-budget endpoint is not an arrival requirement. Replan toward the same real goal around its occupant. */
-    fun retryOccupiedContinuation(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
+    /** Neither a partial endpoint nor the final stance may wait forever for another resident. */
+    fun retryOccupiedEndpoint(actor: CitizenActor, route: CitizenRoute, now: Long): Boolean {
         val since = route.bodyBlockedSince ?: return false
-        if (!route.motion.continuation || route.motion.searching || route.motion.finished || route.motion.failure != null ||
+        val finalWork = !route.intermediate && actor.cycle.phase == CitizenPhase.TO_WORK &&
+            actor.plan.worldWork?.standing == route.authored && actor.plan.courier == null &&
+            !actor.sheltering && !actor.returningToWarehouse && actor.attacker == null && actor.combatDestination == null &&
+            actor.foodSource == null && actor.mealVisit == null && actor.tavernService == null && actor.mineVisit == null &&
+            actor.collectionSeek == null && actor.collectionHome == null && actor.social.visit == null
+        if (!route.motion.continuation && !finalWork) return false
+        if (route.motion.searching || route.motion.finished || route.motion.failure != null ||
             route.completion != null || route.idleAnchor != null ||
             runtime.navigationTick - maxOf(since, route.progressTick) < 40L || endpointResident(actor, route) == null) return false
         if (routes.replanNavigation(actor, route, "resident-blocked", now, destination = route.target)) return true

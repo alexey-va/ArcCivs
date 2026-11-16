@@ -177,7 +177,7 @@ internal object CivsAutonomousTerraform {
         val standing = retained.standing(city, target.id)
         val siblingGrades = siblingRoutes.flatten().groupBy { civsTerrainKey(it.x, it.z) }
         var best: List<CivPosition>? = null
-        for ((id, paid) in retained.routes) {
+        for ((id, paid) in retained.publicRoutes(city)) {
             val owner = city.building(id) ?: continue
             if (owner.phase != BuildingPhase.ACTIVE || paid.size !in 2..MAXIMUM_ROUTE_LENGTH ||
                 paid.first() != route.first() || paid.last() != owner.entrance) continue
@@ -551,7 +551,7 @@ internal object CivsAutonomousTerraform {
         val standing = access.standing(city, building.id)
         // Only actual previously calculated routes participate in the existing shared-road
         // discount. The preferred axes themselves never enter standing or surface authority.
-        val preferred = if (streets.isEmpty()) emptySet() else access.routes.values.flatten()
+        val preferred = if (streets.isEmpty()) emptySet() else access.publicRoutes(city).values.flatten()
             .mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
         val prepared = RoutePreparation(surface, standing, preferred, building)
         val arrival = frontage?.let { join ->
@@ -770,7 +770,7 @@ internal object CivsAutonomousTerraform {
         val (dx, dz) = when (building.rotation) { 90 -> -1 to 0; 180 -> 0 to -1; 270 -> 1 to 0; else -> 0 to 1 }
         val entry = building.entrance
         val starts = sources(city, building).toSet()
-        val joins = access.routes.values.filter { it.firstOrNull() in starts }.flatMap { saved ->
+        val joins = access.publicRoutes(city).values.filter { it.firstOrNull() in starts }.flatMap { saved ->
             (1 until saved.lastIndex).mapNotNull { index ->
                 val p = saved[index]
                 val distance = (p.x - entry.x) * dx + (p.z - entry.z) * dz

@@ -337,7 +337,16 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     private val cursors = mutableMapOf<UUID, Int>()
     // Surface discovery must not skip a column that a builder has not selected.
     private val surfaceCursors = mutableMapOf<UUID, Int>()
-    private data class Selection(val work: CivWorldWork, val rejectedStandings: Set<CivPosition> = emptySet())
+    private data class Selection(val work: CivWorldWork, val rejectedStandings: Set<CivPosition> = emptySet(),
+        val temporaryUntil: Map<CivPosition, Int> = emptyMap(), val retryAt: Int? = null) {
+        fun withoutExpiredOccupancy(now: Int): Selection {
+            if (temporaryUntil.isEmpty()) return this
+            val expired = temporaryUntil.filterValues { now >= it }.keys
+            if (expired.isEmpty()) return this
+            return copy(rejectedStandings = rejectedStandings - expired,
+                temporaryUntil = temporaryUntil - expired, retryAt = null)
+        }
+    }
     private val selected = mutableMapOf<UUID, Selection>()
     private data class BuilderClaim(val owner: UUID, val network: CivRoadUpkeepNetwork, val workerId: UUID,
         val cycle: Long, val priorAssignment: UUID?, val hutId: UUID, val target: CivRoadUpkeep,
@@ -460,11 +469,14 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         }
         val network = networks[city.id]?.takeIf { it.worldId == city.worldId && it.buildings == city.buildings &&
             it.routeOverrides == city.roadRouteOverrides } ?: return null
-        selected[worker.id]?.let { selection ->
+        selected[worker.id]?.let { saved ->
+            val selection = saved.withoutExpiredOccupancy(currentTick())
+            if (selection !== saved) selected[worker.id] = selection
             val work = selection.work
-            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city, work) &&
-                !budget(worker.id)) return work.takeIf { it.standing !in selection.rejectedStandings }
-            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city, work)) {
+            val current = work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city, work)
+            if (current && selection.retryAt?.let { currentTick() < it } == true) return null
+            if (current && !budget(worker.id)) return work.takeIf { it.standing !in selection.rejectedStandings }
+            if (current) {
                 val refreshed = (if (selection.rejectedStandings.isEmpty())
                     world.captureRoadUpkeep(city, worker, requireNotNull(work.upkeep), registerSurface)
                 else world.captureRoadUpkeepAvoiding(city, worker, requireNotNull(work.upkeep), registerSurface,
@@ -474,8 +486,15 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 if (refreshed != null) {
                     val sameChanges = refreshed.changes == work.changes
                     val retained = if (sameChanges && work.standing !in selection.rejectedStandings) work else refreshed
-                    selected[worker.id] = Selection(retained, if (sameChanges) selection.rejectedStandings else emptySet())
+                    selected[worker.id] = Selection(retained, if (sameChanges) selection.rejectedStandings else emptySet(),
+                        if (sameChanges) selection.temporaryUntil else emptyMap())
                     return retained
+                }
+                if (selection.temporaryUntil.isNotEmpty()) {
+                    // Keep the same native job and bill while a person occupies its last
+                    // usable stance; no new capture is due before the earliest exclusion expires.
+                    selected[worker.id] = selection.copy(retryAt = selection.temporaryUntil.values.minOrNull())
+                    return null
                 }
                 gradeChecks[city.id]?.removeAll { it.floor == work.upkeep?.floor }
                 if (selection.rejectedStandings.isNotEmpty() || claim != null) {
@@ -673,7 +692,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     }
 
     /** A failed route keeps its admitted column; only this exact current placement can exclude a stance. */
-    fun rejectStanding(city: Settlement, worker: CivWorker, work: CivWorldWork): Boolean {
+    fun rejectStanding(city: Settlement, worker: CivWorker, work: CivWorldWork, temporary: Boolean = false): Boolean {
         val selection = selected[worker.id] ?: return false
         val upkeep = work.upkeep ?: return false
         val network = networks[city.id] ?: return false
@@ -683,7 +702,9 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             CivsResidents.isChild(worker) || network.worldId != city.worldId || network.buildings != city.buildings ||
             network.routeOverrides != city.roadRouteOverrides || upkeep !in network.targets ||
             runCatching { upkeep.validated(city); validateChanges(city, upkeep, work.changes) }.isFailure) return false
-        selected[worker.id] = selection.copy(rejectedStandings = selection.rejectedStandings + work.standing)
+        selected[worker.id] = selection.copy(rejectedStandings = selection.rejectedStandings + work.standing,
+            temporaryUntil = if (temporary) selection.temporaryUntil + (work.standing to (currentTick() + 100))
+                else selection.temporaryUntil - work.standing, retryAt = null)
         return true
     }
 
@@ -717,17 +738,17 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             city.roadRouteOverrides.orEmpty().values.flatMap { repair ->
                 val before = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
                 val ribbon = hashSetOf<Long>()
-                val banks = hashSetOf<Long>()
+                val flightIndices = hashSetOf<Int>()
                 // Equal-height treads and landings still change material when a flight moves.
                 // Finish that cross-section and its already planned grass banks with the grade.
                 for (at in repair.changed()) for (index in (at - 1).coerceAtLeast(0)..(at + 1).coerceAtMost(repair.route.lastIndex)) {
+                    flightIndices += index
                     val p = repair.route[index]
                     for (dx in -1..1) for (dz in -1..1) ribbon += civsTerrainKey(p.x + dx, p.z + dz)
-                    for ((dx, dz) in directions) banks += civsTerrainKey(p.x + dx * 2, p.z + dz * 2)
                 }
                 CivsAutonomousTerraform.roadProfile(repair.route).filter { (key, floor) ->
                     key in ribbon || before[key]?.let { floor.y != it.y } == true
-                }.values + CivsRoadTerraces.banks(repair.route).filterKeys { it in banks }.values
+                }.values + CivsRoadTerraces.banks(repair.route, flightIndices).values
             }.toHashSet()
         /** The old column charge plus each newly placed support; clearance keeps its existing charge. */
         internal fun inputs(city: Settlement, work: CivWorldWork): Map<String, Long> =
@@ -1313,10 +1334,12 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 CivRoadUpkeep(city.id, city.worldId, city.owner, layout.hall.id, layout.hall, floor, after,
                     null, emptyList(), hall = layout.witness)
             }
+            val bankRoads = access.roadColumns(city)
             val bankTargets = city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }.flatMap { source ->
                 val route = access.routes[source.id].orEmpty()
+                val bankEntries = access.standing(city, source.id)
                 CivsRoadTerraces.banks(route).mapNotNull { (key, floor) ->
-                    if (key in floors || key in held || key in ambiguous || excluded(floor) ||
+                    if (key in floors || key in bankRoads || key in bankEntries || key in held || key in ambiguous || excluded(floor) ||
                         restrictTo != null && key !in restrictTo) return@mapNotNull null
                     CivRoadUpkeep(city.id, city.worldId, city.owner, source.id, source, floor, CivsEntrancePath.GRASS,
                         route, emptyList()).also { it.validated(city) }

@@ -91,6 +91,8 @@ internal class CivsCityDiagnostics(
                 CivsTerrainDebug.capture(city, worker, citizens.residentFeet(workerId), worksites.plan(city, worker), authority.now())
             }
             "citizens" -> citizens.debug(cityId, workerId)
+            "roads" -> if (cityId == null || workerId == null) mapOf("error" to "roads-requires-city-and-worker")
+                else roadMaintenanceDebug(cityId, workerId)
             "worksites" -> worksites.debug(selectedWorkers?.mapTo(hashSetOf()) { it.id },
                 selectedWorkers?.mapNotNullTo(hashSetOf()) { it.assignment })
             "supply" -> {
@@ -148,6 +150,7 @@ internal class CivsCityDiagnostics(
                     "building_catalog_truncated" to (city.buildings.size > 32),
                     "building_catalog" to city.buildings.take(32).map { building -> mapOf(
                         "id" to building.id, "type" to building.type, "phase" to building.phase, "level" to building.level,
+                        "bounds" to building.bounds, "entrance" to building.entrance,
                         "assigned_adults" to city.workers.filter { it.assignment == building.id && !CivsResidents.isChild(it) }.map { it.id },
                         "serving_tavern" to CivsRules.staffedTavern(city, building)) },
                     "inventory_recovery" to inventoryJournal.pendingCount(city.id),

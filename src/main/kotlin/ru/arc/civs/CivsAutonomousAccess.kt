@@ -14,6 +14,12 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     private val surveyedHallApron: Map<Long, CivPosition> = emptyMap(),
     val hallWitness: CivHallApproach? = null,
     val wallPavement: Map<UUID, CivWallApproachCapture> = emptyMap()) {
+    /** Retained construction journals stay immutable; only their public street view is filtered. */
+    fun publicRoutes(city: Settlement): Map<UUID, List<CivPosition>> {
+        val retired = CivsWallApproachCleanup.retired(city, routes)
+        return if (retired.isEmpty()) routes else routes.filterKeys { it !in retired }
+    }
+
     fun hallApproach(city: Settlement): CivsTownHallApproach? {
         val proof = hallWitness ?: return null
         val building = city.building(proof.founding.id) ?: return null
@@ -139,6 +145,10 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                 city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.forEach { building ->
                     val plan = retained[building.id] ?: return@forEach
                     val route = plan.terrain?.route ?: return@forEach
+                    // Retirement may use ROAD transit only when the retained capture binds the
+                    // exact current generated piece. Missing/foreign captures remain reservations.
+                    if (building.type == BuildingType.ROAD && (plan.id != CivsWarehouseRefit.retainedPlanId(building) ||
+                        plan.adminPlacement || plan.building.copy(phase = BuildingPhase.ACTIVE) != building)) return@forEach
                     if (plan.cityId != city.id || plan.worldId != city.worldId || plan.building.type != building.type ||
                         plan.building.anchor != building.anchor || plan.building.rotation != building.rotation ||
                         plan.building.entrance != building.entrance || route.isEmpty() ||

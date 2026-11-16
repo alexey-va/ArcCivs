@@ -27,7 +27,7 @@ internal class CivsCitizenRoutes(
     private val navigation: CivsResidentNavigation,
     private val paths: CivsPaths,
     private val surfaceSpeed: (org.bukkit.block.Block) -> Double,
-    private val workPositionFailed: (Settlement, CivWorker, CivWorldWork) -> Boolean,
+    private val workPositionFailed: (Settlement, CivWorker, CivWorldWork, Boolean) -> Boolean,
     private val recoveryClock: () -> Long,
     private val courierFailed: (UUID, UUID, CivCargo) -> Unit,
     private val remove: (CitizenActor, String) -> Unit,
@@ -572,7 +572,11 @@ internal class CivsCitizenRoutes(
             return
         }
         navigationDiagnostic(actor, detail, target, now, terminal = true)
-        if (actor.route?.completion?.cancelReason == "resident-blocked") { pause(actor, status, now); return }
+        if (actor.route?.completion?.cancelReason == "resident-blocked") {
+            if (retryWorkPosition(actor, detail, temporary = true)) return
+            pause(actor, status, now)
+            return
+        }
         if (actor.route?.let { it.nativeCollisionTicks > 0 || it.motion.waitingForCollision ||
                 it.previousMotion?.waitingForCollision == true } == true) {
             actor.arrivalWait = null
@@ -677,7 +681,8 @@ internal class CivsCitizenRoutes(
     }
 
     /** A failed final approach rejects this stance, leaving the same physical action to its planner. */
-    private fun retryWorkPosition(actor: CitizenActor, detail: String, preflightStanding: CivPosition? = null): Boolean {
+    private fun retryWorkPosition(actor: CitizenActor, detail: String, preflightStanding: CivPosition? = null,
+                                 temporary: Boolean = false): Boolean {
         val route = actor.route
         val work = actor.plan.worldWork ?: return false
         if (!(actor.plan.type == BuildingType.QUARRY && work.miningStep != null ||
@@ -687,14 +692,21 @@ internal class CivsCitizenRoutes(
             route?.let { it.intermediate || it.idleAnchor != null || it.authored != work.standing || it.motion.searching } == true) return false
         if (route == null && (detail != "target-not-standable" || preflightStanding != work.standing)) return false
         val cause = route?.motion?.failure ?: route?.completion?.cancelReason ?: detail
-        if (cause !in setOf("no-path", "search-budget", "capture-budget", "preparation-budget", "movement-blocked", "path-changed",
+        if (temporary) {
+            // An occupied intermediate segment says nothing about the work stance. Only
+            // an exhausted final approach may temporarily exclude this same current job's point.
+            if (cause != "resident-blocked" || route == null || route.motion.continuation || route.motion.failure != null ||
+                route.replanAttempts < 2 || route.bodyBlockedSince == null || collisions.endpointResident(actor, route) == null ||
+                actor.mealVisit != null || actor.tavernService != null || actor.social.visit != null ||
+                actor.collectionSeek != null || actor.collectionHome != null || actor.combatDestination != null) return false
+        } else if (cause !in setOf("no-path", "search-budget", "capture-budget", "preparation-budget", "movement-blocked", "path-changed",
                 "no-progress", "turn-loop", "timed_out", "stopped", "completed_outside_arrival", "target-not-standable")) return false
         val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
-        if (!workPositionFailed(city, worker, work)) return false
+        if (!workPositionFailed(city, worker, work, temporary)) return false
         CivsDiagnostics.event("citizen_work_position_rejected", "city" to city.id, "worker" to worker.id,
             "building" to work.buildingId, "cycle" to work.cycle, "mining_step" to work.miningStep,
-            "focus" to citizenWorkFocus(work), "standing" to work.standing, "reason" to cause,
+            "focus" to citizenWorkFocus(work), "standing" to work.standing, "reason" to cause, "temporary" to temporary,
             "actual" to actor.npc.location.point().coordinates(), "path_progress" to (route?.motion?.forwardProgress ?: 0.0))
         cancelRoute(actor)
         actor.workHandoff = null

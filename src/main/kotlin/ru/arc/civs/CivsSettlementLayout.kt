@@ -185,7 +185,7 @@ internal object CivsSettlementLayout {
             }
         } else {
             // The accepted street owns frontage; the ideal sketch is only a fallback for a new quarter.
-            streetFrontages(access, frame).forEach { (p, turns) ->
+            streetFrontages(city, access, frame).forEach { (p, turns) ->
                 val front = rotate(CivPosition(0, 0, 1), turns)
                 choices += p.copy(x = p.x - front.x * 4, z = p.z - front.z * 4) to turns
             }
@@ -206,8 +206,8 @@ internal object CivsSettlementLayout {
     }
 
     /** Interior straight street segments only; exterior resource approaches never become housing frontage. */
-    private fun streetFrontages(access: CivAutonomousAccess, frame: CivSettlementFrame): List<Pair<CivPosition, Int>> {
-        val points = (access.routes.values.flatten() + access.infrastructure.filter { it.type == BuildingType.ROAD }
+    private fun streetFrontages(city: Settlement, access: CivAutonomousAccess, frame: CivSettlementFrame): List<Pair<CivPosition, Int>> {
+        val points = (access.publicRoutes(city).values.flatten() + access.infrastructure.filter { it.type == BuildingType.ROAD }
             .flatMap { it.transit }).distinctBy(::key).associateBy(::key)
         return points.values.filter { insideCore(frame, it, 6) }.flatMap { p ->
             buildList {
@@ -251,7 +251,7 @@ internal object CivsSettlementLayout {
             listOfNotNull(city.construction?.plannedBuilding?.takeIf { it.id != current.id }?.bounds) + access.reservedFortificationPorts
         val protected = (city.buildings.filter { it.id != current.id }.flatMap(CivsAutonomousGeometry::approach) +
             access.standing(city, current.id).values).mapTo(hashSetOf(), ::key)
-        val frontages = streetFrontages(access, frame)
+        val frontages = streetFrontages(city, access, frame)
         val streetCells = access.routes.values.flatMap { CivsAutonomousTerraform.roadProfile(it).values }.mapTo(hashSetOf(), ::key)
         if (reserveUnbuiltStreets && frontages.isEmpty())
             frame.streets.flatMap { CivsAutonomousTerraform.roadProfile(streetPoints(it)).values }.mapTo(streetCells, ::key)

@@ -804,7 +804,7 @@ internal class CivsAutonomousPlacement(
                     else frame().wallObstacles) + futureObstacles,
                 infrastructureFloors, waterFoundations = piece?.waterFoundations.orEmpty(),
                 reservedRoute = paidApproach?.route ?: reservedRoute,
-                preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) },
+                preferredRoads = access.publicRoutes(city).values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) },
                 protectedRoadColumns = protectedRoadColumns, paidGateFloors = piece?.paidGateFloors.orEmpty())
                     .copy(requiredGrass = piece?.requiredGrass.orEmpty()) }
             catch (failure: RuntimeException) { retryApproach(failure); return }
@@ -867,7 +867,8 @@ internal class CivsAutonomousPlacement(
             val hinted = access.copy(routes = (intent.routes - buildingId.toString()).mapKeys { UUID.fromString(it.key) } + access.routes,
                 reservedFortificationPorts = intent.plots.flatMap { it.fortification?.let { metadata ->
                     CivsSettlementPlans.portReservations(metadata.proof) }.orEmpty() })
-            val roads = hinted.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            val roads = (hinted.routes - CivsWallApproachCleanup.retired(city, access.routes)).values.flatten()
+                .mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
             val planned = CivsAutonomousTerraform.draft(virtual, option, surface, hinted, intent.walls, preferredRoads = roads)
             // Only this second draft reaches native capture: unpaid intent never claims an already-built road.
             val standing = hinted.standing(virtual, buildingId)

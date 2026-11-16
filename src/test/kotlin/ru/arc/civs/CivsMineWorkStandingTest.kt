@@ -80,6 +80,38 @@ class CivsMineWorkStandingTest : FunSpec({
         }
     }
 
+    test("resident occupancy expires without erasing a permanent rejected mine stance or changing its native job") {
+        withReportedMine(nanoTime = { 0L }) { advanceTicks, _, _, city, worker, runtime ->
+            val first = nextMineWork(runtime, city, worker)
+            runtime.rejectStanding(city, worker, first, temporary = true) shouldBe true
+            val second = nextMineWork(runtime, city, worker)
+            (second.standing != first.standing) shouldBe true
+            second.changes shouldBe first.changes
+            second.inputs shouldBe first.inputs
+            second.miningStep shouldBe first.miningStep
+            runtime.rejectStanding(city, worker, second) shouldBe true
+            // A later resident report cannot make this terrain rejection temporary.
+            runtime.rejectStanding(city, worker, second, temporary = true) shouldBe false
+            advanceTicks(99)
+            repeat(64) { runtime.pulse(listOf(city)) }
+            runtime.plan(city, worker)?.let {
+                (it.standing != first.standing && it.standing != second.standing) shouldBe true
+            }
+            advanceTicks(1)
+            runtime.invalidate(worker.id)
+            val resumed = nextMineWork(runtime, city, worker)
+            resumed.standing shouldBe first.standing
+            resumed.changes shouldBe first.changes
+            resumed.inputs shouldBe first.inputs
+            resumed.miningStep shouldBe first.miningStep
+            runtime.validate(city, resumed)
+            advanceTicks(1_201)
+            runtime.invalidate(worker.id)
+            (nextMineWork(runtime, city, worker).standing != second.standing) shouldBe true
+            CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe 32L
+        }
+    }
+
     test("an existing reachable miner stance wins without admitting a resident's outside-cave position") {
         withReportedMine(nanoTime = { 0L }) { _, world, mine, city, worker, runtime ->
             val first = nextMineWork(runtime, city, worker)

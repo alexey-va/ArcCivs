@@ -176,7 +176,7 @@ class CivsNightRouteResetTest : FunSpec({
             actor.sheltering = true
             actor.shelter = CivPosition(29, 64, 0)
             val routes = CivsCitizenRoutes(runtime, { mockk() }, { mockk() }, { mockk() }, { mockk() },
-                { mockk() }, { logistics }, { life }, mockk(), mockk(), { 1.0 }, { _, _, _ -> false },
+                { mockk() }, { logistics }, { life }, mockk(), mockk(), { 1.0 }, { _, _, _, _ -> false },
                 { 0L }, { _, _, _ -> }, { _, _ -> })
             routes.canResetNightShelter(actor) shouldBe true
             for (hold in listOf("harm", "life", "collection", "transfer")) {

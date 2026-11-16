@@ -144,9 +144,9 @@ class CivsService(
         courierFailed = { cityId, workerId, cargo ->
             if (supply.plan(cityId, workerId)?.cargo == cargo) supply.release(cityId, workerId, failed = true)
         },
-        workPositionFailed = { city, worker, work ->
-            if (work.upkeep != null) roadMaintenance.rejectStanding(city, worker, work)
-            else worksites.rejectStanding(city, worker, work)
+        workPositionFailed = { city, worker, work, temporary ->
+            if (work.upkeep != null) roadMaintenance.rejectStanding(city, worker, work, temporary)
+            else worksites.rejectStanding(city, worker, work, temporary)
         },
         residentSupplySource = ::residentSupplySource,
         prepareSupplies = { c, w, b -> residentSupplies.prepareResidentSupplies(c, w, b) },

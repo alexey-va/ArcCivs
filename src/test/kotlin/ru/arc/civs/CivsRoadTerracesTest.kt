@@ -57,14 +57,29 @@ class CivsRoadTerracesTest : FunSpec({
     test("four treads have continuous grass cheeks in two-level bands without widening the walking ribbon") {
         val route = (listOf(69, 69, 68, 67, 66, 65, 65, 65)).mapIndexed { z, y -> CivPosition(0, y, z) }
         val banks = CivsRoadTerraces.banks(route)
-        banks.size shouldBe 8
+        banks.size shouldBe 10
         for (x in listOf(-2, 2)) {
             (1..4).map { z -> banks.getValue(civsTerrainKey(x, z)).y } shouldBe listOf(68, 68, 66, 66)
+            banks.getValue(civsTerrainKey(x, 0)).y shouldBe 68
         }
         val profile = CivsAutonomousTerraform.roadProfile(route)
         banks.keys.none { it in profile } shouldBe true
         (1..4).all { z -> (-1..1).all { x -> civsTerrainKey(x, z) in profile } } shouldBe true
         CivsRoadTerraces.banks(route.reversed()) shouldBe banks
+    }
+
+    test("upper landing shoulders stop at a turn or the bounded span and retain reverse symmetry") {
+        val long = listOf(CivPosition(0, 65, 0)) + (1..40).map { CivPosition(0, 66, it) }
+        val bounded = CivsRoadTerraces.banks(long)
+        bounded.keys shouldBe (1..25).flatMap { z -> listOf(civsTerrainKey(-2, z), civsTerrainKey(2, z)) }.toSet()
+        CivsRoadTerraces.banks(long.reversed()) shouldBe bounded
+        val turn = long.take(5) + (1..8).map { CivPosition(it, 66, 4) }
+        val banks = CivsRoadTerraces.banks(turn)
+        banks.values.all { it.z <= 4 } shouldBe true
+        banks.values.none { it.x > 2 } shouldBe true
+        CivsRoadTerraces.banks(turn.reversed()) shouldBe banks
+        CivsRoadTerraces.banks(long, setOf(20)).isEmpty() shouldBe true
+        CivsRoadTerraces.banks(long, setOf(1)) shouldBe bounded
     }
 
     test("an existing paved hollow is filled through exact paid receipts and remains walkable") {
@@ -151,7 +166,7 @@ class CivsRoadTerracesTest : FunSpec({
             } }
             val oldProfile = CivsAutonomousTerraform.roadProfile(original)
             val oldLevels = oldProfile.mapValues { it.value.y }
-            // The 891-cell capture plus four native boundary rows cover the complete local
+            // The 891-cell capture plus seven native boundary rows cover the complete local
             // receipt/recovery footprint. Distant paid rows only close this isolated test world.
             for (x in 12557..12567) for (z in 10347..10404) {
                 val floor = oldProfile[civsTerrainKey(x, z)]
@@ -171,7 +186,10 @@ class CivsRoadTerracesTest : FunSpec({
                 bounds = CivBox(CivPosition(12530, 66, 10310), CivPosition(12532, 72, 10312)), entrance = CivPosition(12531, 67, 10313))
             val source = owners.first().first
             val worker = CivsEquipment.replace(CivWorker(UUID(294, 4), "Builder", hut.id, nextDeliveryAt = 1),
-                MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also { it[CivsEquipment.BAG] = CivResidentItem("COBBLESTONE", 64) })
+                MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also {
+                    it[CivsEquipment.BAG] = CivResidentItem("COBBLESTONE", 64)
+                    it[CivsEquipment.BAG + 1] = CivResidentItem("COBBLESTONE", 64)
+                })
             var city = Settlement(UUID(294, 5), UUID(294, 6), "Auto4 native flight", world.uid, CivPosition(12563, 68, 10349), 96,
                 "original", Stock(), listOf(hall, hut) + owners.map { it.first }, listOf(worker),
                 autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL))
@@ -184,7 +202,9 @@ class CivsRoadTerracesTest : FunSpec({
             target.linkedRouteOverrides!!.keys shouldBe setOf(owners.last().first.id.toString())
             target.validated(city)
             val native = CivsRoadWorld(paper.createSimplePlugin("Auto4RoadTerraceTest"), { listOf(city) }, { _, _, _ -> true }, { false })
-            val beside = listOf(12560, 12564).flatMap { x -> (10393..10398).map { z -> CivPosition(x, 71, z) } }
+            val beside = listOf(12559, 12565).flatMap { x -> (10393..10398).map { z -> CivPosition(x, 71, z) } }
+                .associateWith { p -> world.getBlockAt(p.x, p.y, p.z).blockData.asString }
+            val farmCrossing = (10400..10401).flatMap { z -> (70..72).map { y -> CivPosition(12564, y, z) } }
                 .associateWith { p -> world.getBlockAt(p.x, p.y, p.z).blockData.asString }
             val captured = native.captureRoadUpkeep(city, worker, target)
             withClue("The captured owned DIRT_PATH at12562,70,10391 must be projected as the new stair") { (captured != null) shouldBe true }
@@ -235,25 +255,65 @@ class CivsRoadTerracesTest : FunSpec({
                 receipts++
             }
             apply(work)
+            // The left shoulder joins the existing high grass at the building boundary;
+            // the right shoulder stops before the lower paid FARM crossing.
+            val bankFloors = (10391..10401).map { CivPosition(12560, 71, it) } +
+                (10391..10399).map { CivPosition(12564, 71, it) }
+            val bankTargets = CivsRoadMaintenance.prepare(city, plans).targets.filter {
+                it.source.id == source.id && it.terraceBank() && it.floor.z in 10391..10401
+            }
+            bankTargets.map { it.floor }.toSet() shouldBe bankFloors.toSet()
+            val guard = bankTargets.single { it.floor == CivPosition(12560, 71, 10395) }
+            val bank = world.getBlockAt(guard.floor.x, guard.floor.y, guard.floor.z)
+            val bankBefore = bank.blockData.clone()
+            val support = world.getBlockAt(bank.x, bank.y - 1, bank.z)
+            val supportBefore = support.blockData.clone()
+            val head = world.getBlockAt(bank.x, bank.y + 1, bank.z)
+            val headBefore = head.blockData.clone()
+            (native.captureRoadUpkeep(city, city.workers.single(), guard) != null) shouldBe true
+            for (material in listOf(Material.OAK_LOG, Material.OAK_LEAVES, Material.TORCH, Material.BEDROCK, Material.WATER, Material.LAVA)) {
+                bank.type = material
+                native.captureRoadUpkeep(city, city.workers.single(), guard) shouldBe null
+            }
+            bank.blockData = bankBefore
+            for (material in listOf(Material.BEDROCK, Material.WATER)) {
+                support.type = material
+                native.captureRoadUpkeep(city, city.workers.single(), guard) shouldBe null
+            }
+            support.blockData = supportBefore
+            for (material in listOf(Material.OAK_LOG, Material.OAK_LEAVES, Material.WATER)) {
+                head.type = material
+                native.captureRoadUpkeep(city, city.workers.single(), guard) shouldBe null
+            }
+            head.blockData = headBefore
+            bank.type = Material.GRASS_BLOCK // Already connected native grade needs no work.
+            native.captureRoadUpkeep(city, city.workers.single(), guard) shouldBe null
+            bank.type = Material.DIRT
+            head.type = Material.GRASS_BLOCK // A higher natural bank is never cut down for a shoulder.
+            native.captureRoadUpkeep(city, city.workers.single(), guard) shouldBe null
+            bank.blockData = bankBefore
+            head.blockData = headBefore
             val expected = linkedMapOf<CivPosition, String>()
             for (z in 10390..10398) for (x in 12561..12563) {
                 val p = profile.getValue(civsTerrainKey(x, z))
                 expected[p] = CivsSettlementLayout.pathPavement(p, profile.mapValues { it.value.y }, city.style,
                     downhill = CivsSettlementLayout.routeDownhill(p, repaired))
             }
-            CivsRoadTerraces.banks(repaired).values.filter { it.z in 10390..10398 }.forEach { expected[it] = CivsEntrancePath.GRASS }
-            expected.size shouldBe 31
+            bankFloors.forEach { expected[it] = CivsEntrancePath.GRASS }
+            expected.size shouldBe 47
             while (receipts < 64) {
                 val pending = CivsRoadMaintenance.prepare(city, plans).targets.filter { it.floor in expected }
                     .firstNotNullOfOrNull { native.captureRoadUpkeep(city, city.workers.single(), it) } ?: break
                 apply(pending)
             }
-            receipts shouldBe 31
+            receipts shouldBe 47
+            CivsEquipment.usableCount(city.workers.single(), "COBBLESTONE") shouldBe 128 - 65
             val unfinished = expected.filter { (p, data) -> world.getBlockAt(p.x, p.y, p.z).blockData.asString != data }
             withClue("paid receipts=$receipts unfinished=$unfinished accepted=${city.roadRouteOverrides?.get(source.id.toString())?.changed()}") {
                 expected.forEach { (p, data) -> withClue("floor=$p") { world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe data } }
             }
             beside.forEach { (p, before) -> world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe before }
+            farmCrossing.forEach { (p, before) -> world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe before }
             (roadHalfStepWalk(world, repaired.subList(39, 50)) != null) shouldBe true
             (roadHalfStepWalk(world, repaired.subList(39, 50).reversed()) != null) shouldBe true
         }

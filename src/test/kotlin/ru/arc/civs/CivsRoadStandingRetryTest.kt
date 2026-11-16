@@ -10,6 +10,40 @@ import org.bukkit.Material
 import java.util.UUID
 
 class CivsRoadStandingRetryTest : FunSpec({
+    test("temporary road occupancy preserves its claim until expiry and never weakens permanent terrain rejection") {
+        StandingRetryFixture(claimed = true).use { h ->
+            val upper = requireNotNull(h.plan())
+            val before = h.foundation.column()
+            h.maintenance.rejectStanding(h.city, h.worker(), upper, temporary = true) shouldBe true
+            h.tick++
+            val lower = requireNotNull(h.plan())
+            (lower.standing != upper.standing) shouldBe true
+            lower.changes shouldBe upper.changes
+            lower.inputs shouldBe upper.inputs
+            h.maintenance.rejectStanding(h.city, h.worker(), lower) shouldBe true
+            h.maintenance.rejectStanding(h.city, h.worker(), lower, temporary = true) shouldBe false
+            h.tick++
+            h.plan() shouldBe null
+            val probes = h.probesByTick.values.sum()
+            h.maintenance.holdsAssignment(h.city, h.worker().id) shouldBe true
+            h.maintenance.requirements(h.city) shouldBe mapOf(h.worker().id to upper.inputs)
+            h.tick = 99
+            repeat(5) { h.plan() shouldBe null }
+            h.probesByTick.values.sum() shouldBe probes
+            h.tick = 100
+            val resumed = requireNotNull(h.plan())
+            resumed.standing shouldBe upper.standing
+            resumed.changes shouldBe upper.changes
+            resumed.inputs shouldBe upper.inputs
+            h.exclusions.last() shouldBe setOf(lower.standing)
+            h.tick += 1_201
+            requireNotNull(h.plan()).standing shouldBe upper.standing
+            h.exclusions.last() shouldBe setOf(lower.standing)
+            h.foundation.column() shouldBe before
+            h.city.workers.single().completedCycles shouldBe 0L
+        }
+    }
+
     test("a rejected upper stance keeps its admitted column and selects the supported lower side with the same bill") {
         StandingRetryFixture(claimed = true).use { h ->
             val original = requireNotNull(h.plan())

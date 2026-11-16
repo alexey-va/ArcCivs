@@ -17,6 +17,9 @@ class CivsDebugTest : FunSpec({
             listOf("overview", city, worker, "extra") to "too-many-arguments",
             listOf("unknown") to "unknown-system",
             listOf("") to "unknown-system",
+            listOf("roads") to "roads-requires-city-and-worker",
+            listOf("roads", city) to "roads-requires-city-and-worker",
+            listOf("terrain") to "terrain-requires-city-and-worker",
         )
         var requests = 0
         for ((args, reason) in cases) {
@@ -30,5 +33,27 @@ class CivsDebugTest : FunSpec({
             payload.has("state") shouldBe false
             requests shouldBe 0
         }
+    }
+
+    test("road owner diagnostics require exact filters and are excluded from broad snapshots") {
+        val city = UUID.randomUUID()
+        val worker = UUID.randomUUID()
+        val requests = mutableListOf<Triple<String, UUID?, UUID?>>()
+        val lines = CivsDebug.lines(listOf("roads", city.toString(), worker.toString())) { system, selectedCity, selectedWorker ->
+            requests += Triple(system, selectedCity, selectedWorker)
+            mapOf("owner" to "road-maintenance", "selected" to 1)
+        }
+        requests shouldBe listOf(Triple("roads", city, worker))
+        val payload = JsonParser.parseString(lines.single().removePrefix("ARCCIVS_DEBUG ")).asJsonObject
+        payload["city"].asString shouldBe city.toString()
+        payload["worker"].asString shouldBe worker.toString()
+        payload.getAsJsonObject("state")["owner"].asString shouldBe "road-maintenance"
+        requests.clear()
+        CivsDebug.lines(listOf("all", city.toString(), worker.toString())) { system, selectedCity, selectedWorker ->
+            requests += Triple(system, selectedCity, selectedWorker)
+            emptyMap()
+        }
+        requests.map { it.first } shouldBe CivsDebug.systems
+        requests.any { it.first in CivsDebug.explicitSystems } shouldBe false
     }
 })

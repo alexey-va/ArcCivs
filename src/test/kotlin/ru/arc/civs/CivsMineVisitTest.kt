@@ -1413,7 +1413,7 @@ private class MineVisitFixture(paper: MockBukkitTestRuntime, maximumAttempts: In
         }
         val routes = CivsCitizenRoutes(runtime, { collisions }, { shelter }, { mockk(relaxed = true) },
             { mockk(relaxed = true) }, { work }, { mockk(relaxed = true) }, { mockk(relaxed = true) },
-            navigation, CivsPaths(), { 1.0 }, { _, _, _ -> false }, { now }, { _, _, _ -> },
+            navigation, CivsPaths(), { 1.0 }, { _, _, _, _ -> false }, { now }, { _, _, _ -> },
             { _, reason -> error("Unexpected actor removal: $reason") })
         work = workOwner(routes)
         return work to routes

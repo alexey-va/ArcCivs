@@ -38,8 +38,10 @@ internal class CivsWorksiteApproaches(
     val workSpots = hashMapOf<UUID, WorkSpotSearch>()
     data class WorkSpotKey(val building: CivBuilding, val step: Long?, val focus: CivPosition? = null)
     data class RejectedWorkSpots(val key: WorkSpotKey, var lastFocus: CivPosition,
-        val positions: LinkedHashMap<CivPosition, Long> = linkedMapOf(), var retryAt: Long? = null,
+        val positions: LinkedHashMap<CivPosition, Long> = linkedMapOf(),
+        val temporaryUntil: MutableMap<CivPosition, Long> = linkedMapOf(), var retryAt: Long? = null,
         var pending: Cached? = null, var checkedChanges: Int = 0, var remoteChecked: Boolean = false,
+        var temporaryRemoteStanding: CivPosition? = null,
         val remote: RemoteWorkProbe = RemoteWorkProbe())
     val rejectedWorkSpots = hashMapOf<UUID, RejectedWorkSpots>()
     val deferredForestApproaches = hashMapOf<UUID, MutableMap<CivPosition, RejectedWorkSpots>>()
@@ -95,7 +97,7 @@ internal class CivsWorksiteApproaches(
         val focus = reopened.key
         val rejected = reopened.value
         roots.remove(focus)
-        rejected.retryAt = null; rejected.remoteChecked = false
+        rejected.retryAt = null; rejected.remoteChecked = false; rejected.temporaryRemoteStanding = null
         rejected.remote.candidate = null; rejected.remote.nextAim = 0
         rejectedWorkSpots[workerId] = rejected
         workSpots.remove(workerId)
@@ -111,8 +113,9 @@ internal class CivsWorksiteApproaches(
     private fun refreshRejected(workerId: UUID, affected: (RejectedWorkSpots) -> Boolean) {
         rejectedWorkSpots[workerId]?.takeIf(affected)?.let { rejected ->
             // Keep a pending immutable batch; only its geometry evidence expired.
-            rejected.positions.clear(); rejected.retryAt = null; rejected.checkedChanges = 0
-            rejected.remoteChecked = false; rejected.remote.candidate = null; rejected.remote.nextAim = 0
+            rejected.positions.clear(); rejected.temporaryUntil.clear(); rejected.retryAt = null; rejected.checkedChanges = 0
+            rejected.remoteChecked = false; rejected.temporaryRemoteStanding = null
+            rejected.remote.candidate = null; rejected.remote.nextAim = 0
             rejected.remote.origins.clear()
             workSpots.remove(workerId)
         }
@@ -124,7 +127,7 @@ internal class CivsWorksiteApproaches(
     }
 
     /** A failed approach excludes its stance, never a durable job, accepted batch or its inputs. */
-    fun rejectStanding(city: Settlement, worker: CivWorker, work: CivWorldWork): Boolean {
+    fun rejectStanding(city: Settlement, worker: CivWorker, work: CivWorldWork, temporary: Boolean = false): Boolean {
         check(Bukkit.isPrimaryThread())
         val building = worker.assignment?.let(city::building) ?: return false
         val focus = citizenWorkFocus(work) ?: return false
@@ -132,22 +135,47 @@ internal class CivsWorksiteApproaches(
         val key = standingKey(worker, building, work.miningStep, focus, work.miningOrdinal) ?: return false
         val rejected = rejectedWorkSpots[worker.id]?.takeIf { it.key == key }
             ?: RejectedWorkSpots(key, focus).also { rejectedWorkSpots[worker.id] = it }
+        // A resident cannot turn existing bad-terrain evidence into an expiring exclusion.
+        if (temporary && work.standing in rejected.positions && work.standing !in rejected.temporaryUntil) return false
         rejected.lastFocus = focus
         // The finite authored stance domain bounds this set. Time alone must not make
         // a failed point eligible before the remaining alternatives have been tried.
         rejected.positions[work.standing] = Bukkit.getCurrentTick().toLong()
+        if (temporary) rejected.temporaryUntil[work.standing] = Bukkit.getCurrentTick().toLong() + 100L
+        else rejected.temporaryUntil.remove(work.standing)
         // Authored candidates are finite; a moving actor may also supply one live position.
-        while (rejected.positions.size > 512) rejected.positions.remove(rejected.positions.keys.first())
+        while (rejected.positions.size > 512) {
+            val oldest = rejected.positions.keys.first()
+            rejected.positions.remove(oldest)
+            rejected.temporaryUntil.remove(oldest)
+        }
         rejected.retryAt = null
         rejected.pending = context.cached.remove(worker.id)
         rejected.checkedChanges = 0
         rejected.remoteChecked = work.remoteWork
-        if (building.type == BuildingType.FORESTER && work.remoteWork) rejected.remote.observed(work.standing)
+        rejected.temporaryRemoteStanding = work.standing.takeIf { temporary && work.remoteWork }
+        if (building.type == BuildingType.FORESTER && work.remoteWork && !temporary) rejected.remote.observed(work.standing)
         rejected.remote.candidate = null
         rejected.remote.nextAim = 0
         workSpots.remove(worker.id)
         context.needs[worker.id] = Need(building, worker.completedCycles, "searching-work")
         return true
+    }
+
+    /** Reopen only expired resident occupancy before a normal bounded stance search. */
+    private fun expireTemporary(workerId: UUID, rejected: RejectedWorkSpots) {
+        if (rejected.temporaryUntil.isEmpty()) return
+        val now = Bukkit.getCurrentTick().toLong()
+        val expired = rejected.temporaryUntil.filterValues { now >= it }.keys
+        if (expired.isEmpty()) return
+        expired.forEach { rejected.temporaryUntil.remove(it); rejected.positions.remove(it) }
+        if (rejected.temporaryRemoteStanding in expired) {
+            rejected.temporaryRemoteStanding = null
+            rejected.remoteChecked = false
+            rejected.remote.candidate = null; rejected.remote.nextAim = 0
+        }
+        rejected.retryAt = null
+        workSpots.remove(workerId)
     }
 
     fun standingKey(worker: CivWorker, building: CivBuilding, step: Long?, focus: CivPosition?, ordinal: Int? = null): WorkSpotKey? = when {
@@ -221,6 +249,7 @@ internal class CivsWorksiteApproaches(
     fun retryForestApproach(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         pending: Cached): CivWorldWork? {
         val rejected = rejectedWorkSpots.getValue(worker.id)
+        expireTemporary(worker.id, rejected)
         val work = pending.work
         fun changed(): CivWorldWork? {
             rejectedWorkSpots.remove(worker.id)
@@ -242,7 +271,7 @@ internal class CivsWorksiteApproaches(
             else CivsForestry.plantingClear(city, roots, paths)
         if (!clear) return changed()
         rejected.retryAt?.let { retryAt ->
-            if (city.forestryJobs?.containsKey(building.id.toString()) != true) {
+            if (city.forestryJobs?.containsKey(building.id.toString()) != true && rejected.temporaryUntil.isEmpty()) {
                 // No receipt owns this candidate. Continue the existing field cursor;
                 // this root stays deferred until the whole field has had its turn.
                 rejected.pending = null
@@ -328,6 +357,7 @@ internal class CivsWorksiteApproaches(
         val rejected = rejectedWorkSpots[worker.id]?.takeIf {
             it.key == standingKey(worker, building, miningStep, target, execution?.ordinal)
         }
+        rejected?.let { expireTemporary(worker.id, it) }
         rejected?.retryAt?.let { retryAt ->
             if (Bukkit.getCurrentTick().toLong() < retryAt) {
                 context.blocked(worker, "worksite-no-access", point = target, reason = "approaches-exhausted")

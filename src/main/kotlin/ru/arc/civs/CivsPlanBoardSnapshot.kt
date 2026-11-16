@@ -117,12 +117,19 @@ internal fun civsPlanBoardSnapshot(city: Settlement, saved: List<CivPlacementPla
         planned[building.id] = plan.building.boardCopy()
     }
     city.construction?.plannedBuilding?.let { planned[it.id] = it.boardCopy() }
+    val access = CivAutonomousAccess.from(city, saved.filter {
+        it.id == CivsWarehouseRefit.retainedPlanId(it.building)
+    })
+    val retired = CivsWallApproachCleanup.retired(city, access.routes)
+    val publicRoutes = access.routes - retired
+    val retiredKeys = retired.mapTo(hashSetOf(), UUID::toString)
+    val publicPlan = CivsSettlementPlans.detached(CivsSettlementPlans.current(city))?.let { plan ->
+        plan.copy(routes = plan.routes - retiredKeys)
+    }
     return CivPlanBoardSnapshot(city.id, city.name, civsPlanBoardLayoutKey(city), city.worldId, city.center, city.radius,
         city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map { it.boardCopy() }, planned.values.toList(),
-        CivAutonomousAccess.from(city, saved.filter { it.id == CivsWarehouseRefit.retainedPlanId(it.building) }).routes
-            .filterKeys { id -> city.building(id)?.let { CivsWallApproachCleanup.completed(city, it) } != true }
-            .mapValues { (_, route) -> route.toList() },
-        CivsSettlementPlans.detached(CivsSettlementPlans.current(city)))
+        publicRoutes.mapValues { (_, route) -> route.toList() },
+        publicPlan)
 }
 
 /** Main captures and publishes; the existing plan loader and executor own all file/pure layout work. */

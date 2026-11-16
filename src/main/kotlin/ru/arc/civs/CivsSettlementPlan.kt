@@ -342,7 +342,7 @@ internal object CivsSettlementPlans {
         envelopes: Collection<CivBox>): Map<String, CivPosition> {
         val accepted = retained.infrastructure.mapTo(hashSetOf()) { it.id }
         val paidRoads = retained.roadColumns(city)
-        val preferred = retained.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val preferred = retained.publicRoutes(city).values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
         return layout.pieces.filter { it.id !in accepted && it.type in setOf(BuildingType.GATE, BuildingType.WALL) }
             .associate { piece -> piece.id.toString() to perimeterEntrance(forecast, piece, surface, frame, retained,
                 envelopes, paidRoads, preferred) }
@@ -740,7 +740,8 @@ internal object CivsSettlementPlans {
         val routes = adopted?.routes.orEmpty().filter { (id, _) -> id in keptPlots || !expanding && !redrawUnbuiltPerimeter &&
             adopted?.plots.orEmpty().none { it.building.id.toString() == id } }.mapKeys { UUID.fromString(it.key) }.toMutableMap()
         routes += retained.routes.filterKeys { city.building(it)?.type?.isInfrastructure == false }
-        val preferredRoads = routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        val preferredRoads = (routes - CivsWallApproachCleanup.retired(city, retained.routes)).values.flatten()
+            .mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
         val protectedRoadColumns = if (deferPerimeter == null) emptySet() else retained.roadColumns(city)
         fun planningAccess() = retained.copy(routes = if (retainedGrowth) routes + retained.routes else routes,
             reservedFortificationPorts = plots.flatMap { it.fortification?.let { metadata -> portReservations(metadata.proof) }.orEmpty() })
