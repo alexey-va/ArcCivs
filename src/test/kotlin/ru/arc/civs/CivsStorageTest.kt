@@ -2291,6 +2291,7 @@ class CivsStorageTest : FunSpec({
         val blocks = states.mapValues { (_, state) -> mockk<Block> {
             every { type } returns Material.BARREL
             every { this@mockk.state } returns state
+            every { getState(false) } returns state
         } }
         val nativeWorld = mockk<World>()
         val chunk = mockk<Chunk> {
@@ -2545,6 +2546,7 @@ private class DebitWindowFixture(base: Settlement) : AutoCloseable {
         val blocks = states.mapValues { (_, state) -> mockk<Block> {
             every { type } returns Material.BARREL
             every { this@mockk.state } returns state
+            every { getState(false) } returns state
         } }
         val chunk = mockk<Chunk> {
             every { world } returns nativeWorld

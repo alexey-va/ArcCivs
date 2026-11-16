@@ -557,6 +557,7 @@ private class SupplyCaptureNode(private val world: World, position: CivPosition,
     val block = mockk<Block> {
         every { this@mockk.type } returns type
         every { this@mockk.state } returns this@SupplyCaptureNode.state
+        every { getState(false) } returns this@SupplyCaptureNode.state
         every { this@mockk.world } returns this@SupplyCaptureNode.world
         every { x } returns position.x
         every { y } returns position.y

@@ -145,7 +145,7 @@ internal class CivsStorageContainers(
             throw CivsRejection("storage-container-invalid", located + ("reason" to "outside-world"))
         if (!world.isChunkLoaded(position.x shr 4, position.z shr 4)) throw CivsRejection("storage-unavailable", located)
         val block = world.getBlockAt(position.x, position.y, position.z)
-        val state = block.state
+        val state = block.getState(false)
         val inventory = when (state) {
             is Chest -> state.blockInventory // Exactly one 27-slot half, even beside a foreign chest.
             is Barrel -> state.inventory
