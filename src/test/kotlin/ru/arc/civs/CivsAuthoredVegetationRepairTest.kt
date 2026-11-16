@@ -263,7 +263,7 @@ class CivsAuthoredVegetationRepairTest : FunSpec({
                     store.save(f.city).join()
                     store.saveInventoryTransaction(tx).join() shouldBe tx
                     store.loadInventoryTransactions().join() shouldBe listOf(tx)
-                    store.save(tx.after).join()
+                    store.completeInventoryTransaction(tx).join() shouldBe tx.after
                     store.deleteInventoryTransaction(tx.id).join() shouldBe true
                     store.deleteInventoryTransaction(tx.id).join() shouldBe false
                     val audit = JsonParser.parseString(Files.readString(root.resolve("authored-vegetation-repairs/${tx.id}.json"))).asJsonObject

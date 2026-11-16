@@ -77,7 +77,7 @@ class CivsGateRefitTest : FunSpec({
         civsRouteObstacles(f.after, target.copy(phase = BuildingPhase.CONSTRUCTING), allowPlanned = true) shouldBe obstacles
     }
 
-    test("both immutable captures and the typed receipt survive the normal store without overwriting old geometry") {
+    test("both immutable captures and the legacy typed receipt survive reopening without overwriting old geometry") {
         val f = gateRefitFixture()
         val root = Files.createTempDirectory("civs-gate-refit-")
         try {
@@ -87,9 +87,9 @@ class CivsGateRefitTest : FunSpec({
                 store.savePlan(f.source).join()
                 store.saveSchematic(f.receipt.replacement.id, f.replacementBytes).join()
                 store.savePlan(f.receipt.replacement).join()
-                store.saveInventoryTransaction(f.transaction).join()
                 shouldThrow<CompletionException> { store.saveSchematic(f.source.id, f.replacementBytes).join() }
             }
+            writeLegacyInventoryReceipt(root, f.transaction)
             CivsStore(root, Executor { it.run() }).use { reopened ->
                 reopened.load().join() shouldBe listOf(f.before)
                 reopened.loadPlan(f.source.id).join() shouldBe f.source

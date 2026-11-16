@@ -10,7 +10,7 @@ import ru.arc.civs.*
 import java.util.concurrent.CompletionException
 
 class Auto2WorksitesScenarioTest : FunSpec({
-    test("Auto2 shaped forest crash recovery quarry work and paid road preserve one food and neighbouring work zones") {
+    test("Auto2 shaped forest legacy recovery quarry work and checkpointed paid road preserve one food and neighbouring work zones") {
         val recipe = auto2Recipe()
         val capture = recipe.capture
         SettlementScenario.run("auto2-worksite-receipts", AUTO2_CENTER, capture, { world -> auto2Town(world, recipe) }) {
@@ -28,7 +28,8 @@ class Auto2WorksitesScenarioTest : FunSpec({
             unchanged(treeBefore)
             savedCity() shouldBe before
             persistOne() shouldBe true
-            val receipt = receipts().single().validated()
+            val receipt = admittedInventoryIntent()
+            receipts() shouldBe emptyList()
             receipt.forestry shouldBe null
             receipt.worldChanges shouldBe forest.changes
             receipt.after.stock shouldBe Stock()
@@ -36,7 +37,10 @@ class Auto2WorksitesScenarioTest : FunSpec({
             unchanged(treeBefore)
             savedCity() shouldBe before
 
-            // Stop after the genuine journal write and before its queued native callback.
+            // Seed the pre-upgrade disk format explicitly; ordinary RAM admission writes no receipt.
+            seedLegacyInventoryReceipt(receipt)
+            receipts().single().validated() shouldBe receipt
+            // Stop before the queued native callback and recover only the explicit legacy fixture.
             restart()
             interrupted.isCompletedExceptionally shouldBe true
             city shouldBe receipt.after
@@ -52,9 +56,10 @@ class Auto2WorksitesScenarioTest : FunSpec({
             val quarry = nextWork("miner")
             quarry.autonomousVisual shouldBe false
             quarry.miningPlanVersion shouldBe CivsMinePlan.VERSION
+            checkpoint()
             val beforeQuarry = city
             val pendingQuarry = observedCompletion(quarry)
-            // Background read-only vegetation captures share the executor; durable boundaries are checked below.
+            // Background vegetation captures share the storage executor with RAM intent admission.
             (pendingIo >= 1) shouldBe true
             receipts() shouldBe emptyList()
             savedCity() shouldBe beforeQuarry
@@ -88,6 +93,8 @@ class Auto2WorksitesScenarioTest : FunSpec({
             receipts() shouldBe emptyList()
             unchanged(roofAndPaths)
             repaired.buildings shouldBe before.buildings
+            checkpoint()
+            savedCity() shouldBe repaired
 
             val duplicate = observedCompletion(road, builderBefore.nextDeliveryAt)
             shouldThrow<CompletionException> { await(duplicate) }.let {

@@ -13,10 +13,11 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsMineReceiptTest : FunSpec({
-    test("ordinary mine preparation and durable codec retain explicit authority while legacy receipts remain untagged") {
+    test("mine preparation and the legacy disk codec retain explicit authority while older receipts remain untagged") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("ordinary-mine-codec")
             val plugin = paper.createSimplePlugin("MineReceiptCodec")
@@ -37,15 +38,15 @@ class CivsMineReceiptTest : FunSpec({
                     shouldThrow<IllegalArgumentException> {
                         tx.copy(playerDebit = CivPlayerDebit(city.owner, emptyList())).validated()
                     }
+                    writeLegacyInventoryReceipt(root, tx)
                     CivsStore(root, Executor(Runnable::run)).use { store ->
-                        store.saveInventoryTransaction(tx).join() shouldBe tx
                         store.loadInventoryTransactions().join() shouldBe listOf(tx)
                         store.deleteInventoryTransaction(id).join() shouldBe true
                         val legacyCity = city.copy(minePlans = null)
                         val legacy = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision,
                             legacyCity.copy(revision = city.revision + 1), emptyList(), worldChanges = work.changes).validated()
                         Gson().toJsonTree(legacy).asJsonObject.has("mine") shouldBe false
-                        store.saveInventoryTransaction(legacy).join() shouldBe legacy
+                        writeLegacyInventoryReceipt(root, legacy)
                         store.loadInventoryTransactions().join().single().mine shouldBe null
                     }
                     storage.unlock(id)
@@ -136,7 +137,7 @@ class CivsMineReceiptTest : FunSpec({
         }
     }
 
-    test("ordinary mine journal detaches nested before progress and action proof before queued persistence") {
+    test("ordinary mine admission detaches nested before progress and action proof before its RAM queue runs") {
         MockBukkitTestRuntime.open().use {
             val (initial, initialWork) = mineReceiptFixture(UUID.randomUUID())
             val key = initialWork.buildingId.toString()
@@ -157,9 +158,11 @@ class CivsMineReceiptTest : FunSpec({
                 mine = CivMineReceipt(requireNotNull(city.building(work.buildingId)), previous, null, work)).validated()
             val expected = tx.copy(worldChanges = cells.toList(), mine = tx.mine!!.detached())
             val pending = ArrayDeque<Runnable>()
+            fun <T> runQueued(future: CompletableFuture<T>): T = future.also { pending.removeFirst().run() }.join()
             val root = Files.createTempDirectory("arc-civs-mine-snapshot-")
             try {
                 CivsStore(root, Executor { pending.addLast(it) }).use { store ->
+                    runQueued(store.save(city)) shouldBe city
                     val saved = store.saveInventoryTransaction(tx)
                     beforeSections["invalid"] = 1
                     beforeSeals["invalid"] = "minecraft:diamond_block"
@@ -167,12 +170,11 @@ class CivsMineReceiptTest : FunSpec({
                     sections.clear(); access["invalid"] = 9
                     inputs.clear(); outputs["DIAMOND"] = 64
                     cells.clear()
-                    pending.removeFirst().run()
-                    saved.join() shouldBe expected
+                    runQueued(saved) shouldBe expected
+                    runQueued(store.loadInventoryTransactions()) shouldBe listOf(expected)
+                    runQueued(store.deleteInventoryTransaction(tx.id)) shouldBe true
                 }
-                CivsStore(root, Executor(Runnable::run)).use { store ->
-                    store.loadInventoryTransactions().join() shouldBe listOf(expected)
-                }
+                pending.removeFirst().run()
             } finally { root.toFile().deleteRecursively() }
         }
     }

@@ -12,24 +12,35 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.floor
 
 private val unavailableSnapshotBlock = CitizenTerrainBlock.UNAVAILABLE.copy(cost = 1.0)
-private typealias SnapshotCell = SimpleImmutableEntry<CivPosition, CitizenTerrainBlock>
+/** This cell belongs to one search job; global section/palette values never retain candidate nodes. */
+internal class CitizenSnapshotCell(point: CivPosition, block: CitizenTerrainBlock) :
+    SimpleImmutableEntry<CivPosition, CitizenTerrainBlock>(point, block) {
+    private var standingNode: CitizenSearchNode? = null
+
+    // Keep the first exact standing height only; a different height still gets its own node.
+    fun standingNode(y: Double): CitizenSearchNode {
+        val old = standingNode
+        if (old != null && old.y.toBits() == y.toBits()) return old
+        return CitizenSearchNode(key.x, y, key.z).also { if (old == null) standingNode = it }
+    }
+}
 
 /** Replaces this route's cell map; exact X/Z and Y keys do not truncate world coordinates. */
 internal class CitizenSnapshotCells : AbstractMap<CivPosition, CitizenTerrainBlock>() {
-    private val columns = Long2ObjectOpenHashMap<Int2ObjectOpenHashMap<SnapshotCell>>()
+    private val columns = Long2ObjectOpenHashMap<Int2ObjectOpenHashMap<CitizenSnapshotCell>>()
     override var size: Int = 0
         private set
 
-    fun cell(x: Int, y: Int, z: Int): SimpleImmutableEntry<CivPosition, CitizenTerrainBlock>? =
+    fun cell(x: Int, y: Int, z: Int): CitizenSnapshotCell? =
         columns[civsTerrainKey(x, z)]?.get(y)
 
     override fun get(key: CivPosition): CitizenTerrainBlock? = cell(key.x, key.y, key.z)?.value
 
-    fun add(point: CivPosition, block: CitizenTerrainBlock): SimpleImmutableEntry<CivPosition, CitizenTerrainBlock> {
+    fun add(point: CivPosition, block: CitizenTerrainBlock): CitizenSnapshotCell {
         val key = civsTerrainKey(point.x, point.z)
-        val column = columns[key] ?: Int2ObjectOpenHashMap<SnapshotCell>(8).also { columns.put(key, it) }
+        val column = columns[key] ?: Int2ObjectOpenHashMap<CitizenSnapshotCell>(8).also { columns.put(key, it) }
         check(!column.containsKey(point.y)) { "Captured navigation cells are immutable" }
-        return SnapshotCell(point, block).also { column.put(point.y, it); size++ }
+        return CitizenSnapshotCell(point, block).also { column.put(point.y, it); size++ }
     }
 
     override val entries: Set<Map.Entry<CivPosition, CitizenTerrainBlock>> = object : AbstractSet<Map.Entry<CivPosition, CitizenTerrainBlock>>() {
@@ -123,9 +134,14 @@ internal data class CitizenSnapshotRequest(
 internal operator fun Map<CivPosition, CitizenTerrainBlock>.get(x: Int, y: Int, z: Int): CitizenTerrainBlock? =
     if (this is CitizenSnapshotBlocks) get(x, y, z) else get(CivPosition(x, y, z))
 
+/** Candidate flags stay exact; only ordinary standing candidates can share this job's cell slot. */
+internal fun Map<CivPosition, CitizenTerrainBlock>.searchCandidateNode(x: Int, y: Double, z: Int,
+    climbing: Boolean): CitizenSearchNode =
+    if (!climbing && this is CitizenSnapshotBlocks) standingNode(x, y, z) else CitizenSearchNode(x, y, z, climbing)
+
 /** Fixed x/z/y order; overlapping probes share immutable cells from this route only. */
 private class CitizenSnapshotBlocks(
-    private val cells: Array<SnapshotCell>,
+    private val cells: Array<CitizenSnapshotCell>,
 ) : AbstractMap<CivPosition, CitizenTerrainBlock>() {
     private val origin = cells.firstOrNull()?.key
     override val size: Int get() = cells.size
@@ -135,6 +151,11 @@ private class CitizenSnapshotBlocks(
     fun get(worldX: Int, worldY: Int, worldZ: Int): CitizenTerrainBlock? {
         val index = indexOf(worldX, worldY, worldZ)
         return if (index < 0) null else cells[index].value
+    }
+
+    fun standingNode(worldX: Int, worldY: Double, worldZ: Int): CitizenSearchNode {
+        val index = indexOf(worldX, floor(worldY + .001).toInt(), worldZ)
+        return if (index < 0) CitizenSearchNode(worldX, worldY, worldZ) else cells[index].standingNode(worldY)
     }
 
     fun key(worldX: Int, worldY: Int, worldZ: Int): CivPosition {
@@ -167,8 +188,8 @@ private class CitizenSnapshotBlocks(
     }
 
     /** Copy references only when needed; an older published capture never observes later cost knowledge. */
-    fun withCosts(resolve: (SnapshotCell) -> SnapshotCell): CitizenSnapshotBlocks {
-        var resolved: Array<SnapshotCell>? = null
+    fun withCosts(resolve: (CitizenSnapshotCell) -> CitizenSnapshotCell): CitizenSnapshotBlocks {
+        var resolved: Array<CitizenSnapshotCell>? = null
         for (index in cells.indices) {
             val cell = resolve(cells[index])
             if (cell !== cells[index]) {
@@ -265,31 +286,35 @@ internal class CitizenSnapshotCapture(
                 for (cx in (xs.first shr 4)..(xs.last shr 4))
                     for (cz in (zs.first shr 4)..(zs.last shr 4)) add(CitizenSnapshotKey(cx, cz))
             }
-            val needed = if (minimumY < maximumY && y - 3 < maximumY && y + 3 >= minimumY) buildSet {
-                for (key in chunkKeys) for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4))
-                    add(CitizenSnapshotSectionKey(key.x, sy, key.z))
-            } else emptySet()
-            needed.forEach { terrain.activate(it, minimumY, maximumY) }
-            val missing = needed.filterTo(linkedSetOf()) { section ->
-                val key = CitizenSnapshotKey(section.x, section.z)
-                key !in terrain.unavailable && terrain.chunks[key]?.available(section.y) != true
-            }
-            if (missing.isNotEmpty()) return request(
-                chunks = missing.mapTo(linkedSetOf()) { CitizenSnapshotKey(it.x, it.z) }, requestedSections = missing)
-            for (section in needed) {
-                val chunk = terrain.chunks[CitizenSnapshotKey(section.x, section.z)] ?: continue
-                if (section !in terrain.sections) {
-                    val revision = chunk.stamp(section.y)
-                    terrain.sections[section] = revision
-                    newSections[section] = revision
+            var missing: MutableSet<CitizenSnapshotSectionKey>? = null
+            var firstUse: MutableList<CitizenSnapshotSectionKey>? = null
+            if (minimumY < maximumY && y - 3 < maximumY && y + 3 >= minimumY) {
+                for (key in chunkKeys) {
+                    if (key in terrain.unavailable) continue
+                    for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4)) {
+                        val section = CitizenSnapshotSectionKey(key.x, sy, key.z)
+                        if (section in terrain.sections) continue
+                        terrain.activate(section, minimumY, maximumY)
+                        if (terrain.chunks[key]?.available(sy) != true) {
+                            (missing ?: linkedSetOf<CitizenSnapshotSectionKey>().also { missing = it }).add(section)
+                        } else (firstUse ?: arrayListOf<CitizenSnapshotSectionKey>().also { firstUse = it }).add(section)
+                    }
                 }
+            }
+            missing?.let { return request(
+                chunks = it.mapTo(linkedSetOf()) { section -> CitizenSnapshotKey(section.x, section.z) }, requestedSections = it) }
+            // Match the existing handoff: publish no new section stamps until this probe has every required section.
+            firstUse?.forEach { section ->
+                val revision = terrain.chunks.getValue(CitizenSnapshotKey(section.x, section.z)).stamp(section.y)
+                terrain.sections[section] = revision
+                newSections[section] = revision
             }
             val missingStates = linkedMapOf<BlockData, CivPosition>()
             for (key in chunkKeys) {
                 terrain.chunks[key]?.states(ys.first, ys.last)?.let { terrain.collectMissingStates(it, missingStates) }
             }
             if (missingStates.isNotEmpty()) return request(states = missingStates)
-            val cells = arrayOfNulls<SnapshotCell>(if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) 0 else probeStates.size)
+            val cells = arrayOfNulls<CitizenSnapshotCell>(if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) 0 else probeStates.size)
             val dynamic = linkedMapOf<CivPosition, BlockData>()
             var positionIndex = 0
             for (x in xs) for (z in zs) for (by in ys) {
@@ -355,7 +380,7 @@ internal class CitizenSnapshotCapture(
             if (cost == null) missing += point else terrain.costs[point] = cost
         }
         if (missing.isNotEmpty()) return request(costs = missing.take(512).toSet())
-        val resolved = hashMapOf<CivPosition, SnapshotCell>()
+        val resolved = hashMapOf<CivPosition, CitizenSnapshotCell>()
         return request(captures = completed.map { capture ->
             capture.published?.let { return@map it.copy(probe = capture.probe) }
             val blocks = capture.blocks.withCosts { cell ->
@@ -363,7 +388,7 @@ internal class CitizenSnapshotCapture(
                 val block = cell.value
                 val cost = terrain.costs[point]
                 if (cost == null || cost.toBits() == block.cost.toBits()) cell
-                else resolved.getOrPut(point) { SnapshotCell(point, block.copy(cost = cost)) }
+                else resolved.getOrPut(point) { CitizenSnapshotCell(point, block.copy(cost = cost)) }
             }
             CitizenSearchCapture(capture.probe, blocks, capture.edges)
         })

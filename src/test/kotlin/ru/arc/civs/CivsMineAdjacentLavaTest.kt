@@ -60,7 +60,7 @@ class CivsMineAdjacentLavaTest : FunSpec({
         }
     }
 
-    for (applied in listOf(false, true)) test("adjacent lava proof survives sealed restart without items or cut credit applied=$applied") {
+    for (applied in listOf(false, true)) test("legacy adjacent lava proof survives restart without items or cut credit applied=$applied") {
         adjacentLavaFixture { paper, world, runtime, city, mine, work ->
             val after = CivsRules.finishWorldWork(city, work, 10_000)
             val directory = Files.createTempDirectory("arc-civs-adjacent-lava-")
@@ -68,7 +68,7 @@ class CivsMineAdjacentLavaTest : FunSpec({
                 val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(),
                     worldChanges = work.changes, mine = CivMineReceipt(mine, city.minePlans!!.getValue(mine.id.toString()), null, work)).validated()
                 Gson().fromJson(Gson().toJson(tx), CivInventoryTransaction::class.java).validated() shouldBe tx
-                CivsStore(directory, Executor(Runnable::run)).use { store -> store.saveInventoryTransaction(tx).join() shouldBe tx }
+                writeLegacyInventoryReceipt(directory, tx)
                 val source = work.changes.single().position
                 if (applied) world.getBlockAt(source.x, source.y, source.z).type = Material.AIR
                 CivsStore(directory, Executor(Runnable::run)).use { restarted ->

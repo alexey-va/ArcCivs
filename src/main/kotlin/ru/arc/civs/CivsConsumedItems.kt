@@ -60,8 +60,10 @@ internal class CivConsumedItemIndex private constructor(private val buckets: Arr
 internal class CivsConsumedItems {
     private data class State(val index: CivConsumedItemIndex, val worlds: Set<UUID>)
     private var state: State? = null
+    private val dirty = linkedMapOf<UUID, MutableSet<UUID>>()
 
     fun load(root: Path): CivConsumedItemIndex {
+        check(dirty.isEmpty()) { "Flush accepted ground history before reloading it" }
         state = null
         val directory = root.resolve(DIRECTORY)
         if (!Files.exists(directory, NOFOLLOW_LINKS)) return CivConsumedItemIndex.EMPTY.also { state = State(it, emptySet()) }
@@ -109,37 +111,51 @@ internal class CivsConsumedItems {
         current.index.adding(reservations.flatMap { it.collected!!.ground.map(CivGroundItemChange::entityId) } + ids)
     }
 
-    /** After the native debit ACK, before city credit. Partial file success remains covered by the original receipt. */
-    fun mark(root: Path, world: UUID, ids: Collection<UUID>): CivConsumedItemIndex {
+    /** New consumed UUIDs are accepted in RAM and share the city checkpoint cadence. */
+    fun stage(root: Path, world: UUID, ids: Collection<UUID>): CivConsumedItemIndex {
+        if (ids.isEmpty()) return state?.index ?: CivConsumedItemIndex.EMPTY
         val current = ensure(root)
         val added = ids.distinct().filterNot { it in current.index }
-        try {
-            if (added.isEmpty()) {
-                // A reopened marker may follow a rename with an uncertain directory force. Re-acknowledge
-                // the bounded directory tree before treating an existing UUID as a durable credit fence.
-                if (ids.isNotEmpty()) forceDirectories(root, current.worlds)
-                return current.index
-            }
-            val next = current.index.adding(added)
-            if (world !in current.worlds && current.worlds.size >= MAX_WORLDS) throw CivsRejection("ground-history-full")
-            val directory = root.resolve(DIRECTORY)
-            require(!Files.exists(directory, NOFOLLOW_LINKS) || Files.isDirectory(directory, NOFOLLOW_LINKS))
-            Files.createDirectories(directory)
-            FileChannel.open(root, READ).use { it.force(true) }
-            FileChannel.open(requireNotNull(root.parent), READ).use { it.force(true) }
+        if (added.isEmpty()) return current.index
+        if (world !in current.worlds && current.worlds.size >= MAX_WORLDS) throw CivsRejection("ground-history-full")
+        val next = current.index.adding(added)
+        dirty.getOrPut(world) { linkedSetOf() }.addAll(added)
+        state = State(next, current.worlds + world)
+        return next
+    }
+
+    /** Only recovery of a pre-existing durable receipt still needs a per-operation UUID acknowledgement. */
+    fun mark(root: Path, world: UUID, ids: Collection<UUID>): CivConsumedItemIndex {
+        val next = stage(root, world, ids)
+        flush(root)
+        if (ids.isNotEmpty()) forceDirectories(root, requireNotNull(state).worlds)
+        return next
+    }
+
+    /** Called under the store IO lock: later admissions cannot be erased by this checkpoint's acknowledgement. */
+    fun flush(root: Path) {
+        if (dirty.isEmpty()) return
+        val pending = dirty.mapValues { (_, ids) -> ids.toList() }
+        val directory = root.resolve(DIRECTORY)
+        require(!Files.exists(directory, NOFOLLOW_LINKS) || Files.isDirectory(directory, NOFOLLOW_LINKS))
+        Files.createDirectories(directory)
+        FileChannel.open(root, READ).use { it.force(true) }
+        FileChannel.open(requireNotNull(root.parent), READ).use { it.force(true) }
+        for ((world, ids) in pending) {
             val worldPath = directory.resolve(world.toString())
             require(!Files.exists(worldPath, NOFOLLOW_LINKS) || Files.isDirectory(worldPath, NOFOLLOW_LINKS))
             Files.createDirectories(worldPath)
             FileChannel.open(directory, READ).use { it.force(true) }
-            for ((prefix, additions) in added.groupBy { CivConsumedItemIndex.prefix(it) }) {
+            for ((prefix, additions) in ids.groupBy { CivConsumedItemIndex.prefix(it) }) {
                 val store = bucketStore(root, world, prefix)
                 store.write((store.loadOrNull().orEmpty() + additions).distinct().sorted())
             }
-            state = State(next, current.worlds + world)
-            return next
-        } catch (failure: Exception) {
-            state = null // Unknown rename outcome must be read back before a retry or a new admission.
-            throw failure
+        }
+        forceDirectories(root, pending.keys)
+        // Keep all pending IDs on any failed write/ACK, including partially written buckets. Retry is a union.
+        for ((world, ids) in pending) {
+            dirty[world]?.removeAll(ids.toSet())
+            if (dirty[world].isNullOrEmpty()) dirty.remove(world)
         }
     }
 

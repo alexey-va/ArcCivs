@@ -229,8 +229,7 @@ class CivsMinePlanTest : FunSpec({
                     }
                     val oldPaid = legacy.filterValues { it == "minecraft:torch" || it == "minecraft:cobblestone" || it?.startsWith("minecraft:ladder") == true }
                         .mapKeys { CivsWorksiteLayouts.point(mine, it.key) }
-                    val store = CivsStore(directory, Executor { it.run() })
-                    store.save(city).join()
+                    CivsStore(directory, Executor { it.run() }).use { it.save(city).join() }
                     CivsStorage(plugin) { emptyArray() }.use { storage ->
                         CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                             // Receipt/cutover geometry uses fixed time; the count quotas remain active.
@@ -258,8 +257,8 @@ class CivsMinePlanTest : FunSpec({
                             val after = CivsRules.finishWorldWork(city, first, 20_000).copy(inventory = prepared.inventoryAfter)
                             val receipt = CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes,
                                 worldChanges = prepared.worldChanges).validated()
-                            store.saveInventoryTransaction(receipt).join()
-                            // A crash here leaves the old snapshot and one complete native+cursor receipt.
+                            // Old crash image: the before-city and one native receipt containing the new cursor.
+                            writeLegacyInventoryReceipt(directory, receipt)
                             val reopened = CivsStore(directory, Executor { it.run() })
                             reopened.load().join().single().minePlans shouldBe null
                             val recovered = reopened.loadInventoryTransactions().join().single()
@@ -274,10 +273,11 @@ class CivsMinePlanTest : FunSpec({
                             storage.seal(recovered, keepViewersOpen = true)
                             storage.reconcile(recovered) shouldBe CivInventoryApplyResult.Applied
                             storage.reconcile(recovered) shouldBe CivInventoryApplyResult.Applied
-                            store.save(recovered.after).join()
-                            store.deleteInventoryTransaction(id).join()
+                            reopened.completeInventoryTransaction(recovered).join() shouldBe recovered.after
+                            reopened.loadInventoryTransactions().join() shouldBe emptyList()
+                            reopened.close()
                             storage.unlock(id)
-                            city = CivsStore(directory, Executor { it.run() }).load().join().single()
+                            city = CivsStore(directory, Executor { it.run() }).use { it.load().join().single() }
                             city.mineProgress shouldBe mapOf(key to legacyStep)
                             city.workers.single().completedCycles shouldBe 1L
                             city.inventory!!.buildingStock(mine.id) shouldBe emptyMap()

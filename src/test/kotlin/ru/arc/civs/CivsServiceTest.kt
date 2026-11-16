@@ -27,6 +27,7 @@ import org.bukkit.event.inventory.InventoryType
 import org.bukkit.inventory.ItemStack
 import org.bukkit.block.data.Ageable
 import org.bukkit.block.BlockFace
+import org.bukkit.entity.Item
 import org.bukkit.entity.Player
 import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.util.RayTraceResult
@@ -551,17 +552,13 @@ class CivsQueuedTavernPickupServiceTest : FunSpec({
         }
     }
 
-    for (retireAt in listOf("city-wait", "native-before", "journal-save"))
+    for (retireAt in listOf("city-wait", "ram-admission"))
     test("a retired queued serving ticket cannot debit its replacement's food retiredAt=$retireAt") {
-        val nativeBefore = CompletableFuture<Unit>()
-        val journalSaved = CompletableFuture<CivInventoryTransaction>()
+        val admission = CompletableFuture<CivInventoryTransaction>()
         var firstReceipt: CivInventoryTransaction? = null
-        var preparingNative = false
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage ->
-                storage.persistCollectedNative = { _, before ->
-                    if (before) { preparingNative = true; nativeBefore } else CompletableFuture.completedFuture(Unit)
-                }
+                storage.persistCollectedNative = { _, _ -> error("Fresh food pickup requested native persistence") }
             }
         }) { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
@@ -584,9 +581,9 @@ class CivsQueuedTavernPickupServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.store.saveInventoryTransaction(any()) } answers {
                 val tx = firstArg<CivInventoryTransaction>()
-                if (retireAt == "journal-save" && tx.collected?.food?.servingTicket == first) {
+                if (retireAt == "ram-admission" && tx.collected?.food?.servingTicket == first) {
                     firstReceipt = tx
-                    journalSaved
+                    admission
                 } else CompletableFuture.completedFuture(tx)
             }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
@@ -597,11 +594,9 @@ class CivsQueuedTavernPickupServiceTest : FunSpec({
                 servingFor = guest.id, servingTicket = first)
             val retired = h.service.pickupResidentFood(city.id, keeper.id, source)
             retired.isDone shouldBe false
-            if (retireAt != "city-wait") {
-                if (retireAt == "journal-save") nativeBefore.complete(Unit)
+            if (retireAt == "ram-admission") {
                 h.commit()
-                h.tickUntil("first ticket reaches the native before fence") { preparingNative }
-                if (retireAt == "journal-save") h.tickUntil("first ticket reaches journal save") { firstReceipt != null }
+                h.tickUntil("first ticket reaches RAM admission") { firstReceipt != null }
                 retired.isDone shouldBe false
                 // A prepared collection retains the existing five-second world collection cadence even when retired.
                 h.time += 5_000
@@ -610,10 +605,9 @@ class CivsQueuedTavernPickupServiceTest : FunSpec({
             val current = h.service.pickupResidentFood(city.id, keeper.id, source.copy(servingTicket = replacement))
             current.isDone shouldBe false
             contents.getItem(0)!!.amount shouldBe 8
-            verify(exactly = if (retireAt == "journal-save") 1 else 0) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = if (retireAt == "ram-admission") 1 else 0) { h.store.saveInventoryTransaction(any()) }
             if (retireAt == "city-wait") h.commit()
-            nativeBefore.complete(Unit)
-            if (retireAt == "journal-save") journalSaved.complete(requireNotNull(firstReceipt))
+            if (retireAt == "ram-admission") admission.complete(requireNotNull(firstReceipt))
             h.tickUntil("retired ticket rejection and replacement receipt") { retired.isDone && h.saves.size == 2 }
             shouldThrow<CompletionException> { retired.join() }.cause.let { (it as CivsRejection).reason } shouldBe "stale-meal"
             h.commit()
@@ -623,7 +617,7 @@ class CivsQueuedTavernPickupServiceTest : FunSpec({
             CivsEquipment.plainCount(savedKeeper, "BREAD") shouldBe 4L
             contents.getItem(0)!!.amount shouldBe 4
             verify(exactly = 1) { h.store.saveInventoryTransaction(match { it.collected?.food?.servingTicket == replacement }) }
-            verify(exactly = if (retireAt == "journal-save") 2 else 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = if (retireAt == "ram-admission") 2 else 1) { h.store.saveInventoryTransaction(any()) }
         }
     }
 })
@@ -847,17 +841,11 @@ class CivsForestryLeafLootServiceTest : FunSpec({
 class CivsBuilderBufferReserveServiceTest : FunSpec({
     for (condition in listOf("surplus", "reserved", "partial-reserve", "destination-room", "bag-room", "short-stack-grown"))
     test("ordinary hut recovery rechecks its whole slot proof with $condition") {
-        val nativeFence = CompletableFuture<Unit>()
-        val persisted = mutableListOf<CivInventoryTransaction>()
+        val commitDropoff = CompletableFuture<Settlement>()
+        val completedDropoffs = mutableListOf<CivInventoryTransaction>()
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage ->
-                // The native adapter's version contract is tested separately; hold its real receipt ACK here.
-                storage.persistCollectedNative = { tx, before ->
-                    before shouldBe false
-                    requireNotNull(tx.cargoDropoff)
-                    persisted += tx
-                    nativeFence
-                }
+                storage.persistCollectedNative = { _, _ -> error("Fresh courier transfer requested native persistence") }
             }
         }) { h ->
             val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT, control = CivPosition(10, 64, 0),
@@ -903,6 +891,13 @@ class CivsBuilderBufferReserveServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.completeInventoryTransaction(any()) } answers {
+                val tx = firstArg<CivInventoryTransaction>()
+                if (tx.cargoDropoff == null) CompletableFuture.completedFuture(tx.after) else {
+                    completedDropoffs += tx
+                    commitDropoff
+                }
+            }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val dispatcher = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
@@ -920,7 +915,7 @@ class CivsBuilderBufferReserveServiceTest : FunSpec({
                     source.contents.toList() shouldBe beforeSlots
                     destination.contents.toList() shouldBe destinationSlots
                     h.service.settlements().single() shouldBe city
-                    persisted shouldBe emptyList()
+                    completedDropoffs shouldBe emptyList()
                     verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
                 } else {
                     val picked = h.await(h.service.pickupCargo(city.id, courier.id, cargo))
@@ -929,15 +924,15 @@ class CivsBuilderBufferReserveServiceTest : FunSpec({
                     val carried = requireNotNull(picked.workers.first { it.id == courier.id }.cargo)
                     carried.amount shouldBe 64L
                     carried.inventoryBacked shouldBe true
-                    persisted shouldBe emptyList()
+                    completedDropoffs shouldBe emptyList()
                     val unloading = h.service.dropoffCargo(city.id, courier.id, carried, warehouse.id)
-                    h.tickUntil("native cargo credit awaiting its persistence ACK") { persisted.isNotEmpty() }
-                    persisted.size shouldBe 1
+                    h.tickUntil("native cargo credit awaiting RAM commit") { completedDropoffs.isNotEmpty() }
+                    val dropoff = completedDropoffs.single()
                     unloading.isDone shouldBe false
                     h.service.settlements().single() shouldBe picked
                     destination.contents.filterNotNull() shouldBe listOf(ItemStack(Material.DIRT, 64))
                     source.contents.drop(1) shouldBe beforeSlots.drop(1)
-                    nativeFence.complete(Unit)
+                    commitDropoff.complete(dropoff.after)
                     val saved = h.await(unloading)
                     destination.contents.filterNotNull() shouldBe listOf(ItemStack(Material.DIRT, 64))
                     saved.workers.first { it.id == courier.id }.cargo shouldBe null
@@ -1508,7 +1503,7 @@ class CivsMineFallbackAuthorityTest : FunSpec({
             accepted.worldChanges.orEmpty() shouldBe emptyList()
             val directory = java.nio.file.Files.createTempDirectory("fallback-proof-codec-")
             try {
-                CivsStore(directory, Executor(Runnable::run)).use { it.saveInventoryTransaction(accepted).join() }
+                writeLegacyInventoryReceipt(directory, accepted)
                 CivsStore(directory, Executor(Runnable::run)).use { it.loadInventoryTransactions().join().single() shouldBe accepted }
             } finally { directory.toFile().deleteRecursively() }
             h.commit()
@@ -2134,7 +2129,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("both asynchronous persistence fences hold city authority and delay the exact ground credit") {
+    test("RAM admission and commit hold city authority through the exact ground pickup") {
         lateinit var storage: CivsStorage
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage = it }
@@ -2144,35 +2139,47 @@ class CivsServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
             every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
             val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
-            val source = CompletableFuture<Unit>()
-            val after = CompletableFuture<Unit>()
-            storage.persistCollectedNative = { _, beforeJournal -> if (beforeJournal) source else after }
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            val admission = CompletableFuture<CivInventoryTransaction>()
+            val commit = CompletableFuture<Settlement>()
+            var receipt: CivInventoryTransaction? = null
+            var committing = false
+            storage.persistCollectedNative = { _, _ -> error("Fresh ground pickup requested native persistence") }
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); admission }
+            every { h.store.completeInventoryTransaction(any()) } answers {
+                firstArg<CivInventoryTransaction>() shouldBe receipt
+                item.isValid shouldBe false
+                committing = true
+                commit
+            }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            h.tickUntil("ground intent admission") { receipt != null }
             collecting.isDone shouldBe false
             item.isValid shouldBe true
-            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            storage.debug(before.id)["total"] shouldBe 1
+            verify(exactly = 0) { h.store.completeInventoryTransaction(any()) }
             h.service.collectionAvailable(before.id) shouldBe false
             val duplicate = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(duplicate) })?.reason shouldBe "city-busy"
-            source.complete(Unit)
-            h.tickUntil("native ground debit") { !item.isValid }
+            val accepted = requireNotNull(receipt)
+            admission.complete(accepted)
+            h.tickUntil("ground pickup awaiting RAM commit") { committing }
             item.isValid shouldBe false
-            h.saves shouldBe emptyList()
+            h.service.settlements().single() shouldBe before
+            storage.debug(before.id)["total"] shouldBe 1
             collecting.isDone shouldBe false
-            after.complete(Unit)
-            h.tickUntil("city save after native and marker ACK") { h.saves.isNotEmpty() }
-            val saved = h.saves.single()
-            saved.first.workers.single().items!![6] shouldBe CivResidentItem("COAL", 8)
-            saved.second.complete(saved.first)
-            h.await(collecting).revision shouldBe before.revision + 1
+            accepted.after.workers.single().items!![6] shouldBe CivResidentItem("COAL", 8)
+            commit.complete(accepted.after)
+            h.await(collecting) shouldBe accepted.after
+            storage.debug(before.id)["total"] shouldBe 0
+            verify(exactly = 0) { h.store.save(any()) }
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.store.completeInventoryTransaction(any()) }
             verify(exactly = 1) { h.store.deleteInventoryTransaction(any()) }
         }
     }
 
-    test("a native timeout after ground debit retries the same locked receipt after five seconds and credits once") {
+    test("a legacy ground receipt retries its native timeout after five seconds and credits once") {
         lateinit var storage: CivsStorage
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage = it }
@@ -2180,22 +2187,20 @@ class CivsServiceTest : FunSpec({
             val worker = h.city.workers.first()
             val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
-            every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
             val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val receipt = readLegacyGroundPickup(before, item)
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
             val afterAttempts = mutableListOf<UUID>()
             storage.persistCollectedNative = { tx, beforeJournal ->
-                if (beforeJournal) CompletableFuture.completedFuture(Unit)
-                else {
-                    afterAttempts += tx.id
-                    if (afterAttempts.size == 1) CompletableFuture.failedFuture(CivsNativePersistenceRetry("Native persistence timed out"))
-                    else CompletableFuture.completedFuture(Unit)
-                }
+                beforeJournal shouldBe false
+                afterAttempts += tx.id
+                if (afterAttempts.size == 1) CompletableFuture.failedFuture(CivsNativePersistenceRetry("Native persistence timed out"))
+                else CompletableFuture.completedFuture(Unit)
             }
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
-            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
-            shouldThrow<CompletionException> { h.await(collecting) }
+            h.tickUntil("legacy debit and native timeout") { afterAttempts.size == 1 }
+            h.tick() // Record the retry deadline before advancing the clock.
             item.isValid shouldBe false
             h.saves shouldBe emptyList()
             storage.debug(before.id)["total"] shouldBe 1
@@ -2207,7 +2212,7 @@ class CivsServiceTest : FunSpec({
             h.time++
             h.tickUntil("retry native ACK and one recovered city credit") { h.saves.isNotEmpty() }
             afterAttempts.size shouldBe 2
-            afterAttempts.distinct().size shouldBe 1
+            afterAttempts shouldBe listOf(receipt.id, receipt.id)
             val saved = h.saves.single()
             saved.first.workers.single().items!![6] shouldBe CivResidentItem("COAL", 8)
             saved.second.complete(saved.first)
@@ -2217,17 +2222,17 @@ class CivsServiceTest : FunSpec({
             h.tick()
             afterAttempts.size shouldBe 2
             h.saves.size shouldBe 1
-            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             verify(exactly = 1) { h.store.markConsumedItems(any()) }
             verify(exactly = 1) { h.store.deleteInventoryTransaction(any()) }
         }
     }
 
-    test("unknown consumed marker outcome retains the debited receipt and cannot credit the bag") {
+    test("a failed RAM consumed marker keeps the exact ground lock and prevents bag publication") {
         lateinit var storage: CivsStorage
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also {
-                storage = it; it.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+                storage = it; it.persistCollectedNative = { _, _ -> error("Fresh ground pickup requested native persistence") }
             }
         }) { h ->
             val worker = h.city.workers.first()
@@ -2237,28 +2242,33 @@ class CivsServiceTest : FunSpec({
             val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
             val marker = CompletableFuture<CivConsumedItemIndex>()
             every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.completeInventoryTransaction(any()) } answers {
+                CompletableFuture.completedFuture(firstArg<CivInventoryTransaction>().after)
+            }
             every { h.store.markConsumedItems(any()) } returns marker
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
-            repeat(6) { h.paper.performTicks(1) }
+            h.tickUntil("native debit while RAM marker is pending") { !item.isValid }
             item.isValid shouldBe false
-            h.saves shouldBe emptyList()
+            h.service.settlements().single() shouldBe before
             collecting.isDone shouldBe false
-            marker.completeExceptionally(java.io.IOException("Unknown atomic marker rename outcome"))
+            marker.completeExceptionally(IllegalStateException("Consumed UUID staging failed"))
             shouldThrow<CompletionException> { h.await(collecting) }
-            h.saves shouldBe emptyList()
+            h.service.settlements().single() shouldBe before
             verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
             verify(exactly = 1) { h.store.markConsumedItems(any()) }
             storage.debug(before.id)["total"] shouldBe 1
             h.time += 10_000
             h.tick()
-            h.saves shouldBe emptyList()
+            h.service.settlements().single() shouldBe before
+            verify(exactly = 0) { h.store.save(any()) }
+            verify(exactly = 1) { h.store.completeInventoryTransaction(any()) }
             verify(exactly = 1) { h.store.markConsumedItems(any()) }
         }
     }
 
-    for (phase in listOf("before", "after")) test("city revision drift during $phase disk acknowledgement cannot publish a prepared credit") {
+    for (legacy in listOf(false, true)) test("city revision drift rejects ground credit during admission or legacy native ACK legacy=$legacy") {
         lateinit var storage: CivsStorage
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage = it }
@@ -2268,25 +2278,46 @@ class CivsServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
             every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
             val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
-            val pending = CompletableFuture<Unit>()
-            storage.persistCollectedNative = { _, beforeJournal ->
-                if (beforeJournal == (phase == "before")) pending else CompletableFuture.completedFuture(Unit)
+            val nativeAck = CompletableFuture<Unit>()
+            val admission = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            var writingNative = false
+            if (legacy) {
+                val old = readLegacyGroundPickup(before, item)
+                every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(old))
+                storage.persistCollectedNative = { tx, beforeJournal ->
+                    tx shouldBe old
+                    beforeJournal shouldBe false
+                    writingNative = true
+                    nativeAck
+                }
+            } else {
+                storage.persistCollectedNative = { _, _ -> error("Fresh ground pickup requested native persistence") }
+                every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); admission }
             }
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
-            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
-            repeat(3) { h.paper.performTicks(1) }
-            @Suppress("UNCHECKED_CAST")
-            val current = CivsService::class.java.getDeclaredField("cities").apply { isAccessible = true }
-                .get(h.service) as MutableMap<UUID, Settlement>
-            current[before.id] = before.copy(revision = before.revision + 1)
-            pending.complete(Unit)
-            shouldThrow<CompletionException> { h.await(collecting) }
+            val collecting = if (legacy) null else h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            h.tickUntil("ground operation reaches held acknowledgement") { writingNative || receipt != null }
+            item.isValid shouldBe !legacy
+            val advanced = before.copy(revision = before.revision + 1)
+            replaceCraftTestCity(h, advanced)
+            if (legacy) {
+                nativeAck.complete(Unit)
+                h.tickUntil("drift blocks legacy recovery") {
+                    h.service.debugState("overview", before.id, null)["blocked_recovery_total"] == 1
+                }
+            } else {
+                admission.complete(requireNotNull(receipt))
+                CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(requireNotNull(collecting)) })
+                    ?.reason shouldBe "stale-delivery"
+            }
             h.saves shouldBe emptyList()
-            item.isValid shouldBe (phase == "before")
-            verify(exactly = if (phase == "before") 0 else 1) { h.store.saveInventoryTransaction(any()) }
-            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+            h.service.settlements().single() shouldBe advanced
+            item.isValid shouldBe !legacy
+            storage.debug(before.id)["total"] shouldBe if (legacy) 1 else 0
+            verify(exactly = if (legacy) 0 else 1) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.completeInventoryTransaction(any()) }
         }
     }
 
@@ -2310,17 +2341,17 @@ class CivsServiceTest : FunSpec({
                 every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
                 every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
                 val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
-                storage.persistCollectedNative = { _, _ ->
-                    order += if (item.isValid) "source-flush" else "after-flush"
-                    CompletableFuture.completedFuture(Unit)
-                }
+                storage.persistCollectedNative = { _, _ -> error("Fresh ground pickup requested native persistence") }
                 var receipt: CivInventoryTransaction? = null
                 val journal = CompletableFuture<CivInventoryTransaction>()
+                val committedModel = CompletableFuture<Settlement>()
                 val retirement = CompletableFuture<Boolean>()
-                every { h.store.saveInventoryTransaction(any()) } answers { order += "journal"; receipt = firstArg(); journal }
-                every { h.store.save(any()) } answers {
-                    order += "city"
-                    CompletableFuture<Settlement>().also { h.saves += firstArg<Settlement>() to it }
+                every { h.store.saveInventoryTransaction(any()) } answers { order += "admission"; receipt = firstArg(); journal }
+                every { h.store.completeInventoryTransaction(any()) } answers {
+                    firstArg<CivInventoryTransaction>() shouldBe receipt
+                    item.isValid shouldBe false
+                    order += "commit"
+                    committedModel
                 }
                 every { h.store.markConsumedItems(any()) } answers {
                     order += "marker"
@@ -2329,16 +2360,17 @@ class CivsServiceTest : FunSpec({
                 every { h.store.deleteInventoryTransaction(any()) } answers { order += "retire"; retirement }
                 h.start()
                 val collected = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
-                h.paper.performTicks(1) // The acknowledged source returns to city authority before journalling.
-                order shouldBe listOf("source-flush", "journal")
+                h.tickUntil("ground intent admission") { receipt != null }
+                order shouldBe listOf("admission")
                 item.isValid shouldBe true
                 events shouldBe emptyList()
-                journal.complete(receipt!!)
-                h.tickUntil("city save after journal and marker") { h.saves.isNotEmpty() }
-                order shouldBe listOf("source-flush", "journal", "after-flush", "marker", "city")
+                val admitted = requireNotNull(receipt)
+                journal.complete(admitted)
+                h.tickUntil("ground RAM commit and marker submission") { order.last() == "marker" }
+                order shouldBe listOf("admission", "commit", "marker")
                 item.isValid shouldBe false
                 h.service.settlements().single().workers.single().hasCollectedItems shouldBe null
-                h.saves.single().let { it.second.complete(it.first) }
+                committedModel.complete(admitted.after)
                 h.tickUntil("receipt retirement") { order.last() == "retire" }
                 order.last() shouldBe "retire"
                 events shouldBe emptyList()
@@ -2351,18 +2383,19 @@ class CivsServiceTest : FunSpec({
                 committed.stock shouldBe before.stock
                 committed.inventory shouldBe before.inventory
                 events.single()["worker"] shouldBe worker.id
-                events.single()["transaction"] shouldBe receipt!!.id
+                events.single()["transaction"] shouldBe admitted.id
                 events.single()["items"] shouldBe 8
                 events.single()["slots"] shouldBe 1
                 h.time += 4_999
                 h.service.collectionAvailable(before.id) shouldBe false
                 h.time++
                 h.service.collectionAvailable(before.id) shouldBe true
+                verify(exactly = 0) { h.store.save(any()) }
             }
         } finally { unmockkObject(CivsDiagnostics) }
     }
 
-    for (failurePhase in listOf("before", "after")) test("failed $failurePhase native fence never credits the resident") {
+    for (legacy in listOf(false, true)) test("failed ground admission or legacy native ACK never credits the resident legacy=$legacy") {
         lateinit var storage: CivsStorage
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage = it }
@@ -2372,25 +2405,40 @@ class CivsServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
             every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
             val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
-            var fences = 0
-            storage.persistCollectedNative = { _, _ ->
-                if (++fences == if (failurePhase == "before") 1 else 2) CompletableFuture.failedFuture(IllegalStateException("flush failed"))
-                else CompletableFuture.completedFuture(Unit)
+            var nativeAttempts = 0
+            if (legacy) {
+                val old = readLegacyGroundPickup(before, item)
+                every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(old))
+                storage.persistCollectedNative = { tx, beforeJournal ->
+                    tx shouldBe old
+                    beforeJournal shouldBe false
+                    nativeAttempts++
+                    CompletableFuture.failedFuture(IllegalStateException("Legacy native flush failed"))
+                }
+            } else {
+                storage.persistCollectedNative = { _, _ -> error("Fresh ground pickup requested native persistence") }
+                every { h.store.saveInventoryTransaction(any()) } returns
+                    CompletableFuture.failedFuture(CivsRejection("ground-history-full"))
             }
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
-            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
-            shouldThrow<CompletionException> { h.await(collecting) }
+            if (legacy) h.tickUntil("failed legacy native flush") {
+                h.service.debugState("overview", before.id, null)["blocked_recovery_total"] == 1
+            } else {
+                val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+                CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(collecting) })
+                    ?.reason shouldBe "ground-history-full"
+            }
             h.saves shouldBe emptyList()
             h.service.city(h.player)!!.workers.single() shouldBe worker
-            item.isValid shouldBe (failurePhase == "before")
-            verify(exactly = if (failurePhase == "before") 0 else 1) { h.store.saveInventoryTransaction(any()) }
-            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
-            h.service.corpseSettlements().size shouldBe if (failurePhase == "after") 0 else 1
+            item.isValid shouldBe !legacy
+            verify(exactly = if (legacy) 0 else 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.completeInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
+            storage.debug(before.id)["total"] shouldBe if (legacy) 1 else 0
+            h.service.corpseSettlements().size shouldBe if (legacy) 0 else 1
             h.time += 10_000
             h.tick()
-            fences shouldBe if (failurePhase == "before") 1 else 2
+            nativeAttempts shouldBe if (legacy) 1 else 0
             h.saves shouldBe emptyList()
         }
     }
@@ -2508,9 +2556,8 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("home deposit persists native exact slots before bag debit and never changes abstract stock") {
+    test("home deposit validates native exact slots before publishing the RAM bag debit") {
         lateinit var storage: CivsStorage
-        val fences = mutableListOf<Int>()
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage = it }
         }) { h ->
@@ -2521,25 +2568,39 @@ class CivsServiceTest : FunSpec({
                 inventory = null, autonomy = CivAutonomy(paused = true))
             h.world.getBlockAt(0, 64, 0).type = Material.BARREL
             val barrel = (h.world.getBlockAt(0, 64, 0).state as org.bukkit.block.Barrel).inventory
-            storage.persistCollectedNative = { _, _ ->
-                fences += barrel.getItem(0)?.amount ?: 0
-                CompletableFuture.completedFuture(Unit)
-            }
+            storage.persistCollectedNative = { _, _ -> error("Fresh home deposit requested native persistence") }
+            val admission = CompletableFuture<CivInventoryTransaction>()
+            val commit = CompletableFuture<Settlement>()
+            var receipt: CivInventoryTransaction? = null
+            var committing = false
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
             every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 1.5, 64.0, .5)
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); admission }
+            every { h.store.completeInventoryTransaction(any()) } answers {
+                firstArg<CivInventoryTransaction>() shouldBe receipt
+                barrel.getItem(0) shouldBe ItemStack(Material.COAL, 8)
+                committing = true
+                commit
+            }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val depositing = h.service.depositCollected(before.id, worker.id, hall.control)
-            repeat(4) { h.paper.performTicks(1) }
-            fences shouldBe listOf(0, 8)
+            h.tickUntil("home deposit waiting for RAM admission") { receipt != null }
+            barrel.isEmpty shouldBe true
+            h.service.settlements().single() shouldBe before
+            val admitted = requireNotNull(receipt)
+            admission.complete(admitted)
+            h.tickUntil("home deposit awaiting RAM commit") { committing }
             barrel.getItem(0) shouldBe ItemStack(Material.COAL, 8)
-            val saved = h.saves.single()
-            saved.first.stock shouldBe before.stock
-            saved.first.inventory shouldBe null
-            saved.first.workers.single().hasCollectedItems shouldBe false
-            saved.second.complete(saved.first)
-            h.await(depositing).workers.single().items!!.all { it == null } shouldBe true
+            h.service.settlements().single() shouldBe before
+            depositing.isDone shouldBe false
+            commit.complete(admitted.after)
+            val saved = h.await(depositing)
+            saved.stock shouldBe before.stock
+            saved.inventory shouldBe null
+            saved.workers.single().hasCollectedItems shouldBe false
+            saved.workers.single().items!!.all { it == null } shouldBe true
+            verify(exactly = 0) { h.store.save(any()) }
         }
     }
 
@@ -2565,9 +2626,9 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    for (autonomous in listOf(false, true)) test("scroll resurrection is one durable exact-item operation autonomous=$autonomous") {
+    for (autonomous in listOf(false, true)) test("scroll resurrection is one exact-item RAM operation autonomous=$autonomous") {
         serviceScenario(nativeGeometry = true, storageFactory = {
-            CivsStorage(it, ru.arc.paper.playerstate.PaperPlayerDataPersistence { }) { emptyArray() }
+            CivsStorage(it, ru.arc.paper.playerstate.PaperPlayerDataPersistence { error("Fresh resurrection requested a player save") }) { emptyArray() }
         }) { h ->
             val player = h.paper.addPlayer("ResurrectionOwner").apply {
                 addAttachment(h.plugin, "arccivs.use", true)
@@ -7995,6 +8056,22 @@ private fun prepareFundedCraft(h: ServiceScenario): Pair<CivBuilding, CivWorker>
     ready.buildings.forEach { building -> requireNotNull(building.control).let { h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL } }
     every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
     return workshop to funded
+}
+
+private fun readLegacyGroundPickup(before: Settlement, item: Item): CivInventoryTransaction {
+    val worker = before.workers.single()
+    val stack = requireNotNull(CivResidentItem.of(item.itemStack))
+    val credited = worker.copy(items = List(CivsEquipment.SLOTS) { if (it == 6) stack else null }, hasCollectedItems = true)
+    val at = item.location
+    val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision,
+        before.copy(workers = listOf(credited), revision = before.revision + 1), emptyList(),
+        collected = CivCollectedTransfer(worker.id, CivsEquipment.slots(worker), ground = listOf(
+            CivGroundItemChange(item.uniqueId, CivPosition(at.blockX, at.blockY, at.blockZ), stack, null))))
+    val directory = java.nio.file.Files.createTempDirectory("legacy-ground-receipt-")
+    try {
+        writeLegacyInventoryReceipt(directory, receipt)
+        return CivsStore(directory, Executor(Runnable::run)).use { it.loadInventoryTransactions().join().single() }
+    } finally { directory.toFile().deleteRecursively() }
 }
 
 private fun replaceCraftTestCity(h: ServiceScenario, city: Settlement) {

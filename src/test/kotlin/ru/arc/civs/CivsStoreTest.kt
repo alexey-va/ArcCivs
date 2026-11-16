@@ -60,7 +60,7 @@ class CivsStoreTest : FreeSpec({
         CivsStore(root, directExecutor).use { store ->
             store.save(city).join() shouldBe city
             store.savePlan(plan).join() shouldBe plan
-            store.saveInventoryTransaction(receipt).join() shouldBe receipt
+            writeLegacyInventoryReceipt(root, receipt)
         }
         val bytes = Files.readAllBytes(receiptPath)
         listOf(root.resolve("cities/${city.id}.json"), root.resolve("plans/${plan.id}.json"), receiptPath).forEach {
@@ -107,7 +107,7 @@ class CivsStoreTest : FreeSpec({
                 listOf(CivInventorySlotChange(control, "BARREL", 0, null, CivPlainItem("COAL", 4)))).validated()
             Files.createDirectories(root.resolve("cities"))
             Files.writeString(root.resolve("cities/${before.id}.json"), Gson().toJson(mapOf("schemaVersion" to CivsStore.SCHEMA_VERSION, "city" to before)))
-            CivsStore(root, directExecutor).use { it.saveInventoryTransaction(receipt).join() shouldBe receipt }
+            writeLegacyInventoryReceipt(root, receipt)
             CivsStore(root, directExecutor).use { store ->
                 store.load().join() shouldBe listOf(before)
                 store.loadInventoryTransactions().join() shouldBe listOf(receipt)
@@ -261,7 +261,7 @@ class CivsStoreTest : FreeSpec({
         val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision,
             city.copy(revision = city.revision + 1), listOf(CivInventorySlotChange(requireNotNull(farm.control),
                 "BARREL", 0, CivPlainItem("WHEAT", 3), CivPlainItem("BREAD", 1))))
-        store.saveInventoryTransaction(receipt).join()
+        writeLegacyInventoryReceipt(root, receipt)
         CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe listOf(receipt)
     }
 
@@ -631,9 +631,9 @@ class CivsStoreTest : FreeSpec({
         directStore.loadSchematic(id).join() shouldBe null
     }
 
-    "inventory journal allows only an exact retry, retains one pending receipt per city and reloads after reopen" {
+    "RAM inventory intents allow exact retry and retain one active intent per city without serializing" {
         val transaction = inventoryTransaction(settlement())
-        val json = inventoryJournalJson(transaction)
+        CivsStore(root, directExecutor).save(transaction.after.copy(revision = transaction.beforeRevision)).join()
         mockkConstructor(Gson::class, localToThread = true) {
             val store = CivsStore(root, directExecutor)
             store.saveInventoryTransaction(transaction).join() shouldBe transaction
@@ -642,20 +642,21 @@ class CivsStoreTest : FreeSpec({
                 store.saveInventoryTransaction(transaction.copy(after = transaction.after.copy(name = "Changed retry"))).join()
             }
             shouldThrow<CompletionException> { store.saveInventoryTransaction(transaction.copy(id = UUID.randomUUID())).join() }
-            verify(exactly = 1) { anyConstructed<Gson>().toJson(inventoryJournalDocument()) }
+            verify(exactly = 0) { anyConstructed<Gson>().toJson(inventoryJournalDocument()) }
+            store.loadInventoryTransactions().join() shouldBe listOf(transaction)
+            store.deleteInventoryTransaction(transaction.id).join() shouldBe true
+            store.deleteInventoryTransaction(transaction.id).join() shouldBe false
+            store.loadInventoryTransactions().join() shouldBe emptyList()
         }
-        Files.readString(root.resolve("inventory-transactions/${transaction.id}.json")) shouldBe json
-        val reopened = CivsStore(root, directExecutor)
-        reopened.loadInventoryTransactions().join() shouldBe listOf(transaction)
-        reopened.deleteInventoryTransaction(transaction.id).join() shouldBe true
-        reopened.deleteInventoryTransaction(transaction.id).join() shouldBe false
-        reopened.loadInventoryTransactions().join() shouldBe emptyList()
+        Files.exists(root.resolve("inventory-transactions/${transaction.id}.json")) shouldBe false
+        CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe emptyList()
     }
 
     "queued journal captures immutable slots and nested building stock and finishes admitted work after close" {
         val queued = QueuedExecutor()
         val store = CivsStore(root, queued)
         val base = inventoryTransaction(settlement())
+        CivsStore(root, directExecutor).save(base.after.copy(revision = base.beforeRevision)).join()
         val cargo = mutableMapOf("BREAD" to 2L)
         val warehouses = mutableMapOf(base.after.buildings.single().id.toString() to cargo)
         val changes = base.changes.toMutableList()
@@ -671,13 +672,14 @@ class CivsStoreTest : FreeSpec({
         shouldThrow<CompletionException> { store.loadInventoryTransactions().join() }
         queued.runNext()
         accepted.join() shouldBe expected
-        CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe listOf(expected)
+        CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe emptyList()
     }
 
-    "player source slots are captured immutably and survive reopening the inventory journal" {
+    "player source slots are detached and their legacy disk representation remains readable" {
         val queued = QueuedExecutor()
         val store = CivsStore(root, queued)
         val base = inventoryTransaction(settlement())
+        CivsStore(root, directExecutor).save(base.after.copy(revision = base.beforeRevision)).join()
         val source = mutableListOf(CivPlayerSlotChange(0, CivPlainItem("OAK_LOG", 10), CivPlainItem("OAK_LOG", 6)))
         val transaction = base.copy(changes = listOf(base.changes.single().copy(before = null, after = CivPlainItem("OAK_LOG", 4))),
             playerDebit = CivPlayerDebit(base.after.owner, source))
@@ -686,15 +688,17 @@ class CivsStoreTest : FreeSpec({
         source.clear()
         queued.runNext()
         saved.join() shouldBe expected
+        writeLegacyInventoryReceipt(root, expected)
         val reopened = CivsStore(root, directExecutor)
         reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
         reopened.saveInventoryTransaction(expected).join() shouldBe expected
-        val otherCity = inventoryTransaction(settlement(owner = expected.after.owner))
+        val otherCity = inventoryTransaction(settlement(owner = expected.after.owner).copy(autonomy = CivAutonomy()))
         val second = otherCity.copy(changes = listOf(otherCity.changes.single().copy(before = null, after = CivPlainItem("OAK_LOG", 4))),
             playerDebit = expected.playerDebit)
         shouldThrow<CompletionException> { reopened.saveInventoryTransaction(second).join() }
         Files.exists(root.resolve("inventory-transactions/${second.id}.json")) shouldBe false
         reopened.deleteInventoryTransaction(expected.id).join() shouldBe true
+        reopened.save(otherCity.after.copy(revision = otherCity.beforeRevision)).join()
         reopened.saveInventoryTransaction(second).join() shouldBe second
     }
 
@@ -702,6 +706,7 @@ class CivsStoreTest : FreeSpec({
         val queued = QueuedExecutor()
         val store = CivsStore(root, queued)
         val base = inventoryTransaction(settlement())
+        CivsStore(root, directExecutor).save(base.after.copy(revision = base.beforeRevision)).join()
         val workerId = UUID.randomUUID()
         val before = MutableList<CivResidentItem?>(33) { null }
         val items = before.toMutableList().apply { this[6] = CivResidentItem("OAK_LOG", 4) }
@@ -716,6 +721,7 @@ class CivsStoreTest : FreeSpec({
         before.clear(); items.clear(); playerSlots.clear(); world.clear()
         queued.runNext()
         saved.join() shouldBe expected
+        writeLegacyInventoryReceipt(root, expected)
         val reopened = CivsStore(root, directExecutor)
         reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
         val other = inventoryTransaction(settlement(owner = expected.after.owner))
@@ -741,10 +747,12 @@ class CivsStoreTest : FreeSpec({
             val expected = receipt.copy(after = receipt.after.copy(workers = receipt.after.workers.map {
                 it.copy(items = it.items!!.toList(), skills = it.skills!!.toMap())
             }), resurrection = debit.copy(corpse = corpse.copy(worker = corpse.worker.copy(items = items.toList(), skills = skills.toMap()))))
+            CivsStore(root, directExecutor).save(dead).join()
             val saved = store.saveInventoryTransaction(receipt)
             items.clear(); skills.clear()
             queued.runNext()
             saved.join() shouldBe expected
+            writeLegacyInventoryReceipt(root, expected)
             val reopened = CivsStore(root, directExecutor)
             reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
             expected.after.inventory shouldBe null
@@ -752,7 +760,7 @@ class CivsStoreTest : FreeSpec({
         }
     }
 
-    "collected receipts freeze native endpoints and preserve the optional home-visit marker across reload" {
+    "collected intents detach native endpoints and legacy fixtures preserve the home-visit marker" {
         val queued = QueuedExecutor()
         val store = CivsStore(root, queued)
         val base = settlement().copy(inventory = null, stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
@@ -765,10 +773,12 @@ class CivsStoreTest : FreeSpec({
             collected = CivCollectedTransfer(worker.id, before, ground = ground))
         val expected = tx.copy(after = tx.after.copy(workers = listOf(worker.copy(items = items.toList()))),
             collected = tx.collected!!.copy(before = before.toList(), ground = ground.toList()))
+        CivsStore(root, directExecutor).save(base).join()
         val saving = store.saveInventoryTransaction(tx)
         before.clear(); items.clear(); ground.clear()
         queued.runNext()
         saving.join() shouldBe expected
+        writeLegacyInventoryReceipt(root, expected)
         val reopened = CivsStore(root, directExecutor)
         reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
         reopened.save(base).join()
@@ -790,6 +800,7 @@ class CivsStoreTest : FreeSpec({
         val queued = QueuedExecutor()
         val store = CivsStore(root, queued)
         val base = settlement()
+        CivsStore(root, directExecutor).save(base).join()
         val home = base.buildings.single().copy(phase = BuildingPhase.ACTIVE, control = CivPosition(3, 64, 0))
         val before = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("COAL", 8) else null }
         val afterItems = List<CivResidentItem?>(CivsEquipment.SLOTS) { null }
@@ -803,6 +814,7 @@ class CivsStoreTest : FreeSpec({
         before.clear(); slots.clear()
         queued.runNext()
         saving.join() shouldBe expected
+        writeLegacyInventoryReceipt(root, expected)
         CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe listOf(expected)
         shouldThrow<IllegalArgumentException> { expected.copy(collected = expected.collected!!.copy(
             containers = listOf(expected.collected!!.containers.single().copy(after = CivResidentItem("COAL", 11))))).validated() }
@@ -845,7 +857,7 @@ class CivsStoreTest : FreeSpec({
         Files.readString(path) shouldBe "{broken"
     }
 
-    "inventory admission rejects an uncommittable city payload before writing its receipt" {
+    "checkpoint rejects an oversized accepted city while retaining its latest RAM revision" {
         val base = inventoryTransaction(settlement())
         val item = CivResidentItem("IRON_AXE", 1, Base64.getEncoder().encodeToString(ByteArray(22_500) { 7 }))
         val before = List<CivResidentItem?>(33) { if (it in 6..13) item else null }
@@ -859,28 +871,28 @@ class CivsStoreTest : FreeSpec({
             initial.owner, worker.id, before, listOf(CivNativePlayerSlot(0, item, null))))
         transaction.validated() shouldBe transaction
 
-        val failure = shouldThrow<CompletionException> { store.saveInventoryTransaction(transaction).join() }
-        (failure.cause as CivsRejection).reason shouldBe "storage-transaction-too-large"
+        store.saveInventoryTransaction(transaction).join() shouldBe transaction
+        store.completeInventoryTransaction(transaction).join() shouldBe transaction.after
+        store.deleteInventoryTransaction(transaction.id).join()
+        shouldThrow<CompletionException> { store.flush().join() }
+        store.checkpointStats().dirtyCities shouldBe 1
         Files.exists(root.resolve("inventory-transactions/${transaction.id}.json")) shouldBe false
-        store.loadInventoryTransactions().join() shouldBe emptyList()
-        store.load().join() shouldBe listOf(initial)
+        CivsStore(root, directExecutor).load().join() shouldBe listOf(initial)
     }
 
-    "inventory admission rejects oversized journal bytes with a committable after-city" {
+    "RAM inventory admission never invokes the legacy receipt encoder" {
         val initial = settlement()
         val transaction = inventoryTransaction(initial)
-        val oversized = inventoryJournalJson(transaction).padEnd(CivsStore.MAX_INVENTORY_TRANSACTION_BYTES.toInt() + 1)
         CivsStore(root, directExecutor).save(initial).join() shouldBe initial
         mockkConstructor(Gson::class, localToThread = true) {
-            every { anyConstructed<Gson>().toJson(inventoryJournalDocument()) } returns oversized
-            val failure = shouldThrow<CompletionException> {
-                CivsStore(root, directExecutor).saveInventoryTransaction(transaction).join()
-            }
-            (failure.cause as CivsRejection).reason shouldBe "storage-transaction-too-large"
-            verify(exactly = 1) { anyConstructed<Gson>().toJson(inventoryJournalDocument()) }
+            every { anyConstructed<Gson>().toJson(inventoryJournalDocument()) } throws IllegalStateException("No receipt serialization")
+            val store = CivsStore(root, directExecutor)
+            store.saveInventoryTransaction(transaction).join() shouldBe transaction
+            store.completeInventoryTransaction(transaction).join() shouldBe transaction.after
+            store.deleteInventoryTransaction(transaction.id).join()
+            verify(exactly = 0) { anyConstructed<Gson>().toJson(inventoryJournalDocument()) }
         }
-        val directory = root.resolve("inventory-transactions")
-        if (Files.exists(directory)) Files.list(directory).use { it.count() } shouldBe 0L
+        Files.exists(root.resolve("inventory-transactions")) shouldBe false
         val reopened = CivsStore(root, directExecutor)
         reopened.loadInventoryTransactions().join() shouldBe emptyList()
         reopened.load().join() shouldBe listOf(initial)

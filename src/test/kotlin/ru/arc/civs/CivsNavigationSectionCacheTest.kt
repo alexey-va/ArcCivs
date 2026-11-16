@@ -66,6 +66,30 @@ class CivsNavigationSectionCacheTest : FunSpec({
         }
     }
 
+    test("a deduplicated seed batch keeps returned immutable sections under a smaller city quota") {
+        SectionHarness(cityMaximum = 1, globalMaximum = 4).use { h ->
+            val first = h.extract(CitizenSnapshotKey(0, 0), setOf(4)).payloads().single()
+            val second = h.extract(CitizenSnapshotKey(1, 0), setOf(4), UUID(0, 2)).payloads().single()
+            val route = h.route()
+            val probes = listOf(1, 17, 1).map { x ->
+                val node = CitizenSearchNode(x, 64.0, 1)
+                CitizenSearchProbe(node, node.point())
+            }
+            val input = route.seedSnapshots(h.cache, probes, false)
+            input.seeded shouldBe listOf(first, second)
+            input.seeded[0] shouldBeSameInstanceAs first
+            input.seeded[1] shouldBeSameInstanceAs second
+            h.cityStats(h.city.id)["sections"] shouldBe 1
+            (h.cache.debug()["sections"] as Int <= 4) shouldBe true
+            val stamps = input.seeded.associate { it.key to it.revision }
+            h.cache.currentSections(h.world.uid, stamps) shouldBe true
+            h.cache.changed(h.world.uid, CivPosition(1, 64, 1))
+            h.paper.performTicks(3)
+            h.cache.currentSections(h.world.uid, stamps) shouldBe false
+            input.seeded shouldBe listOf(first, second)
+        }
+    }
+
     test("TTL refresh establishes one new generation and a new height does not expire its fresh sibling") {
         SectionHarness(refreshTicks = 5).use { h ->
             val key = CitizenSnapshotKey(0, 0)

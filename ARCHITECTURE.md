@@ -474,7 +474,8 @@ disappear on clients as well as on the server.
 Every backend keeps its stable typed `server-id` and the shared SQL configuration.
 A city has one immutable home backend and one running writer for that home. Complete
 `Settlement` is authoritative in RAM while the backend is running. Ordinary resident
-life, carried-food consumption, rest, education, regeneration and assignments replace
+life, carried-food consumption, rest, education, regeneration, assignments and ordinary
+native inventory operations replace
 only the latest dirty snapshot. Once per second the existing storage executor may
 checkpoint one eligible dirty city, with at most one periodic task in flight. The first
 deadline is spread over five minutes by the city's UUID; the next deadline is five
@@ -482,39 +483,47 @@ minutes after actual checkpoint completion. There is no catch-up batch, and a fa
 periodic attempt also waits five minutes before retrying. Explicit reload and stopping
 drain every remaining dirty city. A crash may roll back this
 ordinary suffix; revisions are still admitted consecutively in RAM, while file snapshots
-may skip intermediate revisions. Founding, directory changes, deletion and world mutation
-intents retain their durable save boundary.
+may skip intermediate revisions. Founding, directory changes, deletion, captured
+construction plans and explicit administrative repair audits retain their existing
+disk writes.
 
-Durable city state is the newer of `settlements/cities/<UUID>.json` and its completed
-item checkpoint. Native item intent still commits its exact immutable receipt before
-any native mutation. After the existing native persistence fences acknowledge the
-after-state, `inventory-completed/<cityUUID>.json` atomically records the receipt UUID
-and after-revision. Its already durable receipt contains the complete city snapshot;
-there is no second full city serialization at item completion. Only then may publication
-and native lock retirement complete. One completed receipt and at most one pending
-receipt can coexist per city. Before admitting the next pending receipt, intervening
-ordinary RAM changes are checkpointed so recovery retains the exact before-revision.
-These native barriers and explicit durable saves may write sooner than the background
-five-minute deadline. Successful full city writes are counted separately by reason
-(`PERIODIC`, `BEFORE_NATIVE`, `EXPLICIT_SAVE`, `RELOAD`, `DRAIN`); the schedule is not
-an absolute cap on durable writes. Counters advance after the full file and its
-directory are acknowledged, even if subsequent completed-receipt cleanup fails.
+New item intents live only in the active RAM journal. Admission preserves the exact
+before/after slots, source freshness, permissions, domain validation and existing
+operation locks. It performs no receipt/head JSON serialization, full city checkpoint
+or forced native inventory save. Immutable construction-buffer proofs may still be read
+for transfers that consume those buffers. Native application still checks actual slots; completion
+publishes the accepted city in RAM and marks it dirty before retiring the active intent
+and its locks. Completed receipt graphs do not accumulate. Newly consumed ground-item
+UUIDs also accumulate in RAM and flush with checkpoints, rather than writing a bucket
+for every pickup. Ordinary Minecraft world/player autosave remains unchanged.
 
-A completed receipt never replays native changes. Replacing its durable completion head
-allows removal of the older payload; writing a full city checkpoint allows removal of
-the current payload. The small head remains a revision watermark so interrupted cleanup
-cannot turn old completed receipts into pending work. A missing head target is valid
-only when the durable city file covers its revision; otherwise bootstrap fails closed.
-All snapshots, receipts and heads use the existing bounded Core AtomicFileStore. Pending
-receipts retain their existing reconciliation, source freshness and construction-buffer
-proofs. Normal runtime reads use owned RAM snapshots and pending receipt metadata;
-explicit reload rescans disk. Failed checkpoints retain their latest RAM state and
-quarantine the affected cities. Shutdown drains file work without awaiting stopped Main
-callbacks.
-Before downgrading to a binary without completed checkpoints, drain a clean full
-checkpoint so no head is ahead of its city file. An old binary cannot recover this
-new checkpoint format after an unclean shutdown; deleting its heads or receipts is
-not a valid rollback procedure.
+The crash contract is deliberately weaker: the latest successful city checkpoint may
+precede independently saved native item state. A crash can roll back recent city progress
+and create an item discrepancy. There is no per-operation crash replay guarantee for
+new RAM intents. Within a running process, partial or uncertain native application still
+retains its intent and locks and reconciles the same before/after states; it cannot be
+blindly repeated as a fresh operation. JSON byte-size limits apply when checkpointing;
+admission still enforces the existing domain bounds. Checkpoint failure retains the
+latest RAM state and is reported explicitly.
+
+Historical disk receipts and `inventory-completed/<cityUUID>.json` heads remain readable.
+Startup consolidates an acknowledged completed head into the city file before admitting
+new work. A completed historical receipt never replays native changes, and a missing
+head target is valid only when the city file already covers its revision. Historical
+pending intents retain their native persistence/recovery fences until their one-time
+completion. New RAM operations never become historical disk intents. Cleanup follows
+acknowledged city state so interruption cannot resurrect an old operation or city.
+Files still use the existing bounded Core AtomicFileStore; there is no new storage
+format or parallel journal. After native success, RAM completion is submitted before
+deferring publication to Main, so shutdown drains it before the final checkpoint.
+An unresolved partial RAM intent makes drain fail explicitly; it is not reported as
+a clean save. No stopped Main callback is awaited. Do not delete historical heads or receipts to bypass recovery or downgrade
+to a binary that cannot read the retained state.
+
+Successful full city writes are counted after file and directory acknowledgement.
+The five-minute schedule governs ordinary dirty city checkpoints, while explicit
+administrative/structural saves and historical recovery may still write earlier.
+Ordinary native item operations no longer trigger `BEFORE_NATIVE` checkpoints.
 Normal work, construction, resident state and inventory revisions do not read or
 write SQL. There is no periodic SQL checkpoint or asynchronous city mirror.
 
@@ -542,7 +551,7 @@ Deletion checks the complete expected local city before atomically releasing SQL
 membership and retaining the global tombstone. Local tombstones precede file
 cleanup. On startup, SQL tombstones reach the local loader before old city files
 are considered, so interrupted cleanup cannot resurrect a retired city. Immutable
-plans, captured schematics, construction buffers and exact item receipts remain on
+plans, captured schematics, construction buffers and historical item receipts remain on
 the same home filesystem. Only owned local cities reach protection, construction
 and resident actors; remote lookups return just a city identity, name and home.
 
@@ -715,10 +724,10 @@ radius and accepted geometry.
 
 Materials pages show8 rows and provide one explicit player supply action plus
 an admin/Creative deficit grant. Both subtract existing builder stock and fit physical
-slot capacity. Player supply journals exact plain-slot before/after debit together
-with container credits, locks the source inventory, and uses Core native player
-data persistence before applying container credits. Recovery waits for an offline
-source player; unknown slot drift remains a conflict. Initial/reload item changes
+slot capacity. Player supply keeps exact plain-slot before/after debit together
+with container credits in the RAM journal and locks the source inventory. It does
+not force player data persistence for each transfer. Historical disk recovery waits
+for an offline source player; unknown slot drift remains a conflict. Initial/reload item changes
 wait for local receipt discovery; exact locks are installed and unrelated players
 are released before network city loading begins. Local journal failure remains
 explicitly blocked instead of being treated as an empty journal. Old receipts
@@ -973,9 +982,9 @@ under head, torso and legs, and the standing resurrection envelope must be safe.
 No safe pose hides presentation without changing the persisted death or its items.
 Every action resolves the current pose and exact `diedAt`, so stale body controls
 cannot target a later death of the same worker. Auto corpse access requires admin.
-An admin-issued tagged paper scroll uses the existing durable inventory receipt:
-persist exact native player-slot debit, apply and flush player data, save/publish
-the same worker identity and remaining belongings, then retire the receipt. An
+An admin-issued tagged paper scroll uses the existing RAM inventory receipt:
+validate the exact native player-slot debit, apply it, publish the same worker
+identity and remaining belongings in RAM, then retire the receipt. An
 untouched debit can abort when the corpse expires or its pose changes; an applied
 debit completes the accepted transition on recovery. Admission prefers the accepted
 body site through normal loaded-space checks and never moves an existing actor.
@@ -1019,21 +1028,21 @@ Couriers can intercept moving source residents through a bounded ephemeral route
 target. The producer keeps its work and movement; the actual encounter and surplus
 are rechecked before sealing the immutable item transfer.
 
-All item movement uses exact native slot before/after receipts stored by Core
-AtomicFileStore on the I/O executor before native writes. Synchronous planning
+All item movement uses exact native slot before/after receipts in the active RAM
+journal. Synchronous planning
 freezes source membership, then only native containers changed by the exact receipt
 stay locked through journal retirement. Unaffected containers remain open and
 interactive. Explicit transfers close affected viewers; NPC/background transfers
 use open containers immediately and keep their views open, with only receipt
 containers' item edits briefly fenced until retirement. A source player's inventory remains locked
 through its item receipt. It checks all
-changed slots before any writes; restart may finish only known before/after states.
-Drift is an explicit conflict. The city revision commits after native application;
-only an exact same-revision retry is accepted. Unknown outcomes retain the receipt,
-freeze city mutations and reconcile against the canonical home file on reload. Native chunk
-persistence and city files are separate systems: this is guarded replay, not a distributed
-atomic transaction; a power-loss rollback of already-acknowledged chunk data remains
-a platform persistence boundary. No blind repeat after an unknown result.
+changed slots before any writes; only known before/after states may finish a pending
+operation. Drift is an explicit conflict. The RAM city revision advances after native
+application; only an exact same-revision retry is accepted. Unknown outcomes retain the
+active intent and freeze affected mutations until reconciliation. Historical disk
+receipts also support restart recovery. New operations rely on the staggered city
+checkpoint and independent native autosave, with the accepted crash discrepancy described
+above. No blind repeat after an unknown result within the running process.
 
 Construction starts without requiring the complete material list. New orders split the
 immutable captured before/after plan into deterministic horizontal rows of at most16
@@ -1047,12 +1056,13 @@ builders add once-only durable credit, bounded by remaining rows and 768 total r
 one placer still charges and installs each row serially. Durable work credit
 preserves the remaining authorization across pause/restart; it does
 not change row indices or charge already paid rows again. Only that row's exact obtainable items are debited, in the existing
-durable inventory receipt together with the READY→PLACING transition and `reservedBatch`.
+inventory receipt together with the READY→PLACING transition and `reservedBatch`.
 Missing items persist WAITING_MATERIALS without any debit; one waiting city is retried
 per5s in round-robin order. Open warehouse viewers do not defer it. Adding
 the required items resumes automatically. `materials` holds the unpaid remainder.
-Paid rows retain their reservation across pause, retry and restart, so replay cannot charge
-twice. Completing the row clears its reservation and advances within the bounded
+Paid rows retain their reservation across pause and in-process retry; restart resumes
+the latest checkpoint, subject to the same accepted crash rollback. Completing the row
+clears its reservation and advances within the bounded
 session while credit remains; the next trip is required when that credit ends. Legacy
 orders with null payment state retain their already-paid 256-cell tile algorithm.
 New SITE plans and accepted ACTIVE-building upgrades for the next level share a
@@ -1459,4 +1469,4 @@ Players may trade plain native resources near an active warehouse, with the town
 
 Auto commerce additionally protects one bid-sized batch of each material with proven operational demand, for the next work cycles. Both directions use this same reserve. This buffer belongs only to commerce: ordinary Auto supply grants and the shared logistics snapshot still target the original operational amount. An unknown paid construction bill never creates this extra demand from protected observed stock. Manual settlements retain their existing reserves.
 
-The existing inventory journal persists the exact quote and changes in up to36 player slots and at most16 local native holders before mutation. Native storage and player slots are locked and conserved together; retries reuse accepted terms, including after restart, and cannot pay again. Public market access is separate from membership/container-edit authority. Distance, fresh supply evidence, actual stock and available slots are checked at admission.
+The existing RAM inventory journal holds the exact quote and changes in up to36 player slots and at most16 local native holders before mutation. Native storage and player slots are locked and conserved together; in-process retries reuse accepted terms and cannot pay again. New transfers do not force player/container persistence or write per-operation receipts; after a crash, independently saved native state can differ from the last city checkpoint. Historical disk receipts retain their recovery terms. Public market access is separate from membership/container-edit authority. Distance, fresh supply evidence, actual stock and available slots are checked at admission.

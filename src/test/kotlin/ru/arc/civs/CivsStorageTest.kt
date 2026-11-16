@@ -163,15 +163,15 @@ class CivsStorageTest : FunSpec({
         storage.unlock(tx.id)
     }
 
-    test("Auto supply marker survives the real journal codec while older missing markers stay readable") {
+    test("the legacy journal codec reads typed Auto supply markers and records without them") {
         city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL))
         val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, city.copy(revision = city.revision + 1),
             listOf(CivInventorySlotChange(control, "BARREL", 0, null, CivPlainItem("BREAD", 4))),
             autoSupplyBuildingId = city.buildings.single().id).validated()
         val root = java.nio.file.Files.createTempDirectory("civs-auto-supply-codec-")
         try {
+            writeLegacyInventoryReceipt(root, tx)
             CivsStore(root, java.util.concurrent.Executor(Runnable::run)).use { store ->
-                store.saveInventoryTransaction(tx).join() shouldBe tx
                 store.loadInventoryTransactions().join().single() shouldBe tx
             }
             val path = root.resolve("inventory-transactions/${tx.id}.json")

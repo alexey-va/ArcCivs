@@ -172,7 +172,7 @@ class CivsRoadFoundationRepairTest : FunSpec({
         }
     }
 
-    test("a partial paid foundation receipt restarts with exact changes and one physical debit then healthy capture stops") {
+    test("a legacy partial foundation receipt restarts with exact changes and one physical debit then healthy capture stops") {
         FoundationFixture().use { h ->
             val work = h.capture()
             h.stock(24)
@@ -187,8 +187,8 @@ class CivsRoadFoundationRepairTest : FunSpec({
             }
             CivsStore(root, Executor { it.run() }).use { store ->
                 store.save(h.city).join()
-                store.saveInventoryTransaction(tx).join() shouldBe tx
             }
+            writeLegacyInventoryReceipt(root, tx)
             // Crash image: the native chest debit and first three bottom-up cells are on disk.
             h.stock(14)
             work.changes.take(3).forEach { h.block(it.position).setBlockData(Bukkit.createBlockData(it.after), false) }

@@ -341,13 +341,16 @@ internal class CitizenPacketRoute(
         return CitizenSnapshotInput(chunks, unavailable, states, dynamics, costs)
     }
 
-    /** Immutable compact references only; each worker promotes a section when its own probe first consumes it. */
+    /**
+     * Immutable compact references only; each worker promotes a section when its own probe first consumes it.
+     * Later batches look up each section once in first-probe order, without duplicate hit counts or LRU touches.
+     */
     internal fun seedSnapshots(snapshots: CivsNavigationSnapshots, probes: List<CitizenSearchProbe>, initial: Boolean): CitizenSnapshotInput {
         val city = snapshotPolicy?.cityId
         val selected = if (initial) snapshots.seed(world, city, org.bukkit.Bukkit.getCurrentTick().toLong(), ::initialSnapshotSection)
-            else snapshots.cached(world, probes.flatMap { probe ->
-                val y = kotlin.math.floor(probe.node.y).toInt()
-                buildList {
+            else snapshots.cached(world, buildSet {
+                for (probe in probes) {
+                    val y = kotlin.math.floor(probe.node.y).toInt()
                     for (x in ((probe.node.x - 1) shr 4)..((probe.node.x + 1) shr 4))
                         for (z in ((probe.node.z - 1) shr 4)..((probe.node.z + 1) shr 4))
                             for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4))

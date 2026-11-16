@@ -393,7 +393,7 @@ internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivP
             abs(y - node.y) > .0001 -> CitizenRouteAction.STEP
             else -> CitizenRouteAction.WALK
         }
-        result += CitizenSearchEdge(CitizenSearchNode(x, y, z, climbing), action, true)
+        result += CitizenSearchEdge(blocks.searchCandidateNode(x, y, z, climbing), action, true)
     }
     fun standing(x: Int, z: Int) {
         val first = result.size

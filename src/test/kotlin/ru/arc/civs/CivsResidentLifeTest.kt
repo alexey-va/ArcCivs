@@ -142,8 +142,8 @@ class CivsResidentLifeTest : FunSpec({
         try {
             CivsStore(root, Executor { it.run() }).use { store ->
                 store.save(city).join()
-                store.saveInventoryTransaction(receipt).join() shouldBe receipt
             }
+            writeLegacyInventoryReceipt(root, receipt)
             CivsStore(root, Executor { it.run() }).use { store ->
                 val restored = store.loadInventoryTransactions().join().single().validated()
                 restored shouldBe receipt

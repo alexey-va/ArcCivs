@@ -66,8 +66,9 @@ class CivsGateVariantsTest : FunSpec({
                 store.save(f.before).join()
                 store.saveSchematic(f.source.id, f.sourceBytes).join(); store.savePlan(f.source).join()
                 store.saveSchematic(f.receipt.replacement.id, f.replacementBytes).join(); store.savePlan(f.receipt.replacement).join()
-                store.saveInventoryTransaction(f.transaction).join(); store.save(f.after).join()
+                store.save(f.after).join()
             }
+            writeLegacyInventoryReceipt(root, f.transaction)
             CivsStore(root, Executor { it.run() }).use { store ->
                 store.load().join().single() shouldBe f.after
                 store.loadInventoryTransactions().join().single() shouldBe f.transaction

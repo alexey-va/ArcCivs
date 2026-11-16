@@ -72,7 +72,7 @@ class CivsMineAutoFallbackTest : FunSpec({
                     Gson().fromJson(Gson().toJson(tx), CivInventoryTransaction::class.java).validated().after shouldBe completed
                     val directory = Files.createTempDirectory("arc-civs-mine-fallback-receipt-")
                     try {
-                        CivsStore(directory, Executor(Runnable::run)).use { store -> store.saveInventoryTransaction(tx).join() shouldBe tx }
+                        writeLegacyInventoryReceipt(directory, tx)
                         CivsStore(directory, Executor(Runnable::run)).use { restarted ->
                             val accepted = restarted.loadInventoryTransactions().join().single()
                             accepted.after shouldBe completed

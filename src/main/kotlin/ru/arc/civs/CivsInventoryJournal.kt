@@ -10,7 +10,7 @@ import java.util.logging.Level
 
 private val STORAGE_BLOCK_IDS = CIVS_STORAGE_TYPES.mapTo(hashSetOf()) { it.lowercase() }
 
-/** Main-thread receipt state machine: source fence, durable intent, native reconcile, publication and retirement. */
+/** Main-thread inventory state machine. New intents live in RAM; only pre-existing disk receipts use crash fences. */
 internal class CivsInventoryJournal(
     private val plugin: Plugin,
     private val tasks: LifecycleTaskScope,
@@ -42,6 +42,7 @@ internal class CivsInventoryJournal(
     private val collectedNextAt = mutableMapOf<UUID, Long>()
     private val inventoryRecovery = linkedMapOf<UUID, CivInventoryTransaction>()
     private val blockedRecovery = mutableSetOf<UUID>()
+    private val activeRamReceipts = mutableSetOf<UUID>()
     val pendingCount: Int get() = inventoryRecovery.size
     val blockedCount: Int get() = blockedRecovery.size
     fun pending(cityId: UUID): Boolean = cityId in inventoryRecovery
@@ -124,7 +125,7 @@ internal class CivsInventoryJournal(
             result.completeExceptionally(failure)
             updateHealth()
         }
-        val sourceFence = runCatching { storage.persistCollected(tx, beforeJournal = true) }
+        val sourceFence = runCatching { storage.persistCollected(tx, beforeJournal = true, durable = false) }
             .getOrElse { abort(it); return result }
         sourceFence.whenCompleteSync(tasks) { _, failure ->
             if (failure != null) return@whenCompleteSync abort(failure)
@@ -206,12 +207,14 @@ internal class CivsInventoryJournal(
         val id = tx.id
         busy += cityId
         val result = tracked<Settlement>()
+        activeRamReceipts += id
         store.saveInventoryTransaction(tx).whenCompleteSync(tasks) { _, failure ->
             if (failure != null) {
                 val rejection = CivsDiagnostics.rejection(failure)
-                if (rejection?.reason in setOf("storage-transaction-too-large", "ground-history-full", "ground-item-consumed")) {
+                if (rejection?.reason in setOf("storage-transaction-too-large", "ground-history-full", "ground-item-consumed", "stale-city", "no-city")) {
                     // These admission failures precede the journal write; no native mutation has started.
                     storage.unlock(id)
+                    activeRamReceipts -= id
                     if (tx.collected != null) collectedWorldBusy.remove(tx.after.worldId, tx.id)
                     busy -= cityId
                     result.completeExceptionally(rejection)
@@ -307,7 +310,7 @@ internal class CivsInventoryJournal(
                     }
                 }
             }
-            when (val applied = storage.reconcile(tx)) {
+            when (val applied = storage.reconcile(tx, persistPlayer = tx.id !in activeRamReceipts)) {
                 is CivInventoryApplyResult.Retry -> {
                     if (tx.cargoDropoff != null || tx.cargoPickup != null || tx.trade != null) collectedNextAt[tx.after.worldId] = now() + 5_000
                     return fail(CivsRejection("inventory-recovery", applied.values), retry = true)
@@ -347,16 +350,28 @@ internal class CivsInventoryJournal(
                     }
                 }
                 if (changedHolders.isNotEmpty()) storage.invalidateSupplyPositions(tx.after.worldId, changedHolders)
-                store.completeInventoryTransaction(tx).whenCompleteSync(tasks) { saved, failure ->
+                val completion = store.completeInventoryTransaction(tx)
+                // Both submissions happen in this Main turn. DRAIN is queued after the accepted city and UUID state,
+                // even if shutdown prevents the later publication callback from running.
+                val accepted = if (tx.id in activeRamReceipts && !tx.collected?.ground.isNullOrEmpty())
+                    completion.thenCombine(store.markConsumedItems(tx)) { city, consumed -> city to consumed }
+                else completion.thenApply { city -> city to null }
+                accepted.whenCompleteSync(tasks) { state, failure ->
                     if (failure != null) return@whenCompleteSync fail(CivsRejection("inventory-recovery").also { it.initCause(failure) })
-                    publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
+                    val (saved, consumed) = requireNotNull(state)
+                    consumed?.let(storage::installConsumed)
+                    publish(saved).whenCompleteSync(tasks) { _, publishFailure ->
                         if (publishFailure != null) return@whenCompleteSync fail(publishFailure)
                         requestResurrectionAdmission(tx)
                         finishInventory(tx, result)
                     }
                 }
             }
-            if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null && tx.trade == null && !tx.mixedBufferPickup()) commit()
+            if (tx.id in activeRamReceipts) {
+                // RAM mode performs the after-state check synchronously and never schedules native persistence.
+                storage.persistCollected(tx, durable = false)
+                commit()
+            } else if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null && tx.trade == null && !tx.mixedBufferPickup()) commit()
             else persistCollectedReceipt(tx).whenCompleteSync(tasks) { _, persistenceFailure ->
                 if (persistenceFailure != null) fail(CivsRejection("inventory-recovery").also { it.initCause(persistenceFailure) },
                     retry = retryCollectedPersistence(tx, persistenceFailure))
@@ -365,10 +380,10 @@ internal class CivsInventoryJournal(
         }.onFailure { fail(it) }
     }
 
-    /** Native after-state first, then a permanent UUID fence, then the caller may publish its one city credit. */
+    /** Validate native after-state and reserve its consumed UUIDs before publishing the city credit. */
     private fun persistCollectedReceipt(tx: CivInventoryTransaction): CompletableFuture<Unit> {
         val result = tracked<Unit>()
-        runCatching { storage.persistCollected(tx) }.getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { _, failure ->
+        runCatching { storage.persistCollected(tx, durable = tx.id !in activeRamReceipts) }.getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { _, failure ->
             if (failure != null) result.completeExceptionally(failure)
             else if (closed) result.completeExceptionally(CivsRejection("not-ready"))
             else if (tx.collected?.ground.isNullOrEmpty()) result.complete(Unit)
@@ -398,6 +413,7 @@ internal class CivsInventoryJournal(
             busy -= tx.cityId
             if (failure == null) {
                 inventoryRecovery.remove(tx.cityId)
+                activeRamReceipts -= tx.id
                 unhealthy -= tx.cityId
                 blockedRecovery -= tx.cityId
                 storage.unlock(tx.id)
@@ -423,6 +439,7 @@ internal class CivsInventoryJournal(
                 result?.completeExceptionally(CivsRejection("inventory-recovery"))
             } else {
                 inventoryRecovery.remove(tx.cityId)
+                activeRamReceipts -= tx.id
                 unhealthy -= tx.cityId
                 blockedRecovery -= tx.cityId
                 storage.unlock(tx.id)
@@ -469,7 +486,7 @@ internal class CivsInventoryJournal(
                     return@runCatching
                 }
                 if (city.revision == tx.after.revision || tx.trade != null || tx.residentTransfer != null || tx.resurrection != null || tx.collected != null ||
-                    tx.containerRelocation != null || tx.cargoDropoff != null || tx.cargoPickup != null) when (val applied = storage.reconcile(tx)) {
+                    tx.containerRelocation != null || tx.cargoDropoff != null || tx.cargoPickup != null) when (val applied = storage.reconcile(tx, persistPlayer = tx.id !in activeRamReceipts)) {
                     is CivInventoryApplyResult.Retry -> {
                         if (tx.cargoDropoff != null || tx.cargoPickup != null || tx.trade != null) collectedNextAt[tx.after.worldId] = now() + 5_000
                         busy -= city.id; unhealthy += city.id; return@runCatching
@@ -530,6 +547,7 @@ internal class CivsInventoryJournal(
                         collectedWorldBusy.clear()
                         blockedRecovery.clear()
                         inventoryRecovery.putAll(retained.associateBy { it.cityId })
+                        activeRamReceipts.retainAll(retained.map { it.id }.toSet())
                         storage.completeReceiptBootstrap(retained, consumed)
                         cosmetic.forEach { tx ->
                             CivsDiagnostics.event("autonomous_visual_journal_retired", "city" to tx.cityId,

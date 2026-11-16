@@ -246,19 +246,31 @@ class CivsFarmExpansionScenarioTest : FunSpec({
             harvest.outputs shouldBe mapOf("WHEAT" to 1L, "WHEAT_SEEDS" to 2L)
             harvest.changes.single().after shouldBe "minecraft:air"
             val before = city
-            val seedsBefore = CivsEquipment.plainCount(before.workers.single(), "WHEAT_SEEDS")
+            val farmerBefore = before.workers.single()
+            val seedsBefore = CivsEquipment.plainCount(farmerBefore, "WHEAT_SEEDS")
+            checkpoint()
+
             val pending = observedCompletion(harvest)
-            var writes = 0
-            while (receipts().isEmpty()) { check(writes++ < 32); persistOne() shouldBe true }
-            val receipt = receipts().single()
+            val receipt = admittedInventoryIntent()
             receipt.worldChanges shouldBe harvest.changes
             CivsEquipment.plainCount(receipt.after.workers.single(), "WHEAT_SEEDS") shouldBe seedsBefore + 2
+            CivsEquipment.plainCount(receipt.after.workers.single(), "WHEAT") shouldBe CivsEquipment.plainCount(farmerBefore, "WHEAT") + 1
+            pending.isDone shouldBe false
+            receipts() shouldBe emptyList()
             savedCity() shouldBe before
-            state(harvest.focus!!) shouldBe "minecraft:wheat[age=7]"
+            val crop = requireNotNull(harvest.focus)
+            state(crop) shouldBe "minecraft:wheat[age=7]"
             restart()
             pending.isCompletedExceptionally shouldBe true
-            city shouldBe receipt.after
-            state(harvest.focus!!) shouldBe "minecraft:air"
+            city shouldBe before
+            state(crop) shouldBe "minecraft:wheat[age=7]"
+            receipts() shouldBe emptyList()
+
+            // Seed a separate pre-upgrade crash image on the same checkpointed before-city.
+            seedLegacyInventoryReceipt(receipt)
+            restart()
+            advanceUntil("legacy harvest publication") { city == receipt.after }
+            state(crop) shouldBe "minecraft:air"
             val recovered = city
             restart()
             city shouldBe recovered
@@ -313,6 +325,7 @@ class CivsFarmExpansionScenarioTest : FunSpec({
             city.workers.size shouldBe 1
             receipts() shouldBe emptyList()
             val completed = city
+            checkpoint()
             restart()
             city shouldBe completed
         }

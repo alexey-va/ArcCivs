@@ -12,12 +12,12 @@ internal const val CIVS_RESIDENT_CURSOR_SLOT = -1
 /** Plain stacks keep the small legacy representation; custom components retain native bytes. */
 data class CivResidentItem(val material: String, val amount: Int, val data: String? = null) {
     fun validated(): CivResidentItem = apply {
-        require(material.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) && amount in 1..64)
+        require(material.matches(MATERIAL) && amount in 1..64)
         data?.let { require(it.length <= 32_768 && Base64.getDecoder().decode(it).size <= 24_576) }
     }
 
     internal fun validatedConstruction(): CivResidentItem = apply {
-        require(material.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) && amount in 1..99)
+        require(material.matches(MATERIAL) && amount in 1..99)
         data?.let { require(it.length <= CivsStore.MAX_INVENTORY_TRANSACTION_BYTES && Base64.getDecoder().decode(it).isNotEmpty()) }
     }
 
@@ -34,6 +34,8 @@ data class CivResidentItem(val material: String, val amount: Int, val data: Stri
     }
 
     companion object {
+        private val MATERIAL = Regex("[A-Z][A-Z0-9_]{0,63}")
+
         fun of(item: ItemStack?): CivResidentItem? = encode(item, false)
         internal fun ofConstruction(item: ItemStack?): CivResidentItem? = encode(item, true)
 

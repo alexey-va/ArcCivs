@@ -14,22 +14,19 @@ import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.playerstate.PaperPlayerDataPersistence
 import ru.arc.paper.testing.MockBukkitTestRuntime
-import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
-import java.util.concurrent.Executor
 
 class CivsTradeJournalTest : FunSpec({
     lateinit var h: TradeJournalFixture
     beforeEach { h = TradeJournalFixture() }
     afterEach { h.close() }
 
-    test("trade fences native preimages and credits before it publishes or retires the accepted receipt") {
-        val source = CompletableFuture<Unit>()
-        val after = CompletableFuture<Unit>()
-        val fences = mutableListOf<Boolean>()
-        h.persistence = { _, before -> fences += before; if (before) source else after }
+    test("new trade keeps native locks until publication without player or container persistence") {
+        h.persistence = { _, _ -> error("A new trade must not force native persistence") }
+        val published = CompletableFuture<Unit>()
+        h.publication = published
         val before = h.city
         val tx = h.prepare()
         val result = h.journal.submitTrade(before, tx) {
@@ -37,105 +34,127 @@ class CivsTradeJournalTest : FunSpec({
             h.storage.hasClaim(before) shouldBe true
             CivsTrade.checkAccess(before, h.player)
         }
-        (before.id in h.busy) shouldBe true
-        h.playerSaves.single().first() shouldBe ItemStack(Material.EMERALD, 1)
-        verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
-        h.barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 64)
-        source.complete(Unit); h.ticks()
+        h.ticks()
         h.player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
         h.barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
-        h.city shouldBe before
+        h.playerSaves shouldBe emptyList()
         result.isDone shouldBe false
-        h.playerSaves.last().first() shouldBe ItemStack(Material.COBBLESTONE, 32)
-        fences shouldBe listOf(true, false)
+        h.storage.hasClaim(before) shouldBe true
         verify(exactly = 0) { h.store.save(any()) }
         verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
-        after.complete(Unit); h.ticks()
+        published.complete(Unit); h.ticks()
         result.join() shouldBe tx.after
-        h.storage.hasClaim(tx.after) shouldBe false
+        h.storage.hasClaim(before) shouldBe false
+        h.journal.pendingCount shouldBe 0
         h.journal.recover(); h.ticks()
         h.player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
-        h.barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
         verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
         verify(exactly = 1) { h.store.deleteInventoryTransaction(tx.id) }
     }
 
-    test("leaving the public market during its source fence cancels an untouched trade before journal admission") {
-        val source = CompletableFuture<Unit>()
-        h.persistence = { _, before -> if (before) source else CompletableFuture.completedFuture(Unit) }
+    test("native after-state submits RAM completion in the same Main turn before a shutdown can drain") {
+        h.persistence = { _, _ -> error("No native persistence") }
+        val completion = CompletableFuture<Settlement>()
         val before = h.city
         val tx = h.prepare()
-        val result = h.journal.submitTrade(before, tx) { CivsTrade.checkAccess(before, h.player) }
+        every { h.store.completeInventoryTransaction(tx) } returns completion
+        h.journal.submitTrade(before, tx)
+        repeat(12) {
+            if (h.player.inventory.getItem(0)?.type == Material.EMERALD) h.oneTick()
+        }
+        h.player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
+        // No next-tick persistence callback separates the native writes from this storage-lane admission.
+        verify(exactly = 1) { h.store.completeInventoryTransaction(tx) }
+        h.storage.hasClaim(before) shouldBe true
+        completion.complete(tx.after); h.ticks()
+        h.storage.hasClaim(tx.after) shouldBe false
+    }
+
+    test("known stale RAM admission releases locks and does not create a false recovery intent") {
+        val before = h.city
+        val tx = h.prepare()
+        every { h.store.saveInventoryTransaction(tx) } returns CompletableFuture.failedFuture(CivsRejection("stale-city"))
+        val result = h.journal.submitTrade(before, tx)
+        h.ticks()
+        shouldThrow<CompletionException> { result.join() }
+        h.journal.pendingCount shouldBe 0
+        h.storage.hasClaim(before) shouldBe false
+        h.player.inventory.getItem(0) shouldBe ItemStack(Material.EMERALD, 1)
+        val next = h.prepare()
+        val accepted = h.journal.submitTrade(before, next)
+        h.ticks()
+        accepted.join() shouldBe next.after
+    }
+
+    test("expired fresh trade authority cancels before RAM admission or native mutation") {
+        h.persistence = { _, _ -> error("No native persistence") }
+        val before = h.city
+        val tx = h.prepare()
         h.player.teleport(Location(h.world, 40.0, 64.0, 3.0))
-        source.complete(Unit); h.ticks()
+        val result = h.journal.submitTrade(before, tx) { CivsTrade.checkAccess(before, h.player) }
+        h.ticks()
         shouldThrow<CompletionException> { result.join() }
         h.player.inventory.getItem(0) shouldBe ItemStack(Material.EMERALD, 1)
         h.barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 64)
+        h.playerSaves shouldBe emptyList()
         h.city shouldBe before
         h.storage.hasClaim(before) shouldBe false
         h.journal.pendingCount shouldBe 0
         verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
     }
 
-    test("an unknown native save acknowledgement recovers the durable accepted trade without a new offer or payout") {
-        val after = CompletableFuture<Unit>()
-        h.persistence = { _, before -> if (before) CompletableFuture.completedFuture(Unit) else after }
+    test("failure after native mutation retains the RAM intent and reload retries without double credit or persistence") {
+        h.persistence = { _, _ -> error("A same-process retry must stay in RAM mode") }
         val before = h.city
         val tx = h.prepare()
-        val result = h.journal.submitTrade(before, tx) { CivsTrade.checkAccess(before, h.player) }
+        every { h.store.completeInventoryTransaction(tx) } returns CompletableFuture.failedFuture(IllegalStateException("RAM lane rejected completion"))
+        val result = h.journal.submitTrade(before, tx)
         h.ticks()
-        after.completeExceptionally(CivsNativePersistenceRetry("trade region acknowledgement unknown")); h.ticks()
         shouldThrow<CompletionException> { result.join() }
         h.city shouldBe before
-        h.journal.pendingCount shouldBe 1
+        h.player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
+        h.barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
         h.storage.hasClaim(before) shouldBe true
-        val root = Files.createTempDirectory("trade-recovery-")
-        val stored = try {
-            CivsStore(root, Executor { it.run() }).use { store ->
-                store.saveInventoryTransaction(tx).join() shouldBe tx
-                store.loadInventoryTransactions().join().single()
-            }
-        } finally { root.toFile().deleteRecursively() }
-        every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(stored))
-        h.persistence = { _, _ -> CompletableFuture.completedFuture(Unit) }
-        h.player.teleport(Location(h.world, 40.0, 64.0, 3.0))
+        h.journal.pendingCount shouldBe 1
+        every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+        every { h.store.completeInventoryTransaction(tx) } returns CompletableFuture.completedFuture(tx.after)
         val bootstrap = h.journal.bootstrap(); h.ticks(); bootstrap.join()
-        h.time += 5_000
         h.journal.recover(); h.ticks()
         h.city shouldBe tx.after
+        h.storage.hasClaim(tx.after) shouldBe false
+        h.journal.pendingCount shouldBe 0
+        h.playerSaves shouldBe emptyList()
         h.player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
         h.barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
         h.barrel.storageContents.filterNotNull().filter { it.type == Material.EMERALD }.sumOf { it.amount } shouldBe 1
-        h.journal.recover(); h.ticks()
-        h.player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
         verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
-        verify(exactly = 1) { h.store.deleteInventoryTransaction(tx.id) }
     }
 
-    test("disconnecting during the native credit fence waits for rejoin without permanently blocking recovery") {
+    test("a legacy disk trade keeps its native persistence fence until recovery finishes") {
         val after = CompletableFuture<Unit>()
-        h.persistence = { _, before -> if (before) CompletableFuture.completedFuture(Unit) else after }
+        val fences = mutableListOf<Boolean>()
+        h.persistence = { _, before -> fences += before; after }
         val before = h.city
         val tx = h.prepare()
-        val result = h.journal.submitTrade(before, tx)
-        h.ticks()
-        h.player.disconnect()
+        every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+        val bootstrap = h.journal.bootstrap(); h.ticks(); bootstrap.join()
+        h.player.teleport(Location(h.world, 40.0, 64.0, 3.0))
+        h.journal.recover(); h.ticks()
+        h.city shouldBe before
+        h.player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
+        h.storage.hasClaim(before) shouldBe true
+        fences shouldBe listOf(false)
+        h.playerSaves.size shouldBe 1
         after.complete(Unit); h.ticks()
-        shouldThrow<CompletionException> { result.join() }
-        h.city shouldBe before
-        h.journal.pendingCount shouldBe 1
-        h.journal.blockedCount shouldBe 0
-        h.time += 5_000
-        h.journal.recover(); h.ticks()
-        h.city shouldBe before
-        h.player.reconnect()
-        h.persistence = { _, _ -> CompletableFuture.completedFuture(Unit) }
-        h.journal.recover(); h.ticks()
         h.city shouldBe tx.after
+        h.storage.hasClaim(tx.after) shouldBe false
+        h.journal.pendingCount shouldBe 0
+        h.journal.recover(); h.ticks()
         h.player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
         h.barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 32)
-        verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
+        verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
     }
+
 })
 
 private class TradeJournalFixture : AutoCloseable {
@@ -157,6 +176,7 @@ private class TradeJournalFixture : AutoCloseable {
     val busy = mutableSetOf<UUID>()
     private val unhealthy = mutableSetOf<UUID>()
     var time = 10_000L
+    var publication: CompletableFuture<Unit> = CompletableFuture.completedFuture(Unit)
     var persistence: (CivInventoryTransaction, Boolean) -> CompletableFuture<Unit> = { _, _ -> CompletableFuture.completedFuture(Unit) }
     val journal: CivsInventoryJournal
     init {
@@ -175,11 +195,12 @@ private class TradeJournalFixture : AutoCloseable {
         storage.persistCollectedNative = { tx, before -> persistence(tx, before) }
         every { store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
         every { store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+        every { store.completeInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg<CivInventoryTransaction>().after) }
         every { store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
         every { store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(emptyList())
         every { store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
         journal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy, unhealthy, { false },
-            { saved -> city = saved; CompletableFuture.completedFuture(Unit) },
+            { saved -> city = saved; publication },
             { _, _ -> error("Unexpected trade city mutation") }, {}, { error("No collection receipt") },
             { _, _, _ -> null }, {}, { tx, _ -> cities.getValue(tx.cityId) }, {}, { time })
     }
@@ -190,6 +211,7 @@ private class TradeJournalFixture : AutoCloseable {
         return CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1),
             plan.changes, trade = plan.trade).also(storage::seal)
     }
+    fun oneTick() { paper.performTicks(1) }
     fun ticks() { paper.performTicks(8) }
     override fun close() { tasks.close(); storage.close(); paper.close() }
 }

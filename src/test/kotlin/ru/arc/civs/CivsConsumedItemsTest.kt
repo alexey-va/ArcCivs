@@ -37,6 +37,26 @@ class CivsConsumedItemsTest : FunSpec({
         Files.list(root.resolve("consumed-ground")).use { it.count() } shouldBe 1L
     }
 
+    test("failed UUID checkpoint retains pending IDs and a later stage survives the earlier flush") {
+        val world = UUID.randomUUID()
+        val first = UUID(0, 1)
+        val second = UUID(0, 2)
+        val history = CivsConsumedItems()
+        history.stage(root, world, listOf(first)).size shouldBe 1
+        val blocked = root.resolve("consumed-ground")
+        Files.writeString(blocked, "broken directory")
+        shouldThrow<IllegalArgumentException> { history.flush(root) }
+        history.stage(root, world, listOf(second)).size shouldBe 2
+        Files.delete(blocked)
+        history.flush(root)
+        val third = UUID(0, 3)
+        history.stage(root, world, listOf(third)).size shouldBe 3
+        CivsConsumedItems().load(root).size shouldBe 2
+        history.flush(root)
+        val reopened = CivsConsumedItems().load(root)
+        listOf(first, second, third).forEach { (it in reopened) shouldBe true }
+    }
+
     test("corrupt checksum unexpected paths and symlink buckets fail closed") {
         val world = UUID.randomUUID()
         CivsConsumedItems().mark(root, world, listOf(UUID(0, 1)))
@@ -73,6 +93,8 @@ class CivsConsumedItemsTest : FunSpec({
         CivsConsumedItems().mark(root, first.after.worldId,
             (1 until CivConsumedItemIndex.MAX_BUCKET_ITEMS).map { UUID(0, it.toLong()) })
         val store = CivsStore(root, Executor(Runnable::run))
+        store.save(first.after.copy(revision = first.beforeRevision)).join()
+        store.save(second.after.copy(revision = second.beforeRevision)).join()
         store.saveInventoryTransaction(first).join() shouldBe first
         val failure = shouldThrow<CompletionException> { store.saveInventoryTransaction(second).join() }
         CivsDiagnostics.rejection(failure)?.reason shouldBe "ground-history-full"
@@ -81,22 +103,27 @@ class CivsConsumedItemsTest : FunSpec({
         store.markConsumedItems(first).join().size shouldBe CivConsumedItemIndex.MAX_BUCKET_ITEMS
         store.saveInventoryTransaction(first).join() shouldBe first
         store.markConsumedItems(first).join().size shouldBe CivConsumedItemIndex.MAX_BUCKET_ITEMS
+        store.deleteInventoryTransaction(first.id).join()
         store.close()
     }
 
-    test("marker needs its exact durable receipt and remains after that receipt retires") {
+    test("RAM marker needs its exact intent and becomes durable with the checkpoint") {
         val receipt = consumedReceipt(UUID.randomUUID())
         val store = CivsStore(root, Executor(Runnable::run))
         shouldThrow<CompletionException> { store.markConsumedItems(receipt).join() }
         store.loadConsumedItems().join().size shouldBe 0
+        store.save(receipt.after.copy(revision = receipt.beforeRevision)).join()
         store.saveInventoryTransaction(receipt).join()
         store.markConsumedItems(receipt).join().size shouldBe 1
         store.deleteInventoryTransaction(receipt.id).join() shouldBe true
+        CivsStore(root, Executor(Runnable::run)).loadConsumedItems().join().size shouldBe 0
+        store.flush().join()
         val reopened = CivsStore(root, Executor(Runnable::run))
         reopened.loadInventoryTransactions().join() shouldBe emptyList()
         val id = receipt.collected!!.ground.single().entityId
         (id in reopened.loadConsumedItems().join()) shouldBe true
         val duplicate = consumedReceipt(id)
+        reopened.save(duplicate.after.copy(revision = duplicate.beforeRevision)).join()
         val failure = shouldThrow<CompletionException> { reopened.saveInventoryTransaction(duplicate).join() }
         CivsDiagnostics.rejection(failure)?.reason shouldBe "ground-item-consumed"
         reopened.loadInventoryTransactions().join() shouldBe emptyList()

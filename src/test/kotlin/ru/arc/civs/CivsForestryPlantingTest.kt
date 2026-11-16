@@ -508,9 +508,9 @@ class CivsTreelessForestryBootstrapTest : FunSpec({
             try {
                 CivsStore(directory, Executor(Runnable::run)).use { store ->
                     store.save(city).join()
-                    store.saveInventoryTransaction(receipt).join()
                 }
-                // Simulate a crash after the accepted receipt wrote its soil, before its root.
+                writeLegacyInventoryReceipt(directory, receipt)
+                // Old crash image: the soil was written, but the root was not.
                 val soil = work.changes.single { it.after == "minecraft:dirt" }
                 world.getBlockAt(soil.position.x, soil.position.y, soil.position.z).blockData = Bukkit.createBlockData(soil.after)
                 val restored = CivsStore(directory, Executor(Runnable::run)).use { it.loadInventoryTransactions().join().single() }

@@ -8,6 +8,7 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeSameInstanceAs
 import io.mockk.every
 import io.mockk.mockk
+import org.bukkit.Bukkit
 import org.bukkit.ChunkSnapshot
 import org.bukkit.Location
 import org.bukkit.Material
@@ -711,6 +712,48 @@ class CivsNavigationSnapshotsTest : FunSpec({
             val completed = requireNotNull(request.captures).single()
             completed.blocks shouldBe before.blocks
             for ((point, block) in before.blocks) completed.blocks[point] shouldBeSameInstanceAs block
+        }
+    }
+
+    test("job cell candidate slots preserve ordered edges across fractional heights ladders and initial offsets") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            val slab = Bukkit.createBlockData(Material.STONE_SLAB)
+            val ladder = Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
+            fun terrain(): CitizenSnapshotTerrain = flatSnapshotTerrain(0, 0, mapOf(
+                CivPosition(3, 62, 2) to Bukkit.createBlockData(Material.AIR), CivPosition(3, 63, 2) to slab,
+                CivPosition(4, 64, 2) to ladder, CivPosition(4, 65, 2) to ladder)).also {
+                it.states[slab] = CitizenSnapshotState(CitizenTerrainShape(false, false, false, false,
+                    listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                        CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, .9375, 1.0))), false)
+                it.states[ladder] = CitizenSnapshotState(CitizenTerrainShape(false, false, true, false, emptyList()), false)
+            }
+            fun capture(terrain: CitizenSnapshotTerrain, probe: CitizenSearchProbe): CitizenSearchCapture =
+                requireNotNull(CitizenSnapshotCapture(listOf(probe), terrain,
+                    CitizenSnapshotPolicy({ _, _ -> true }, { _, _ -> true }, supportCost = { _, _ -> 1.0 }),
+                    -64, 320, 32768, 1, false).advance(CitizenSnapshotInput()).captures).single()
+            val normal = CitizenSearchNode(2, 64.0, 2)
+            val initial = normal.copy(initial = true)
+            val probes = listOf(CitizenSearchProbe(normal, normal.point()),
+                CitizenSearchProbe(initial, CitizenPoint(2.25, 64.0, 2.75)),
+                CitizenSearchProbe(CitizenSearchNode(3, 63.5, 3), CitizenPoint(3.5, 63.5, 3.5)),
+                CitizenSearchProbe(CitizenSearchNode(4, 64.0, 2, climbing = true), CitizenPoint(4.5, 64.0, 2.5)))
+            val local = terrain()
+            val captures = (probes + probes).map { probe -> capture(local, probe).also { got ->
+                got.edges shouldBe citizenSearchCandidates(probe, got.blocks.toMap(), -64, 320)
+            } }
+            val first = captures[0]
+            val repeated = captures[4]
+            fun standing(capture: CitizenSearchCapture, y: Double) = capture.edges.single {
+                it.node.x == 3 && it.node.z == 2 && it.node.y.toBits() == y.toBits() && !it.node.climbing }.node
+            standing(first, 63.5) shouldBeSameInstanceAs standing(repeated, 63.5)
+            (standing(first, 63.9375) === standing(repeated, 63.9375)) shouldBe false
+            (standing(first, 63.5) === standing(first, 63.9375)) shouldBe false
+            captures[1].edges.single { it.node.x == 2 && it.node.z == 2 && it.node.y == 64.0 && !it.node.climbing }.node.initial shouldBe false
+            val firstClimb = captures[3].edges.first { it.node.climbing }.node
+            val nextClimb = captures[7].edges.first { it.node == firstClimb }.node
+            (firstClimb === nextClimb) shouldBe false
+            val anotherJob = capture(terrain(), probes[0])
+            (standing(first, 63.5) === standing(anotherJob, 63.5)) shouldBe false
         }
     }
 

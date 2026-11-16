@@ -232,14 +232,14 @@ class CivsCargoRedirectionTest : FunSpec({
         verify(exactly = 1) { h.store.deleteInventoryTransaction(tx.id) }
     }
 
-    test("an unknown journal acknowledgement recovers the same batch from the durable receipt exactly once") {
+    test("an unknown admission acknowledgement reloads the same active cargo intent exactly once") {
         h.redirect()
         val tx = h.prepare()
         val accepted = CompletableFuture<CivInventoryTransaction>()
         every { h.store.saveInventoryTransaction(any()) } returns accepted
         val before = h.city
         val result = h.journal.submit(tx)
-        accepted.completeExceptionally(IOException("journal rename outcome was unknown")); h.ticks()
+        accepted.completeExceptionally(IOException("RAM admission outcome was unknown")); h.ticks()
         shouldThrow<CompletionException> { result.join() }
         h.city shouldBe before
         h.inventory(h.alternative.id).isEmpty shouldBe true
@@ -257,51 +257,61 @@ class CivsCargoRedirectionTest : FunSpec({
         verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
     }
 
-    test("native persistence acknowledgement fences city debit and replay does not duplicate a written slot") {
+    test("RAM completion fences city debit and reloading an active dropoff does not duplicate its slot") {
         h.redirect()
         val tx = h.prepare()
-        val persisted = CompletableFuture<Unit>()
-        h.persistence = { _, _ -> persisted }
+        val completion = CompletableFuture<Settlement>()
+        every { h.store.completeInventoryTransaction(tx) } returns completion
         val before = h.city
         val result = h.journal.submit(tx); h.ticks()
         h.inventory(h.alternative.id).getItem(0) shouldBe ItemStack(Material.TORCH, 1)
         h.city shouldBe before
         h.journal.pendingCount shouldBe 1
+        h.storage.hasClaim(before) shouldBe true
         result.isDone shouldBe false
-        verify(exactly = 0) { h.store.save(tx.after) }
-        persisted.completeExceptionally(CivsNativePersistenceRetry("region acknowledgement was unknown")); h.ticks()
+        h.nativePersistenceCalls shouldBe 0
+        verify(exactly = 0) { h.store.deleteInventoryTransaction(tx.id) }
+        completion.completeExceptionally(IllegalStateException("RAM completion acknowledgement was unknown")); h.ticks()
         shouldThrow<CompletionException> { result.join() }
-        h.persistence = { _, _ -> CompletableFuture.completedFuture(Unit) }
+        every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+        every { h.store.completeInventoryTransaction(tx) } returns CompletableFuture.completedFuture(tx.after)
         h.denied += requireNotNull(h.alternative.control) // Already accepted after-state needs no second credit.
-        h.time += 5_000; h.journal.recover(); h.ticks()
+        val boot = h.journal.bootstrap(); h.ticks(); boot.join()
+        h.journal.recover(); h.ticks()
         h.city shouldBe tx.after
         h.worker.cargo shouldBe null
         h.inventory(h.alternative.id).getItem(0) shouldBe ItemStack(Material.TORCH, 1)
         h.worker.completedCycles shouldBe before.workers.single().completedCycles + 1
         h.journal.pendingCount shouldBe 0
+        h.nativePersistenceCalls shouldBe 0
+        verify(exactly = 1) { h.store.deleteInventoryTransaction(tx.id) }
     }
 
-    test("typed receipts roundtrip through the actual store and historical cargo receipts retain generic recovery") {
+    test("RAM cargo intent rejects altered retries and legacy cargo retains generic recovery") {
+        val initial = h.city
         h.redirect()
         val tx = h.prepare()
         val oldDocument = Gson().toJsonTree(tx).asJsonObject.also { it.remove("cargoDropoff") }
         val historical = Gson().fromJson(oldDocument, CivInventoryTransaction::class.java).validated()
         val root = Files.createTempDirectory("cargo-journal-")
-        try {
+        val restored = try {
             CivsStore(root, Executor { it.run() }).use { store ->
+                store.save(initial).join()
+                store.save(h.city).join()
                 store.saveInventoryTransaction(tx).join() shouldBe tx
                 store.loadInventoryTransactions().join() shouldBe listOf(tx)
                 store.saveInventoryTransaction(tx).join() shouldBe tx
                 shouldThrow<CompletionException> { store.saveInventoryTransaction(tx.copy(
                     cargoDropoff = tx.cargoDropoff!!.copy(acceptedAt = tx.cargoDropoff!!.acceptedAt + 1))).join() }
-                store.deleteInventoryTransaction(tx.id).join()
-                store.saveInventoryTransaction(historical).join() shouldBe historical
-                store.loadInventoryTransactions().join() shouldBe listOf(historical)
+                store.deleteInventoryTransaction(tx.id).join() shouldBe true
             }
+            writeLegacyInventoryReceipt(root, historical)
+            CivsStore(root, Executor { it.run() }).use { store -> store.loadInventoryTransactions().join().single() }
         } finally { root.toFile().deleteRecursively() }
-        historical.cargoDropoff shouldBe null
+        restored shouldBe historical
+        restored.cargoDropoff shouldBe null
         h.storage.unlock(tx.id)
-        every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(historical))
+        every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(restored))
         h.persistence = { _, _ -> error("Historical generic receipts retain their original recovery contract") }
         h.journal.bootstrap(); h.ticks(); h.journal.recover(); h.ticks()
         h.city shouldBe tx.after
@@ -360,6 +370,8 @@ internal class CargoRedirectionFixture : AutoCloseable {
     var arrivals = 0
     var time = 10_000L
     var persistence: (CivInventoryTransaction, Boolean) -> CompletableFuture<Unit> = { _, _ -> CompletableFuture.completedFuture(Unit) }
+    var nativePersistenceCalls = 0
+        private set
     val journal: CivsInventoryJournal
     init {
         for (x in -1..2) for (z in -1..1) world.loadChunk(x, z)
@@ -376,7 +388,10 @@ internal class CargoRedirectionFixture : AutoCloseable {
             "nordic", Stock(), listOf(hall, source, target, alternative), listOf(courier),
             inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy()))
         storage.foodCanModify = { _, point -> point !in denied }
-        storage.persistCollectedNative = { tx, before -> persistence(tx, before) }
+        storage.persistCollectedNative = { tx, before ->
+            nativePersistenceCalls++
+            persistence(tx, before)
+        }
         every { store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
         every { store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
         every { store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)

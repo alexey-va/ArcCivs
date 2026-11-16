@@ -39,8 +39,8 @@ class CivsForestryTest : FunSpec({
             } shouldBe before.workers.single()
             CivsStore(directory, Executor(Runnable::run)).use { store ->
                 store.save(before).join()
-                store.saveInventoryTransaction(receipt).join() shouldBe receipt
             }
+            writeLegacyInventoryReceipt(directory, receipt)
             CivsStore(directory, Executor(Runnable::run)).use { store ->
                 store.loadInventoryTransactions().join().single().validated() shouldBe receipt
             }
@@ -1442,8 +1442,8 @@ class CivsForestryTest : FunSpec({
             receipt.validated() shouldBe receipt
             CivsStore(root, Executor(Runnable::run)).use { store ->
                 store.save(before).join()
-                store.saveInventoryTransaction(receipt).join() shouldBe receipt
             }
+            writeLegacyInventoryReceipt(root, receipt)
             CivsStore(root, Executor(Runnable::run)).use { reopened ->
                 reopened.loadInventoryTransactions().join().single() shouldBe receipt
                 reopened.save(partial).join()
@@ -1490,8 +1490,8 @@ class CivsForestryTest : FunSpec({
             receipt.after.forestryJobs shouldBe null
             CivsStore(directory, Executor(Runnable::run)).use { store ->
                 store.save(before).join()
-                store.saveInventoryTransaction(receipt).join() shouldBe receipt
             }
+            writeLegacyInventoryReceipt(directory, receipt)
             CivsStore(directory, Executor(Runnable::run)).use { store ->
                 val replay = store.loadInventoryTransactions().join().single()
                 replay.validated() shouldBe receipt

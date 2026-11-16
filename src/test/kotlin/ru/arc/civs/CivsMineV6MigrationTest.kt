@@ -169,7 +169,7 @@ class CivsMineV6MigrationTest : FunSpec({
                             mine = CivMineReceipt(mine, previous, null, work)).validated()
                         CivsStore(root, Executor(Runnable::run)).use { store ->
                             store.save(city).join()
-                            store.saveInventoryTransaction(transaction).join()
+                            writeLegacyInventoryReceipt(root, transaction)
                             val restored = store.loadInventoryTransactions().join().single().validated()
                             if (alreadyApplied) target.blockData = Bukkit.createBlockData(cell.after)
                             world.getBlockAt(rung.x, rung.y, rung.z).type = Material.AIR
@@ -293,8 +293,8 @@ class CivsMineV6MigrationTest : FunSpec({
                 worldChanges = work.changes, mine = CivMineReceipt(mine, city.minePlans!!.getValue(mine.id.toString()), null, work)).validated()
             val root = Files.createTempDirectory("arc-civs-v5-journal-")
             try {
+                writeLegacyInventoryReceipt(root, transaction)
                 CivsStore(root, Executor(Runnable::run)).use { store ->
-                    store.saveInventoryTransaction(transaction).join() shouldBe transaction
                     val restored = store.loadInventoryTransactions().join().single()
                     restored.mine!!.work.miningPlanVersion shouldBe 5
                     LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->

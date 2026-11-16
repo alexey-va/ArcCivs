@@ -92,8 +92,9 @@ class CivsGateCleanProfileTest : FunSpec({
                 store.savePlan(old.receipt.replacement).join()
                 store.saveSchematic(clean.receipt.replacement.id, clean.replacementBytes).join()
                 store.savePlan(clean.receipt.replacement).join()
-                store.saveInventoryTransaction(clean.transaction).join(); store.save(clean.after).join()
+                store.save(clean.after).join()
             }
+            writeLegacyInventoryReceipt(directory, clean.transaction)
             CivsStore(directory, Executor { it.run() }).use { store ->
                 store.load().join().single() shouldBe clean.after
                 store.loadPlan(old.receipt.replacement.id).join() shouldBe old.receipt.replacement

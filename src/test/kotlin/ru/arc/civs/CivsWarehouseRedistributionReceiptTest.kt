@@ -8,7 +8,6 @@ import io.mockk.every
 import io.mockk.verify
 import org.bukkit.Material
 import org.bukkit.inventory.ItemStack
-import java.io.IOException
 import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -79,12 +78,10 @@ class CivsWarehouseRedistributionReceiptTest : FunSpec({
         h.storage.unlock(id)
     }
 
-    test("the source persistence fence owns city busy and its claim before any competing receipt can start") {
+    test("pre-admission source checks retain the city claim and reject an actor who leaves") {
         val cargo = warehouseCargo(h)
         val before = h.city
         val tx = warehousePickup(h, cargo)
-        val sourceAck = CompletableFuture<Unit>()
-        h.persistence = { _, source -> if (source) sourceAck else CompletableFuture.completedFuture(Unit) }
         val result = h.journal.submitCargoPickup(before, tx) {
             (before.id in h.busy) shouldBe true
             h.storage.hasClaim(before) shouldBe true
@@ -95,53 +92,53 @@ class CivsWarehouseRedistributionReceiptTest : FunSpec({
         verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         h.inventory(h.target.id).getItem(0) shouldBe ItemStack(Material.TORCH, 10)
         h.arrived = false
-        sourceAck.complete(Unit); h.ticks()
-        shouldThrow<CompletionException> { result.join() }
+        h.ticks()
+        (shouldThrow<CompletionException> { result.join() }.cause as CivsRejection).reason shouldBe "route-unreachable"
         h.city shouldBe before
         h.inventory(h.target.id).getItem(0) shouldBe ItemStack(Material.TORCH, 10)
         CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 0
         (before.id in h.busy) shouldBe false
         h.storage.hasClaim(before) shouldBe false
+        h.nativePersistenceCalls shouldBe 0
         h.journal.pendingCount shouldBe 0
         verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
     }
 
-    test("a filled destination after the async source fence cancels the untouched pickup before intent") {
+    test("a filled destination before admission cancels the untouched pickup") {
         val cargo = warehouseCargo(h)
         val before = h.city
         val tx = warehousePickup(h, cargo)
-        val sourceAck = CompletableFuture<Unit>()
-        h.persistence = { _, source -> if (source) sourceAck else CompletableFuture.completedFuture(Unit) }
         val result = h.journal.submitCargoPickup(before, tx) {
             h.requireArrival()
             h.storage.requireRedistributionCapacity(before, cargo, emptyList())
         }
         h.fill(h.alternative.id)
-        sourceAck.complete(Unit); h.ticks()
-        shouldThrow<CompletionException> { result.join() }
+        h.ticks()
+        (shouldThrow<CompletionException> { result.join() }.cause as CivsRejection).reason shouldBe "stale-delivery"
+        h.nativePersistenceCalls shouldBe 0
         h.inventory(h.target.id).getItem(0) shouldBe ItemStack(Material.TORCH, 10)
         CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 0
         h.journal.pendingCount shouldBe 0
         verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
     }
 
-    test("an unknown native debit acknowledgement cannot publish its bag credit and recovers the paid batch once") {
+    test("RAM completion gates bag credit after the exact native debit") {
         val cargo = warehouseCargo(h)
         val before = h.city
         val tx = warehousePickup(h, cargo)
-        val afterAck = CompletableFuture<Unit>()
-        h.persistence = { _, source -> if (source) CompletableFuture.completedFuture(Unit) else afterAck }
+        val completion = CompletableFuture<Settlement>()
+        every { h.store.completeInventoryTransaction(tx) } returns completion
         val result = h.journal.submitCargoPickup(before, tx) { h.requireArrival() }; h.ticks()
         h.inventory(h.target.id).getItem(0) shouldBe null
         h.city shouldBe before
         CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 0
         result.isDone shouldBe false
-        verify(exactly = 0) { h.store.save(tx.after) }
-        afterAck.completeExceptionally(CivsNativePersistenceRetry("warehouse source region acknowledgement is unknown")); h.ticks()
-        shouldThrow<CompletionException> { result.join() }
-        h.persistence = { _, _ -> CompletableFuture.completedFuture(Unit) }
-        h.arrived = false // Accepted recovery owns its source proof; it needs no surviving old actor.
-        h.time += 5_000; h.journal.recover(); h.ticks()
+        h.storage.hasClaim(before) shouldBe true
+        h.nativePersistenceCalls shouldBe 0
+        verify(exactly = 0) { h.store.deleteInventoryTransaction(tx.id) }
+        h.arrived = false // Accepted intent keeps its source proof after the actor leaves.
+        completion.complete(tx.after); h.ticks()
+        result.join() shouldBe tx.after
         h.city shouldBe tx.after
         CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 10
         h.worker.cargo shouldBe cargo.copy(inventoryBacked = true)
@@ -149,37 +146,45 @@ class CivsWarehouseRedistributionReceiptTest : FunSpec({
         h.worker.completedCycles shouldBe 0L
         h.journal.recover(); h.ticks()
         CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 10
-        verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
+        h.storage.hasClaim(before) shouldBe false
+        h.nativePersistenceCalls shouldBe 0
+        verify(exactly = 1) { h.store.completeInventoryTransaction(tx) }
     }
 
-    test("unknown journal acknowledgement restarts from the actual durable pickup DTO without an actor or duplicate debit") {
+    test("legacy pickup recovery retries an unknown native acknowledgement without an actor or duplicate debit") {
         val cargo = warehouseCargo(h)
         val before = h.city
         val tx = warehousePickup(h, cargo)
         val root = Files.createTempDirectory("warehouse-pickup-")
         val stored = try {
-            CivsStore(root, Executor { it.run() }).use { store ->
-                store.saveInventoryTransaction(tx).join() shouldBe tx
-                store.loadInventoryTransactions().join().single()
-            }
+            CivsStore(root, Executor { it.run() }).use { it.save(before).join() }
+            writeLegacyInventoryReceipt(root, tx)
+            CivsStore(root, Executor { it.run() }).use { it.loadInventoryTransactions().join().single() }
         } finally { root.toFile().deleteRecursively() }
-        val accepted = CompletableFuture<CivInventoryTransaction>()
-        every { h.store.saveInventoryTransaction(any()) } returns accepted
-        val result = h.journal.submitCargoPickup(before, tx) { h.requireArrival() }
-        accepted.completeExceptionally(IOException("warehouse intent rename outcome unknown")); h.ticks()
-        shouldThrow<CompletionException> { result.join() }
-        h.inventory(h.target.id).getItem(0) shouldBe ItemStack(Material.TORCH, 10)
-        CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 0
+        stored shouldBe tx
         every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(stored))
+        val nativeAck = CompletableFuture<Unit>()
+        h.persistence = { _, source -> source shouldBe false; nativeAck }
         h.arrived = false
         val boot = h.journal.bootstrap(); h.ticks(); boot.join()
+        h.inventory(h.target.id).getItem(0) shouldBe ItemStack(Material.TORCH, 10)
         h.journal.recover(); h.ticks()
+        h.inventory(h.target.id).getItem(0) shouldBe null
+        h.city shouldBe before
+        CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 0
+        h.nativePersistenceCalls shouldBe 1
+        nativeAck.completeExceptionally(CivsNativePersistenceRetry("warehouse source region acknowledgement is unknown")); h.ticks()
+        h.journal.pendingCount shouldBe 1
+        h.journal.blockedCount shouldBe 0
+        h.persistence = { _, _ -> CompletableFuture.completedFuture(Unit) }
+        h.time += 5_000; h.journal.recover(); h.ticks()
         h.city shouldBe tx.after
         h.inventory(h.target.id).getItem(0) shouldBe null
         CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 10
         h.journal.recover(); h.ticks()
         CivsEquipment.plainCount(h.worker, "TORCH") shouldBe 10
-        verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
+        h.nativePersistenceCalls shouldBe 2
+        verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
     }
 
     test("the typed source proof rejects foreign holders extra credit and unsupported historical marker assumptions") {

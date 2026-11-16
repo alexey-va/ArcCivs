@@ -127,61 +127,71 @@ class CivsStoreCheckpointTest : FreeSpec({
         CivsStore(root, direct).load().join().associateBy { it.id } shouldBe mapOf(city.id to latest, other.id to otherLatest)
     }
 
-    "native admission first checkpoints intervening ordinary revisions" {
-        val city = checkpointCity()
-        val store = CivsStore(root, direct)
-        store.save(city).join()
-        val rested = city.copy(revision = 1, workers = city.workers.map { it.copy(hunger = 19) })
-        store.stage(rested).join()
-        val tx = checkpointTransaction(rested, 3, 2)
-        store.saveInventoryTransaction(tx).join()
-        store.saveInventoryTransaction(tx).join()
-        store.checkpointStats().fullCityWrites[CivsCheckpointReason.BEFORE_NATIVE] shouldBe 1L
-        store.checkpointStats().fullCityWrites[CivsCheckpointReason.PERIODIC] shouldBe 0L
-        val reopened = CivsStore(root, direct)
-        reopened.loadInventoryTransactions().join() shouldBe listOf(tx)
-        reopened.load().join() shouldBe listOf(rested)
-        shouldThrow<CompletionException> { store.stage(tx.after).join() }
-    }
-
-    "native completion does not encode a second full city and ordinary revisions do not encode at all" {
+    "ordinary and two same-slot native operations use RAM without JSON or filesystem access" {
         mockkConstructor(Gson::class, localToThread = true) {
-            every { anyConstructed<Gson>().toJson(match<Any> { it.javaClass.simpleName == "CityDocument" }) } answers { callOriginal() }
             val city = checkpointCity()
             val store = CivsStore(root, direct)
             store.save(city).join()
-            store.stage(city.copy(revision = 1)).join()
-            store.stage(city.copy(revision = 2)).join()
-            verify(exactly = 1) { anyConstructed<Gson>().toJson(match<Any> { it.javaClass.simpleName == "CityDocument" }) }
+            store.loadInventoryTransactions().join()
+            store.loadConsumedItems().join()
+            val original = Files.readAllBytes(cityFile(root, city))
+            val hidden = root.resolveSibling(root.fileName.toString() + "-hidden")
+            Files.move(root, hidden)
+            Files.writeString(root, "No filesystem operations are available here")
+            val latest: Settlement
+            try {
+                val rested = city.copy(revision = 1, workers = city.workers.map { it.copy(hunger = 19) })
+                store.stage(rested).join()
+                val first = checkpointTransaction(rested, 3, 2)
+                store.saveInventoryTransaction(first).join() shouldBe first
+                store.saveInventoryTransaction(first).join() shouldBe first
+                shouldThrow<CompletionException> { store.saveInventoryTransaction(first.copy(id = UUID.randomUUID())).join() }
+                store.completeInventoryTransaction(first).join() shouldBe first.after
+                store.completeInventoryTransaction(first).join() shouldBe first.after
+                store.deleteInventoryTransaction(first.id).join() shouldBe true
+                val second = checkpointTransaction(first.after, 2, 1)
+                store.saveInventoryTransaction(second).join()
+                latest = store.completeInventoryTransaction(second).join()
+                store.deleteInventoryTransaction(second.id).join() shouldBe true
+                verify(exactly = 1) { anyConstructed<Gson>().toJson(any<Any>()) }
+                store.checkpointStats().fullCityWrites[CivsCheckpointReason.BEFORE_NATIVE] shouldBe 0L
+                store.checkpointStats().dirtyCities shouldBe 1
+            } finally {
+                Files.delete(root)
+                Files.move(hidden, root)
+            }
+            Files.readAllBytes(cityFile(root, city)).contentEquals(original) shouldBe true
+            Files.exists(root.resolve("inventory-transactions")) shouldBe false
+            Files.exists(root.resolve("inventory-completed")) shouldBe false
+            // An abrupt restart may roll back this suffix, but must never invent a receipt or replay native slots.
+            CivsStore(root, direct).loadInventoryTransactions().join() shouldBe emptyList()
+            CivsStore(root, direct).load().join() shouldBe listOf(city)
             store.flush().join()
-            val tx = checkpointTransaction(city.copy(revision = 2), 3, 2)
-            store.saveInventoryTransaction(tx).join()
-            store.completeInventoryTransaction(tx).join()
-            store.deleteInventoryTransaction(tx.id).join()
-            // Initial city + one coalesced flush + the existing receipt admission size check.
-            verify(exactly = 3) { anyConstructed<Gson>().toJson(match<Any> { it.javaClass.simpleName == "CityDocument" }) }
+            CivsStore(root, direct).load().join() shouldBe listOf(latest)
         }
     }
 
-    "completed native receipt supplies the durable city without rewriting its full snapshot" {
+    "completed RAM intent graphs retire while only the latest city remains dirty" {
         val city = checkpointCity()
         val store = CivsStore(root, direct)
         store.save(city).join()
-        val original = Files.readAllBytes(cityFile(root, city))
-        val tx = checkpointTransaction(city, 3, 2)
-        store.saveInventoryTransaction(tx).join()
-        store.completeInventoryTransaction(tx).join() shouldBe tx.after
-        store.deleteInventoryTransaction(tx.id).join() shouldBe true
-        Files.readAllBytes(cityFile(root, city)).contentEquals(original) shouldBe true
-        Files.exists(receiptFile(root, tx)) shouldBe true
-        (Files.size(root.resolve("inventory-completed/${city.id}.json")) < 1_024L) shouldBe true
-        val reopened = CivsStore(root, direct)
-        reopened.loadInventoryTransactions().join() shouldBe emptyList()
-        reopened.load().join() shouldBe listOf(tx.after)
-        shouldThrow<CompletionException> { store.saveInventoryTransaction(tx.copy(changes = emptyList())).join() }
+        var latest = city
+        repeat(100) {
+            val tx = checkpointTransaction(latest, 3, 2)
+            store.saveInventoryTransaction(tx).join()
+            latest = store.completeInventoryTransaction(tx).join()
+            store.deleteInventoryTransaction(tx.id).join()
+        }
+        val field = CivsStore::class.java.getDeclaredField("activeReceipts").apply { isAccessible = true }
+        (field.get(store) as Map<*, *>).size shouldBe 0
+        store.loadInventoryTransactions().join() shouldBe emptyList()
+        store.checkpointStats().dirtyCities shouldBe 1
+        store.checkpointStats().fullCityWrites[CivsCheckpointReason.EXPLICIT_SAVE] shouldBe 1L
+        store.flush().join()
+        CivsStore(root, direct).load().join() shouldBe listOf(latest)
     }
 
-    "two successive transactions on the same native slot never replay the first after head replacement" {
+    "retired UUID cannot be admitted after a later revision even when native slots return to its before image" {
         val city = checkpointCity()
         val store = CivsStore(root, direct)
         store.save(city).join()
@@ -189,82 +199,112 @@ class CivsStoreCheckpointTest : FreeSpec({
         store.saveInventoryTransaction(first).join()
         store.completeInventoryTransaction(first).join()
         store.deleteInventoryTransaction(first.id).join()
-        val second = checkpointTransaction(first.after, 2, 1)
+        // A later operation creates the native ABA image. Its newer city revision is still authoritative.
+        val second = checkpointTransaction(first.after, 2, 3)
         store.saveInventoryTransaction(second).join()
-
-        // Crash while the second native transfer is pending: the first is the exact durable before-city.
-        val pendingRestart = CivsStore(root, direct)
-        pendingRestart.loadInventoryTransactions().join() shouldBe listOf(second)
-        pendingRestart.load().join() shouldBe listOf(first.after)
         store.completeInventoryTransaction(second).join()
-
-        // Crash after the second head ACK but before retirement of the first receipt.
-        Files.exists(receiptFile(root, first)) shouldBe true
-        Files.exists(receiptFile(root, second)) shouldBe true
-        val completedRestart = CivsStore(root, direct)
-        completedRestart.loadInventoryTransactions().join() shouldBe emptyList()
-        completedRestart.load().join() shouldBe listOf(second.after)
         store.deleteInventoryTransaction(second.id).join()
-        Files.exists(receiptFile(root, first)) shouldBe false
-        Files.exists(receiptFile(root, second)) shouldBe true
+        shouldThrow<CompletionException> { store.saveInventoryTransaction(first).join() }
+        store.loadInventoryTransactions().join() shouldBe emptyList()
+        store.flush().join()
+        CivsStore(root, direct).load().join() shouldBe listOf(second.after)
     }
 
-    "periodic snapshot covers and retires the receipt while its small watermark remains valid" {
+    "same-process reload preserves an accepted RAM intent and its exact retry" {
         val city = checkpointCity()
         val store = CivsStore(root, direct)
         store.save(city).join()
         val tx = checkpointTransaction(city, 3, 2)
         store.saveInventoryTransaction(tx).join()
-        store.completeInventoryTransaction(tx).join()
-        val ordinary = tx.after.copy(revision = 2, workers = tx.after.workers.map { it.copy(hunger = 18) })
-        store.stage(ordinary).join()
+        store.loadInventoryTransactions().join() shouldBe listOf(tx)
+        store.load().join() shouldBe listOf(city)
+        store.saveInventoryTransaction(tx).join() shouldBe tx
+        shouldThrow<CompletionException> { store.saveInventoryTransaction(tx.copy(id = UUID.randomUUID())).join() }
+        store.completeInventoryTransaction(tx).join() shouldBe tx.after
+        // A reload between acceptance and Main publication must still finish this same in-process operation.
+        store.loadInventoryTransactions().join() shouldBe listOf(tx)
+        store.load().join() shouldBe listOf(tx.after)
+        store.completeInventoryTransaction(tx).join() shouldBe tx.after
+        store.deleteInventoryTransaction(tx.id).join()
+        store.loadInventoryTransactions().join() shouldBe emptyList()
+    }
+
+    "legacy pending recovery finishes durably before a new RAM operation" {
+        val city = checkpointCity()
+        CivsStore(root, direct).save(city).join()
+        val legacy = checkpointTransaction(city, 3, 2)
+        writeLegacyInventoryReceipt(root, legacy)
+        val store = CivsStore(root, direct)
+        store.loadInventoryTransactions().join() shouldBe listOf(legacy)
+        shouldThrow<CompletionException> { store.saveInventoryTransaction(legacy.copy(id = UUID.randomUUID())).join() }
+        store.completeInventoryTransaction(legacy).join() shouldBe legacy.after
+        store.deleteInventoryTransaction(legacy.id).join()
+        Files.exists(receiptFile(root, legacy)) shouldBe false
+        CivsStore(root, direct).load().join() shouldBe listOf(legacy.after)
+        val next = checkpointTransaction(legacy.after, 2, 1)
+        store.saveInventoryTransaction(next).join()
+        store.completeInventoryTransaction(next).join()
+        store.deleteInventoryTransaction(next.id).join()
+        Files.exists(receiptFile(root, next)) shouldBe false
+        CivsStore(root, direct).load().join() shouldBe listOf(legacy.after)
         store.flush().join()
-        Files.exists(receiptFile(root, tx)) shouldBe false
-        Files.exists(root.resolve("inventory-completed/${city.id}.json")) shouldBe true
+        CivsStore(root, direct).load().join() shouldBe listOf(next.after)
+    }
+
+    "legacy completed heads consolidate before admission and never resurrect an older city" {
+        val city = checkpointCity()
+        CivsStore(root, direct).save(city).join()
+        val legacy = checkpointTransaction(city, 3, 2)
+        writeLegacyInventoryReceipt(root, legacy, completed = true)
+        val store = CivsStore(root, direct)
+        store.loadInventoryTransactions().join() shouldBe emptyList()
+        Files.exists(receiptFile(root, legacy)) shouldBe false
+        CivsStore(root, direct).load().join() shouldBe listOf(legacy.after)
+        val next = checkpointTransaction(legacy.after, 2, 1)
+        store.saveInventoryTransaction(next).join()
+        store.completeInventoryTransaction(next).join()
+        store.deleteInventoryTransaction(next.id).join()
+        store.flush().join()
         val reopened = CivsStore(root, direct)
         reopened.loadInventoryTransactions().join() shouldBe emptyList()
-        reopened.load().join() shouldBe listOf(ordinary)
+        reopened.load().join() shouldBe listOf(next.after)
     }
 
-    "missing completed payload fails closed until a durable city snapshot covers the head" {
+    "missing legacy completed payload fails closed until a full snapshot covers its head" {
         val city = checkpointCity()
-        val store = CivsStore(root, direct)
-        store.save(city).join()
+        CivsStore(root, direct).save(city).join()
         val tx = checkpointTransaction(city, 3, 2)
-        store.saveInventoryTransaction(tx).join()
-        store.completeInventoryTransaction(tx).join()
+        writeLegacyInventoryReceipt(root, tx, completed = true)
         Files.delete(receiptFile(root, tx))
         shouldThrow<CompletionException> { CivsStore(root, direct).loadInventoryTransactions().join() }
         shouldThrow<CompletionException> { CivsStore(root, direct).load().join() }
-        store.flush().join()
+        Files.writeString(cityFile(root, city), Gson().toJson(mapOf("schemaVersion" to CivsStore.SCHEMA_VERSION, "city" to tx.after)))
         CivsStore(root, direct).loadInventoryTransactions().join() shouldBe emptyList()
         CivsStore(root, direct).load().join() shouldBe listOf(tx.after)
     }
 
-    "a covered full snapshot ignores corrupt obsolete receipt bytes during bootstrap" {
+    "a covered full snapshot ignores and retires corrupt obsolete legacy receipt bytes" {
         val city = checkpointCity()
-        val store = CivsStore(root, direct)
-        store.save(city).join()
         val tx = checkpointTransaction(city, 3, 2)
-        store.saveInventoryTransaction(tx).join()
-        store.completeInventoryTransaction(tx).join()
-        store.flush().join()
+        CivsStore(root, direct).apply { save(city).join(); save(tx.after).join() }
+        writeLegacyInventoryReceipt(root, tx, completed = true)
         Files.writeString(receiptFile(root, tx), "{obsolete broken bytes")
         val reopened = CivsStore(root, direct)
         reopened.loadInventoryTransactions().join() shouldBe emptyList()
         reopened.load().join() shouldBe listOf(tx.after)
+        Files.exists(receiptFile(root, tx)) shouldBe false
         val next = checkpointTransaction(tx.after, 2, 1)
         reopened.saveInventoryTransaction(next).join()
-        Files.exists(receiptFile(root, tx)) shouldBe false
         reopened.loadInventoryTransactions().join() shouldBe listOf(next)
     }
 
-    "an uncertain head acknowledgement recovers its completed state without replaying the native receipt" {
+    "an uncertain legacy head acknowledgement recovers the old accepted state without native replay" {
         val city = checkpointCity()
-        val store = CivsStore(root, direct)
-        store.save(city).join()
+        CivsStore(root, direct).save(city).join()
         val tx = checkpointTransaction(city, 3, 2)
-        store.saveInventoryTransaction(tx).join()
+        writeLegacyInventoryReceipt(root, tx)
+        val store = CivsStore(root, direct)
+        store.loadInventoryTransactions().join()
         mockkConstructor(AtomicFileStore::class, localToThread = true) {
             every { anyConstructed<AtomicFileStore<Any>>().write(match { it.javaClass.simpleName == "InventoryCompletionHead" }) } answers {
                 callOriginal()
@@ -276,6 +316,31 @@ class CivsStoreCheckpointTest : FreeSpec({
         reopened.loadInventoryTransactions().join() shouldBe emptyList()
         reopened.load().join() shouldBe listOf(tx.after)
         store.completeInventoryTransaction(tx).join() shouldBe tx.after
+    }
+
+    "a queued checkpoint acknowledgement does not erase later accepted revisions" {
+        val city = checkpointCity()
+        CivsStore(root, direct).save(city).join()
+        val queue = ArrayDeque<Runnable>()
+        val store = CivsStore(root, Executor { queue.addLast(it) })
+        val first = city.copy(revision = 1)
+        val second = city.copy(revision = 2)
+        val third = city.copy(revision = 3)
+        val one = store.stage(first)
+        val checkpoint = store.flush()
+        val two = store.stage(second)
+        val three = store.stage(third)
+        repeat(2) { queue.removeFirst().run() }
+        one.join() shouldBe first
+        checkpoint.join()
+        CivsStore(root, direct).load().join() shouldBe listOf(first)
+        while (queue.isNotEmpty()) queue.removeFirst().run()
+        two.join() shouldBe second; three.join() shouldBe third
+        store.checkpointStats().dirtyCities shouldBe 1
+        store.close()
+        while (queue.isNotEmpty()) queue.removeFirst().run()
+        store.drained().join()
+        CivsStore(root, direct).load().join() shouldBe listOf(third)
     }
 
     "flush failure keeps the newest RAM state and still checkpoints unrelated cities" {
@@ -298,6 +363,36 @@ class CivsStoreCheckpointTest : FreeSpec({
         Files.write(path, original)
         store.flush().join()
         CivsStore(root, direct).load().join().associateBy { it.id } shouldBe mapOf(city.id to next, other.id to otherNext)
+    }
+
+    "close drains an already submitted native completion without a Main callback" {
+        val city = checkpointCity()
+        CivsStore(root, direct).save(city).join()
+        val queue = ArrayDeque<Runnable>()
+        val store = CivsStore(root, Executor { queue.addLast(it) })
+        val tx = checkpointTransaction(city, 3, 2)
+        val admitted = store.saveInventoryTransaction(tx)
+        val completed = store.completeInventoryTransaction(tx)
+        store.close()
+        while (queue.isNotEmpty()) queue.removeFirst().run()
+        admitted.join() shouldBe tx
+        completed.join() shouldBe tx.after
+        store.drained().join()
+        CivsStore(root, direct).load().join() shouldBe listOf(tx.after)
+        CivsStore(root, direct).loadInventoryTransactions().join() shouldBe emptyList()
+    }
+
+    "close reports unresolved RAM intent instead of claiming a successful clean drain" {
+        val city = checkpointCity()
+        val store = CivsStore(root, direct)
+        store.save(city).join()
+        val tx = checkpointTransaction(city, 3, 2)
+        store.saveInventoryTransaction(tx).join()
+        store.close()
+        val failure = shouldThrow<CompletionException> { store.drained().join() }.cause as CivsCheckpointFailure
+        failure.failures.keys shouldBe setOf(city.id)
+        CivsStore(root, direct).load().join() shouldBe listOf(city)
+        CivsStore(root, direct).loadInventoryTransactions().join() shouldBe emptyList()
     }
 
     "close drains already accepted buffered changes without a Main thread continuation" {

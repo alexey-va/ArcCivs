@@ -187,14 +187,12 @@ class Auto2MineLavaBoundaryScenarioTest : FunSpec({
                                             snapshot.worldId, snapshot.owner, mine)
                                         val transaction = CivInventoryTransaction(UUID.randomUUID(), snapshot.id, snapshot.revision,
                                             after, emptyList(), worldChanges = work.changes, autonomousVisual = receipt).validated()
-                                        store.saveInventoryTransaction(transaction).join()
-                                        val restored = store.loadInventoryTransactions().join().single().validated()
-                                        storage.lock(restored)
-                                        repeat(2) { storage.reconcile(restored) shouldBe CivInventoryApplyResult.Applied }
-                                        snapshot = restored.after
-                                        store.save(snapshot).join()
-                                        store.deleteInventoryTransaction(restored.id).join() shouldBe true
-                                        storage.unlock(restored.id)
+                                        val acceptedReceipt = store.saveInventoryTransaction(transaction).join().validated()
+                                        storage.lock(acceptedReceipt)
+                                        repeat(2) { storage.reconcile(acceptedReceipt) shouldBe CivInventoryApplyResult.Applied }
+                                        snapshot = store.completeInventoryTransaction(acceptedReceipt).join()
+                                        store.deleteInventoryTransaction(acceptedReceipt.id).join() shouldBe true
+                                        storage.unlock(acceptedReceipt.id)
                                         owner.invalidate(worker.id, work)
                                         snapshot.workers shouldBe city.workers
                                         snapshot.stock shouldBe city.stock

@@ -135,8 +135,8 @@ class CivsMineV7MigrationTest : FunSpec({
                 world.loadChunk(point.x shr 4, point.z shr 4)
                 world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(
                     if (alreadyApplied) work.changes.single().after else work.changes.single().before)
+                writeLegacyInventoryReceipt(root, transaction)
                 CivsStore(root, Executor(Runnable::run)).use { store ->
-                    store.saveInventoryTransaction(transaction).join()
                     val restored = store.loadInventoryTransactions().join().single().validated()
                     LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
                         CivsWorld(plugin, tasks) { listOf(city) }.use { access ->

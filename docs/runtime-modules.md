@@ -1,7 +1,7 @@
 # Runtime modules and extension points
 
 ArcCivs has one settlement engine. Player and autonomous villages share resident
-life, profession work, navigation, native containers and durable item accounting.
+life, profession work, navigation, native containers and item accounting.
 Autonomy supplies planning, staffing and the explicit deficit grants around that
 engine. A feature must not introduce a parallel Auto-only work loop.
 
@@ -16,7 +16,7 @@ and the colony owns a [token-based request manager](https://github.com/ldtteam/m
 
 ArcCivs adopts the separation of responsibilities and explicit work/request
 identity. It retains its own packet residents, owning-thread native capture,
-bounded detached planning and asynchronous inventory journal. It does not need
+bounded detached planning and the shared in-memory inventory journal. It does not need
 the mod's native entity lifecycle, NBT hierarchy or a second request framework.
 These are architectural comparisons; no upstream implementation is imported.
 
@@ -29,15 +29,21 @@ flowchart LR
     resident --> navigation[Shared navigation]
     navigation --> observation[Observed arrival and action]
     observation --> authority[Current native authority]
-    authority --> journal[Existing inventory journal]
+    authority --> journal[In-memory inventory journal]
     journal --> published[Published settlement revision]
+    published --> checkpoint[Staggered city checkpoint]
 ```
 
 Discovery proposes immutable work. It never credits items merely because time
 passed or a route finished. The resident cycle observes the actual action. The
-write lane rechecks the actor proof, permissions and real debit, then persists
-the accepted result before publication. Cosmetic work without items remains
-outside the inventory journal.
+write lane rechecks the actor proof, permissions and real debit, then publishes
+the accepted result in RAM. Ordinary transfers do not write a receipt, completion
+head or city file, and do not force native player/container persistence. The latest
+dirty city is checkpointed every five minutes with per-city staggering; reload and
+clean shutdown drain remaining changes. Crash rollback and item mismatch with
+independently saved native state are accepted. Historical disk receipts retain
+their recovery path. Cosmetic work without items remains outside the inventory
+journal.
 
 ### Resident execution
 
@@ -82,7 +88,7 @@ New producer output leaves two empty slots per physical holder for required
 supplies. Existing contents and accepted receipts keep their original quantities.
 Upgrade preparation can relocate exact native items between existing holders of
 the same building. `CivContainerRelocation` enters the existing inventory journal
-and native persistence fences; it never creates a second transfer journal.
+and native before/after checks; it never creates a second transfer journal.
 Unchanged destination container cells are excluded from schematic paste, including
 their inventory and metadata. Insufficient space prevents the transfer and upgrade.
 
@@ -110,7 +116,7 @@ saved-state integrity. World observations are not snapshot-integrity checks.
 `CivsCityRecords` view lets request owners observe current records without
 granting another publication path. Placement drafts, accepted building orders,
 resident supplies, cargo, storage actions and deletion each keep their own
-request/cursor state in their concrete owner. The root still persists city
+request/cursor state in their concrete owner. The root still checkpoints city
 records and applies accepted inventory receipts through the original journal.
 
 Construction fences are public nearby visual cues, including autonomous upgrades.
@@ -158,8 +164,10 @@ There are three distinct kinds of context:
    A changed target invalidates that action and permits rediscovery; it does not
    make unrelated residents or the town unhealthy.
 3. An accepted inventory/payment receipt owns exact items and an operation
-   identity. Preserve its debit, duplicate suppression and restart recovery.
-   Conflicts here cannot be silently treated as cosmetic drift.
+   identity. Preserve its debit, locks and duplicate suppression while the
+   process runs. Historical disk receipts also retain restart recovery; new
+   operations rely on the next city checkpoint and ordinary native autosave.
+   Conflicts during a running operation cannot be treated as cosmetic drift.
 
 Every native write still checks current modification authority and protects
 containers with contents, control blocks and unrelated buildings. No stale

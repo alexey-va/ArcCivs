@@ -12,10 +12,10 @@ import ru.arc.civs.scenarios.SettlementScenario
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 
-/** Portable component recreation from real city/journal files in one fixture world and JVM. */
+/** Portable recreation from explicit city checkpoints and legacy receipts in one fixture world and JVM. */
 class CivsResidentRestartJourneyTest : FunSpec({
     for (automatic in listOf(false, true))
-    test("a restarted walking forester walks from fresh admission and durably finishes exactly once Auto=$automatic") {
+    test("a restarted walking forester walks from a checkpoint and checkpoints exactly one completion Auto=$automatic") {
         restartJourney(automatic) { journey ->
             journey.walkPartway()
             val before = journey.run.savedCity()
@@ -36,7 +36,7 @@ class CivsResidentRestartJourneyTest : FunSpec({
     }
 
     for (automatic in listOf(false, true))
-    test("recovery reconciles a real arrival receipt once and ignores the retired owner's late callback Auto=$automatic") {
+    test("recovery reconciles an explicit legacy arrival receipt once and ignores the retired owner's late callback Auto=$automatic") {
         restartJourney(automatic) { journey ->
             journey.walkPartway()
             journey.restart()
@@ -46,7 +46,11 @@ class CivsResidentRestartJourneyTest : FunSpec({
             journey.run.savedCity() shouldBe before
             journey.run.receipts() shouldBe emptyList()
             journey.run.persistOne() shouldBe true
-            val receipt = journey.run.receipts().single().validated()
+            val receipt = journey.run.admittedInventoryIntent()
+            journey.run.receipts() shouldBe emptyList()
+            // Model a pre-upgrade disk receipt explicitly; the new ordinary intent remains RAM-only.
+            journey.run.seedLegacyInventoryReceipt(receipt)
+            journey.run.receipts().single().validated() shouldBe receipt
             journey.completedReceipt = receipt.after
             receipt.forestry shouldBe null
             receipt.worldChanges shouldBe journey.work!!.changes
@@ -174,6 +178,8 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
         walked shouldBe positions.zipWithNext().sumOf { (a, b) -> a.distance(b) }
         h.deliveries shouldBe 0
         run.city.workers.single { it.id == h.workerId }.completedCycles shouldBe 0L
+        // This scenario restarts from a clean checkpoint, not from an arbitrary unflushed RAM revision.
+        run.checkpoint()
         run.savedCity() shouldBe run.city
         run.receipts() shouldBe emptyList()
     }
@@ -197,7 +203,7 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
     }
 
     fun finishWalkingAndWork() {
-        until("one durable completion") { callback?.isDone == true && run.pendingIo == 0 && run.receipts().isEmpty() }
+        until("one accepted completion") { callback?.isDone == true && run.pendingIo == 0 && run.receipts().isEmpty() }
         requireNotNull(callback).join()
         (walked > 8.0) shouldBe true
         (positions.size > 40) shouldBe true
@@ -226,6 +232,8 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
         val holder = h.world.getBlockAt(control.x, control.y, control.z).state as org.bukkit.block.Container
         val storedLogs = holder.inventory.storageContents.filterNotNull().filter { it.type == Material.OAK_LOG }.sumOf { it.amount }
         (CivsEquipment.plainCount(after.workers.single { it.id == h.workerId }, "OAK_LOG") + storedLogs) shouldBe 3
+        run.receipts() shouldBe emptyList()
+        run.checkpoint()
         run.savedCity() shouldBe after
         run.receipts() shouldBe emptyList()
     }

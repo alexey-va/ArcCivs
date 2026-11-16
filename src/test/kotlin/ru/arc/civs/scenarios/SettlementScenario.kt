@@ -213,8 +213,31 @@ internal class SettlementScenario private constructor(
     fun dropoffCargo(cityId: UUID, workerId: UUID, cargo: CivCargo, destination: UUID): CompletableFuture<Settlement> =
         service.dropoffCargo(cityId, workerId, cargo, destination)
 
-    /** One real queued filesystem operation, without running the next server callback. */
-    fun persistOne(): Boolean = io.runNext().also { record("filesystem step pending=${io.pending}") }
+    /** One queued storage operation, including RAM admission, without running the next server callback. */
+    fun persistOne(): Boolean = io.runNext().also { record("storage step pending=${io.pending}") }
+
+    /** Explicit clean checkpoint; do not advance resident movement while draining the storage lane. */
+    fun checkpoint() {
+        val pending = store.flush()
+        repeat(2_000) {
+            if (pending.isDone) return pending.join()
+            check(io.runNext()) { "Checkpoint has no queued storage task" }
+        }
+        error("Checkpoint did not finish within 2000 storage steps")
+    }
+
+    /** Inspect an admitted RAM intent before its queued native callback, without making it durable. */
+    fun admittedInventoryIntent(): CivInventoryTransaction {
+        val pending = store.loadInventoryTransactions()
+        repeat(2_000) {
+            if (pending.isDone) return pending.join().single().validated()
+            check(io.runNext()) { "Inventory intent read has no queued storage task" }
+        }
+        error("Inventory intent read did not finish within 2000 storage steps")
+    }
+
+    /** Explicit pre-upgrade fixture; ordinary inventory operations never call this writer. */
+    fun seedLegacyInventoryReceipt(transaction: CivInventoryTransaction) = writeLegacyInventoryReceipt(root, transaction)
 
     fun savedCity(): Settlement = CivsStore(root, Executor(Runnable::run)).use { it.load().join().single() }
     fun receipts(): List<CivInventoryTransaction> = CivsStore(root, Executor(Runnable::run)).use { it.loadInventoryTransactions().join() }

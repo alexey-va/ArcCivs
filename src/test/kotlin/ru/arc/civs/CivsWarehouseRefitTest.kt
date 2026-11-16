@@ -91,7 +91,7 @@ class CivsWarehouseRefitTest : FunSpec({
         f.receipt.before(f.after) shouldBe f.before
     }
 
-    test("immutable old and new captures plus the no-item-change intent survive a real store restart") {
+    test("immutable old and new captures plus the legacy no-item-change intent survive a store restart") {
         val f = warehouseRefitFixture()
         val root = Files.createTempDirectory("civs-warehouse-refit-")
         try {
@@ -101,9 +101,9 @@ class CivsWarehouseRefitTest : FunSpec({
                 store.saveSchematic(f.source.id, f.sourceBytes).join()
                 store.savePlan(f.receipt.replacement).join()
                 store.saveSchematic(f.receipt.replacement.id, f.replacementBytes).join()
-                store.saveInventoryTransaction(f.transaction).join()
                 shouldThrow<CompletionException> { store.saveSchematic(f.source.id, f.replacementBytes).join() }
             }
+            writeLegacyInventoryReceipt(root, f.transaction)
             CivsStore(root, Executor { it.run() }).use { store ->
                 store.loadPlan(f.source.id).join() shouldBe f.source
                 store.loadPlan(f.receipt.replacement.id).join() shouldBe f.receipt.replacement

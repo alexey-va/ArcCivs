@@ -358,7 +358,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val root = Files.createTempDirectory("civs-apple-receipt-")
         try {
             CivsStore(root, Executor(Runnable::run)).use { store ->
-                store.saveInventoryTransaction(tx).join() shouldBe tx
+                writeLegacyInventoryReceipt(root, tx)
                 store.loadInventoryTransactions().join().single().collected!!.food!!.material shouldBe "APPLE"
             }
         } finally { root.toFile().deleteRecursively() }
@@ -614,13 +614,15 @@ class CivsResidentFoodReceiptTest : FunSpec({
 
     test("claim loss after every exact native after-state still completes the one accepted accounting") {
         h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
-        h.storage.persistCollectedNative = { _, before ->
-            if (!before) h.foodAllowed = false
-            CompletableFuture.completedFuture(Unit)
-        }
+        h.storage.persistCollectedNative = { _, _ -> error("No forced native persistence") }
         val tx = h.pickup()
+        val completed = CompletableFuture<Settlement>()
+        every { h.store.completeInventoryTransaction(tx) } returns completed
         val result = h.journal.submitCollected(h.city, tx)
         h.ticks()
+        h.barrel.getItem(0) shouldBe null
+        h.foodAllowed = false
+        completed.complete(tx.after); h.ticks()
         result.join() shouldBe tx.after
         h.foodAllowed shouldBe false
         h.barrel.getItem(0) shouldBe null
@@ -633,7 +635,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val root = Files.createTempDirectory("civs-food-store-")
         try {
             CivsStore(root, Executor(Runnable::run)).use { store ->
-                store.saveInventoryTransaction(tx).join() shouldBe tx
+                writeLegacyInventoryReceipt(root, tx)
                 store.loadInventoryTransactions().join() shouldBe listOf(tx)
                 store.saveInventoryTransaction(tx).join() shouldBe tx
                 shouldThrow<CompletionException> { store.saveInventoryTransaction(tx.copy(after = tx.after.copy(stock = Stock()))).join() }
@@ -642,30 +644,30 @@ class CivsResidentFoodReceiptTest : FunSpec({
     }
 
     for ((material, materializing) in listOf("BREAD" to false, "BREAD" to true, "APPLE" to false)) {
-        test("before-journal disk failure leaves native food stock and bag unchanged material=$material materializing=$materializing") {
+        test("new food transfer does not invoke forced native persistence material=$material materializing=$materializing") {
             h.storage.residentFoods = CivsResidentFoods(mapOf("BREAD" to CivResidentFoodDefinition(6), "APPLE" to CivResidentFoodDefinition(4)))
             if (!materializing) h.barrel.setItem(0, ItemStack(Material.valueOf(material), 4))
-            h.storage.persistCollectedNative = { _, _ -> CompletableFuture.failedFuture(java.io.IOException("before fence")) }
+            h.storage.persistCollectedNative = { _, _ -> error("No per-operation persistence") }
             val tx = if (materializing) h.materialize() else h.pickup(h.source.copy(material = material))
-            val before = h.city
-            val future = h.journal.submitCollected(before, tx)
+            val future = h.journal.submitCollected(h.city, tx)
             h.ticks()
-            shouldThrow<CompletionException> { future.join() }
-            h.city shouldBe before
-            h.barrel.getItem(0)?.amount shouldBe if (materializing) null else 4
-            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            future.join() shouldBe tx.after
+            h.city shouldBe tx.after
+            h.barrel.getItem(0)?.amount shouldBe if (materializing) 4 else null
+            verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
             h.busy.isEmpty() shouldBe true
         }
 
-        test("after-native timeout recovers the same food receipt once material=$material materializing=$materializing") {
+        test("RAM completion failure recovers the same food operation once material=$material materializing=$materializing") {
             h.storage.residentFoods = CivsResidentFoods(mapOf("BREAD" to CivResidentFoodDefinition(6), "APPLE" to CivResidentFoodDefinition(4)))
             if (!materializing) h.barrel.setItem(0, ItemStack(Material.valueOf(material), 4))
-            var afterAttempts = 0
-            h.storage.persistCollectedNative = { _, before ->
-                if (!before && ++afterAttempts == 1) CompletableFuture.failedFuture(CivsNativePersistenceRetry("after fence"))
-                else CompletableFuture.completedFuture(Unit)
-            }
+            h.storage.persistCollectedNative = { _, _ -> error("No forced persistence on RAM retry") }
+            var attempts = 0
             val tx = if (materializing) h.materialize() else h.pickup(h.source.copy(material = material))
+            every { h.store.completeInventoryTransaction(tx) } answers {
+                if (++attempts == 1) CompletableFuture.failedFuture(IllegalStateException("RAM completion unavailable"))
+                else CompletableFuture.completedFuture(tx.after)
+            }
             val before = h.city
             h.journal.reserveCollection(before.worldId, tx.id)
             val future = h.journal.submitCollected(before, tx)
@@ -673,18 +675,20 @@ class CivsResidentFoodReceiptTest : FunSpec({
             shouldThrow<CompletionException> { future.join() }
             h.city shouldBe before
             h.barrel.getItem(0)?.amount shouldBe if (materializing) 4 else null
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+            every { h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
+            val boot = h.journal.bootstrap(); h.ticks(); boot.join()
             h.time += 5_000
-            h.journal.recover()
-            h.ticks()
+            h.journal.recover(); h.ticks()
             h.city shouldBe tx.after
-            h.journal.recover()
-            h.ticks()
+            h.journal.recover(); h.ticks()
             h.city shouldBe tx.after
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
             verify(exactly = 1) { h.store.deleteInventoryTransaction(tx.id) }
-            afterAttempts shouldBe 2
+            attempts shouldBe 2
         }
     }
+
 })
 
 class CivsUpgradeStorageReceiptTest : FunSpec({
@@ -816,26 +820,25 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         shouldThrow<IllegalArgumentException> { proof.copy(unregister = null).validated(before) }
     }
 
-    test("an initially empty changing registration retires only after both native disk fences") {
+    test("empty registration retirement waits for RAM admission and completion without native disk fences") {
         f.configure()
         val before = f.h.city
         val original = f.allItems()
         val tx = f.prepare()
-        val proof = requireNotNull(tx.containerRelocation)
-        proof.changes() shouldBe emptyList()
-        proof.unregister!!.cells.map { it.position } shouldBe listOf(f.source)
-        proof.before(tx.after) shouldBe before
-        val sourceFence = CompletableFuture<Unit>()
-        val afterFence = CompletableFuture<Unit>()
-        f.h.storage.persistCollectedNative = { _, first -> if (first) sourceFence else afterFence }
+        requireNotNull(tx.containerRelocation).changes() shouldBe emptyList()
+        val admitted = CompletableFuture<CivInventoryTransaction>()
+        val completed = CompletableFuture<Settlement>()
+        every { f.h.store.saveInventoryTransaction(tx) } returns admitted
+        every { f.h.store.completeInventoryTransaction(tx) } returns completed
+        f.h.storage.persistCollectedNative = { _, _ -> error("No forced native persistence") }
         val result = f.h.journal.submitRelocation(before, tx)
         f.h.ticks()
         f.h.city shouldBe before
-        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
-        sourceFence.complete(Unit); f.h.ticks()
+        verify(exactly = 1) { f.h.store.saveInventoryTransaction(tx) }
+        admitted.complete(tx); f.h.ticks()
         f.h.city shouldBe before
         result.isDone shouldBe false
-        afterFence.complete(Unit); f.h.ticks()
+        completed.complete(tx.after); f.h.ticks()
         result.join() shouldBe tx.after
         f.h.city.inventory!!.containers shouldBe listOf(f.destination)
         f.allItems() shouldBe original
@@ -853,7 +856,7 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
             CivsStore(root, Executor(Runnable::run)).use { store ->
                 store.save(before).join()
                 if (published) store.save(tx.after).join()
-                store.saveInventoryTransaction(tx).join()
+                writeLegacyInventoryReceipt(root, tx)
                 f.h.city = store.load().join().single()
                 store.loadInventoryTransactions().join().single().also { it shouldBe tx }
             }
@@ -909,6 +912,7 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         val pending = ArrayDeque<Runnable>()
         val root = Files.createTempDirectory("civs-retirement-snapshot-")
         try {
+            CivsStore(root, Executor(Runnable::run)).save(f.h.city).join()
             CivsStore(root, Executor { pending.addLast(it) }).use { store ->
                 val write = store.saveInventoryTransaction(mutable)
                 registered.clear(); cells.clear()
@@ -928,7 +932,6 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         val fence = CompletableFuture<Unit>()
         f.h.storage.persistCollectedNative = { _, _ -> fence }
         val result = f.h.journal.submitRelocation(before, tx)
-        f.h.ticks()
         f.inventory(f.source).setItem(0, ItemStack(Material.DIAMOND, 7))
         fence.complete(Unit); f.h.ticks()
         shouldThrow<CompletionException> { result.join() }
@@ -937,44 +940,39 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
     }
 
-    test("refilling an empty source during the after-native fence cannot publish retired registration") {
+    test("a source refill after accepted native retirement does not roll back the committed city") {
         f.configure()
         val before = f.h.city
         val tx = f.prepare()
-        val fence = CompletableFuture<Unit>()
-        f.h.storage.persistCollectedNative = { _, first -> if (first) CompletableFuture.completedFuture(Unit) else fence }
+        val completed = CompletableFuture<Settlement>()
+        every { f.h.store.completeInventoryTransaction(tx) } returns completed
+        f.h.storage.persistCollectedNative = { _, _ -> error("No forced native persistence") }
         val result = f.h.journal.submitRelocation(before, tx); f.h.ticks()
         result.isDone shouldBe false
         f.inventory(f.source).setItem(0, ItemStack(Material.DIAMOND, 7))
-        fence.complete(Unit); f.h.ticks()
-        shouldThrow<CompletionException> { result.join() }
-        f.h.city shouldBe before
+        completed.complete(tx.after); f.h.ticks()
+        result.join() shouldBe tx.after
+        f.h.city shouldBe tx.after
         f.inventory(f.source).getItem(0) shouldBe ItemStack(Material.DIAMOND, 7)
         verify(exactly = 0) { f.h.store.save(any()) }
-        verify(exactly = 0) { f.h.store.deleteInventoryTransaction(any()) }
+        verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
     }
 
-    test("permission lost during the after-native fence retries the same retirement after permission returns") {
+    test("permission loss after accepted native retirement does not revoke its committed result") {
         f.configure()
         val before = f.h.city
         val original = f.allItems()
         val tx = f.prepare()
-        val fence = CompletableFuture<Unit>()
-        f.h.storage.persistCollectedNative = { _, first -> if (first) CompletableFuture.completedFuture(Unit) else fence }
+        val completed = CompletableFuture<Settlement>()
+        every { f.h.store.completeInventoryTransaction(tx) } returns completed
         val result = f.h.journal.submitRelocation(before, tx); f.h.ticks()
         f.h.foodAllowed = false
-        fence.complete(Unit); f.h.ticks()
-        shouldThrow<CompletionException> { result.join() }
-        f.h.city shouldBe before
-        f.h.journal.pendingCount shouldBe 1
-        f.h.journal.blockedCount shouldBe 0
-        f.allItems() shouldBe original
-        verify(exactly = 0) { f.h.store.save(any()) }
-        f.h.foodAllowed = true
-        f.h.journal.recover(); f.h.ticks()
+        completed.complete(tx.after); f.h.ticks()
+        result.join() shouldBe tx.after
         f.h.city shouldBe tx.after
         f.h.journal.pendingCount shouldBe 0
         f.allItems() shouldBe original
+        verify(exactly = 0) { f.h.store.save(any()) }
         verify(exactly = 1) { f.h.store.saveInventoryTransaction(tx) }
         verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
     }
@@ -1208,7 +1206,7 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         val root = Files.createTempDirectory("civs-cross-building-relocation-")
         val accepted = try {
             CivsStore(root, Executor(Runnable::run)).use { store ->
-                store.saveInventoryTransaction(tx).join()
+                writeLegacyInventoryReceipt(root, tx)
                 store.loadInventoryTransactions().join().single().also { it shouldBe tx }
             }
         } finally { root.toFile().deleteRecursively() }
@@ -1258,7 +1256,7 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         val root = Files.createTempDirectory("civs-upgrade-relocation-")
         val accepted = try {
             CivsStore(root, Executor(Runnable::run)).use { store ->
-                store.saveInventoryTransaction(tx).join() shouldBe tx
+                writeLegacyInventoryReceipt(root, tx)
                 store.loadInventoryTransactions().join().single().also { it shouldBe tx }
             }
         } finally { root.toFile().deleteRecursively() }
@@ -1334,33 +1332,34 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
     }
 
-    test("relocation waits for native source and native after disk fences before publishing the city") {
+    test("relocation preserves admission and publication locks without forcing native saves") {
         f.configure()
         f.fillSource()
         val original = f.items(f.source)
         val before = f.h.city
         val tx = f.prepare()
-        val source = CompletableFuture<Unit>()
-        val after = CompletableFuture<Unit>()
-        f.h.storage.persistCollectedNative = { _, first -> if (first) source else after }
+        val admitted = CompletableFuture<CivInventoryTransaction>()
+        val completed = CompletableFuture<Settlement>()
+        every { f.h.store.saveInventoryTransaction(tx) } returns admitted
+        every { f.h.store.completeInventoryTransaction(tx) } returns completed
+        f.h.storage.persistCollectedNative = { _, _ -> error("No forced native persistence") }
         val result = f.h.journal.submitRelocation(before, tx)
         f.h.ticks()
         result.isDone shouldBe false
         f.items(f.source) shouldBe original
-        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
-        source.complete(Unit); f.h.ticks()
+        verify(exactly = 1) { f.h.store.saveInventoryTransaction(tx) }
+        admitted.complete(tx); f.h.ticks()
         f.items(f.source).all { it == null } shouldBe true
         f.items(f.destination) shouldBe original
         f.h.city shouldBe before
         result.isDone shouldBe false
-        verify(exactly = 1) { f.h.store.saveInventoryTransaction(tx) }
-        after.complete(Unit); f.h.ticks()
+        completed.complete(tx.after); f.h.ticks()
         result.join() shouldBe tx.after
         f.h.city shouldBe tx.after
         verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
     }
 
-    test("an after disk timeout replays the same exact relocation receipt once") {
+    test("RAM completion failure replays the same exact accepted relocation once") {
         f.configure()
         f.fillSource()
         val original = f.items(f.source)
@@ -1369,9 +1368,10 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         var attempts = 0
         var intent = true
         var admissions = 0
-        f.h.storage.persistCollectedNative = { _, first ->
-            if (!first && ++attempts == 1) CompletableFuture.failedFuture(CivsNativePersistenceRetry("after fence"))
-            else CompletableFuture.completedFuture(Unit)
+        f.h.storage.persistCollectedNative = { _, _ -> error("No forced native persistence") }
+        every { f.h.store.completeInventoryTransaction(tx) } answers {
+            if (++attempts == 1) CompletableFuture.failedFuture(IllegalStateException("RAM completion unavailable"))
+            else CompletableFuture.completedFuture(tx.after)
         }
         val result = f.h.journal.submitRelocation(before, tx) { admissions++; check(intent) }
         f.h.ticks()
@@ -1379,6 +1379,9 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         f.h.city shouldBe before
         f.items(f.destination) shouldBe original
         intent = false // An accepted durable transfer recovers independently of the retired player request.
+        every { f.h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+        every { f.h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
+        val boot = f.h.journal.bootstrap(); f.h.ticks(); boot.join()
         f.h.time += 5_000
         repeat(2) { f.h.journal.recover(); f.h.ticks() }
         f.h.city shouldBe tx.after
@@ -1390,23 +1393,25 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
         verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
     }
 
-    test("native source disk failure leaves all items and accounting untouched without a journal") {
+    test("ordinary relocation has no dependency on the native persistence writer") {
         f.configure()
         f.fillSource()
         val original = f.allItems()
         val before = f.h.city
         val tx = f.prepare()
-        f.h.storage.persistCollectedNative = { _, _ -> CompletableFuture.failedFuture(java.io.IOException("source fence")) }
+        f.h.storage.persistCollectedNative = { _, _ -> error("No forced native persistence") }
         val result = f.h.journal.submitRelocation(before, tx)
         f.h.ticks()
-        shouldThrow<CompletionException> { result.join() }
-        f.allItems() shouldBe original
-        f.h.city shouldBe before
+        result.join() shouldBe tx.after
+        f.h.city shouldBe tx.after
+        fun totals(values: Collection<List<CivResidentItem?>>) = values.flatten().filterNotNull()
+            .groupingBy { it.material to it.data }.fold(0L) { sum, item -> sum + item.amount }
+        totals(f.allItems().values) shouldBe totals(original.values)
         f.h.busy.isEmpty() shouldBe true
-        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
+        verify(exactly = 1) { f.h.store.saveInventoryTransaction(tx) }
     }
 
-    test("revoked ephemeral player intent after the source disk fence prevents journal admission and all native moves") {
+    test("revoked ephemeral player intent before RAM admission prevents journal admission and all native moves") {
         f.configure()
         f.fillSource()
         val original = f.allItems()
@@ -1420,7 +1425,6 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
             admissions++
             if (!permitted) throw CivsRejection("not-authorized")
         }
-        f.h.ticks()
         admissions shouldBe 0
         permitted = false
         source.complete(Unit); f.h.ticks()
@@ -1765,6 +1769,7 @@ class CivsConstructionStorageTest : FunSpec({
                     store.loadInventoryTransactions().join() shouldBe listOf(tx)
                     f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
                     store.save(tx.after).join() shouldBe tx.after
+                    store.deleteInventoryTransaction(tx.id).join()
                 }
                 f.h.city = tx.after
                 f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
@@ -1934,7 +1939,7 @@ class CivsConstructionStorageTest : FunSpec({
             f.h.city.inventory!!.bufferStock(f.building.id) shouldBe mapOf("COBBLESTONE" to 70L)
         }
     }
-    test("mixed native and buffered cargo waits for its region save before publishing the same courier bag") {
+    test("mixed native and buffered cargo waits for RAM completion before publishing the same courier bag") {
         UpgradeStorageFixture().use { f ->
             f.configure()
             val hut = f.addReceiver(BuildingType.BUILDER_HUT)
@@ -1983,16 +1988,17 @@ class CivsConstructionStorageTest : FunSpec({
             arrived = true
             f.h.storage.reserve(before, id)
             f.h.storage.seal(tx)
-            val persisted = CompletableFuture<Unit>()
+            val persisted = CompletableFuture<Settlement>()
             every { f.h.store.verifyConstructionReceipt(tx) } returns CompletableFuture.completedFuture(Unit)
-            f.h.storage.persistCollectedNative = { _, source -> if (source) CompletableFuture.completedFuture(Unit) else persisted }
+            every { f.h.store.completeInventoryTransaction(tx) } returns persisted
+            f.h.storage.persistCollectedNative = { _, _ -> error("No forced native persistence") }
             val result = f.h.journal.submitCargoPickup(before, tx)
             f.h.ticks()
             result.isDone shouldBe false
             f.items(f.destination)[5] shouldBe null
             f.h.city shouldBe before
             verify(exactly = 0) { f.h.store.save(after) }
-            persisted.complete(Unit)
+            persisted.complete(after)
             f.h.ticks()
             result.join() shouldBe after
             CivsEquipment.plainCount(f.h.worker, "COAL") shouldBe 2
@@ -2189,6 +2195,9 @@ class CivsConstructionStorageTest : FunSpec({
             val captured = requireNotNull(f.h.storage.prepareConstructionStorage(restart, next.building, listOf(second)))
             val root = Files.createTempDirectory("construction-producer-retry")
             try {
+                Files.createDirectories(root.resolve("cities"))
+                Files.writeString(root.resolve("cities/${restart.id}.json"), com.google.gson.Gson().toJson(
+                    mapOf("schemaVersion" to CivsStore.SCHEMA_VERSION, "city" to restart)))
                 CivsStore(root, Executor { it.run() }).use { store ->
                     store.savePlan(next).join()
                     val saved = store.saveConstructionStorage(CivConstructionStorageSnapshot(id, owner, second, captured.holder.before, next.id)).join()
@@ -2237,6 +2246,7 @@ class CivsConstructionStorageTest : FunSpec({
                 val root = Files.createTempDirectory("construction-registered-site")
                 try {
                     CivsStore(root, Executor { it.run() }).use { store ->
+                        store.save(f.h.city).join()
                         shouldThrow<CompletionException> { store.saveInventoryTransaction(tx).join() }
                         store.savePlan(plan).join()
                         store.saveInventoryTransaction(tx).join()

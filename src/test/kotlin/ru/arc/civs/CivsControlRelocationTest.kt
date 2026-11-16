@@ -497,7 +497,7 @@ class CivsControlRelocationTest : FunSpec({
         }
     }
 
-    test("restart reconciles mixed old and new slots before publishing the new control and never credits twice") {
+    test("restart reconciles a legacy receipt's mixed slots before publishing the new control and never credits twice") {
         ControlRelocationFixture().use { h ->
             h.durable()
             h.oldInventory.setItem(0, ItemStack(Material.DIAMOND, 7))
@@ -506,7 +506,7 @@ class CivsControlRelocationTest : FunSpec({
             h.stagingFence = CompletableFuture.completedFuture(Unit)
             h.installations.install(h.city.id, h.building.id).join()
             val tx = h.prepare()
-            h.store.saveInventoryTransaction(tx).join()
+            h.seedLegacyReceipt(tx)
             val destination = tx.containerRelocation!!.containers.single { it.position == h.replacement }
             h.oldInventory.setItem(0, null)
             h.replacementInventory.setItem(0, destination.after[0]!!.stack())
@@ -831,6 +831,7 @@ private class ControlRelocationFixture(type: BuildingType = BuildingType.SMELTER
             containerRelocation = move).also { storage.seal(it) }
     }
     fun durable() { store.save(city).join() }
+    fun seedLegacyReceipt(tx: CivInventoryTransaction) = writeLegacyInventoryReceipt(requireNotNull(durableRoot), tx)
     fun reload() { city = store.load().join().single(); storage.updateCity(city) }
     fun ticks() { paper.performTicks(20) }
     fun candidate(point: CivPosition, existing: Boolean): CivControlCandidate {

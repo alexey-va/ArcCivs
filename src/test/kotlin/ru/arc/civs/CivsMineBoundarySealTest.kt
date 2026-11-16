@@ -137,14 +137,22 @@ class CivsMineBoundarySealTest : FunSpec({
                             val transaction = CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes,
                                 worldChanges = prepared.worldChanges, mine = prepared.mine).validated()
                             requireNotNull(transaction.mine).work shouldBe work
-                            store.saveInventoryTransaction(transaction).join() shouldBe transaction
-                            val durable = store.loadInventoryTransactions().join().single()
-                            storage.seal(durable, keepViewersOpen = true)
-                            storage.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
-                            storage.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
+                            val accepted = if (retainJournal) {
+                                writeLegacyInventoryReceipt(directory, transaction)
+                                store.loadInventoryTransactions().join().single()
+                            } else store.saveInventoryTransaction(transaction).join()
+                            accepted shouldBe transaction
+                            storage.seal(accepted, keepViewersOpen = true)
+                            storage.reconcile(accepted) shouldBe CivInventoryApplyResult.Applied
+                            storage.reconcile(accepted) shouldBe CivInventoryApplyResult.Applied
                             storage.unlock(id)
-                            city = store.save(durable.after).join()
-                            if (retainJournal) sealed = durable else store.deleteInventoryTransaction(id).join() shouldBe true
+                            if (retainJournal) {
+                                city = store.save(accepted.after).join()
+                                sealed = accepted
+                            } else {
+                                city = store.completeInventoryTransaction(accepted).join()
+                                store.deleteInventoryTransaction(id).join() shouldBe true
+                            }
                             runtime.invalidate(work.workerId)
                         }
                         val cut = nextBoundaryWork(runtime, city, world)
@@ -198,7 +206,7 @@ class CivsMineBoundarySealTest : FunSpec({
                         city.minePlans!!.getValue(mine.id.toString()).sectionSteps shouldBe planBefore.sectionSteps
                         wall.type shouldBe Material.COBBLESTONE
                     }
-                    // An apply-before-retire restart reuses the exact native authority and after-state.
+                    // The legacy apply-before-retire image reuses the exact native authority and after-state.
                     val durable = store.loadInventoryTransactions().join().single()
                     durable shouldBe requireNotNull(sealed)
                     val saved = store.load().join().single()
@@ -520,14 +528,13 @@ private fun assertSpineRungRepair(world: CivsWorksiteWorldFixture, mine: CivBuil
                         .copy(inventory = prepared.inventoryAfter)
                     val transaction = CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes,
                         worldChanges = prepared.worldChanges, mine = prepared.mine).validated()
-                    store.saveInventoryTransaction(transaction).join()
-                    val durable = store.loadInventoryTransactions().join().single()
-                    requireNotNull(durable.mine).work shouldBe work
-                    storage.seal(durable, keepViewersOpen = true)
-                    storage.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
-                    storage.reconcile(durable) shouldBe CivInventoryApplyResult.Applied
+                    val accepted = store.saveInventoryTransaction(transaction).join()
+                    requireNotNull(accepted.mine).work shouldBe work
+                    storage.seal(accepted, keepViewersOpen = true)
+                    storage.reconcile(accepted) shouldBe CivInventoryApplyResult.Applied
+                    storage.reconcile(accepted) shouldBe CivInventoryApplyResult.Applied
                     storage.unlock(id)
-                    city = store.save(durable.after).join()
+                    city = store.completeInventoryTransaction(accepted).join()
                     store.deleteInventoryTransaction(id).join() shouldBe true
                     city.workers.single().completedCycles shouldBe work.cycle + 1
                     progress().nextStep shouldBe 4L

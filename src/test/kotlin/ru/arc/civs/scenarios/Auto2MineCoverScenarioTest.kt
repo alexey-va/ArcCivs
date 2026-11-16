@@ -126,25 +126,23 @@ class Auto2MineCoverScenarioTest : FunSpec({
                                     current.worldId, current.owner, mine)
                                 val transaction = CivInventoryTransaction(UUID.randomUUID(), current.id, current.revision,
                                     after, emptyList(), worldChanges = accepted.changes, autonomousVisual = receipt).validated()
-                                store.saveInventoryTransaction(transaction).join()
-                                val restored = store.loadInventoryTransactions().join().single().validated()
-                                storage.lock(restored)
-                                repeat(2) { storage.reconcile(restored) shouldBe CivInventoryApplyResult.Applied }
+                                val acceptedReceipt = store.saveInventoryTransaction(transaction).join().validated()
+                                storage.lock(acceptedReceipt)
+                                repeat(2) { storage.reconcile(acceptedReceipt) shouldBe CivInventoryApplyResult.Applied }
                                 accepted.changes.forEach { cell ->
                                     world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.after
                                     if (cell.position in paidBlocks) paidBlocks[cell.position] = cell.after
                                     lowest = minOf(lowest, cell.position.y)
                                 }
-                                current = restored.after
+                                current = store.completeInventoryTransaction(acceptedReceipt).join()
                                 current.workers shouldBe city.workers
                                 current.stock shouldBe city.stock
                                 current.stock.food shouldBe 1
                                 current.minePlans!!.getValue(key).v5Proof shouldBe frozen
                                 current.minePlans!!.getValue(key).v5Step shouldBe before.v5Step
                                 CivsMineProgress.v5State(current.minePlans!!.getValue(key)) shouldBe before
-                                store.save(current).join() shouldBe current
-                                store.deleteInventoryTransaction(restored.id).join() shouldBe true
-                                storage.unlock(restored.id)
+                                store.deleteInventoryTransaction(acceptedReceipt.id).join() shouldBe true
+                                storage.unlock(acceptedReceipt.id)
                                 runtime.invalidate(worker.id, accepted)
                                 actions++
                                 if (actions == 2) {

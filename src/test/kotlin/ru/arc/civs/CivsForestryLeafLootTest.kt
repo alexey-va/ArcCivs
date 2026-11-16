@@ -27,7 +27,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsForestryLeafLootTest : FunSpec({
-    test("native decay Item enters only its forester holder once through persisted UUID receipt") {
+    test("native decay Item enters only its forester holder once and rejects a reappearing UUID") {
         LeafLootFixture().use { fixture -> with(fixture) {
             val item = decay()
             val proof = requireNotNull(CivsForestryLeafLoot.proof(item))
@@ -47,17 +47,16 @@ class CivsForestryLeafLootTest : FunSpec({
             try {
                 CivsStore(folder, Executor(Runnable::run)).use { store ->
                     store.save(city).join()
-                    store.saveInventoryTransaction(tx).join()
-                    val replay = store.loadInventoryTransactions().join().single().validated()
+                    val replay = store.saveInventoryTransaction(tx).join().validated()
                     replay.collected!!.forestryLeafLoot shouldBe tx.collected!!.forestryLeafLoot
                     repeat(2) { storage.reconcile(replay) shouldBe CivInventoryApplyResult.Applied }
                     holder.inventory.getItem(0) shouldBe ItemStack(Material.APPLE, 2)
                     item.isValid shouldBe false
                     replay.after.stock shouldBe city.stock
                     replay.after.workers shouldBe city.workers
-                    storage.persistCollected(replay).join()
+                    storage.persistCollected(replay, durable = false).join()
+                    store.completeInventoryTransaction(replay).join() shouldBe replay.after
                     storage.installConsumed(store.markConsumedItems(replay).join())
-                    store.save(replay.after).join()
                     store.deleteInventoryTransaction(replay.id).join() shouldBe true
                     storage.unlock(id)
                     val stale = ground(Material.APPLE, 2, item.uniqueId)

@@ -959,7 +959,7 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     /** All slots are classified first; drift prevents every write, including otherwise valid cells. */
-    fun reconcile(transaction: CivInventoryTransaction): CivInventoryApplyResult {
+    fun reconcile(transaction: CivInventoryTransaction, persistPlayer: Boolean = true): CivInventoryApplyResult {
         checkMain()
         requireOpen()
         transaction.validated()
@@ -1114,8 +1114,8 @@ class CivsStorage(private val plugin: Plugin,
                 val verified = classifyPlayer(playerId, playerChanges, player)
                 if (verified != CivInventoryApplyResult.Applied) return verified
                     ?: CivInventoryApplyResult.Retry(mapOf("reason" to "player-write-incomplete"))
-                // Persist the debit before crediting any city holder or retiring the durable receipt.
-                playerDataPersistence.persist(player)
+                // Only old durable receipts retain this crash fence; ordinary operations use vanilla autosave.
+                if (persistPlayer) playerDataPersistence.persist(player)
                 playerPersisted = true
                 val persisted = classifyPlayer(playerId, playerChanges, player)
                 if (persisted != CivInventoryApplyResult.Applied) return persisted
@@ -1170,7 +1170,7 @@ class CivsStorage(private val plugin: Plugin,
     fun apply(transaction: CivInventoryTransaction): CivInventoryApplyResult = reconcile(transaction)
 
     /** Collected transfers fence both states; typed cargo persists its native credit before city debit. */
-    internal fun persistCollected(transaction: CivInventoryTransaction, beforeJournal: Boolean = false): CompletableFuture<Unit> {
+    internal fun persistCollected(transaction: CivInventoryTransaction, beforeJournal: Boolean = false, durable: Boolean = true): CompletableFuture<Unit> {
         checkMain(); requireOpen()
         if (transaction.collected == null && transaction.containerRelocation == null && transaction.cargoDropoff == null && transaction.cargoPickup == null && transaction.trade == null && !transaction.mixedBufferPickup())
             return CompletableFuture.completedFuture(Unit)
@@ -1191,6 +1191,10 @@ class CivsStorage(private val plugin: Plugin,
                 is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", state.values)
                 null -> throw CivsRejection("inventory-recovery")
             }
+        }
+        if (!durable) {
+            checkState()
+            return CompletableFuture.completedFuture(Unit)
         }
         return nativeBarrier({
             if (beforeJournal && transaction.trade != null)

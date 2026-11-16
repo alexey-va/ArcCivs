@@ -172,7 +172,7 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                     .get(authority) as CivsWorksites
                 var runtime = serviceWorksites()
                 fun restartService() {
-                    // Copy actual durable before-city + pending-receipt bytes, never manufacture a mining receipt.
+                    // Reopen only the copied disk state and discard the old executor's pending work.
                     val next = Files.createTempDirectory("initial-mine-restart-")
                     directories.add(next)
                     Files.walk(directory).use { paths -> paths.filter { Files.isRegularFile(it) }.forEach { source ->
@@ -256,7 +256,11 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                     val recoverCap = restartFirstCap && !restarted && selected.changes.any {
                         it.position in cap && it.before == "minecraft:cobblestone" && it.after == "minecraft:air"
                     }
-                    if (recoverCap) { io.pending shouldBe 0; io.hold = true }
+                    if (recoverCap) {
+                        io.pending shouldBe 0
+                        store.flush().join()
+                        io.hold = true
+                    }
                     val mutation = authority.inventoryMutation(city.id, { fresh ->
                         runtime.validate(fresh, selected)
                         completed = CivsRules.finishWorldWork(fresh, selected, at)
@@ -264,21 +268,35 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                             emptyMap(), selected.changes, selected).also { requireNotNull(it.mine) }
                     }) { _, inventory -> requireNotNull(completed).copy(inventory = inventory) }
                     val after = if (!recoverCap) await(mutation) else {
-                        io.runNext() shouldBe true // The real journal file is now durable; its native callback has not run.
+                        io.runNext() shouldBe true // Admit the intent without running its native callback.
                         mutation.isDone shouldBe false
-                        val durable = CivsStore(directory, direct).use { it.loadInventoryTransactions().join().single() }
-                        requireNotNull(durable.mine).work shouldBe selected
-                        durable.beforeRevision shouldBe live.revision
-                        selected.changes.forEach { cell ->
-                            world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+                        val admitted = store.loadInventoryTransactions()
+                        io.runNext() shouldBe true
+                        val receipt = admitted.join().single()
+                        requireNotNull(receipt.mine).work shouldBe selected
+                        receipt.beforeRevision shouldBe live.revision
+                        Files.exists(directory.resolve("inventory-transactions")) shouldBe false
+                        Files.exists(directory.resolve("inventory-completed")) shouldBe false
+                        CivsStore(directory, direct).use { it.load().join().single() } shouldBe live
+                        fun nativeStates() = selected.changes.map { cell ->
+                            world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString
                         }
+                        val before = selected.changes.map(CivPlanBlock::before)
+                        nativeStates() shouldBe before
+                        restartService()
+                        mutation.isCompletedExceptionally shouldBe true
+                        current() shouldBe live
+                        nativeStates() shouldBe before
+                        store.loadInventoryTransactions().join() shouldBe emptyList()
+
+                        // The old-format recovery case starts from the same exact native before-image.
+                        writeLegacyInventoryReceipt(directory, receipt)
                         restartService()
                         repeat(80) {
-                            // A completed checkpoint is durable before its Main publication callback.
-                            if (current() != durable.after || store.loadInventoryTransactions().join().isNotEmpty()) paper.performTicks(1)
+                            if (current() != receipt.after || store.loadInventoryTransactions().join().isNotEmpty()) paper.performTicks(1)
                         }
                         store.loadInventoryTransactions().join() shouldBe emptyList()
-                        current() shouldBe durable.after
+                        current() shouldBe receipt.after
                         val recovered = current()
                         restartService()
                         paper.performTicks(40)
