@@ -35,7 +35,8 @@ internal data class CitizenTerrainBlock(
 internal enum class CitizenRouteAction { WALK, STEP, LADDER_ENTER, CLIMB, LADDER_EXIT }
 internal data class CitizenSearchNode(val x: Int, val y: Double, val z: Int,
     val climbing: Boolean = false, val initial: Boolean = false) {
-    fun point() = CitizenPoint(x + .5, y, z + .5)
+    @Transient private var position: CitizenPoint? = null
+    fun point() = position ?: CitizenPoint(x + .5, y, z + .5).also { position = it }
 }
 internal class CitizenSearchBounds private constructor(private val minimum: CitizenPoint, private val maximum: CitizenPoint) {
     fun contains(point: CitizenPoint): Boolean = point.x in minimum.x..maximum.x &&
@@ -107,6 +108,11 @@ internal class CitizenNavigationSearch(
     init { open += Entry(start, 0.0, heuristic(start), serial++) }
 
     fun cancel() { cancelled.set(true) }
+
+    /** Read only between search slices on the same worker. Initial and incoming probes are directional. */
+    fun captured(probe: CitizenSearchProbe): CitizenSearchCapture? =
+        if (probe.incoming || probe.node.initial) null
+        else neighbourhoods[probe.node]?.takeIf { it.probe.from == probe.from }
 
     fun advance(captures: List<CitizenSearchCapture>): CitizenSearchResult {
         val began = System.nanoTime()

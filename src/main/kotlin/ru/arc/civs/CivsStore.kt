@@ -239,10 +239,17 @@ class CivsStore(
     }
 
     /** Reuse owned committed plans until save/delete or explicit load(); no disk polling on a hit. */
-    fun loadPlan(id: UUID): CompletableFuture<CivPlacementPlan?> = submit {
-        planCache[id]?.let { return@submit it }
+    fun loadPlan(id: UUID): CompletableFuture<CivPlacementPlan?> = submit { loadPlanLocal(id) }
+
+    /** Finish the pure projection on the same storage task, before a completed future can reach Main. */
+    internal fun loadRetainedPlanSource(id: UUID): CompletableFuture<CivRetainedPlanSource?> = submit {
+        loadPlanLocal(id)?.let(CivRetainedPlanSource::from)
+    }
+
+    private fun loadPlanLocal(id: UUID): CivPlacementPlan? {
+        planCache[id]?.let { return it }
         val trustedRoot = trustedRoot()
-        planStore(trustedRoot, id).loadOrNull()?.plan?.let(::cachePlan)
+        return planStore(trustedRoot, id).loadOrNull()?.plan?.let(::cachePlan)
     }
 
     fun deletePlan(id: UUID): CompletableFuture<Boolean> = submitPlanChange {

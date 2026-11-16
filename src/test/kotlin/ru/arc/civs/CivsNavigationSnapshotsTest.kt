@@ -583,6 +583,172 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
+    test("published search neighbourhoods reuse directed edges and immutable costs only for the same noninitial origin") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            for (height in listOf(64.0, 63.5)) {
+                val terrain = flatSnapshotTerrain(0, 0)
+                val node = CitizenSearchNode(2, height, 2)
+                val probe = CitizenSearchProbe(node, node.point())
+                val published = completeSnapshotCapture(terrain, listOf(probe), 2.25).single()
+                val initial = probe.copy(node = node.copy(initial = true), from = node.point().copy(x = 2.25, z = 2.75))
+                val initialCapture = completeSnapshotCapture(terrain, listOf(initial), 2.25).single()
+                val search = CitizenNavigationSearch(initial.from, CitizenPoint(12.5, 64.0, 2.5), -64, 320, emptyList())
+                search.advance(listOf(published, initialCapture))
+                search.captured(probe) shouldBeSameInstanceAs published
+                search.captured(initial) shouldBe null
+                search.captured(probe.copy(incoming = true)) shouldBe null
+                search.captured(probe.copy(from = initial.from)) shouldBe null
+                val later = published.blocks.keys.first { it !in terrain.costs }
+                val policy = CitizenSnapshotPolicy({ _, _ -> error("Repeated cell policy") }, { _, _ -> error("Repeated directed policy") })
+                val request = CitizenSnapshotCapture(listOf(probe), terrain, policy, -64, 320, terrain.blocks.size, 1, false)
+                    .advance(CitizenSnapshotInput(costs = mapOf(later to Double.POSITIVE_INFINITY)), search::captured)
+                val reused = requireNotNull(request.captures).single()
+                reused.blocks shouldBeSameInstanceAs published.blocks
+                reused.edges shouldBeSameInstanceAs published.edges
+                reused.blocks.getValue(later).cost shouldBe 1.0
+                request.costs shouldBe emptySet()
+                request.sections shouldBe emptyMap()
+                request.capturedBlocks shouldBe terrain.blocks.size
+                val cancelled = CitizenSnapshotCapture(listOf(probe), terrain, policy, -64, 320, terrain.blocks.size, 1, false)
+                cancelled.cancel()
+                shouldThrow<CancellationException> { cancelled.advance(CitizenSnapshotInput(), search::captured) }
+                val fresh = CitizenNavigationSearch(initial.from, CitizenPoint(12.5, 64.0, 2.5), -64, 320, emptyList())
+                fresh.captured(probe) shouldBe null
+            }
+        }
+    }
+
+    test("reused queue slots preserve current prefetch bounds and capped tails across native input resumes") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            data class Run(val captures: List<CitizenSearchCapture>, val cursor: CitizenNavigationDebugCursor,
+                val cells: Set<CivPosition>, val stepChecks: Int, val sections: Map<CitizenSnapshotSectionKey, Long>)
+            fun run(reuse: Boolean, maximum: Int, bounded: Boolean): Run {
+                val terrain = flatSnapshotTerrain(0, 0)
+                val oldNode = CitizenSearchNode(14, 64.0, 3)
+                val oldProbe = CitizenSearchProbe(oldNode, oldNode.point(),
+                    bounds = CitizenSearchBounds.between(oldNode.point(), oldNode.point(), 0, 0))
+                val prior = completeSnapshotCapture(terrain, listOf(oldProbe), 2.25).single()
+                val search = CitizenNavigationSearch(oldNode.point(), CitizenPoint(24.5, 64.0, 4.5), -64, 320, emptyList())
+                search.advance(listOf(prior))
+                val node = CitizenSearchNode(15, 64.0, 4)
+                val probe = CitizenSearchProbe(node, node.point(), bounds = if (bounded)
+                    CitizenSearchBounds.between(node.point(), node.point(), 1, 0) else null)
+                var stepChecks = 0
+                val policy = CitizenSnapshotPolicy({ p, _ -> p.y == 64 }, { _, _ -> stepChecks++; true })
+                val cursor = CitizenSnapshotCapture(listOf(probe), terrain, policy, -64, 320, maximum, 12, true)
+                val lookup = if (reuse) search::captured else null
+                val missing = cursor.advance(CitizenSnapshotInput(), lookup)
+                missing.chunks shouldBe setOf(CitizenSnapshotKey(1, 0))
+                missing.captures shouldBe null
+                val extra = flatSnapshotTerrain(1, 0)
+                var request = cursor.advance(CitizenSnapshotInput(chunks = extra.chunks, states = extra.states), lookup)
+                val sections = request.sections
+                if (request.captures == null) {
+                    request.chunks shouldBe emptySet()
+                    request.states shouldBe emptyMap()
+                    request.dynamics shouldBe emptyMap()
+                    request = cursor.advance(CitizenSnapshotInput(costs = request.costs.associateWith { 2.25 }), lookup)
+                }
+                val captures = requireNotNull(request.captures)
+                if (reuse) captures.single { it.probe.node == oldNode }.blocks shouldBeSameInstanceAs prior.blocks
+                return Run(captures, cursor.debugCursor(), terrain.blocks.keys.toSet(), stepChecks, sections)
+            }
+            for (maximum in listOf(99, 32768)) for (bounded in listOf(false, true)) {
+                val old = run(false, maximum, bounded)
+                val reused = run(true, maximum, bounded)
+                reused.captures.map { it.probe.node } shouldBe old.captures.map { it.probe.node }
+                reused.captures.map { it.probe.from } shouldBe old.captures.map { it.probe.from }
+                reused.captures.map { it.edges } shouldBe old.captures.map { it.edges }
+                fun supportCosts(run: Run) = run.captures.map { capture -> capture.edges.map { edge ->
+                    capture.blocks[edge.node.x, citizenSupportY(edge.node.y), edge.node.z]?.cost
+                } }
+                supportCosts(reused) shouldBe supportCosts(old)
+                reused.cursor.required shouldBe old.cursor.required
+                reused.cursor.next shouldBe old.cursor.next
+                reused.cursor.probes.map { it.node } shouldBe old.cursor.probes.map { it.node }
+                reused.cells shouldBe old.cells
+                reused.sections shouldBe old.sections
+                (reused.stepChecks < old.stepChecks) shouldBe true
+                if (maximum == 99) reused.captures.size shouldBe 2
+            }
+        }
+    }
+
+    test("a consumed surface edit restarts the search and cannot reuse its previous open neighbourhoods") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("snapshot-reuse-restart").also(paper.server::addWorld)
+            for (x in -1..2) for (z in -1..1) world.loadChunk(x, z)
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("ReuseRestart")))
+            val workers = ArrayDeque<Runnable>()
+            val owner = CivsResidentNavigation(tasks, executor = Executor { workers.addLast(it) },
+                settings = CivsNavigationSettings(searchNodesPerBatch = 2), snapshotContextFree = { true })
+            val allowed: (CivPosition) -> Boolean = { it.x in 0..20 && it.y == 64 && it.z == 0 }
+            val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> true })
+            val route = owner.request(world, Location(world, .5, 64.0, .5), Location(world, 20.5, 64.0, .5),
+                allowed, policy.stepAllowed, { 1.0 }, null, policy)
+            try {
+                var tick = 0
+                while (!(route.capturedBlocks > 200 && route.preparationPhase == "searching") && tick++ < 150) {
+                    while (workers.isNotEmpty()) workers.removeFirst().run()
+                    paper.performTicks(1); owner.pulse()
+                }
+                (route.capturedBlocks > 200 && route.searching) shouldBe true
+                val oldNodes = route.nodeCount
+                val oldCells = route.capturedBlocks
+                for (y in 64..66) {
+                    world.getBlockAt(5, y, 0).type = Material.STONE
+                    owner.changed(world.uid, CivPosition(5, y, 0))
+                }
+                owner.pulse()
+                owner.debug()["stale_snapshot_restarts"] shouldBe 1L
+                while (route.searching && tick++ < 350) {
+                    while (workers.isNotEmpty()) workers.removeFirst().run()
+                    paper.performTicks(1); owner.pulse()
+                }
+                route.searching shouldBe false
+                route.failure shouldBe null
+                route.continuation shouldBe true
+                route.endpoint shouldBe CitizenPoint(4.5, 64.0, .5)
+                owner.debug()["stale_snapshot_restarts"] shouldBe 1L
+                val totals = (owner.debug()["preparation_lifetime"] as Map<*, *>)["published_work"] as Map<*, *>
+                val ready = totals["ready"] as Map<*, *>
+                ready["nodes"] shouldBe oldNodes.toLong() + route.nodeCount
+                ready["captured_cells"] shouldBe oldCells.toLong() + route.capturedBlocks
+                ready["search_nanos"] shouldBe route.searchNanos
+            } finally { owner.clear(); tasks.close() }
+        }
+    }
+
+    test("preparation work is counted once for ready failed and cancelled jobs using only published progress") {
+        sharedRouteRuntime { h ->
+            fun work(outcome: String): Map<*, *> = ((h.owner.debug()["preparation_lifetime"] as Map<*, *>)
+                ["published_work"] as Map<*, *>)[outcome] as Map<*, *>
+            fun check(outcome: String, route: CitizenPacketRoute) {
+                work(outcome)["nodes"] shouldBe route.nodeCount.toLong()
+                work(outcome)["captured_cells"] shouldBe route.capturedBlocks.toLong()
+                work(outcome)["search_nanos"] shouldBe route.searchNanos
+                work(outcome)["native_shape_reads"] shouldBe route.nativeShapeReads.toLong()
+            }
+            val ready = h.request(reuseKey = null)
+            h.finish(ready)
+            ready.failure shouldBe null
+            check("ready", ready)
+            val failed = h.request(reuseKey = null, permitted = { false })
+            h.finish(failed)
+            failed.failure shouldBe "no-path"
+            check("failed", failed)
+            val cancelled = h.request(reuseKey = null)
+            h.prepareUntil { cancelled.capturedBlocks > 0 }
+            cancelled.searching shouldBe true
+            (cancelled.nodeCount > 0) shouldBe true
+            cancelled.cancel(); h.owner.pulse()
+            check("cancelled", cancelled)
+            val before = (h.owner.debug()["preparation_lifetime"] as Map<*, *>).toMap()
+            repeat(3) { h.owner.pulse() }
+            h.owner.debug()["preparation_lifetime"] shouldBe before
+        }
+    }
+
     test("requested new cells enforce the block limit in existing cell order after cached cells") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
             val terrain = flatSnapshotTerrain(0, 0)
@@ -1160,13 +1326,17 @@ private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, setti
     }
 
     fun finish(route: CitizenPacketRoute) {
+        prepareUntil { !route.searching }
+    }
+
+    fun prepareUntil(done: () -> Boolean) {
         repeat(300) {
-            if (!route.searching) return
+            if (done()) return
             while (workers.isNotEmpty()) workers.removeFirst().run()
             paper.performTicks(1)
             owner.pulse()
         }
-        error("Shared route did not finish: ${route.preparationPhase} ${owner.debug()}")
+        error("Shared route did not reach the requested state: ${owner.debug()}")
     }
 
     fun walk(route: CitizenPacketRoute, from: CitizenPoint = CitizenPoint(.5, 64.0, .5),

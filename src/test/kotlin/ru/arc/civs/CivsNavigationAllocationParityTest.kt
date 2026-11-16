@@ -12,6 +12,26 @@ import kotlin.math.min
 import kotlin.random.Random
 
 class CivsNavigationAllocationParityTest : FunSpec({
+    test("node points preserve exact coordinates and identity without adding cached fields to diagnostic JSON") {
+        val gson = com.google.gson.Gson()
+        for (x in listOf(Int.MIN_VALUE, -1, 0, Int.MAX_VALUE))
+            for (height in listOf(-64.0, -0.0, 63.9375, 64.0625, 64.5)) {
+                val node = CitizenSearchNode(x, height, -1, climbing = true, initial = true)
+                val point = node.point()
+                node.point() shouldBeSameInstanceAs point
+                point.x.toBits() shouldBe (x + .5).toBits()
+                point.y.toBits() shouldBe height.toBits()
+                point.z shouldBe -.5
+                node.copy().point() shouldBe point
+                node.copy(y = height + 1).point().y shouldBe height + 1
+                gson.toJsonTree(node).asJsonObject.keySet() shouldBe setOf("x", "y", "z", "climbing", "initial")
+                val decoded = gson.fromJson(gson.toJson(node), CitizenSearchNode::class.java)
+                decoded shouldBe node
+                decoded.point() shouldBe point
+                decoded.point() shouldBeSameInstanceAs decoded.point()
+            }
+    }
+
     test("candidate order and climbing identities match the prior enumeration across captured shapes") {
         val random = Random(311)
         val full = CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)

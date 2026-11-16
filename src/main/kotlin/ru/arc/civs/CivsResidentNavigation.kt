@@ -53,6 +53,10 @@ internal class CivsResidentNavigation(
         val snapshotRevisions = hashMapOf<CitizenSnapshotSectionKey, Long>()
         var reuse: ReuseAttempt? = null
         var debugTrace: DebugTrace? = null
+        var publishedNodes = 0L
+        var publishedCells = 0L
+        var lastNodes = 0
+        var lastCells = 0
     }
     private class DebugTrace(val context: CitizenNavigationDebugContext) {
         val rounds = mutableListOf<CitizenNavigationDebugRound>()
@@ -118,6 +122,7 @@ internal class CivsResidentNavigation(
     private var maximumPreparationNanos = 0L
     private val preparationBoundsMillis = longArrayOf(100, 250, 500, 1_000, 2_000, 5_000, 10_000, Long.MAX_VALUE)
     private val preparationBuckets = LongArray(preparationBoundsMillis.size)
+    private val preparationWork = Array(3) { LongArray(4) }
     private var terminal = CompletableFuture.completedFuture(Unit)
 
     /** A single opt-in recorder. Existing requests are never attached halfway through their history. */
@@ -236,6 +241,12 @@ internal class CivsResidentNavigation(
                 "maximum_candidates" to MAXIMUM_JOIN_CANDIDATES, "maximum_join_distance" to MAXIMUM_JOIN_DISTANCE),
             "preparation_lifetime" to mapOf("source" to "all-admitted-planner-jobs", "ready" to readyPreparations,
                 "failed" to failedPreparations, "cancelled" to cancelledPreparations,
+                "published_work" to listOf("ready", "failed", "cancelled").mapIndexed { index, outcome ->
+                    val work = preparationWork[index]
+                    outcome to mapOf("nodes" to work[0], "captured_cells" to work[1],
+                        "search_nanos" to work[2], "native_shape_reads" to work[3])
+                }.toMap(),
+                "work_scope" to "Main-published work across restarts; unfinished or discarded worker tails excluded",
                 "mean_ms" to if (readyPreparations == 0L) 0.0 else preparationNanos / readyPreparations / 1_000_000.0,
                 "max_ms" to maximumPreparationNanos / 1_000_000.0,
                 "buckets_ms" to preparationBuckets.indices.associate { index ->
@@ -486,6 +497,8 @@ internal class CivsResidentNavigation(
                     job.searching = null
                     val result = searching.join() // isDone above; no blocking gameplay-thread wait.
                     job.route.recordSearch(result)
+                    job.publishedNodes += (result.nodes - job.lastNodes).coerceAtLeast(0)
+                    job.lastNodes = result.nodes
                     recordDebug(job, result)
                     if (result.probes.isEmpty()) {
                         finishDebug(job, result)
@@ -552,7 +565,8 @@ internal class CivsResidentNavigation(
 
     private fun captureSnapshot(job: Job, cursor: CitizenSnapshotCapture, input: CitizenSnapshotInput = CitizenSnapshotInput()) {
         job.route.phase("snapshot-processing")
-        val future = try { CompletableFuture.supplyAsync({ cursor.advance(input) }, executor) }
+        val search = job.search
+        val future = try { CompletableFuture.supplyAsync({ cursor.advance(input, search::captured) }, executor) }
         catch (failure: RejectedExecutionException) { CompletableFuture.failedFuture(failure) }
         job.snapshotWorker = future
         future.whenCompleteSync(tasks) { request, failure ->
@@ -568,6 +582,8 @@ internal class CivsResidentNavigation(
                 return@whenCompleteSync
             }
             job.route.recordSnapshotCapture(prepared.capturedBlocks)
+            job.publishedCells += (prepared.capturedBlocks - job.lastCells).coerceAtLeast(0)
+            job.lastCells = prepared.capturedBlocks
             val captures = prepared.captures
             if (captures != null) {
                 job.snapshotResult = captures
@@ -607,6 +623,8 @@ internal class CivsResidentNavigation(
         job.snapshotTerrain = CitizenSnapshotTerrain()
         job.snapshotRevisions.clear()
         job.search = job.route.newSearch()
+        job.lastNodes = 0
+        job.lastCells = 0
         job.progressTick = Bukkit.getCurrentTick().toLong()
         staleSnapshotRestarts++
         dispatch(job, emptyList())
@@ -619,17 +637,23 @@ internal class CivsResidentNavigation(
             if (job.route.searching) continue
             if (debugRequest?.job === job) failDebug("navigation-request-retired")
             // Include fast routes absent from the deliberately quiet slow-route log.
-            when {
-                job.route.preparationPhase == "cancelled" -> cancelledPreparations++
-                job.route.failure != null -> failedPreparations++
+            val outcome = when {
+                job.route.preparationPhase == "cancelled" -> { cancelledPreparations++; 2 }
+                job.route.failure != null -> { failedPreparations++; 1 }
                 else -> {
                     val elapsed = (nanoTime() - job.startedNanos).coerceAtLeast(0)
                     readyPreparations++
                     preparationNanos += elapsed
                     maximumPreparationNanos = maxOf(maximumPreparationNanos, elapsed)
                     preparationBuckets[preparationBoundsMillis.indexOfFirst { elapsed / 1_000_000.0 <= it }]++
+                    0
                 }
             }
+            val work = preparationWork[outcome]
+            work[0] += job.publishedNodes
+            work[1] += if (job.route.snapshotPolicy == null) job.route.capturedBlocks.toLong() else job.publishedCells
+            work[2] += job.route.searchNanos
+            work[3] += job.route.nativeShapeReads
             job.search.cancel()
             job.snapshotCapture?.cancel()
             job.snapshotWorker?.cancel(false)

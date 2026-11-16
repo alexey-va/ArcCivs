@@ -353,7 +353,10 @@ internal object CivsSettlementLayout {
     }
 
     /** Reuse the existing captured plan journal; this is a detached view, not another registry. */
-    fun accepted(city: Settlement, plans: List<CivPlacementPlan>): List<CivSettlementPiece> = plans.mapNotNull { plan ->
+    fun accepted(city: Settlement, plans: List<CivPlacementPlan>): List<CivSettlementPiece> =
+        acceptedSources(city, plans.map(CivRetainedPlanSource::from))
+
+    internal fun acceptedSources(city: Settlement, plans: List<CivRetainedPlanSource>): List<CivSettlementPiece> = plans.mapNotNull { plan ->
         val building = city.building(plan.building.id) ?: return@mapNotNull null
         if (!building.type.isInfrastructure || plan.cityId != city.id || plan.worldId != city.worldId ||
             plan.building.type != building.type || plan.building.anchor != building.anchor ||
@@ -362,9 +365,9 @@ internal object CivsSettlementLayout {
             (plan.id != CivsGateRefit.retainedPlanId(building) ||
                 plan.building.schematicId != building.schematicId || plan.building.transit != building.transit)) return@mapNotNull null
         CivSettlementPiece(building.id, building.type, building.bounds, building.entrance,
-            plan.blocks.map { CivSettlementBlock(it.position, it.after) }, building.transit.orEmpty(),
-            plan.terrain?.waterFoundations.orEmpty(), CivsInfrastructureRebuild.stage(building).takeIf { it > 0 },
-            paidGateFloors = plan.terrain?.paidGateFloors.orEmpty(), paidWaterFloors = plan.terrain?.paidWaterFloors.orEmpty())
+            plan.infrastructureBlocks, building.transit.orEmpty(),
+            plan.waterFoundations, CivsInfrastructureRebuild.stage(building).takeIf { it > 0 },
+            paidGateFloors = plan.paidGateFloors, paidWaterFloors = plan.paidWaterFloors)
     }.distinctBy { it.id }
 
     /**

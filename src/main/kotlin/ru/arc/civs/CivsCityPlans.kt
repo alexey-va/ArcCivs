@@ -14,19 +14,35 @@ internal class CivsCityPlans(
     private val executor: Executor,
     private val roadMaintenance: CivsRoadMaintenance,
 ) {
-    /** Detached projections of the existing saved terrain routes. */
-    private data class RetainedRoutes(val worldId: UUID, val buildings: List<CivBuilding>,
-        val overrides: Map<String, CivRoadRouteOverride>?, val columns: Set<Pair<Int, Int>>,
-        val courierRoads: CivsPaths.RetainedRoads, val cityId: UUID, val owner: UUID,
-        val center: CivPosition, val radius: Int, val adopted: CivSettlementPlan?,
-        val generation: Long, val epoch: Long, val access: CivAutonomousAccess) {
-        fun matches(city: Settlement): Boolean = worldId == city.worldId && civsSameBuildingLayout(buildings, city.buildings) &&
-            overrides == city.roadRouteOverrides
-        fun matchesAccess(city: Settlement, generation: Long, epoch: Long): Boolean =
-            this.generation == generation && this.epoch == epoch && cityId == city.id && owner == city.owner &&
-                center == city.center && radius == city.radius && adopted == city.autonomy?.plan && matches(city)
+    /** Access and upkeep depend on geometry and pending construction, never on worker/stock revisions. */
+    private data class RetainedInputs(val cityId: UUID, val owner: UUID, val name: String, val worldId: UUID,
+        val center: CivPosition, val radius: Int, val style: String, val buildings: List<CivBuilding>,
+        val constructionId: UUID?, val constructionBuilding: UUID?, val plannedBuilding: CivBuilding?,
+        val queue: List<UUID>?, val controls: List<CivControlPlacement>?, val deletion: CivDeletion?,
+        val autonomous: Boolean, val layoutHalfWidth: Int?, val adopted: CivSettlementPlan?,
+        val discoveries: Set<CivResearchId>, val overrides: Map<String, CivRoadRouteOverride>?) {
+        companion object {
+            fun from(city: Settlement) = RetainedInputs(city.id, city.owner, city.name, city.worldId,
+                city.center, city.radius, city.style, city.buildings, city.construction?.id,
+                city.construction?.buildingId, city.construction?.plannedBuilding, city.constructionQueue,
+                city.pendingControls, city.pendingDeletion, city.autonomy != null, city.autonomy?.layoutHalfWidth,
+                city.autonomy?.plan, city.research?.completed.orEmpty(), city.roadRouteOverrides)
+        }
     }
+
+    /** Detached projections of the existing saved terrain routes. */
+    private data class RetainedRoutes(val inputs: RetainedInputs, val columns: Set<Pair<Int, Int>>,
+        val courierRoads: CivsPaths.RetainedRoads,
+        val generation: Long, val epoch: Long, val access: CivAutonomousAccess, val upkeep: CivRoadUpkeepNetwork) {
+        fun matches(city: Settlement): Boolean = inputs.worldId == city.worldId && civsSameBuildingLayout(inputs.buildings, city.buildings) &&
+            inputs.overrides == city.roadRouteOverrides
+        fun matchesAccess(city: Settlement, generation: Long, epoch: Long): Boolean =
+            this.generation == generation && this.epoch == epoch && inputs == RetainedInputs.from(city)
+    }
+    private data class RetainedSources(val ids: List<UUID>, val generation: Long, val epoch: Long,
+        val sources: List<CivRetainedPlanSource>)
     private val retainedRoutes = mutableMapOf<UUID, RetainedRoutes>()
+    private val retainedSources = mutableMapOf<UUID, RetainedSources>()
     private val routeChunkPositions = mutableMapOf<UUID, List<CivPosition>>()
     private var retainedEpoch = 0L
 
@@ -98,63 +114,74 @@ internal class CivsCityPlans(
     }
 
     fun forestryPath(worldId: UUID, x: Int, z: Int): Boolean =
-        retainedRoutes.values.any { it.worldId == worldId && (x to z) in it.columns }
+        retainedRoutes.values.any { it.inputs.worldId == worldId && (x to z) in it.columns }
     fun forestryRoute(cityId: UUID): Set<Pair<Int, Int>> = retainedRoutes[cityId]?.columns.orEmpty()
     fun courierRoads(city: Settlement): CivsPaths.RetainedRoads =
         retainedRoutes[city.id]?.takeIf { it.matches(city) }?.courierRoads ?: CivsPaths.RetainedRoads.EMPTY
     fun chunkPositions(cityId: UUID): List<CivPosition> = routeChunkPositions[cityId].orEmpty()
-    fun clear() { retainedEpoch++; retainedRoutes.clear(); routeChunkPositions.clear(); initialMines.clear() }
-    fun remove(cityId: UUID) { retainedEpoch++; retainedRoutes.remove(cityId); routeChunkPositions.remove(cityId); initialMines.remove(cityId) }
+    fun clear() { retainedEpoch++; retainedRoutes.clear(); retainedSources.clear(); routeChunkPositions.clear(); initialMines.clear() }
+    fun remove(cityId: UUID) {
+        retainedEpoch++; retainedRoutes.remove(cityId); retainedSources.remove(cityId)
+        routeChunkPositions.remove(cityId); initialMines.remove(cityId)
+    }
 
-    private data class RetainedPlans(val saved: List<CivPlacementPlan>, val access: CivAutonomousAccess,
-        val routes: RetainedRoutes, val upkeep: CivRoadUpkeepNetwork)
-
-    /** Completed building captures retain their actual road grades across later development. */
-    private fun loadRetainedPlans(city: Settlement, cachedRoutes: RetainedRoutes? = null): CompletableFuture<RetainedPlans> {
+    private fun retainedIds(city: Settlement): List<UUID> {
         require(city.buildings.size <= CivsRules.MAX_SITES)
-        val generation = cachedRoutes?.generation ?: store.planGeneration
-        val epoch = cachedRoutes?.epoch ?: retainedEpoch
-        val buildings = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }
-        val plans = if (cachedRoutes == null) buildings.map { store.loadPlan(CivsWarehouseRefit.retainedPlanId(it)) }
-            else emptyList()
-        val result = authority.tracked<RetainedPlans>()
-        CompletableFuture.allOf(*plans.toTypedArray()).thenApplyAsync({
-            val saved = plans.mapNotNull { it.join() }
-            buildings.filter { cachedRoutes == null && it.warehouseCaptureId != null }.forEach { building ->
-                require(CivsWarehouseRefit.matchesCapture(building, saved.singleOrNull { it.id == building.warehouseCaptureId })) {
+        return city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map(CivsWarehouseRefit::retainedPlanId)
+    }
+
+    private fun prepareRetained(city: Settlement, loading: CompletableFuture<RetainedSources>): CompletableFuture<CivAutonomousAccess> {
+        val inputs = RetainedInputs.from(city)
+        val result = authority.tracked<CivAutonomousAccess>()
+        loading.thenApplyAsync({ sources ->
+            city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.warehouseCaptureId != null }.forEach { building ->
+                val source = sources.sources.singleOrNull { it.id == building.warehouseCaptureId }
+                require(source != null && CivsWarehouseRefit.supported(source.building) &&
+                    source.building.warehouseCaptureId == source.id &&
+                    source.building.copy(control = building.control, production = building.production) == building) {
                     "Warehouse retained capture does not match its building"
                 }
             }
-            val access = cachedRoutes?.access ?: CivAutonomousAccess.from(city, saved)
-            val routes = RetainedRoutes(city.worldId, city.buildings.toList(), city.roadRouteOverrides,
+            val access = CivAutonomousAccess.fromSources(city, sources.sources)
+            val upkeep = CivsRoadMaintenance.prepare(city, access)
+            val routes = RetainedRoutes(inputs,
                 access.routes.values.asSequence().flatten().mapTo(hashSetOf()) { it.x to it.z },
-                CivsPaths.RetainedRoads.from(city, access), city.id, city.owner, city.center, city.radius,
-                city.autonomy?.plan, generation, epoch, access)
-            RetainedPlans(saved, access, routes, CivsRoadMaintenance.prepare(city, access))
+                CivsPaths.RetainedRoads.from(city, access), sources.generation, sources.epoch, access, upkeep)
+            sources to routes
         }, executor).whenCompleteSync(tasks) { captured, failure ->
             if (records.closed) result.completeExceptionally(CivsRejection("not-ready"))
             else if (failure != null) result.completeExceptionally(failure)
             else {
-                val retained = requireNotNull(captured)
-                val routes = retained.routes
+                val (sources, routes) = requireNotNull(captured)
                 if (records.cities[city.id]?.let {
-                    it.buildings == city.buildings && routes.matchesAccess(it, store.planGeneration, retainedEpoch)
+                    routes.matchesAccess(it, store.planGeneration, retainedEpoch)
                 } == true) {
+                    retainedSources[city.id] = sources
                     retainedRoutes[city.id] = routes
                     val columns = routes.columns
                     routeChunkPositions[city.id] = if (columns.isEmpty()) emptyList() else listOf(
                         CivPosition(columns.minOf { it.first }, city.center.y, columns.minOf { it.second }),
                         CivPosition(columns.maxOf { it.first }, city.center.y, columns.maxOf { it.second }))
-                    roadMaintenance.publish(city, retained.upkeep)
+                    roadMaintenance.publish(city, routes.upkeep)
                 }
-                result.complete(retained)
+                result.complete(routes.access)
             }
         }
         return result
     }
 
-    fun loadAutonomousPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> =
-        loadRetainedPlans(city).thenApply(RetainedPlans::saved)
+    /** Callers needing exact construction before-images still receive the complete validated journals. */
+    fun loadAutonomousPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
+        val ids = retainedIds(city)
+        val generation = store.planGeneration
+        val epoch = retainedEpoch
+        val plans = ids.map(store::loadPlan)
+        val loading = CompletableFuture.allOf(*plans.toTypedArray()).thenApplyAsync({
+            val saved = plans.mapNotNull { it.join() }
+            RetainedSources(ids, generation, epoch, saved.map(CivRetainedPlanSource::from))
+        }, executor)
+        return prepareRetained(city, loading).thenApply { plans.mapNotNull { it.join() } }
+    }
 
     fun loadAutonomousAccess(city: Settlement): CompletableFuture<CivAutonomousAccess> {
         if (records.closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
@@ -162,7 +189,20 @@ internal class CivsCityPlans(
         val cached = retainedRoutes[city.id]?.takeIf { routes -> routes.matchesAccess(city, generation, retainedEpoch) &&
             records.cities[city.id]?.let { routes.matchesAccess(it, generation, retainedEpoch) } == true
         }
-        return loadRetainedPlans(city, cached).thenApply(RetainedPlans::access)
+        if (cached != null) {
+            // A repeated grade-refresh receipt still owns its wait; publish the same network without rebuilding it.
+            roadMaintenance.publish(city, cached.upkeep)
+            return CompletableFuture.completedFuture(cached.access)
+        }
+        val ids = retainedIds(city)
+        val epoch = retainedEpoch
+        val sources = retainedSources[city.id]?.takeIf { it.ids == ids && it.generation == generation && it.epoch == epoch }
+        if (sources != null) return prepareRetained(city, CompletableFuture.completedFuture(sources))
+        // Project each read immediately. allOf must not keep every full building's block graph alive.
+        val loading = ids.map(store::loadRetainedPlanSource)
+        return prepareRetained(city, CompletableFuture.allOf(*loading.toTypedArray()).thenApply {
+            RetainedSources(ids, generation, epoch, loading.mapNotNull { it.join() })
+        })
     }
 
     /** Reuse the sealed projection for a fresh receipt; a restarted server reopens the retained plan journals. */
@@ -184,7 +224,7 @@ internal class CivsCityPlans(
         val cached = retainedRoutes[before.id]?.takeIf { it.matchesAccess(before, store.planGeneration, retainedEpoch) }
         if (cached != null) return try { verify(cached.access); CompletableFuture.completedFuture(Unit) }
             catch (failure: IllegalArgumentException) { CompletableFuture.failedFuture(failure) }
-        return loadRetainedPlans(before).thenApply { retained -> verify(retained.access) }
+        return loadAutonomousAccess(before).thenApply(::verify)
     }
 
     /** Queued upgrade captures are exact future geometry, never retained built access roads. */

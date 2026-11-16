@@ -367,6 +367,9 @@ private class SharedGateFixture : AutoCloseable {
             every { store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
             every { store.planGeneration } returns 0L
             every { store.loadPlan(any()) } answers { CompletableFuture.completedFuture(saved.singleOrNull { it.id == firstArg<UUID>() }) }
+            every { store.loadRetainedPlanSource(any()) } answers {
+                CompletableFuture.completedFuture(saved.singleOrNull { it.id == firstArg<UUID>() }?.let(CivRetainedPlanSource::from))
+            }
             val authority = mockk<CivsService>()
             every { authority.tracked<Any>() } answers { CompletableFuture<Any>() }
             val records = CivsCityRecords({ mapOf(city.id to city) }, busy, unhealthy, { false }, { false }, { null }, { 0L }, { 0 })

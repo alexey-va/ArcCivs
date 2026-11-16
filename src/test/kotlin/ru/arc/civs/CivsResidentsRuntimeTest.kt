@@ -4534,7 +4534,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("canonical Auto crop receipts preserve the worker token then return sixty observed seconds to the real depot once") {
+    test("Auto crop acknowledgements retain the same city then return sixty observed seconds to the real depot once") {
         residentRuntime { h ->
             val farm = h.assignCanonicalAutoFarm()
             val original = h.city
@@ -4602,26 +4602,21 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (tick % 20 == 0) h.owner.pulse(now)
                 if (tick % 5 == 0) h.owner.pulseFieldWork(now)
                 pendingNative?.let { ack ->
-                    // Native work is complete, but pending durability cannot count as more observed work.
+                    // Time spent waiting for native acknowledgement cannot count as observed work.
                     h.city shouldBe ack.before
                     h.autonomousObservedMillis() shouldBe ack.observed
                     val delay = if (nativeAcks == 0) 10_000L else 250L
                     if (now - ack.at >= delay) {
                         h.owner.requireWorldWorkArrival(h.city.id, h.workerId, ack.work)
-                        val after = CivsRules.finishAutonomousVisual(h.city, ack.work)
                         ack.work.changes.forEach { cell ->
                             h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
                             h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)
                         }
                         h.owner.terrainChanged(h.world.uid, ack.work.changes.map { it.position })
-                        h.city = after
-                        h.city.workers shouldBe original.workers
-                        h.city.stock shouldBe original.stock
-                        h.city.autonomy shouldBe original.autonomy
+                        h.city shouldBe original
                         nativeAcks++
-                        h.city.revision shouldBe original.revision + nativeAcks
-                        ack.future.complete(after) shouldBe true
-                        ack.future.complete(after) shouldBe false
+                        ack.future.complete(h.city) shouldBe true
+                        ack.future.complete(h.city) shouldBe false
                         pendingNative = null
                         if (nativeAcks < 12) h.autoCrop(farm, nativeAcks, duration = 5_000)
                         else {
@@ -4665,7 +4660,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.city.workers.single().items shouldBe worker.items
             h.city.stock shouldBe original.stock.copy(food = original.stock.food + CivsRules.deliveryAmount(farm))
             h.city.autonomy shouldBe original.autonomy
-            h.city.revision shouldBe original.revision + nativeAcks + 1
+            h.city.revision shouldBe original.revision + 1
             requireNotNull(pendingEconomic).complete(committed) shouldBe false
             repeat(20) {
                 h.navigate()

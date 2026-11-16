@@ -150,7 +150,10 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
     }
 
     companion object {
-        fun from(city: Settlement, plans: List<CivPlacementPlan>): CivAutonomousAccess {
+        fun from(city: Settlement, plans: List<CivPlacementPlan>): CivAutonomousAccess =
+            fromSources(city, plans.map(CivRetainedPlanSource::from))
+
+        fun fromSources(city: Settlement, plans: List<CivRetainedPlanSource>): CivAutonomousAccess {
             require(city.buildings.size <= CivsRules.MAX_SITES && plans.size <= CivsRules.MAX_SITES)
             val retained = plans.associateBy { it.building.id }
             val adopted = CivsSettlementPlans.current(city)
@@ -166,7 +169,7 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
             val routes = buildMap {
                 city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.forEach { building ->
                     val plan = retained[building.id] ?: return@forEach
-                    val route = plan.terrain?.route ?: return@forEach
+                    val route = plan.route ?: return@forEach
                     // Retirement may use ROAD transit only when the retained capture binds the
                     // exact current generated piece. Missing/foreign captures remain reservations.
                     if (building.type == BuildingType.ROAD && (plan.id != CivsWarehouseRefit.retainedPlanId(building) ||
@@ -190,13 +193,12 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
             val wallApproachWrites = if (adopted?.deferredPerimeter == null) emptyMap() else buildMap {
                 for (wall in city.buildings.filter { it.type == BuildingType.WALL && it.id in routes }) {
                     val plan = retained.getValue(wall.id)
-                    val terrain = requireNotNull(plan.terrain)
+                    val route = requireNotNull(plan.route)
                     // A profile refit retains the route but its new capture omits the original earthworks.
                     if (plan.id != wall.id || plan.id != CivsGateRefit.retainedPlanId(wall) ||
                         plan.building.copy(phase = BuildingPhase.ACTIVE) != wall || plan.capturedSha256 == null ||
-                        terrain.route != routes[wall.id]) continue
-                    put(wall.id, terrain.blocks.asSequence().filter { it.before != it.after }
-                        .mapTo(hashSetOf()) { civsTerrainKey(it.position.x, it.position.z) })
+                        route != routes[wall.id]) continue
+                    put(wall.id, plan.changedColumns)
                 }
             }
             val perimeterCaptures = adopted?.perimeterEntrances.orEmpty().mapNotNull { (id, stance) ->
@@ -212,7 +214,7 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                     return@mapNotNull null
                 building.id to capture
             }.toMap()
-            return CivAutonomousAccess(routes, CivsSettlementLayout.accepted(city, plans), fortifications,
+            return CivAutonomousAccess(routes, CivsSettlementLayout.acceptedSources(city, plans), fortifications,
                 adopted?.plots.orEmpty().flatMap { plot ->
                     plot.fortification?.let { CivsSettlementPlans.portReservations(it.proof) }.orEmpty()
                 }, paidHallLeadOut(city, routes), wallApproachWrites, perimeterCaptures,

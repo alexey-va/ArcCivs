@@ -1017,7 +1017,7 @@ class CivsService(
         if (tx.worldChanges.orEmpty().isNotEmpty())
             citizens.terrainChanged(tx.after.worldId, tx.worldChanges.orEmpty().map { it.position })
         tx.warehouseRefit?.let { receipt ->
-            cityPlans.loadAutonomousPlans(tx.after).whenCompleteSync(tasks) { _, failure ->
+            cityPlans.loadAutonomousAccess(tx.after).whenCompleteSync(tasks) { _, failure ->
                 if (failure != null) log("reload refitted warehouse ${receipt.beforeBuilding.id}", failure, tx.cityId)
             }
             CivsDiagnostics.event("warehouse_refit_committed", "city" to tx.cityId, "warehouse" to receipt.beforeBuilding.id,
@@ -1025,7 +1025,7 @@ class CivsService(
                 "revision" to tx.after.revision, "recovery_path" to recoveryPath)
         }
         tx.gateRefit?.let { receipt ->
-            cityPlans.loadAutonomousPlans(tx.after).whenCompleteSync(tasks) { _, failure ->
+            cityPlans.loadAutonomousAccess(tx.after).whenCompleteSync(tasks) { _, failure ->
                 if (failure != null) log("reload refitted gate ${receipt.beforeBuilding.id}", failure, tx.cityId)
             }
             CivsDiagnostics.event("gate_refit_committed", "city" to tx.cityId, "gate" to receipt.beforeBuilding.id,
@@ -1043,7 +1043,7 @@ class CivsService(
             val upkeep = requireNotNull(work.upkeep)
             if (upkeep.routeOverride != null) {
                 val gradeLoad = roadMaintenance.awaitGradeNetwork(tx.after)
-                cityPlans.loadAutonomousPlans(tx.after).whenCompleteSync(tasks) { _, failure ->
+                cityPlans.loadAutonomousAccess(tx.after).whenCompleteSync(tasks) { _, failure ->
                     roadMaintenance.gradeNetworkCompleted(tx.cityId, gradeLoad)
                     if (failure != null) {
                         log("reload repaired autonomous road ${tx.cityId}", failure, tx.cityId)

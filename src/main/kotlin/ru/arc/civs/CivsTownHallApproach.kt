@@ -458,7 +458,7 @@ internal class CivsTownHallApproach private constructor(
             "minecraft:large_fern", "minecraft:poppy", "minecraft:dandelion", "minecraft:cornflower", "minecraft:azure_bluet",
             "minecraft:oxeye_daisy", "minecraft:leaf_litter", "minecraft:snow", "minecraft:wildflowers")
 
-        fun capture(city: Settlement, plans: Map<UUID, CivPlacementPlan>, routes: Map<UUID, List<CivPosition>>): CivHallApproach? {
+        fun capture(city: Settlement, plans: Map<UUID, CivRetainedPlanSource>, routes: Map<UUID, List<CivPosition>>): CivHallApproach? {
             val hall = city.buildings.singleOrNull { it.phase == BuildingPhase.ACTIVE && it.type == BuildingType.TOWN_HALL } ?: return null
             val founding = plans[hall.id] ?: return null
             val first = founding.building

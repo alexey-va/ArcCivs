@@ -126,18 +126,17 @@ internal object CivsGateSharedApproaches {
         return result
     }
 
-    fun captures(city: Settlement, plans: Map<UUID, CivPlacementPlan>): Map<UUID, CivSharedRoadCapture> = buildMap {
+    fun captures(city: Settlement, plans: Map<UUID, CivRetainedPlanSource>): Map<UUID, CivSharedRoadCapture> = buildMap {
         for (source in city.buildings) {
             if (source.phase != BuildingPhase.ACTIVE || source.type == BuildingType.TOWN_HALL ||
                 source.type.isInfrastructure && source.type != BuildingType.GATE) continue
             val plan = plans[source.id] ?: continue
             val capture = CivPerimeterCapture(plan.id, plan.capturedSha256 ?: continue)
-            val route = plan.terrain?.route ?: continue
+            val route = plan.route ?: continue
             if (plan.adminPlacement || plan.id != CivsWarehouseRefit.retainedPlanId(source) || !capture.valid() ||
                 plan.cityId != city.id || plan.worldId != city.worldId || !sameRoadSource(plan.building, source) ||
                 route.size !in 4..256 || route.last() != source.entrance) continue
-            val pavement = plan.terrain.blocks.filter { it.before != it.after && it.after in CivsWallApproachCleanup.FINISHES &&
-                CivsAutonomousTerraform.roadProfileContains(route, it.position) }
+            val pavement = plan.pavement
             put(source.id, CivSharedRoadCapture(source, capture, route.toList(), pavement.toList()))
         }
     }

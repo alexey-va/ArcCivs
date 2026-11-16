@@ -98,16 +98,15 @@ internal object CivsWallApproachCleanup {
             planned[it.id.toString()]?.lastOrNull() != it.entrance }
     }
 
-    fun captures(city: Settlement, plans: Map<UUID, CivPlacementPlan>, routes: Map<UUID, List<CivPosition>>): Map<UUID, CivWallApproachCapture> {
+    fun captures(city: Settlement, plans: Map<UUID, CivRetainedPlanSource>, routes: Map<UUID, List<CivPosition>>): Map<UUID, CivWallApproachCapture> {
         val retired = retired(city, routes)
         return city.buildings.filter { it.id in retired }.mapNotNull { source ->
             val plan = plans[source.id] ?: return@mapNotNull null
             val route = routes[source.id] ?: return@mapNotNull null
             if (plan.id != CivsWarehouseRefit.retainedPlanId(source) || plan.adminPlacement ||
                 plan.cityId != city.id || plan.worldId != city.worldId || plan.building.copy(phase = BuildingPhase.ACTIVE) != source ||
-                plan.terrain?.route != route) return@mapNotNull null
-            val pavement = plan.terrain.blocks.filter { it.before != it.after && it.after in FINISHES &&
-                CivsAutonomousTerraform.roadProfileContains(route, it.position) }
+                plan.route != route) return@mapNotNull null
+            val pavement = plan.pavement
             if (pavement.isEmpty()) null else source.id to CivWallApproachCapture(plan.id, route.toList(), pavement.toList())
         }.toMap()
     }

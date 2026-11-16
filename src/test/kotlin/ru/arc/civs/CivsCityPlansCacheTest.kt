@@ -7,16 +7,20 @@ import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import io.mockk.verify
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.persistence.AtomicFileStore
 import java.io.IOException
+import java.lang.management.ManagementFactory
 import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executor
 
 class CivsCityPlansCacheTest : FunSpec({
@@ -62,7 +66,8 @@ class CivsCityPlansCacheTest : FunSpec({
             if (change == "warehouse-capture") shouldThrow<CompletionException> { h.load() }
             else {
                 val access = h.load()
-                h.reads shouldBe 10
+                // The same validated source projections can derive a different current view without decoding again.
+                h.reads shouldBe 5
                 if (change == "override") access.routes.getValue(forester.id)[2].y shouldBe 64
                 if (change == "adopted-plan") requireNotNull(CivsSettlementPlans.current(h.city))
             }
@@ -145,6 +150,117 @@ class CivsCityPlansCacheTest : FunSpec({
         } }
         }
     }
+
+    test("prepared hits republish the same network while construction queue and controls rebuild without reads") {
+        val queued = AccessProjectionExecutor()
+        accessCacheFixture(queued) { h -> h.countReads {
+            val published = mutableListOf<CivRoadUpkeepNetwork>()
+            every { h.maintenance.publish(any(), any()) } answers { published += secondArg<CivRoadUpkeepNetwork>() }
+            val first = h.owner.loadAutonomousAccess(h.city)
+            queued.runNext()
+            h.await(first)
+            val initial = published.single()
+            repeat(4) { h.load() }
+            queued.size shouldBe 0
+            published.size shouldBe 5
+            published.all { it === initial } shouldBe true
+            h.reads shouldBe 5
+
+            val base = h.city
+            for (change in listOf("queue", "construction", "controls", "research", "style", "name")) {
+                h.city = when (change) {
+                    "queue" -> base.copy(constructionQueue = listOf(base.buildings[1].id))
+                    "construction" -> base.copy(construction = CivConstruction(UUID(0, 901), base.buildings[1].id,
+                        2, 10, 0, ConstructionPhase.CONSTRUCTING, Stock(),
+                        plannedBuilding = base.buildings[1].copy(level = 2)))
+                    "controls" -> base.copy(pendingControls = listOf(CivControlPlacement(base.buildings[1].id,
+                        base.buildings[1].anchor, "minecraft:air")))
+                    "research" -> base.copy(research = CivResearchState(setOf(CivResearchId.MATERIALS)))
+                    "style" -> base.copy(style = "oak")
+                    else -> base.copy(name = "Renamed")
+                }
+                val changing = h.owner.loadAutonomousAccess(h.city)
+                queued.size shouldBe 1
+                queued.runNext()
+                h.await(changing)
+                h.reads shouldBe 5
+                (published.last() === initial) shouldBe false
+            }
+        } }
+    }
+
+    test("even already completed reads project only on the owning worker executor") {
+        fun worker(name: String) = Executor { task -> Thread(task, name).apply { start(); join() } }
+        accessCacheFixture(executor = worker("access-planning"), storeExecutor = worker("access-storage")) { h ->
+            val threads = CopyOnWriteArrayList<String>()
+            mockkObject(CivRetainedPlanSource.Companion)
+            try {
+                every { CivRetainedPlanSource.from(any()) } answers {
+                    threads += Thread.currentThread().name
+                    callOriginal()
+                }
+                h.load()
+                threads.toList() shouldBe List(5) { "access-storage" }
+                threads.clear()
+                h.await(h.owner.loadAutonomousPlans(h.city))
+                threads.toList() shouldBe List(5) { "access-planning" }
+            } finally { unmockkObject(CivRetainedPlanSource.Companion) }
+        }
+    }
+
+    test("five cities retain compact sources outside the four full-plan slots with bounded warm allocation") {
+        accessCacheFixture { h ->
+            val cities = (0 until 5).map { index ->
+                val buildings = h.city.buildings.map { it.copy(id = UUID(index + 1L, it.id.leastSignificantBits),
+                    bounds = it.bounds.copy(max = it.bounds.max.copy(y = 114))) }
+                val city = h.city.copy(id = UUID(51, index.toLong()), owner = UUID(52, index.toLong()), buildings = buildings,
+                    workers = List(if (index < 3) 19 else 18) { worker ->
+                        CivWorker(UUID(index + 61L, worker.toLong()), "Worker$worker", buildings[1].id)
+                    })
+                h.additionalCities[city.id] = city
+                buildings.forEachIndexed { buildingIndex, building ->
+                    val before = h.plans[buildingIndex]
+                    val blocks = (64..113).flatMap { y -> (1..4).flatMap { z ->
+                        (-2..2).map { x -> CivPlanBlock(CivPosition(building.anchor.x + x, y, z),
+                            "minecraft:air", "minecraft:stone") }
+                    } }
+                    blocks.size shouldBe 1_000
+                    h.write(before.copy(id = building.id, cityId = city.id, building = building.copy(phase = BuildingPhase.CONSTRUCTING), blocks = blocks))
+                }
+                city
+            }
+            h.city = cities.first()
+            h.additionalCities.remove(h.city.id)
+            cities.sumOf { it.workers.size } shouldBe 93
+            h.countReads {
+                val expected = cities.map { city -> h.load(city) }
+                h.reads shouldBe 25
+                val retained = h.retainedSources()
+                retained.size shouldBe 25
+                retained.all { it.infrastructureBlocks.isEmpty() } shouldBe true
+                retained.all { it.pavement.isEmpty() && it.changedColumns.isEmpty() } shouldBe true
+                repeat(5) { cities.forEachIndexed { index, city -> h.load(city) shouldBe expected[index] } }
+                h.reads shouldBe 25
+
+                val meter = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+                require(meter.isThreadAllocatedMemorySupported)
+                meter.isThreadAllocatedMemoryEnabled = true
+                fun measured(action: () -> Unit): Long {
+                    val before = meter.getThreadAllocatedBytes(Thread.currentThread().threadId())
+                    action()
+                    return meter.getThreadAllocatedBytes(Thread.currentThread().threadId()) - before
+                }
+                val warm = measured { repeat(4) { cities.forEach { h.load(it) } } }
+                h.reads shouldBe 25
+                val full = measured { repeat(4) { cities.forEach { h.await(h.owner.loadAutonomousPlans(it)) } } }
+                h.reads shouldBe 125
+                (warm * 10 < full) shouldBe true
+                println("retained-plan-allocation cities=5 workers=93 plans=25 blocks_per_plan=1000 requests=20 warm_bytes=$warm full_reload_bytes=$full warm_decodes=0 full_decodes=100")
+                cities.forEach { h.owner.remove(it.id) }
+                h.retainedSources() shouldBe emptyList()
+            }
+        }
+    }
 })
 
 private fun accessCacheFixture(executor: Executor = Executor(Runnable::run),
@@ -161,6 +277,7 @@ private class AccessCacheFixture(private val paper: MockBukkitTestRuntime, execu
     var reads = 0
     var city: Settlement
     val plans: List<CivPlacementPlan>
+    val additionalCities = linkedMapOf<UUID, Settlement>()
     val maintenance = mockk<CivsRoadMaintenance>(relaxed = true)
     val owner: CivsCityPlans
 
@@ -182,7 +299,7 @@ private class AccessCacheFixture(private val paper: MockBukkitTestRuntime, execu
         plans.forEach(::write)
         val authority = mockk<CivsService>()
         every { authority.tracked<Any>() } answers { CompletableFuture<Any>() }
-        val records = CivsCityRecords({ mapOf(city.id to city) }, emptySet(), emptySet(), { false }, { false }, { null }, { 0L }, { 0 })
+        val records = CivsCityRecords({ additionalCities + (city.id to city) }, emptySet(), emptySet(), { false }, { false }, { null }, { 0L }, { 0 })
         owner = CivsCityPlans(authority, records, tasks, store, executor, maintenance)
     }
 
@@ -200,7 +317,14 @@ private class AccessCacheFixture(private val paper: MockBukkitTestRuntime, execu
         block()
     }
 
-    fun load() = await(owner.loadAutonomousAccess(city))
+    fun load(city: Settlement = this.city) = await(owner.loadAutonomousAccess(city))
+    fun retainedSources(): List<CivRetainedPlanSource> {
+        val values = owner.javaClass.getDeclaredField("retainedSources").also { it.isAccessible = true }.get(owner) as Map<*, *>
+        return values.values.flatMap { entry ->
+            @Suppress("UNCHECKED_CAST")
+            (entry!!.javaClass.getDeclaredField("sources").also { it.isAccessible = true }.get(entry) as List<CivRetainedPlanSource>)
+        }
+    }
     fun <T> await(future: CompletableFuture<T>): T {
         repeat(10) { if (future.isDone) return future.join(); paper.performTicks(1) }
         error("Retained access did not complete on its owner")
@@ -211,6 +335,7 @@ private class AccessCacheFixture(private val paper: MockBukkitTestRuntime, execu
 
 private class AccessProjectionExecutor : Executor {
     private val pending = ArrayDeque<Runnable>()
+    val size get() = pending.size
     override fun execute(command: Runnable) { pending.addLast(command) }
     fun runNext() = pending.removeFirst().run()
     fun runLast() = pending.removeLast().run()

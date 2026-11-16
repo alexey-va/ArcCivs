@@ -2877,7 +2877,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("Auto field scenery uses one native validation and an ordinary save without an inventory journal") {
+    test("Auto field scenery applies successive native actions without saving or replaying the old work") {
         serviceScenario(nativeGeometry = true) { h ->
             val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(30, 63, 0))
             val worker = h.city.workers.first().copy(assignment = farm.id, nextDeliveryAt = 1)
@@ -2895,7 +2895,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
                 .get(h.service) as CivsWorksites
-            // This fixture checks native application and saving, independently of host/MockK speed.
+            // Keep the native planning budget independent of host and MockK speed.
             CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }
                 .set(worksites, { 0L })
             repeat(16) { worksites.pulse(listOf(village)) }
@@ -2904,20 +2904,78 @@ class CivsServiceTest : FunSpec({
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
-            val pending = deliver.invokeService(h.service, village.id, worker.id, farm.id, worker.completedCycles,
-                worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
-            h.saves.single().first shouldBe village.copy(revision = village.revision + 1)
+            fun complete(cycle: Long = worker.completedCycles) = deliver.invokeService(h.service, village.id, worker.id,
+                farm.id, cycle, worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            val pending = complete()
+            h.saves shouldBe emptyList()
+            h.await(pending) shouldBe village
             work.changes.forEach { cell ->
                 h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.after
             }
-            pending.isDone shouldBe false
             verify(exactly = 1) { h.citizens.requireWorldWorkArrival(village.id, worker.id, work) }
-            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
-            h.commit(); h.await(pending)
-            h.service.settlements().single() shouldBe village.copy(revision = village.revision + 1)
-            (worksites.plan(h.service.settlements().single(), worker) == work) shouldBe false
-            h.saves.size shouldBe 1
-            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete(worker.completedCycles + 1).join() })
+                ?.reason shouldBe "stale-delivery"
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "stale-worksite"
+            h.world.getBlockAt(crop.x, crop.y, crop.z).blockData.asString shouldBe "minecraft:wheat[age=0]"
+
+            val planted = h.world.getBlockAt(crop.x, crop.y, crop.z)
+            planted.blockData = Bukkit.createBlockData("minecraft:wheat[age=7]")
+            worksites.changed(village.worldId, crop)
+            repeat(16) { worksites.pulse(listOf(village)) }
+            val nextWork = requireNotNull(worksites.plan(village, worker))
+            nextWork.changes.single() shouldBe CivPlanBlock(crop, "minecraft:wheat[age=7]", "minecraft:wheat[age=0]")
+            every { h.citizens.autonomousVisualWork(village.id, worker.id) } returns nextWork
+            h.await(complete()) shouldBe village
+            planted.blockData.asString shouldBe "minecraft:wheat[age=0]"
+            h.service.settlements().single() shouldBe village
+            verify(exactly = 1) { h.citizens.requireWorldWorkArrival(village.id, worker.id, nextWork) }
+            verify(exactly = 0) { h.store.save(any()); h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    test("Auto quarry visual work still saves its new cursor before acknowledgement") {
+        serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
+            val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+            val worker = spatialWorker(mine, "IRON_PICKAXE", supplies = false)
+            val before = spatialCity(h.world.uid, listOf(mine), worker).copy(owner = h.owner,
+                autonomy = CivAutonomy(), inventory = null)
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val ladder = CivsWorksiteLayouts.point(mine, geometry.bottom)
+            for (x in -3..3) for (z in -3..2) h.world.loadChunk(x, z)
+            for (y in ladder.y..65) {
+                h.world.getBlockAt(ladder.x, y, ladder.z).blockData =
+                    Bukkit.createBlockData("minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
+            }
+            every { h.worldAdapter.canMine(any()) } returns true
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            h.start()
+            val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
+                .get(h.service) as CivsWorksites
+            CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }
+                .set(worksites, { 0L })
+            repeat(64) { if (worksites.plan(before, worker) == null) worksites.pulse(listOf(before)) }
+            val work = withClue(worksites.debug()) { requireNotNull(worksites.plan(before, worker)) }
+            val nextStep = requireNotNull(work.miningStep)
+            every { h.citizens.autonomousVisualWork(before.id, worker.id) } returns work
+            val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+                .also { it.isAccessible = true }
+            val pending = deliver.invokeService(h.service, before.id, worker.id, mine.id, worker.completedCycles,
+                worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            if (pending.isCompletedExceptionally) pending.join()
+            val saved = h.saves.single().first
+            pending.isDone shouldBe false
+            h.service.settlements().single() shouldBe before
+            work.changes.forEach { cell ->
+                h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.after
+            }
+            requireNotNull(saved.minePlans?.get(mine.id.toString())).nextStep shouldBe nextStep
+            saved.copy(minePlans = before.minePlans, revision = before.revision) shouldBe before
+            saved.revision shouldBe before.revision + 1
+            h.commit()
+            h.await(pending) shouldBe saved
+            verify(exactly = 1) { h.citizens.requireWorldWorkArrival(before.id, worker.id, work) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
 

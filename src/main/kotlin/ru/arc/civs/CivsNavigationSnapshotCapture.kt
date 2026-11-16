@@ -155,7 +155,7 @@ internal class CitizenSnapshotCapture(
     private val connectedPrefetch: Boolean,
 ) {
     private data class CapturedProbe(val probe: CitizenSearchProbe, val blocks: CitizenSnapshotBlocks,
-        val edges: List<CitizenSearchEdge>)
+        val edges: List<CitizenSearchEdge>, val published: CitizenSearchCapture? = null)
     private val probes = probes.toMutableList()
     private val requestedCount = probes.size
     private val prefetch = probes.none { it.incoming || it.node.initial }
@@ -173,7 +173,9 @@ internal class CitizenSnapshotCapture(
     /** Called only after this cursor's worker has terminated; no native state is read. */
     internal fun debugCursor() = CitizenNavigationDebugCursor(requestedCount, next, probes.toList())
 
-    fun advance(input: CitizenSnapshotInput): CitizenSnapshotRequest {
+    @JvmOverloads
+    fun advance(input: CitizenSnapshotInput,
+                captured: ((CitizenSearchProbe) -> CitizenSearchCapture?)? = null): CitizenSnapshotRequest {
         checkCancelled()
         terrain.chunks.putAll(input.chunks)
         terrain.unavailable += input.unavailable
@@ -183,6 +185,15 @@ internal class CitizenSnapshotCapture(
         while (next < probes.size) {
             checkCancelled()
             val probe = probes[next]
+            val previous = captured?.invoke(probe)
+            val previousBlocks = previous?.blocks
+            if (previous != null && previousBlocks is CitizenSnapshotBlocks) {
+                // Keep this queue slot and its current bounds: skipping it would change connected prefetch.
+                completed += CapturedProbe(probe, previousBlocks, previous.edges, previous)
+                prefetch(probe, previous.edges)
+                next++
+                continue
+            }
             val y = floor(probe.node.y).toInt()
             val xs = probe.node.x - 1..probe.node.x + 1
             val zs = probe.node.z - 1..probe.node.z + 1
@@ -253,16 +264,20 @@ internal class CitizenSnapshotCapture(
             }
             edges.forEach { edge -> requiredCosts += blocks.key(edge.node.x, citizenSupportY(edge.node.y), edge.node.z) }
             completed += CapturedProbe(probe, blocks, edges)
-            if (prefetch && (next < requestedCount || connectedPrefetch)) for (edge in edges) {
-                if (probes.size >= maximumProbes) break
-                if (!edge.permitted) continue
-                val point = edge.node.point()
-                if (probe.corridor?.contains(point) != false && probe.bounds?.contains(point) != false && seen.add(edge.node))
-                    probes += CitizenSearchProbe(edge.node, point, corridor = probe.corridor, bounds = probe.bounds)
-            }
+            prefetch(probe, edges)
             next++
         }
         return finish()
+    }
+
+    private fun prefetch(probe: CitizenSearchProbe, edges: List<CitizenSearchEdge>) {
+        if (prefetch && (next < requestedCount || connectedPrefetch)) for (edge in edges) {
+            if (probes.size >= maximumProbes) break
+            if (!edge.permitted) continue
+            val point = edge.node.point()
+            if (probe.corridor?.contains(point) != false && probe.bounds?.contains(point) != false && seen.add(edge.node))
+                probes += CitizenSearchProbe(edge.node, point, corridor = probe.corridor, bounds = probe.bounds)
+        }
     }
 
     private fun finish(): CitizenSnapshotRequest {
@@ -276,6 +291,7 @@ internal class CitizenSnapshotCapture(
         if (missing.isNotEmpty()) return request(costs = missing.take(512).toSet())
         val resolved = hashMapOf<CivPosition, SnapshotCell>()
         return request(captures = completed.map { capture ->
+            capture.published?.let { return@map it.copy(probe = capture.probe) }
             val blocks = capture.blocks.withCosts { cell ->
                 val point = cell.key
                 val block = cell.value

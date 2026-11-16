@@ -193,7 +193,11 @@ internal class CivsWorkerCommits(
     private fun autonomousVisualMutation(city: Settlement, work: CivWorldWork): CompletableFuture<Settlement> =
         authority.mutate(city.id) { current ->
             citizens.requireWorldWorkArrival(current.id, work.workerId, work)
-            val next = CivsRules.finishAutonomousVisual(current, work)
+            val next = if (work.miningStep != null) CivsRules.finishAutonomousVisual(current, work) else {
+                // Valid farm scenery changes only native blocks. Historical receipts still use the old revision transition.
+                CivsAutonomousWorksites.validate(current, work)
+                current
+            }
             worksites.applyAutonomousVisual(current, work)
             citizens.terrainChanged(current.worldId, work.changes.map { it.position })
             next

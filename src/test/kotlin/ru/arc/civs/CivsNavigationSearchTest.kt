@@ -46,7 +46,8 @@ class CivsNavigationSearchTest : FunSpec({
 
     test("repeated geometry probes preserve fractional support collision and hot-exit guards") {
         for (height in listOf(.0625, .5, .9375, 1.0))
-            for (kind in listOf("clear", "solid", "reversed", "liquid", "liquid-below", "unknown", "hot", "hot-exit", "body")) {
+            for (kind in listOf("clear", "solid", "reversed", "liquid", "liquid-below", "unknown", "hot", "hot-exit", "body",
+                "overlap-exit", "overlap-deep")) {
                 val origin = CitizenPoint(.5, 63 + height, .5)
                 val target = origin.copy(x = 2.5)
                 val avoiding = if (kind == "body") listOf(CitizenTerrainBox(1.1, 63 + height, .1,
@@ -59,9 +60,11 @@ class CivsNavigationSearchTest : FunSpec({
                     result = search.advance(result.probes.map { probe ->
                         val blocks = buildMap {
                             for (x in probe.node.x - 1..probe.node.x + 1) for (z in -1..1) for (y in 60..67) {
-                                val at = x == (if (kind == "hot-exit") 0 else 1) && z == 0 && y == 64
+                                val at = x == (if (kind in listOf("hot-exit", "overlap-exit", "overlap-deep")) 0 else 1) && z == 0 && y == 64
                                 val below = kind == "liquid-below" && x == 1 && z == 0 && y == 62
                                 val boxes = when {
+                                    at && kind in listOf("overlap-exit", "overlap-deep") -> listOf(
+                                        CitizenTerrainBox(.1, .05, .1, if (kind == "overlap-exit") .25 else .49, .1, .9))
                                     at && kind == "solid" -> listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
                                     at && kind == "reversed" -> listOf(CitizenTerrainBox(1.0, 1.0, 1.0, 0.0, 0.0, 0.0))
                                     y == 63 -> listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, height, 1.0))
@@ -77,7 +80,7 @@ class CivsNavigationSearchTest : FunSpec({
                     })
                 }
                 withClue("height=$height kind=$kind result=$result") {
-                    (result.path?.lastOrNull()?.point == target) shouldBe (kind in listOf("clear", "liquid-below", "hot-exit"))
+                    (result.path?.lastOrNull()?.point == target) shouldBe (kind in listOf("clear", "liquid-below", "hot-exit", "overlap-exit"))
                 }
             }
     }
