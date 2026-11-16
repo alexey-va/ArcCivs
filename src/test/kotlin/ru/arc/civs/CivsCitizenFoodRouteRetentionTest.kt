@@ -175,6 +175,100 @@ class CivsCitizenFoodRouteRetentionTest : FunSpec({
         }
     }
 
+    test("food retries prefer untried sides and unknown chunks never renew food recovery evidence") {
+        residentRuntime(workerId = UUID(0, 20)) { h ->
+            for (x in -2..2) for (z in -2..2) h.world.loadChunk(x, z)
+            val barrel = CivPosition(8, 64, 0)
+            val first = barrel.copy(x = 9)
+            val second = barrel.copy(x = 7)
+            val third = barrel.copy(z = 1)
+            val tavern = CivBuilding(UUID.randomUUID(), BuildingType.TAVERN, 1, barrel, 0, "food-retry-fixture",
+                CivBox(CivPosition(7, 63, -2), CivPosition(13, 68, 3)), first, BuildingPhase.ACTIVE, control = barrel)
+            h.city = h.city.copy(buildings = h.city.buildings + tavern,
+                workers = h.city.workers.map { it.copy(hunger = 0) })
+            h.world.getBlockAt(barrel.x, barrel.y, barrel.z).type = Material.BARREL
+            for (y in 64..66) h.world.getBlockAt(8, y, -1).type = Material.STONE
+            val actor = h.actor()
+            val routes = h.owner.javaClass.getDeclaredField("routes").run {
+                isAccessible = true
+                get(h.owner) as CivsCitizenRoutes
+            }
+            routes.cancelRoute(actor)
+            val origin = Location(h.world, 3.5, 64.0, .5)
+            actor.npc.teleport(origin)
+            val source = CivResidentFoodSource(tavern.id, barrel, first)
+            h.physicalFoodSource = source
+            h.foodRecoveryAllowed = { true }
+            val before = h.city
+
+            // Exercise the terminal owner; the preceding test supplies the actual bounded-search oracle.
+            fun failed(standing: CivPosition, reason: String, at: Long) {
+                val selected = source.copy(standing = standing)
+                actor.foodPickupSource = selected
+                actor.foodSource = selected.buildingId
+                val target = standing.location(h.world)
+                val motion = CitizenPacketRoute(h.world, origin, target, { true }, { _, _ -> true }, { 1.0 })
+                motion.planningFailed(reason)
+                val route = CitizenRoute(origin.point(), target,
+                    CitizenChunks.between(origin.blockX, origin.blockZ, standing.x, standing.z), at, 90_000,
+                    setOf(tavern.id), motion, null, standing)
+                route.completion = CitizenNavigationCompletion(reason)
+                actor.route = route
+                h.recoveryMillis = at
+                routes.recoverFoodRoute(actor, h.city, h.city.workers.single(), route, selected, at) { selected } shouldBe false
+                routes.cancelRoute(actor)
+            }
+            fun next(at: Long): CivPosition? {
+                h.recoveryMillis = at
+                return routes.foodStanding(actor, h.city, source)
+            }
+
+            failed(first, "capture-budget", 10_000)
+            next(16_000) shouldBe second
+            failed(second, "capture-budget", 20_000)
+            next(26_000) shouldBe third // Do not fall back to the preferred first side while this side is untried.
+            val history = requireNotNull(actor.foodRouteFailure)
+            history.matches(actor, source.copy(standing = third), 26_000) shouldBe true
+            history.matches(actor, source.copy(container = barrel.copy(x = 10)), 26_000) shouldBe false
+            history.matches(actor, source.copy(material = "APPLE"), 26_000) shouldBe false
+            val plan = actor.plan
+            actor.plan = plan.copy(token = plan.token.copy(completedCycles = plan.token.completedCycles + 1))
+            history.matches(actor, source, 26_000) shouldBe false
+            actor.plan = plan
+            actor.npc.teleport(origin.clone().add(1.0, 0.0, 0.0))
+            history.matches(actor, source, 26_000) shouldBe false
+            actor.npc.teleport(origin)
+            next(51_000) shouldBe first // Expired local history does not blacklist the holder or its approach.
+
+            // A sole native-safe side still gets the old prompt genuine retry, then only its repeats wait.
+            for (point in listOf(second, third)) for (y in 64..66)
+                h.world.getBlockAt(point.x, y, point.z).type = Material.STONE
+            actor.foodRouteFailure = null
+            failed(first, "capture-budget", 60_000)
+            next(66_000) shouldBe first
+            failed(first, "capture-budget", 70_000)
+            next(76_000) shouldBe null
+            actor.npc.teleport(origin.clone().add(1.0, 0.0, 0.0))
+            next(76_000) shouldBe first // Actual movement immediately admits a fresh attempt.
+            actor.npc.teleport(origin)
+            next(84_999) shouldBe null
+            next(85_000) shouldBe first
+
+            // Chunk-unloaded can throttle the same failed stance, but cannot bridge a gap in eligible failures.
+            actor.foodRouteFailure = null
+            failed(first, "capture-budget", 100_000)
+            for (at in listOf(120_000L, 140_000L, 160_000L)) failed(first, "chunk-unloaded", at)
+            failed(first, "capture-budget", 180_000)
+            actor.npc.location shouldBe origin
+            actor.supplyPickup shouldBe null
+            h.city shouldBe before
+            h.deliveries shouldBe 0
+            h.pickups shouldBe 0
+            h.unloads shouldBe 0
+            h.observedWork() shouldBe 0L
+        }
+    }
+
     test("physical food pickup waits for body transit to finish and its accepted receipt survives later player occupancy") {
         residentRuntime(workerId = UUID(0, 20)) { h ->
             for (x in -2..3) for (z in -2..2) h.world.loadChunk(x, z)

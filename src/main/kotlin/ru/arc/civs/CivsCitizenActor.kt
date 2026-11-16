@@ -9,13 +9,37 @@ import java.util.UUID
 internal data class CitizenOutputFullPause(val buildingId: UUID, val retryAt: Long)
 internal data class CitizenBodyContact(val token: CitizenToken, val at: CitizenPoint, var walked: Double = 0.0)
 internal data class CitizenFoodRouteFailure(val token: CitizenToken, val source: CivResidentFoodSource,
-    val feet: CitizenPoint, val firstFailureAt: Long) {
-    var lastFailureAt = firstFailureAt
-    var alternateTried = false
+    val feet: CitizenPoint, var lastFailureAt: Long) {
+    private data class StandingFailure(val attempts: Int, val at: Long)
+    private val standings = linkedMapOf<CivPosition, StandingFailure>()
+    private var firstRecoveryFailureAt: Long? = null
+    private var lastRecoveryFailureAt: Long? = null
+
+    fun record(standing: CivPosition, clock: Long) {
+        val previous = standings[standing]
+        // The existing food selector has at most six levels, four sides and one preferred point.
+        if (previous != null || standings.size < 25)
+            standings[standing] = StandingFailure(minOf(2, (previous?.attempts ?: 0) + 1), clock)
+        lastFailureAt = clock
+    }
+
+    fun untried(standing: CivPosition): Boolean = standing !in standings
+
+    fun retryAllowed(standing: CivPosition, clock: Long): Boolean = standings[standing]?.let {
+        it.attempts < 2 || clock - it.at >= 15_000L
+    } != false
+
+    /** Unknown terrain may defer one stance, but never starts or renews relocation evidence. */
+    fun recoveryDue(attemptAt: Long, clock: Long): Boolean {
+        val previous = lastRecoveryFailureAt
+        if (previous == null || attemptAt - previous !in 0L..30_000L) firstRecoveryFailureAt = clock
+        lastRecoveryFailureAt = clock
+        return clock - requireNotNull(firstRecoveryFailureAt) >= 60_000L
+    }
 
     fun matches(actor: CitizenActor, current: CivResidentFoodSource, clock: Long): Boolean =
         token == actor.plan.token && current.copy(standing = source.standing) == source &&
-            clock - lastFailureAt <= 30_000L && feet.distanceSquared(actor.npc.location.point()) <= .25
+            clock - lastFailureAt in 0L..30_000L && feet.distanceSquared(actor.npc.location.point()) <= .25
 }
 
 /** Mutable runtime identity and in-flight activity state for one admitted resident. */

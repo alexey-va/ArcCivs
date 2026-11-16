@@ -480,14 +480,15 @@ internal class CivsCitizenRoutes(
                 storagePointClear(actor, city, world, point, feet) && collisions.idleDestinationFree(actor, feet)
             } == true
         }
-        val blocked = actor.foodRouteFailure?.takeIf { !it.alternateTried && it.matches(actor, source, recoveryClock()) }
-        // Keep a walking alternative once admitted. A different resident's reservation must not restart it each pulse.
+        val clock = recoveryClock()
+        val blocked = actor.foodRouteFailure?.takeIf { it.matches(actor, source, clock) }
+        // Try every fresh approach before retrying a failed side of this same food holder.
         if (blocked != null && actor.route == null) {
             citizenCollectedHomeTarget(city, building, world, source.container, source.standing) {
-                it != blocked.source.standing && safe(it)
-            }?.let { alternate ->
-                blocked.alternateTried = true
-                return alternate
+                blocked.untried(it) && safe(it)
+            }?.let { return it }
+            return citizenCollectedHomeTarget(city, building, world, source.container, source.standing) {
+                blocked.retryAllowed(it, clock) && safe(it)
             }
         }
         return citizenCollectedHomeTarget(city, building, world, source.container, source.standing, safe)
@@ -497,10 +498,12 @@ internal class CivsCitizenRoutes(
     fun recoverFoodRoute(actor: CitizenActor, city: Settlement, worker: CivWorker, route: CitizenRoute,
                          source: CivResidentFoodSource, now: Long, currentSource: () -> CivResidentFoodSource?): Boolean {
         val cause = route.completion?.cancelReason ?: return false
-        // The solver reports this reason only after a required probe exhausts the capture limit.
-        val exhaustedCapture = cause == "capture-budget" && !route.motion.searching && !route.motion.continuation &&
+        // A missing frontier may mask capture exhaustion, but does not prove a relocation is safe.
+        val stationarySearchFailure = (cause == "capture-budget" || cause == "chunk-unloaded") &&
+            !route.motion.searching && !route.motion.continuation &&
             route.replanAttempts == 0 && route.from.distanceSquared(actor.npc.location.point()) <= .25
-        if (route.motion.failure != cause || cause !in FOOD_TERRAIN_FAILURES && !exhaustedCapture) return false
+        val recoveryEligible = cause in FOOD_TERRAIN_FAILURES || cause == "capture-budget" && stationarySearchFailure
+        if (route.motion.failure != cause || !recoveryEligible && !stationarySearchFailure) return false
         if (route.authored != source.standing ||
             route.intermediate || route.idleAnchor != null || route.motion.waitingForCollision || route.nativeCollisionTicks > 0 ||
             actor.collisionResident != null || route.replanReason == "player-blocked" || route.replanReason == "resident-blocked" ||
@@ -516,16 +519,15 @@ internal class CivsCitizenRoutes(
         }
         val clock = recoveryClock()
         // Count a timely walking retry even when its native capture spends longer than the retry window.
-        val attemptAt = if (exhaustedCapture) {
+        val attemptAt = if (stationarySearchFailure) {
             clock - (now - route.startedAt).coerceIn(0L, FOOD_CAPTURE_RETRY_PREPARATION_LIMIT)
         } else clock
-        val previous = actor.foodRouteFailure?.takeIf { attemptAt >= it.lastFailureAt && it.matches(actor, source, attemptAt) }
-        if (previous == null) {
-            actor.foodRouteFailure = CitizenFoodRouteFailure(actor.plan.token, source, actor.npc.location.point(), clock)
-            return false
-        }
-        previous.lastFailureAt = clock
-        if (clock - previous.firstFailureAt < 60_000L || runtime.recoveryBudget == 0 ||
+        val previous = actor.foodRouteFailure?.takeIf { it.matches(actor, source, attemptAt) }
+            ?: CitizenFoodRouteFailure(actor.plan.token, source, actor.npc.location.point(), clock)
+                .also { actor.foodRouteFailure = it }
+        previous.record(source.standing, clock)
+        if (!recoveryEligible || !previous.recoveryDue(attemptAt, clock)) return false
+        if (runtime.recoveryBudget == 0 ||
             actor.nextRecoveryAt?.let { clock < it } == true) return false
         // Bound denied probes too. The ordinary walking retry and its work cooldown continue.
         if (currentSource()?.copy(standing = source.standing) != source) {

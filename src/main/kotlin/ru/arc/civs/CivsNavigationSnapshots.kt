@@ -355,10 +355,7 @@ internal class CivsNavigationSnapshots(
     fun retainedPayloads(): List<CitizenSnapshotSection> { checkOwner(); return sections.values.map { it.value } }
     fun knownStates(values: Collection<CitizenSnapshotSection>): Map<BlockData, CitizenSnapshotState> {
         checkOwner()
-        return buildMap {
-            for (section in values) for (data in section.samples.keys)
-                if (!containsKey(data)) palette[data]?.let { put(data, it) }
-        }
+        return buildMap { values.forEach { section -> section.samples.keys.forEach { data -> palette[data]?.let { put(data, it) } } } }
     }
 
     fun state(world: World, data: BlockData, sample: CivPosition): CitizenSnapshotState {
