@@ -19,6 +19,55 @@ import java.util.concurrent.CompletableFuture
 class CivsInitialAutonomousApproachTest : FunSpec({
     afterEach { clearAllMocks(currentThreadOnly = true) }
 
+    test("initial approaches inspect one city per pulse without sharing its cooldown or failed retry") {
+        serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
+            val initial = InitialApproach(h, adoptedPlan = false)
+            fun shifted(point: CivPosition) = point.copy(x = point.x + 96)
+            val hall = initial.hall.copy(id = UUID.randomUUID(), anchor = shifted(initial.hall.anchor),
+                bounds = CivBox(shifted(initial.hall.bounds.min), shifted(initial.hall.bounds.max)),
+                entrance = shifted(initial.hall.entrance), control = initial.hall.control?.let(::shifted))
+            val second = CivsRules.validate(initial.city.copy(id = UUID.randomUUID(), name = "Second",
+                center = shifted(initial.city.center), buildings = listOf(hall),
+                workers = initial.city.workers.map { it.copy(id = UUID.randomUUID(), homeId = hall.id) }))
+            h.world.loadChunk(hall.entrance.x shr 4, hall.entrance.z shr 4)
+            val cities = linkedMapOf(initial.city.id to initial.city, second.id to second)
+            val chunks = mockk<CivsChunkLoading>()
+            every { chunks.active(any()) } returns true
+            val controls = CivsControlInstallations(h.plugin, h.worldAdapter, mockk(), chunks, { cities },
+                emptySet(), emptySet(), { true }, { _, _ -> error("Approach selection must not mutate a city") })
+            val inspected = mutableListOf<UUID>()
+            val started = mutableListOf<UUID>()
+            val held = CompletableFuture<Unit>()
+            var now = 1_000L
+            fun pulse() = controls.pulse({ now }, { inspected += it.id; true }) { city ->
+                started += city.id
+                if (city.id == initial.city.id) held else CompletableFuture.completedFuture(Unit)
+            }
+
+            pulse()
+            inspected shouldBe listOf(initial.city.id)
+            started shouldBe listOf(initial.city.id)
+            pulse()
+            pulse()
+            inspected shouldBe listOf(initial.city.id, second.id)
+            started shouldBe inspected
+            held.completeExceptionally(CivsRejection("test-retry"))
+            now = 5_999L
+            pulse()
+            started.size shouldBe 2
+            now = 6_000L
+            pulse()
+            started shouldBe listOf(initial.city.id, second.id, second.id)
+            now = 30_999L
+            pulse()
+            started.count { it == initial.city.id } shouldBe 1
+            now = 31_000L
+            pulse()
+            started.count { it == initial.city.id } shouldBe 2
+            inspected shouldBe started
+        }
+    }
+
     for (adoptedPlan in listOf(false, true))
     test("an initial autonomous hall journals its fresh approach and keeps its barrel with adoptedPlan=$adoptedPlan") {
         serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->

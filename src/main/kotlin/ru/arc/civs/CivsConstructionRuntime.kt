@@ -80,14 +80,13 @@ internal class CivsConstructionRuntime(
     private val yieldedBuilderWaits = mutableMapOf<UUID, BuilderWait>()
     private val constructionRetryAfter = mutableMapOf<UUID, Long>()
     private val legacyPlacementRetries = mutableSetOf<UUID>()
-    private var nextMaterialCheckAt = 0L
-    private var materialCursor = 0
+    private val materialTurns = CivsCityTurns()
     private var placementCursor = 0
     private val queueFailures = mutableMapOf<UUID, Pair<UUID, String>>()
-    private class QueueAdmission(val buildingId: UUID)
+    // A completion releases only the admission created for its own activation.
+    private class QueueAdmission
     private val queuedAdmissions = mutableMapOf<UUID, QueueAdmission>()
-    private var nextQueueAt = 0L
-    private var queueCursor = 0
+    private val queueTurns = CivsCityTurns()
 
     val activeCount: Int get() = placing.size
     fun isPlacing(cityId: UUID): Boolean = cityId in placing
@@ -98,12 +97,17 @@ internal class CivsConstructionRuntime(
         it.orderId == city.construction?.id && it.batch == city.construction?.workDone
     }?.materials
 
-    fun materialsChanged() { nextMaterialCheckAt = 0L }
+    fun materialsChanged(cityId: UUID) { materialTurns.clear(cityId) }
     fun queueFailure(cityId: UUID, buildingId: UUID?): String? =
         queueFailures[cityId]?.takeIf { it.first == buildingId }?.second
     fun clearQueueFailure(cityId: UUID) { queueFailures.remove(cityId) }
     fun clearQueueFailures() { queueFailures.clear() }
-    fun resetSites() { constructionSites.clear(); queuedAdmissions.clear() }
+    fun resetSites() {
+        constructionSites.clear()
+        queuedAdmissions.clear()
+        materialTurns.clear()
+        queueTurns.clear()
+    }
 
     fun loadLegacyRetries(records: Collection<Settlement>) {
         legacyPlacementRetries.clear()
@@ -173,32 +177,19 @@ internal class CivsConstructionRuntime(
         return operation.completion.handle { _, _ -> Unit }
     }
 
-    private fun eligibleQueueHead(city: Settlement, admitted: Boolean = false): CivBuilding? {
+    private fun queueHeadReady(city: Settlement): Boolean {
+        val building = city.constructionQueue?.firstOrNull()?.let(city::building) ?: return false
         if (city.autonomy?.paused == true || city.construction != null || city.pendingDeletion != null ||
             !autonomousAccessReady(city) || city.id in unhealthy || city.id in placing || !settlementActive(city) ||
-            !admitted && (city.id in busy || city.id in queuedAdmissions)) return null
-        val building = city.constructionQueue?.firstOrNull()?.let(city::building) ?: return null
-        val target = plugin.server.getWorld(city.worldId) ?: return null
-        return building.takeIf { target.isChunkLoaded(it.entrance.x shr 4, it.entrance.z shr 4) }
-    }
-
-    /** Entered queue activation keeps its slot through async reads and a transient busy retry. */
-    fun queuedAdmissionPending(): Boolean {
-        if (!ready() || closed) return false
-        if (queuedAdmissions.any { (cityId, admission) -> cities[cityId]?.let {
-                eligibleQueueHead(it, admitted = true)?.id == admission.buildingId
-            } == true }) return true
-        return queueFailures.any { (cityId, failure) -> failure.second == "world-busy" && cities[cityId]?.let {
-            eligibleQueueHead(it)?.id == failure.first
-        } == true }
+            city.id in busy || city.id in queuedAdmissions) return false
+        val target = plugin.server.getWorld(city.worldId) ?: return false
+        return target.isChunkLoaded(building.entrance.x shr 4, building.entrance.z shr 4)
     }
 
     fun pulseQueue() {
-        if (!ready() || now() < nextQueueAt) return
-        nextQueueAt = now() + 5_000L
-        val candidates = cities.values.mapNotNull { city -> eligibleQueueHead(city)?.let { city to it } }
-        if (candidates.isEmpty()) return
-        val (city, building) = candidates[Math.floorMod(queueCursor++, candidates.size)]
+        if (!ready()) return
+        val city = queueTurns.next(cities, now(), 5_000L, ::queueHeadReady) ?: return
+        val building = requireNotNull(city.constructionQueue?.firstOrNull()?.let(city::building))
         fun failed(failure: Throwable) {
             val reason = CivsDiagnostics.rejection(failure)?.reason ?: "placement-failed"
             if (queueFailures.put(city.id, building.id to reason) != (building.id to reason)) {
@@ -206,7 +197,7 @@ internal class CivsConstructionRuntime(
                 if (CivsDiagnostics.rejection(failure) == null) log("start queued building ${building.id}", failure, city.id)
             }
         }
-        val admission = QueueAdmission(building.id)
+        val admission = QueueAdmission()
         queuedAdmissions[city.id] = admission // Before activateBuilding can begin its asynchronous store/catalogue reads.
         runCatching { activateBuilding(city, building) }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
             if (!queuedAdmissions.remove(city.id, admission)) return@whenCompleteSync
@@ -221,18 +212,17 @@ internal class CivsConstructionRuntime(
     fun pulse() {
         if (!ready()) return
         yieldBuilderWaits()
-        if (placing.size < 2 && now() >= nextMaterialCheckAt) {
-            nextMaterialCheckAt = now() + 5_000L
-            val waiting = cities.values.filter { city ->
-                city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && now() >= (constructionRetryAfter[city.id] ?: 0L) && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
+        if (placing.size < 2) {
+            val at = now()
+            val city = materialTurns.next(cities, at, 5_000L) { city ->
+                city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && at >= (constructionRetryAfter[city.id] ?: 0L) && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
                     autonomousAccessReady(city) &&
                     city.id !in placing && city.pendingControls.orEmpty().none { it.buildingId == city.construction.buildingId } &&
                     plugin.server.getWorld(city.worldId)?.let { target ->
                         city.construction.plannedBuilding?.entrance?.let { target.isChunkLoaded(it.x shr 4, it.z shr 4) }
                     } == true
             }
-            if (waiting.isNotEmpty()) {
-                val city = waiting[Math.floorMod(materialCursor++, waiting.size)]
+            if (city != null) {
                 val order = requireNotNull(city.construction)
                 // Reprice the unpaid row from its immutable plan, including old free-water requests.
                 startPlacement(city, order)

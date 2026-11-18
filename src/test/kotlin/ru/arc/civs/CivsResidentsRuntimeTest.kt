@@ -657,6 +657,35 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a resident at the selected home container unloads after other residents use the collection budget") {
+        residentRuntime { h ->
+            h.city = h.city.copy(workers = h.city.workers + listOf(
+                CivWorker(UUID.randomUUID(), "Collector", null), CivWorker(UUID.randomUUID(), "Carrier", null)))
+            h.owner.pulse(2_000)
+            val residents = h.owner.collisionActors().toList()
+            residents.size shouldBe 3
+            val carrier = residents.last()
+            val container = CivPosition(1, 64, 1)
+            h.world.getBlockAt(container.x, container.y, container.z).type = Material.BARREL
+            carrier.teleport(Location(h.world, 1.5, 64.0, .5))
+            h.actor(carrier.uniqueId).collectionHome = container
+            h.city = h.city.copy(workers = h.city.workers.map { worker ->
+                if (worker.id != carrier.uniqueId) worker else worker.copy(hasCollectedItems = true,
+                    items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("COAL", 8) else null })
+            })
+            val items = residents.dropLast(1).mapIndexed { index, npc ->
+                val feet = Location(h.world, -6.5 + index * 14, 64.0, .5)
+                npc.teleport(feet)
+                h.groundAt(feet.clone().add(1.0, 0.0, 0.0)).uniqueId
+            }
+            h.collectionEnabled = true
+            h.owner.pulse(3_000)
+            h.groundRequests shouldBe items.map { listOf(it) }
+            h.homeSearches shouldBe 0
+            h.homeDeposits shouldBe listOf(container)
+        }
+    }
+
     for (atHome in listOf(false, true)) test("night shelter only permits unloading when already beside real home container atHome=$atHome") {
         residentRuntime { h ->
             h.collectionEnabled = true
@@ -5380,6 +5409,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     var unloads = 0
     var supplyRequests = 0
     var collectionEnabled = false
+    var homeSearches = 0
     var collectionDestination: CivCollectedHome? = null
     val groundRequests = mutableListOf<List<UUID>>()
     val homeDeposits = mutableListOf<CivPosition?>()
@@ -5596,7 +5626,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
                     onWorkPositionFailed(city, worker, failed)
                 }
             }, constructionSite = { _, order -> constructionSite()?.takeIf { it.orderId == order } },
-            collectionAvailable = { collectionEnabled }, collectionHome = { _, _ -> collectionDestination },
+            collectionAvailable = { collectionEnabled }, collectionHome = { _, _ -> homeSearches++; collectionDestination },
             pickupGround = { _, _, ids -> groundRequests += ids; pendingGroundCollection },
             depositCollected = { _, _, point -> homeDeposits += point; pendingHomeDeposit },
             immortalResidents = { id -> id == city.id && city.settings?.immortalResidents == true && testingAllowed },

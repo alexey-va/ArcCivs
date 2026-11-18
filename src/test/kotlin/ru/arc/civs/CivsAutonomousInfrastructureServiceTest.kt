@@ -33,6 +33,35 @@ class CivsAutonomousInfrastructureServiceTest : FunSpec({
         }
     }
 
+    test("two ready autonomous towns start one search on each of two pulses at the same time") {
+        mockkConstructor(CivsAutonomousPlacement::class)
+        try {
+            val searches = mutableListOf<UUID>()
+            every { anyConstructed<CivsAutonomousPlacement>().search(any(), any(), any(), any()) } answers {
+                searches += firstArg<Settlement>().id
+                CompletableFuture()
+            }
+            serviceScenario { h ->
+                val first = h.city.copy(autonomy = CivAutonomy(), stock = Stock(), workers = emptyList(),
+                    inventory = CivInventory(CivStorageMode.PHYSICAL))
+                val second = first.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), name = "Second")
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(first, second))
+                h.start()
+                h.paper.addPlayer("GrowthObserver").teleport(Location(h.world, 0.5, 65.0, 0.5))
+                val development = autonomousDevelopment(h.service)
+                for (city in listOf(first, second)) {
+                    development.pulseAccessRepair()
+                    h.tickUntil("town access ready") { development.accessReady(city) }
+                }
+                h.time += 5_000
+                development.pulse()
+                searches shouldBe listOf(first.id)
+                development.pulse()
+                searches shouldBe listOf(first.id, second.id)
+            }
+        } finally { unmockkConstructor(CivsAutonomousPlacement::class) }
+    }
+
     test("historical access repair precedes growth with empty stock and publishes no construction or resource credit") {
         serviceScenario { h ->
             val city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), workers = emptyList())

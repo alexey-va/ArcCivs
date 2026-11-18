@@ -1,5 +1,7 @@
 # ArcCivs .68 ground-resource and storage assessment
 
+Version 0.1.334 removed the five-second world cooldown described below. The per-pickup limit and ground-item UUID checks still apply. The net change in item count per transfer remains zero.
+
 The final private asset manifest is [final-v2](../../artifacts/arccivs-068-building-chests/final-v2/building-chests-manifest.json) (SHA-256 `908fcf4f3cf5d27d64cf45f857533a28f135468f05c4f7a4e08e8fb0ece9b545`). Its 72 schematic files total 122,048 bytes. The manifest provides catalog-level counts; it does not verify native runtime readback, installation, placed containers, live availability, or client acceptance.
 
 ## Ground-item transfer

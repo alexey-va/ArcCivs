@@ -29,8 +29,7 @@ internal class CivsDeletionRequests(
     private val membership get() = membershipOwner()
     private val deletionFailures = mutableMapOf<UUID, String>()
     private val deletionRequests = mutableSetOf<UUID>()
-    private var nextDeletionAt = 0L
-    private var deletionCursor = 0
+    private val deletionRecoveryTurns = CivsCityTurns()
 
     fun clearFailures() = deletionFailures.clear()
 
@@ -153,12 +152,10 @@ internal class CivsDeletionRequests(
     }
 
     fun pulseDeletions() {
-        if (authority.now() < nextDeletionAt) return
-        nextDeletionAt = authority.now() + 5_000L
-        val pending = records.cities.values.filter { it.pendingDeletion != null && it.id !in records.busy && it.id !in records.unhealthy &&
-            !inventoryJournal.pending(it.id) && it.id !in deletionRequests }
-        if (pending.isEmpty()) return
-        val city = pending[Math.floorMod(deletionCursor++, pending.size)]
+        val city = deletionRecoveryTurns.next(records.cities, authority.now(), 5_000L) {
+            it.pendingDeletion != null && it.id !in records.busy && it.id !in records.unhealthy &&
+                !inventoryJournal.pending(it.id) && it.id !in deletionRequests
+        } ?: return
         runCatching { finishDeletion(city) }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
             if (failure == null) deletionFailures.remove(city.id)
             else {

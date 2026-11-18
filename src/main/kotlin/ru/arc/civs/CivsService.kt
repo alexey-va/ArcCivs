@@ -967,6 +967,7 @@ class CivsService(
                 "revision" to tx.after.revision, "homeId" to transfer.homeId, "items" to kotlin.math.abs(items),
                 "food_stock_before" to transfer.food?.stockBefore?.food, "food_stock_after" to tx.after.stock.food,
                 "building" to (transfer.forestryLeafLoot?.buildingId ?: transfer.food?.buildingId),
+                "container" to transfer.containers.firstOrNull()?.container?.takeIf { transfer.food != null }?.let { "${it.x},${it.y},${it.z}" },
                 "material" to transfer.food?.material,
                 "slots" to if (transfer.ground.isNotEmpty()) transfer.ground.size else transfer.containers.size)
         }
@@ -1206,13 +1207,10 @@ class CivsService(
             storageActions.pulseStorage()
             storageActions.pulseAutoStorage()
             residentSupplies.pulseAutoSupplies()
-            residentSupplies.pulseResidentFood()
             residentSupplies.pulseTestingSupplies()
             construction.pulseQueue()
-            if (!construction.queuedAdmissionPending()) {
-                autonomousDevelopment.pulseAccessRepair()
-                autonomousDevelopment.pulse()
-            }
+            autonomousDevelopment.pulseAccessRepair()
+            autonomousDevelopment.pulse()
         }
         construction.pulse()
         val visibleCities = if (ready()) cities.values.filter { it.id !in unhealthy && it.pendingDeletion == null } else emptyList()
@@ -1724,8 +1722,6 @@ class CivsService(
     internal fun pickupResidentFood(cityId: UUID, workerId: UUID, source: CivResidentFoodSource): CompletableFuture<Settlement> = residentSupplies.pickupResidentFood(cityId, workerId, source)
 
     internal fun deliverTavernMeal(cityId: UUID, delivery: CivTavernDelivery): CompletableFuture<Settlement> = residentSupplies.deliverTavernMeal(cityId, delivery)
-
-    internal fun materializeResidentFood(cityId: UUID, workerId: UUID): CompletableFuture<Settlement> = residentSupplies.materializeResidentFood(cityId, workerId)
 
     internal fun returnResidentOutputs(cityId: UUID, workerId: UUID, buildingId: UUID): CompletableFuture<Settlement> = residentSupplies.returnResidentOutputs(cityId, workerId, buildingId)
 

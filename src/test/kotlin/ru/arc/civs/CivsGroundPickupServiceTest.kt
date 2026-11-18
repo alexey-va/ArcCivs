@@ -62,58 +62,75 @@ class CivsGroundPickupServiceTest : FunSpec({
             commit.complete(accepted.after)
             h.await(collecting) shouldBe accepted.after
             storage.debug(before.id)["total"] shouldBe 0
+            val replay = shouldThrow<CompletionException> {
+                h.await(h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId)))
+            }
+            CivsDiagnostics.rejection(replay)?.reason shouldBe "stale-delivery"
+            h.service.settlements().single() shouldBe accepted.after
             verify(exactly = 0) { h.store.save(any()) }
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.store.completeInventoryTransaction(any()) }
             verify(exactly = 1) { h.store.deleteInventoryTransaction(any()) }
         }
     }
 
-    test("a legacy ground receipt retries its native timeout after five seconds and credits once") {
+    test("a legacy ground receipt retries its own native timeout after five seconds without delaying another town") {
         lateinit var storage: CivsStorage
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage = it }
         }) { h ->
             val worker = h.city.workers.first()
             val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
-            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            val remoteHall = before.buildings.first().copy(id = UUID.randomUUID(), anchor = CivPosition(256, 64, 0),
+                bounds = CivBox(CivPosition(254, 63, -2), CivPosition(258, 68, 2)), entrance = CivPosition(256, 64, -2))
+            val remote = before.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), name = "Second Town",
+                center = remoteHall.anchor, buildings = listOf(remoteHall), workers = listOf(h.city.workers[1]))
+            h.world.loadChunk(16, 0)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before, remote))
             val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val remoteItem = civsGroundFixture(h.paper, h.world, Location(h.world, 257.5, 64.0, .5), ItemStack(Material.COAL, 3))
             val receipt = readLegacyGroundPickup(before, item)
-            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            val remoteReceipt = readLegacyGroundPickup(remote, remoteItem)
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt, remoteReceipt))
             val afterAttempts = mutableListOf<UUID>()
             storage.persistCollectedNative = { tx, beforeJournal ->
                 beforeJournal shouldBe false
                 afterAttempts += tx.id
-                if (afterAttempts.size == 1) CompletableFuture.failedFuture(CivsNativePersistenceRetry("Native persistence timed out"))
+                if (tx.id == receipt.id && afterAttempts.count { it == receipt.id } == 1)
+                    CompletableFuture.failedFuture(CivsNativePersistenceRetry("Native persistence timed out"))
                 else CompletableFuture.completedFuture(Unit)
             }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            val start = h.time
             h.start()
-            h.tickUntil("legacy debit and native timeout") { afterAttempts.size == 1 }
-            h.tick() // Record the retry deadline before advancing the clock.
+            h.tickUntil("other city's receipt commits while the first native save is backing off") { h.saves.isNotEmpty() }
+            afterAttempts shouldBe listOf(receipt.id, remoteReceipt.id)
+            h.time shouldBe start
             item.isValid shouldBe false
-            h.saves shouldBe emptyList()
+            remoteItem.isValid shouldBe false
+            h.saves.single().first shouldBe remoteReceipt.after
             storage.debug(before.id)["total"] shouldBe 1
-            verify(exactly = 0) { h.store.markConsumedItems(any()) }
-            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.markConsumedItems(match { it.id == receipt.id }) }
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(receipt.id) }
+            h.commit()
+            h.service.settlements().single { it.id == remote.id }.workers.single().items!![6] shouldBe CivResidentItem("COAL", 3)
             h.time += 4_999
             h.tick()
-            afterAttempts.size shouldBe 1
+            afterAttempts shouldBe listOf(receipt.id, remoteReceipt.id)
             h.time++
-            h.tickUntil("retry native ACK and one recovered city credit") { h.saves.isNotEmpty() }
-            afterAttempts.size shouldBe 2
-            afterAttempts shouldBe listOf(receipt.id, receipt.id)
-            val saved = h.saves.single()
+            h.tickUntil("retry native ACK and one recovered city credit") { h.saves.size == 2 }
+            afterAttempts shouldBe listOf(receipt.id, remoteReceipt.id, receipt.id)
+            val saved = h.saves.last()
             saved.first.workers.single().items!![6] shouldBe CivResidentItem("COAL", 8)
             saved.second.complete(saved.first)
             h.tickUntil("recovered receipt retirement") { storage.debug(before.id)["total"] == 0 }
             h.service.city(h.player)!!.revision shouldBe before.revision + 1
             h.time += 10_000
             h.tick()
-            afterAttempts.size shouldBe 2
-            h.saves.size shouldBe 1
+            afterAttempts.size shouldBe 3
+            h.saves.size shouldBe 2
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
-            verify(exactly = 1) { h.store.markConsumedItems(any()) }
-            verify(exactly = 1) { h.store.deleteInventoryTransaction(any()) }
+            verify(exactly = 2) { h.store.markConsumedItems(any()) }
+            verify(exactly = 2) { h.store.deleteInventoryTransaction(any()) }
         }
     }
 
@@ -275,9 +292,6 @@ class CivsGroundPickupServiceTest : FunSpec({
                 events.single()["transaction"] shouldBe admitted.id
                 events.single()["items"] shouldBe 8
                 events.single()["slots"] shouldBe 1
-                h.time += 4_999
-                h.service.collectionAvailable(before.id) shouldBe false
-                h.time++
                 h.service.collectionAvailable(before.id) shouldBe true
                 verify(exactly = 0) { h.store.save(any()) }
             }

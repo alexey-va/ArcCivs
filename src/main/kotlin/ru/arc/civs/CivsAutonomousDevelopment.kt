@@ -153,8 +153,8 @@ internal class CivsAutonomousDevelopment(
     private val autonomousAccessRetryAt = mutableMapOf<UUID, Long>()
     private val infrastructureRebuildRetryAt = mutableMapOf<UUID, Long>()
     private val farmExpansionRetryAt = mutableMapOf<UUID, Long>()
-    private var autonomyCursor = 0
-    private var nextAutonomyAt = 0L
+    private val autonomyTurns = CivsCityTurns()
+    private var nextMaintenanceAt = 0L
 
     fun progress(cityId: UUID): CivsAutonomyView? = autonomyProgress[cityId]
     fun debug(cityId: UUID): Map<String, Any?> = mapOf(
@@ -177,6 +177,7 @@ internal class CivsAutonomousDevelopment(
     }
 
     fun reset() {
+        autonomyTurns.clear()
         searchFailures.clear()
         occupiedUpgrades.clear()
         failedGrowthYields.clear()
@@ -196,6 +197,7 @@ internal class CivsAutonomousDevelopment(
     }
 
     fun cancel() {
+        autonomyTurns.clear()
         searchFailures.clear()
         occupiedUpgrades.clear()
         failedGrowthYields.clear()
@@ -256,13 +258,10 @@ internal class CivsAutonomousDevelopment(
     /** One planning request per city, fair admission across cities; native capture uses the shared world budget. */
     fun pulse() {
         val at = now()
-        val regular = at >= nextAutonomyAt
-        val extra = if (regular) null else {
-            val cityId = acceleratedCity() ?: return
-            cities[cityId] ?: return
-        }
-        if (regular) {
-            nextAutonomyAt = at + 5_000
+        val interval = 5_000L
+        val maintenanceDue = at >= nextMaintenanceAt
+        if (maintenanceDue) {
+            nextMaintenanceAt = at + interval
             searchFailures.retain(cities.keys)
             occupiedUpgrades.entries.removeIf { (id, refusal) -> id !in cities || at >= refusal.until }
             ordinaryTurnsOwed.keys.retainAll(cities.keys)
@@ -284,14 +283,19 @@ internal class CivsAutonomousDevelopment(
                 latest == null || plan == null || unpaidPlot(latest, plan, cursor.type)?.building?.id != cursor.buildingId || !cursor.matches(latest)
             }
         }
-        val candidates = (extra?.let { listOf(it) } ?: cities.values).filter {
-            it.autonomy?.paused == false && CivsAutoStorageMigration.ready(it) && it.pendingDeletion == null && accessReady(it) &&
-                it.id !in busy && it.id !in unhealthy && !isPlacing(it.id) && it.id !in autonomyRequests &&
-                it.pendingControls.orEmpty().isEmpty() && it.construction == null &&
-                it.constructionQueue.orEmpty().isEmpty() && at >= (autonomyRetryAt[it.id] ?: 0) && settlementActive(it)
+        fun eligible(city: Settlement): Boolean {
+            if (city.autonomy?.paused != false || city.pendingDeletion != null || city.id in busy || city.id in unhealthy ||
+                city.id in autonomyRequests || isPlacing(city.id) || city.construction != null || !city.constructionQueue.isNullOrEmpty() ||
+                !city.pendingControls.isNullOrEmpty() || at < (autonomyRetryAt[city.id] ?: 0L) || !CivsAutoStorageMigration.ready(city)) return false
+            if (accessReady(city) && settlementActive(city)) return true
+            // Inactive towns keep the ordinary five-second cadence for layout and viewer checks.
+            autonomyTurns.defer(city.id, at, interval)
+            return false
         }
-        if (candidates.isEmpty()) return
-        val city = if (extra == null) candidates[Math.floorMod(autonomyCursor++, candidates.size)] else candidates.single()
+        fun ordinaryTurn() = autonomyTurns.next(cities, at, interval, ::eligible)
+        fun acceleratedTurn() = acceleratedCity()?.let(cities::get)?.takeIf(::eligible)?.also { autonomyTurns.defer(it.id, at, interval) }
+        // Reserve the five-second slot for ordinary work. A busy lab city yields its extra slot.
+        val city = (if (maintenanceDue) ordinaryTurn() ?: acceleratedTurn() else acceleratedTurn() ?: ordinaryTurn()) ?: return
         if (pulseInfrastructureRebuild(city)) return
         if (pulseFarmExpansion(city)) return
         val capacity = if (storageCapacityPressure(city)) CivsAutonomy.capacityGoal(city, blueprints::maximumLevel) else null

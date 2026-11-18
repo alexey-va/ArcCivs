@@ -27,10 +27,10 @@ internal class CivsMineMaintenance(
     private val checked = mutableMapOf<UUID, Identity>()
     private val retryAt = mutableMapOf<UUID, Long>()
     private var pending = false
-    private var nextAt = 0L
 
     /** One bounded check per active construction identity, also repeated after restart or upgrade. */
     fun pulse() {
+        if (pending) return
         val candidates = records.cities.values.flatMap { city -> city.buildings.filter {
             it.type == BuildingType.QUARRY && it.phase == BuildingPhase.ACTIVE && CivsWorksiteLayouts.site(it)?.has("mine") == true
         }.map { city to it } }
@@ -38,7 +38,6 @@ internal class CivsMineMaintenance(
         checked.keys.retainAll(ids)
         retryAt.keys.retainAll(ids)
         val now = authority.now()
-        if (pending || now < nextAt) return
         val (city, building) = candidates.firstOrNull { (city, building) ->
             checked[building.id] != identity(city, building) && now >= retryAt.getOrDefault(building.id, 0) &&
                 city.id !in records.busy && city.id !in records.unhealthy && city.pendingDeletion == null &&
@@ -46,7 +45,6 @@ internal class CivsMineMaintenance(
                 building.id !in city.constructionQueue.orEmpty()
         } ?: return
         pending = true
-        nextAt = now + 1_000
         runCatching { request(city.id, building.id) }.getOrElse { CompletableFuture.failedFuture(it) }
             .whenCompleteSync(tasks) { _, failure ->
                 pending = false

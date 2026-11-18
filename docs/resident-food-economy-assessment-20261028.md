@@ -1,5 +1,7 @@
 # Resident food: physical ownership and paid Auto buffer
 
+As of 0.1.334, migration converts each remaining legacy FOOD unit into one BREAD in the city's reserve. Normal warehouse transfers place that bread in native slots. Previously accepted food receipts can finish on recovery. The historical world-hour limit below applied to the former transfer timer. Independent cities can now move existing bread at the same time. Each pickup still debits its source, with zero direct change to Vault, tokens or player XP.
+
 Verified source base: ArcCivs `6ddb49b` plus the existing species and resident-life extraction deltas. This change keeps the normal adult hunger clock at one point per observed awake minute and bread at six restored hunger per consumed item. Sleeping/absent time, work rewards, production rates, prices, recruitment and currency APIs are unchanged.
 
 Auto settlements retain `inventory = null` and their existing abstract production/construction owner. Food is the narrow new item bridge: one existing `stock.food` becomes one ordinary native `BREAD`, with the debit and exact native slot credit in a single typed receipt. The public buffer targets four bread in a reachable staffed tavern, otherwise an active warehouse, otherwise the hall. Full, unloaded or unreachable holders leave the reserve untouched or use an honest fallback. Existing native contents are retained; four is the refill target of the selected holder, not a global cap on player-supplied food or older fallback holders.

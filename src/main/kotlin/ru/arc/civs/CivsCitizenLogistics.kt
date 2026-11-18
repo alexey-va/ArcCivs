@@ -238,8 +238,14 @@ internal class CivsCitizenLogistics(
         val idle = citizenCollectionIdle(actor.plan, actor.cycle.phase)
         val shouldGoHome = worker.hasCollectedItems == true &&
             (night || idle || worker.completedCycles > requireNotNull(actor.collectionCycle))
+        val selectedHome = actor.collectionHome
         if (night || !idle && !shouldGoHome) clearCollectedRoute(actor)
-        if (now < actor.collectionRetryAt || !collectionAvailable(city.id) || runtime.collectionBudget == 0) {
+        val available = now >= actor.collectionRetryAt && collectionAvailable(city.id)
+        if (available && shouldGoHome && selectedHome != null && civsCanReachContainer(actor.npc.location, selectedHome)) {
+            depositAtHome(actor, selectedHome, now)
+            return true
+        }
+        if (!available || runtime.collectionBudget == 0) {
             // An admitted leisure route retains its identity while another resident uses the native budget.
             if (actor.collectionSeek != null || actor.collectionHome != null) {
                 runtime.statuses[worker.id] = if (actor.collectionHome != null) "moving-to-storage" else "collecting-items"
@@ -258,11 +264,8 @@ internal class CivsCitizenLogistics(
             }
             val target = home.container
             if (target == null) { actor.collectionRetryAt = now + 5_000; return false }
-            if (civsCanReachContainer(actor.npc.location, target)) {
-                leisure.stopCamp(actor, "home-deposit")
-                routes.cancelRoute(actor)
-                actor.collectionHome = target
-                beginCollected(actor, now) { depositCollected(city.id, worker.id, target) }
+            if (target != selectedHome && civsCanReachContainer(actor.npc.location, target)) {
+                depositAtHome(actor, target, now)
                 return true
             }
             if (night) return false
@@ -331,6 +334,13 @@ internal class CivsCitizenLogistics(
         if (actor.collectionSeek != null || actor.collectionHome != null) routes.cancelRoute(actor)
         actor.collectionSeek = null
         actor.collectionHome = null
+    }
+
+    private fun depositAtHome(actor: CitizenActor, target: CivPosition, now: Long) {
+        leisure.stopCamp(actor, "home-deposit")
+        routes.cancelRoute(actor)
+        actor.collectionHome = target
+        beginCollected(actor, now) { depositCollected(actor.cityId, actor.workerId, target) }
     }
 
     private fun beginCollected(actor: CitizenActor, now: Long, operation: () -> CompletableFuture<Settlement>) {

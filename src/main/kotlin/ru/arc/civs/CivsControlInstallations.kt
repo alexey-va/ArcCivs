@@ -43,10 +43,8 @@ internal class CivsControlInstallations(
     private val controlFailures = mutableSetOf<UUID>()
     private val installing = mutableMapOf<UUID, CompletableFuture<Settlement>>()
     private var controlCursor = 0
-    private var initialApproachCursor = 0
-    private var nextInitialApproachAt = 0L
+    private val initialApproachTurns = CivsCityTurns()
     private val initialApproachRequests = mutableSetOf<UUID>()
-    private val initialApproachRetryAt = mutableMapOf<UUID, Long>()
     private val initialApproachFailures = mutableSetOf<UUID>()
     internal var controlOccupied: (UUID, CivPosition) -> Boolean = { _, _ -> false }
     internal var campApproachAllowed: (Settlement) -> Boolean = { false }
@@ -54,8 +52,7 @@ internal class CivsControlInstallations(
     fun forgetFailure(buildingId: UUID) { controlFailures.remove(buildingId) }
     fun clear() {
         controlFailures.clear(); controlCursor = 0
-        initialApproachRequests.clear(); initialApproachRetryAt.clear(); initialApproachFailures.clear()
-        initialApproachCursor = 0; nextInitialApproachAt = 0L
+        initialApproachRequests.clear(); initialApproachFailures.clear(); initialApproachTurns.clear()
     }
 
     /** Missing controls after their one-time grant require repair, never a repeating free grant. */
@@ -357,11 +354,12 @@ internal class CivsControlInstallations(
     fun pulse(clock: () -> Long = System::currentTimeMillis,
         initialApproachAllowed: (Settlement) -> Boolean = { false },
         repairInitialApproach: (Settlement) -> CompletableFuture<Unit> = { CompletableFuture.completedFuture(Unit) }) {
-        val nearby = cities.values.filter { city -> chunks.active(city.id) ||
+        val currentCities = cities
+        val nearby = currentCities.filterValues { city -> chunks.active(city.id) ||
             plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) } &&
                 (city.autonomy != null || plugin.server.onlinePlayers.any { city.canManage(it.uniqueId) }) }
         // Existing paid orders finish with their original receipt before conversion to actual item storage.
-        nearby.firstOrNull { it.autonomy == null && it.inventory == null && it.construction == null && it.id !in busy && it.id !in unhealthy }?.let { old ->
+        nearby.values.firstOrNull { it.autonomy == null && it.inventory == null && it.construction == null && it.id !in busy && it.id !in unhealthy }?.let { old ->
             runCatching { mutate(old.id) { city ->
                 val buildings = city.buildings.map { if (it.type == BuildingType.DECORATION || it.type.isInfrastructure) it
                     else it.copy(control = it.control ?: it.anchor) }
@@ -373,37 +371,36 @@ internal class CivsControlInstallations(
             } }.onFailure { log("migrate city materials ${old.id}", it, old.id) }
         }
         val now = clock()
-        if (now >= nextInitialApproachAt) {
-            nextInitialApproachAt = now + 5_000
-            initialApproachRetryAt.keys.retainAll(cities.keys)
-            initialApproachFailures.retainAll(cities.keys)
-            val initial: List<Pair<Settlement, CivBuilding?>> = nearby.filter { it.id !in busy && it.id !in unhealthy &&
-                it.id !in initialApproachRequests && now >= (initialApproachRetryAt[it.id] ?: 0L) }.mapNotNull { city ->
-                if (initialApproachAllowed(city) && initialAutonomousHall(city)?.let { initialApproachNeeded(city, it) } == true)
-                    city to null
-                else if (city.pendingControls.orEmpty().isEmpty() && campCapAllowed(city))
-                    city.buildings.firstOrNull { campControlCap(city, it) != null }?.let { city to it }
-                else null
-            }
-            if (initial.isNotEmpty()) {
-                val (city, camp) = initial[Math.floorMod(initialApproachCursor++, initial.size)]
+        initialApproachFailures.retainAll(currentCities.keys)
+        initialApproachTurns.next(currentCities, now, 5_000) { city ->
+            city.id in nearby && city.id !in busy && city.id !in unhealthy && city.id !in initialApproachRequests &&
+                city.autonomy?.paused == false && city.pendingDeletion == null && city.pendingControls.orEmpty().isEmpty() &&
+                CivsAutoStorageMigration.ready(city) && city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }?.let { hall ->
+                    hall.level == 1 && hall.phase == BuildingPhase.SITE &&
+                        hall.control != null && hall.control == city.center && city.construction?.buildingId != hall.id &&
+                        hall.id !in city.constructionQueue.orEmpty()
+                } == true
+        }?.let { city ->
+            // Plan and native approach checks run only for this turn, not for every nearby city.
+            val initial = initialApproachAllowed(city) && initialAutonomousHall(city)?.let { initialApproachNeeded(city, it) } == true
+            val camp = if (!initial && campCapAllowed(city)) city.buildings.firstOrNull { campControlCap(city, it) != null } else null
+            if (initial || camp != null) {
                 initialApproachRequests += city.id
-                runCatching { if (camp == null) repairInitialApproach(city) else repairCampCap(city, camp) }
+                runCatching { if (initial) repairInitialApproach(city) else repairCampCap(city, requireNotNull(camp)) }
                     .getOrElse { CompletableFuture.failedFuture(it) }
                     .whenComplete { _, failure ->
                         initialApproachRequests -= city.id
                         if (failure == null) {
-                            initialApproachRetryAt.remove(city.id)
                             initialApproachFailures.remove(city.id)
                         } else {
-                            initialApproachRetryAt[city.id] = clock() + 30_000
+                            initialApproachTurns.defer(city.id, clock(), 30_000)
                             if (initialApproachFailures.add(city.id)) log("prepare initial hall approach ${city.id}", failure, city.id)
                         }
                     }
             }
         }
         // The relocation owner retries its item transfer/retirement as one bounded operation every five seconds.
-        val controls = nearby.filter { it.id !in busy && it.id !in unhealthy }.flatMap { city ->
+        val controls = nearby.values.filter { it.id !in busy && it.id !in unhealthy }.flatMap { city ->
             city.pendingControls.orEmpty().filter { it.retire == null }.map { city to it }
         }
         if (controls.isEmpty()) return

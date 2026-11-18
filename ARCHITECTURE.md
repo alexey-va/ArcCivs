@@ -117,7 +117,7 @@ retain deletion and accepted-receipt locks.
 
 `CivsAutonomy.legacyStock` identifies only saved Auto records without inventory.
 After accepted journals drain, `CivsAutoStorageMigration` converts their remaining
-closed stock exactly once: shared stock goes to the warehouse (hall fallback),
+closed stock exactly once. Each FOOD unit becomes one BREAD. Shared stock goes to the warehouse (hall fallback),
 producer pending goods retain their workplace, and accepted cargo retains its
 destination. Unplaced migration goods are durable reserves and are not spendable.
 A full local workplace never silently overflows its producer reserve into the hall.
@@ -131,8 +131,7 @@ invalidates worksite observations once rather than resetting their search every 
 Meals consume carried food through the same observed animation and receipt in
 both modes. Existing food in an eligible building's exact native control barrel
 remains accessible during SITE and CONSTRUCTING. Other indexed holders still
-require ACTIVE; tavern service and legacy FOOD materialization keep their active
-building rules. Native ownership, reach, slot debit and receipt validation remain
+require ACTIVE, as does tavern service. Native ownership, reach, slot debit and receipt validation remain
 authoritative, without another food grant.
 Population uses the same active-minute ageing and family rules after
 migration, without offline catch-up. Planning submits sites and upgrades through
@@ -493,7 +492,10 @@ operation locks. It performs no receipt/head JSON serialization, full city check
 or forced native inventory save. Immutable construction-buffer proofs may still be read
 for transfers that consume those buffers. Native application still checks actual slots; completion
 publishes the accepted city in RAM and marks it dirty before retiring the active intent
-and its locks. Completed receipt graphs do not accumulate. Newly consumed ground-item
+and its locks. Within a city, the next transfer can use the new balances as soon
+as the previous transfer finishes. Other cities in the same world can transfer
+items independently. A transient native failure delays recovery of its own receipt.
+Completed receipt graphs do not accumulate. Newly consumed ground-item
 UUIDs also accumulate in RAM and flush with checkpoints, rather than writing a bucket
 for every pickup. Ordinary Minecraft world/player autosave remains unchanged.
 
@@ -663,7 +665,7 @@ a resident already touching fire may leave it. Fire damage remains active.
 Optional resource-pack speech uses a stable voice profile per worker UUID.
 Only human viewers within 12 blocks hear ambient speech; sleeping or moving
 residents do not speak ambient lines. Per-resident intervals are 15–25 seconds,
-with a three-second shared minimum. Every intentional click greets its viewer,
+with at least three seconds between ambient lines heard by the same viewer. Every intentional click greets its viewer,
 independently of the ambient cooldown. Campfire, sleep and actual speech diagnostics are emitted on transitions.
 The shared sound pack exposes all four existing clips of each voice profile to
 each speech event. Client selection remains random and can repeat a clip; ambient
@@ -775,7 +777,7 @@ at most 128 containers and changes at most 1024 slots per attempt, preserving an
 remainder when full. Control barrels have priority; other containers rotate fairly
 even after a full/no-op attempt. Each selected container is read at most once. Opening
 a physical warehouse or switching to PHYSICAL attempts it; nearby cities with
-pending items also retry one city per5s fairly. Mode changes create no items.
+pending items get one attempt per service pulse, rotating among eligible cities. Each city waits five seconds between its own background attempts. Mode changes create no items.
 Deposit in VIRTUAL moves actual control-barrel cargo to that building's
 warehouse; withdrawal moves up to64 items to its barrel, using its own warehouse
 then the common initial/legacy reserve. No direct player-inventory automation.
@@ -1061,8 +1063,7 @@ one placer still charges and installs each row serially. Durable work credit
 preserves the remaining authorization across pause/restart; it does
 not change row indices or charge already paid rows again. Only that row's exact obtainable items are debited, in the existing
 inventory receipt together with the READY→PLACING transition and `reservedBatch`.
-Missing items persist WAITING_MATERIALS without any debit; one waiting city is retried
-per5s in round-robin order. Open warehouse viewers do not defer it. Adding
+Missing items persist WAITING_MATERIALS without any debit. A service pulse can check another waiting city while the previous city waits for its next material check. Open warehouse viewers do not defer it. Adding
 the required items resumes automatically. `materials` holds the unpaid remainder.
 Paid rows retain their reservation across pause and in-process retry; restart resumes
 the latest checkpoint, subject to the same accepted crash rollback. Completing the row
@@ -1118,10 +1119,9 @@ construction. Duplicate requests are idempotent. Starting the next job reloads i
 saved plan and captures/revalidates current terrain. A failed queue head retains
 its position and exposes a concrete retry reason; it is not silently skipped.
 Upgrades retain their existing active-order contract.
-Queued activation runs before new development planning. Its asynchronous prepare
-and a loaded eligible head waiting for the shared world budget hold admission
-ahead of new speculative searches. Other queue failures release that hold;
-paused, unavailable and unhealthy queues do not stop unrelated planning.
+Each service pulse offers queued construction the shared world budget first.
+A city waiting to retry its queue head keeps its place. Other cities can use
+available capacity for construction, access repairs or new development.
 
 Building and city removal first persist a deletion intent in the city snapshot.
 The service loads only the exact control chunks asynchronously, then revalidates

@@ -164,31 +164,23 @@ internal class CivsResidentStorage(
         return null
     }
 
-    private data class FoodPosition(val building: CivBuilding, val point: CivPosition, val type: String?,
-        val venueRank: Int, val distanceSquared: Double)
+    private data class FoodPosition(val building: CivBuilding, val point: CivPosition, val venueRank: Int, val distanceSquared: Double)
 
     /** Up to sixteen indexed holders, including the nearest holder of the preferred venue. */
-    private fun foodPositions(city: Settlement, worker: CivWorker, from: org.bukkit.Location,
-        reserve: Boolean = false): Sequence<FoodPosition> {
-        val buildings = city.buildings.filter { CivsResidentFood.eligible(city, worker, it) &&
-            (!reserve || CivsResidentFood.reserveBuilding(city, it)) }
+    private fun foodPositions(city: Settlement, worker: CivWorker, from: org.bukkit.Location): Sequence<FoodPosition> {
+        val buildings = city.buildings.filter { CivsResidentFood.eligible(city, worker, it) }
         if (buildings.isEmpty()) return emptySequence()
-        val membership = if (reserve) buildings.associate { it.id to containers.buildingPositions(city, it.id) }
-            else containers.planningPositions(city, buildings)
+        val membership = containers.planningPositions(city, buildings)
         val positions = mutableListOf<FoodPosition>()
         val seen = hashSetOf<CivPosition>()
         for (building in buildings) {
-            val venueRank = when {
-                building.type == BuildingType.TAVERN -> 0
-                !reserve || building.type == BuildingType.WAREHOUSE -> 1
-                else -> 2
-            }
-            for ((point, type) in membership[building.id].orEmpty()) {
+            val venueRank = if (building.type == BuildingType.TAVERN) 0 else 1
+            for (point in membership[building.id].orEmpty().keys) {
                 if (!seen.add(point)) continue
                 val dx = point.x + .5 - from.x
                 val dy = point.y - from.y
                 val dz = point.z + .5 - from.z
-                positions += FoodPosition(building, point, type, venueRank, dx * dx + dy * dy + dz * dz)
+                positions += FoodPosition(building, point, venueRank, dx * dx + dy * dy + dz * dz)
             }
         }
         if (positions.isEmpty()) return emptySequence()
@@ -230,34 +222,6 @@ internal class CivsResidentStorage(
             return CivResidentFoodSource(building.id, point, target, material)
         }
         return null
-    }
-
-    /** An existing Auto FOOD unit becomes one ordinary bread only in this exact native receipt. */
-    internal fun prepareFoodMaterialization(city: Settlement, workerId: UUID, feet: org.bukkit.Location): CivCollectedPlan {
-        checkClaim(city)
-        val worker = city.workers.single { it.id == workerId }
-        reject(city.autonomy?.paused != false || city.inventory != null || city.stock.food <= 0 ||
-            feet.world?.uid != city.worldId, "resident-food-missing")
-        for ((building, point, type) in foodPositions(city, worker, feet, reserve = true)) {
-            if (!foodCanModify(city, point)) continue
-            val source = containers.resolveSources(city, sequenceOf(point to type)).firstOrNull()?.takeIf { it.acceptsInsert }
-                ?: continue
-            val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
-            if (citizenCollectedHomeTarget(city, building, world, source.position) == null) continue
-            val original = source.inventory.storageContents.map(CivResidentItem::of)
-            val count = original.filterNotNull().filter { it.material == "BREAD" && it.data == null }.sumOf { it.amount }
-            if (count >= CivsResidentFood.BATCH) return CivCollectedPlan(worker, null)
-            val slot = original.indexOfFirst { it == null || it.material == "BREAD" && it.data == null && it.amount < 64 }
-            if (slot < 0) continue
-            val moved = minOf(CivsResidentFood.BATCH - count, city.stock.food.toInt().coerceAtMost(CivsResidentFood.BATCH))
-            val before = original[slot]
-            val after = CivResidentItem("BREAD", (before?.amount ?: 0) + moved)
-            val change = CivNativeContainerChange(source.position, source.type, slot, before, after)
-            return CivCollectedPlan(worker, CivCollectedTransfer(worker.id, CivsEquipment.slots(worker),
-                containers = listOf(change), food = CivResidentFoodReceipt(building.id, city.stock, moved)),
-                city.stock.copy(food = city.stock.food - moved))
-        }
-        return CivCollectedPlan(worker, null)
     }
 
     internal fun prepareFoodPickup(city: Settlement, workerId: UUID, target: CivResidentFoodSource,

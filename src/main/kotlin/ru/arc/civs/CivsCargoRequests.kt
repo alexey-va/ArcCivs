@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
@@ -308,7 +309,7 @@ internal class CivsCargoRequests(
                         CivsLogistics.unload(current, workerId, cargo.id, authority.now())
                     }.thenApply { saved ->
                         supply.release(cityId, workerId)
-                        construction.materialsChanged()
+                        construction.materialsChanged(cityId)
                         CivsDiagnostics.event("cargo_dropoff_committed", "city" to cityId, "worker" to workerId,
                             "shipment" to cargo.id, "stock_resource" to resource, "amount" to cargo.amount,
                             "source_worker" to cargo.sourceWorkerId, "destination" to destinationId,
@@ -341,7 +342,7 @@ internal class CivsCargoRequests(
                     if (failure == null) {
                         cargoWaits.remove(workerId)
                         supply.release(cityId, workerId)
-                        construction.materialsChanged()
+                        construction.materialsChanged(cityId)
                         CivsDiagnostics.event("cargo_dropoff_committed", "city" to cityId, "worker" to workerId,
                             "shipment" to cargo.id, "material" to cargo.material, "amount" to cargo.amount,
                             "source_worker" to cargo.sourceWorkerId, "carried_before" to carriedBefore,
@@ -423,8 +424,8 @@ internal class CivsCargoRequests(
 
     internal fun collectionAvailable(cityId: UUID): Boolean {
         val city = records.cities[cityId] ?: return false
-        return authority.ready() && city.pendingDeletion == null && city.id !in records.busy && city.id !in records.unhealthy &&
-            inventoryJournal.collectionAvailable(city.worldId)
+        return authority.ready() && city.pendingDeletion == null && cityId !in records.busy && cityId !in records.unhealthy &&
+            !inventoryJournal.pending(cityId)
     }
 
     private fun collectionReserve(city: Settlement, worker: CivWorker): Map<String, Long> =
@@ -445,7 +446,9 @@ internal class CivsCargoRequests(
 
     fun collectForestryLeafLoot(cityId: UUID, workerId: UUID, entities: List<UUID>): CompletableFuture<Settlement> =
         authority.action("forestry_leaf_loot", null, "city" to cityId, "worker" to workerId, "entities" to entities.size) {
-            collectedReceipt(cityId, workerId) { city -> storage.prepareForestryLeafLoot(city, workerId, entities) }
+            rejectIf(!collectionAvailable(cityId), "city-busy")
+            val city = records.cities.getValue(cityId)
+            collectedReceipt(city, workerId) { storage.prepareForestryLeafLoot(city, workerId, entities) }
         }
 
     internal fun depositCollected(cityId: UUID, workerId: UUID, destination: CivPosition?): CompletableFuture<Settlement> =
@@ -459,48 +462,45 @@ internal class CivsCargoRequests(
                 else authority.mutate(cityId) { current -> CivsRules.validate(current.copy(workers = current.workers.map {
                     if (it.id == workerId) it.copy(hasCollectedItems = false) else it
                 }, revision = current.revision + 1)) }
-            } else collectedMutation(cityId, workerId, allowNight = true) { current, feet -> storage.prepareHomeDeposit(current, workerId,
-                destination ?: throw CivsRejection("storage-unavailable"), feet, collectionReserve(current,
-                    current.workers.first { it.id == workerId })) }
+            } else {
+                val feet = collectionFeet(city, workerId, allowNight = true)
+                collectedReceipt(city, workerId) {
+                    storage.prepareHomeDeposit(city, workerId, destination ?: throw CivsRejection("storage-unavailable"), feet, reserve)
+                }
+            }
         }
 
-    fun collectedMutation(cityId: UUID, workerId: UUID, allowNight: Boolean = false,
-        materializingFood: Boolean = false,
-        prepare: (Settlement, org.bukkit.Location) -> CivCollectedPlan): CompletableFuture<Settlement> {
-        authority.checkMain()
-        rejectIf(!collectionAvailable(cityId), "city-busy") // Throttle before reserving a city or any native source.
-        val city = records.cities.getValue(cityId)
-        val feet = if (materializingFood) citizens.residentFeet(workerId) else citizens.residentCollectionFeet(workerId, allowNight)
-        feet ?: throw CivsRejection("worker-too-far")
-        rejectIf(feet.world?.uid != city.worldId, "wrong-world")
-        return collectedReceipt(cityId, workerId) { current -> prepare(current, feet) }
-    }
-
-    private fun collectedReceipt(cityId: UUID, workerId: UUID,
-        prepare: (Settlement) -> CivCollectedPlan): CompletableFuture<Settlement> {
+    fun collectedMutation(cityId: UUID, workerId: UUID,
+        prepare: (Settlement, Location) -> CivCollectedPlan): CompletableFuture<Settlement> {
         authority.checkMain()
         rejectIf(!collectionAvailable(cityId), "city-busy")
         val city = records.cities.getValue(cityId)
+        val feet = collectionFeet(city, workerId)
+        return collectedReceipt(city, workerId) { prepare(city, feet) }
+    }
+
+    private fun collectionFeet(city: Settlement, workerId: UUID, allowNight: Boolean = false): Location {
+        val feet = citizens.residentCollectionFeet(workerId, allowNight) ?: throw CivsRejection("worker-too-far")
+        rejectIf(feet.world?.uid != city.worldId, "wrong-world")
+        return feet
+    }
+
+    private fun collectedReceipt(city: Settlement, workerId: UUID,
+        prepare: () -> CivCollectedPlan): CompletableFuture<Settlement> {
         val id = UUID.randomUUID()
         storage.reserve(city, id)
         val tx = try {
-            val prepared = prepare(city)
+            val prepared = prepare()
             val transfer = prepared.transfer ?: run { storage.unlock(id); return CompletableFuture.completedFuture(city) }
-            val after = CivsRules.validate(city.copy(stock = prepared.stock ?: city.stock,
-                workers = city.workers.map { if (it.id == workerId) prepared.worker else it },
+            val after = CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) prepared.worker else it },
                 revision = city.revision + 1))
-            CivInventoryTransaction(id, cityId, city.revision, after, emptyList(), collected = transfer).also {
-                storage.seal(it)
-                inventoryJournal.reserveCollection(city.worldId, id)
-                authority.reserveCity(cityId) // The immutable after-state must remain current during the first asynchronous disk fence.
-            }
+            CivInventoryTransaction(id, city.id, city.revision, after, emptyList(), collected = transfer).also { storage.seal(it) }
         } catch (failure: Exception) {
             storage.unlock(id)
-            inventoryJournal.releaseCollection(city.worldId, id)
-            authority.releaseCity(cityId)
             throw failure
         }
-        return inventoryJournal.submitCollected(city, tx)
+        authority.reserveCity(city.id)
+        return inventoryJournal.submitNative(city, tx)
     }
 
     fun validateNativeCollected(tx: CivInventoryTransaction) {

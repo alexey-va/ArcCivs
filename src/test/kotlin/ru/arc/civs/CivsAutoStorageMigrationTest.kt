@@ -33,10 +33,12 @@ class CivsAutoStorageMigrationTest : FunSpec({
         CivsAutoStorageMigration.ready(migrated.copy(inventory = migrated.inventory!!.copy(materials = emptyMap(), buildingMaterials = null))) shouldBe true
     }
 
-    test("ordinary cities and native auto inventories are never issued another reserve") {
+    test("migration preserves existing inventories and gives empty legacy reserves no materials") {
         val city = physicalAutoFixture()
         CivsAutoStorageMigration.migrate(city) shouldBe city
         CivsAutoStorageMigration.migrate(city.copy(autonomy = null)) shouldBe city.copy(autonomy = null)
+        val empty = CivsAutoStorageMigration.migrate(city.copy(stock = Stock(), inventory = null))
+        empty.inventory shouldBe CivInventory(CivStorageMode.PHYSICAL)
     }
 
     test("new auto towns use ordinary physical starting reserves and native research terms") {

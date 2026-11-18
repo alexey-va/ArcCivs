@@ -17,19 +17,24 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsCitizenVoicesTest : FunSpec({
-    test("voice identity is stable and the shared tick budget prevents a crowd from speaking together") {
+    test("each listener hears at most one ambient voice per interval and each resident keeps its own interval") {
         val first = UUID(0, 0)
         val second = UUID(0, 1)
+        val third = UUID(0, 2)
         citizenVoice(first) shouldBe "male1"
         citizenVoice(second) shouldBe "female1"
         citizenVoice(UUID.fromString(first.toString())) shouldBe citizenVoice(first)
         val clock = CitizenVoiceClock()
-        clock.admit(first, 0) shouldBe true
-        clock.admit(second, 59) shouldBe false
-        clock.admit(second, 60) shouldBe true
-        clock.admit(first, 299) shouldBe false
-        clock.admit(first, 300) shouldBe true
-        clock.admit(first, 460) shouldBe false
+        val alice = mockk<Player> { every { uniqueId } returns UUID(0, 10) }
+        val bob = mockk<Player> { every { uniqueId } returns UUID(0, 11) }
+        clock.admit(first, 0, sequenceOf(alice)) shouldBe listOf(alice)
+        clock.admit(second, 0, sequenceOf(alice, bob)) shouldBe listOf(bob)
+        clock.admit(third, 59, sequenceOf(alice, bob)).isEmpty() shouldBe true
+        clock.admit(third, 60, sequenceOf(alice, bob)) shouldBe listOf(alice, bob)
+        clock.admit(first, 299, sequenceOf(bob)).isEmpty() shouldBe true
+        clock.admit(first, 300, sequenceOf(alice)) shouldBe listOf(alice)
+        clock.admit(second, 300, sequenceOf(bob)).isEmpty() shouldBe true
+        clock.admit(second, 301, sequenceOf(alice, bob)) shouldBe listOf(bob)
     }
 
     test("only enabled pack events reach nearby human viewers and sleep suppresses speech") {

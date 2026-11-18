@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import org.bukkit.Bukkit
 import org.bukkit.SoundCategory
 import org.bukkit.configuration.ConfigurationSection
 import org.bukkit.entity.Player
@@ -9,7 +10,7 @@ import java.util.UUID
 
 internal enum class CitizenVoiceEvent(val key: String) { IDLE("idle"), WORK("work"), GREET("greet") }
 
-/** Optional pack events, stable voice per resident, with one shared server-tick speaking budget. */
+/** Optional pack events with a stable voice per resident and a quiet interval for each listener. */
 internal class CivsCitizenVoices(config: ConfigurationSection) {
     private val enabled = config.getBoolean("npc-voices.enabled", false)
     private val prefix = config.getString("npc-voices.event-prefix", "arccivs:citizen")!!.also {
@@ -20,9 +21,10 @@ internal class CivsCitizenVoices(config: ConfigurationSection) {
     fun say(cityId: UUID, workerId: UUID, actor: PacketPlayerNpc, event: CitizenVoiceEvent, tick: Int, viewers: Collection<Player>, sex: CivSex? = null) {
         if (!enabled || !actor.isValid || actor.pose == PacketNpcPose.SLEEPING) return
         val at = actor.location.add(0.0, actor.eyeHeight, 0.0)
-        val audience = viewers.filter { it.isOnline && !it.hasMetadata("NPC") && it.world == actor.world &&
+        val nearby = viewers.asSequence().filter { it.isOnline && !it.hasMetadata("NPC") && it.world == actor.world &&
             it.location.distanceSquared(at) <= 12.0 * 12.0 }
-        if (audience.isEmpty() || !clock.admit(workerId, tick)) return
+        val audience = clock.admit(workerId, tick, nearby)
+        if (audience.isEmpty()) return
         emit(cityId, workerId, actor, event, audience, sex)
     }
 
@@ -43,7 +45,9 @@ internal class CivsCitizenVoices(config: ConfigurationSection) {
             "audience" to audience.size)
     }
 
-    fun retain(workers: Set<UUID>) = clock.retain(workers)
+    fun retain(workers: Set<UUID>) {
+        if (enabled) clock.retain(workers, Bukkit.getCurrentTick())
+    }
     fun clear() = clock.clear()
 }
 
@@ -51,18 +55,27 @@ internal fun citizenVoice(workerId: UUID, sex: CivSex? = null): String =
     if ((sex ?: CivsResidents.legacySex(workerId)) == CivSex.MALE) "male1" else "female1"
 
 internal class CitizenVoiceClock {
-    private var lastGlobal: Int? = null
     private val lastWorker = mutableMapOf<UUID, Int>()
+    private val lastHeard = mutableMapOf<UUID, Int>()
 
-    fun admit(workerId: UUID, tick: Int): Boolean {
-        if (lastGlobal?.let { tick - it < 60 } == true) return false
+    fun admit(workerId: UUID, tick: Int, nearby: Sequence<Player>): List<Player> {
         val delay = 300 + Math.floorMod(workerId.hashCode(), 201)
-        if (lastWorker[workerId]?.let { tick - it < delay } == true) return false
-        lastGlobal = tick
-        lastWorker[workerId] = tick
-        return true
+        if (lastWorker[workerId]?.let { tick - it < delay } == true) return emptyList()
+        val audience = nearby.filter { listener ->
+            lastHeard[listener.uniqueId]?.let { tick - it < LISTENER_INTERVAL } != true
+        }.toList()
+        if (audience.isNotEmpty()) {
+            lastWorker[workerId] = tick
+            audience.forEach { lastHeard[it.uniqueId] = tick }
+        }
+        return audience
     }
 
-    fun retain(workers: Set<UUID>) { lastWorker.keys.retainAll(workers) }
-    fun clear() { lastGlobal = null; lastWorker.clear() }
+    fun retain(workers: Set<UUID>, tick: Int) {
+        lastWorker.keys.retainAll(workers)
+        lastHeard.values.removeIf { tick - it >= LISTENER_INTERVAL }
+    }
+    fun clear() { lastWorker.clear(); lastHeard.clear() }
+
+    private companion object { const val LISTENER_INTERVAL = 60 }
 }

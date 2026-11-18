@@ -10,9 +10,91 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.block.Barrel
 import org.bukkit.inventory.ItemStack
 
 class CivsResidentLifecycleServiceTest : FunSpec({
+    test("ready residents can debit separate holders without waiting for a world clock") {
+        serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture(), storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage ->
+                storage.persistCollectedNative = { _, _ -> error("Fresh food pickup requested native persistence") }
+            }
+        }) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val adjacent = CivPosition(1, 63, 0)
+            val (firstWorker, secondWorker, remoteWorker, replayWorker) = h.city.workers.map { it.copy(hunger = 10) }
+            val town = CivsRules.validate(h.city.copy(buildings = listOf(hall), workers = listOf(firstWorker, secondWorker, replayWorker),
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL, containers = listOf(adjacent))))
+            val remoteHall = hall.copy(id = UUID.randomUUID(), anchor = CivPosition(256, 64, 0),
+                bounds = CivBox(CivPosition(254, 63, -2), CivPosition(258, 68, 2)), entrance = CivPosition(256, 64, -2),
+                control = CivPosition(256, 63, 0))
+            val remote = CivsRules.validate(town.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), name = "Second Town",
+                center = remoteHall.anchor, buildings = listOf(remoteHall), workers = listOf(remoteWorker),
+                inventory = CivInventory(CivStorageMode.PHYSICAL)))
+            h.world.loadChunk(16, 0)
+
+            val firstSource = CivResidentFoodSource(hall.id, requireNotNull(hall.control), CivPosition(0, 64, 1))
+            val secondSource = CivResidentFoodSource(hall.id, adjacent, CivPosition(1, 64, 1))
+            val remoteSource = CivResidentFoodSource(remoteHall.id, requireNotNull(remoteHall.control), CivPosition(257, 64, 0))
+            fun fill(source: CivResidentFoodSource) = source.container.let { at ->
+                val block = h.world.getBlockAt(at.x, at.y, at.z).also { it.type = Material.BARREL }
+                (block.state as Barrel).inventory.also { it.setItem(0, ItemStack(Material.BREAD, 4)) }
+            }
+            val firstHolder = fill(firstSource)
+            val secondHolder = fill(secondSource)
+            val remoteHolder = fill(remoteSource)
+            every { h.citizens.residentCollectionFeet(firstWorker.id, false) } returns firstSource.standing.location(h.world)
+            every { h.citizens.residentCollectionFeet(secondWorker.id, false) } returns secondSource.standing.location(h.world)
+            every { h.citizens.residentCollectionFeet(remoteWorker.id, false) } returns remoteSource.standing.location(h.world)
+            every { h.citizens.residentCollectionFeet(replayWorker.id, false) } returns firstSource.standing.location(h.world)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(town, remote))
+            val admission = CompletableFuture<CivInventoryTransaction>()
+            var held: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers {
+                val receipt = firstArg<CivInventoryTransaction>()
+                if (receipt.collected?.workerId == firstWorker.id) {
+                    held = receipt
+                    admission
+                } else CompletableFuture.completedFuture(receipt)
+            }
+            every { h.store.completeInventoryTransaction(any()) } answers {
+                CompletableFuture.completedFuture(firstArg<CivInventoryTransaction>().after)
+            }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val clock = h.time
+
+            val first = h.service.pickupResidentFood(town.id, firstWorker.id, firstSource)
+            h.tickUntil("first holder receipt awaits admission") { held != null }
+            val second = h.service.pickupResidentFood(town.id, secondWorker.id, secondSource)
+            val repeated = h.service.pickupResidentFood(town.id, replayWorker.id, firstSource)
+            h.service.collectionAvailable(town.id) shouldBe false
+            h.service.collectionAvailable(remote.id) shouldBe true
+            val remoteAfter = h.await(h.service.pickupResidentFood(remote.id, remoteWorker.id, remoteSource))
+            CivsEquipment.plainCount(remoteAfter.workers.single(), "BREAD") shouldBe 4L
+            remoteHolder.isEmpty shouldBe true
+            first.isDone shouldBe false
+            second.isDone shouldBe false
+            repeated.isDone shouldBe false
+            firstHolder.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
+            secondHolder.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
+
+            admission.complete(requireNotNull(held))
+            h.await(first)
+            val after = h.await(second)
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(repeated) })?.reason shouldBe "resident-food-missing"
+            h.service.collectionAvailable(town.id) shouldBe true
+            after.workers.associate { it.id to CivsEquipment.plainCount(it, "BREAD") } shouldBe
+                mapOf(firstWorker.id to 4L, secondWorker.id to 4L, replayWorker.id to 0L)
+            h.service.settlements().single { it.id == town.id } shouldBe after
+            firstHolder.isEmpty shouldBe true
+            secondHolder.isEmpty shouldBe true
+            h.time shouldBe clock
+            verify(exactly = 3) { h.store.saveInventoryTransaction(any()); h.store.completeInventoryTransaction(any()) }
+            verify(exactly = 3) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
     test("an active tavern serves existing bread without staff and falls back to a stocked hall when empty") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
@@ -358,8 +440,6 @@ class CivsQueuedTavernPickupServiceTest : FunSpec({
                 h.commit()
                 h.tickUntil("first ticket reaches RAM admission") { firstReceipt != null }
                 retired.isDone shouldBe false
-                // A prepared collection retains the existing five-second world collection cadence even when retired.
-                h.time += 5_000
             }
             activeTicket = replacement
             val current = h.service.pickupResidentFood(city.id, keeper.id, source.copy(servingTicket = replacement))
@@ -449,11 +529,10 @@ class CivsResidentFoodFairnessTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(first, second))
             every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            every { h.blueprints.autonomousSource(first.style, BuildingType.BUILDER_HUT) } throws CivsRejection("blueprint-unavailable")
             h.paper.addPlayer("NativeFoodWitness").teleport(Location(h.world, 1.5, 65.0, .5))
-            // This case owns supply fairness; automatic expansion has its own city-save tests.
-            CivsAutonomousDevelopment::class.java.getDeclaredField("nextAutonomyAt").also { it.isAccessible = true }
-                .setLong(autonomousDevelopment(h.service), Long.MAX_VALUE)
             h.start()
+            val clock = h.time
             if (firstBuffer == "unavailable") h.world.unloadChunk(0, 0)
             val pulse = CivsResidentSupplies::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
             pulse.invokeService(h.service)
@@ -462,12 +541,12 @@ class CivsResidentFoodFairnessTest : FunSpec({
             val observation = CivsResidentSupplies::class.java.getDeclaredMethod("autoSupplyObservation", Settlement::class.java)
                 .also { it.isAccessible = true }
             h.tickUntil("second town native supply capture") { observation.invokeService(h.service, second) != null }
-            h.time += 1_000
             pulse.invokeService(h.service)
             h.tickUntil("second town native food receipt") { h.saves.isNotEmpty() }
             h.saves.single().first.id shouldBe second.id
             h.saves.single().first.stock shouldBe Stock()
             secondBarrel.contents.filterNotNull().filter { it.type == Material.BREAD }.sumOf { it.amount } shouldBe 4
+            h.time shouldBe clock
             repeat(3) { h.time += 1_000; pulse.invokeService(h.service) }
             h.saves.size shouldBe 1
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }

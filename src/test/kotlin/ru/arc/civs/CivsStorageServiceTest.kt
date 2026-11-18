@@ -381,6 +381,54 @@ class CivsNativeProductionParityTest : FunSpec({
 })
 
 class CivsAutonomousStorageRuntimeTest : FunSpec({
+    test("a full city keeps its storage retry without delaying another city's reserve") {
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin -> CivsStorage(plugin) { emptyArray() } }) { h ->
+            val firstPoint = CivPosition(0, 64, 0)
+            val secondPoint = firstPoint.copy(x = 224)
+            val hall = h.city.buildings.first().copy(control = firstPoint)
+            val first = CivsRules.validate(h.city.copy(buildings = listOf(hall), workers = emptyList(), stock = Stock(),
+                inventory = CivInventory(CivStorageMode.PHYSICAL, materials = mapOf("OAK_LOG" to 5L))))
+            val secondHall = hall.copy(id = UUID.randomUUID(), anchor = secondPoint, entrance = secondPoint, control = secondPoint,
+                bounds = CivBox(secondPoint.copy(x = 222, z = -2), secondPoint.copy(x = 226, y = 68, z = 2)))
+            val second = CivsRules.validate(first.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), name = "Birch Town",
+                center = secondPoint, buildings = listOf(secondHall),
+                inventory = CivInventory(CivStorageMode.PHYSICAL, materials = mapOf("OAK_LOG" to 7L))))
+            h.world.loadChunk(secondPoint.x shr 4, 0)
+            fun barrel(point: CivPosition) = h.world.getBlockAt(point.x, point.y, point.z).let { block ->
+                block.type = Material.BARREL
+                (block.state as org.bukkit.block.Barrel).inventory
+            }
+            val full = barrel(firstPoint)
+            val free = barrel(secondPoint)
+            repeat(full.size) { full.setItem(it, ItemStack(Material.STONE, 64)) }
+            h.paper.addPlayer("FirstTownVisitor").teleport(firstPoint.location(h.world))
+            h.paper.addPlayer("SecondTownVisitor").teleport(secondPoint.location(h.world))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(first, second))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val flush = CivsStorageActions::class.java.getDeclaredMethod("pulseStorage").also { it.isAccessible = true }
+            fun pulse() { flush.invokeService(h.service); h.tick() }
+            pulse()
+            h.saves shouldBe emptyList()
+            pulse()
+            h.saves.map { it.first.id } shouldBe listOf(second.id)
+            free.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 7)
+            h.commit()
+            full.clear()
+            h.time += 4_999
+            pulse()
+            h.saves.map { it.first.id } shouldBe listOf(second.id)
+            full.getItem(0) shouldBe null
+            h.time++
+            pulse()
+            h.saves.map { it.first.id } shouldBe listOf(second.id, first.id)
+            full.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 5)
+            free.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 7)
+            h.commit()
+        }
+    }
+
     for (initiallyFull in listOf(false, true)) test("legacy Auto migrates once after startup and retries native full storage=$initiallyFull") {
         serviceScenario(nativeGeometry = true, storageFactory = { plugin -> CivsStorage(plugin) { emptyArray() } }) { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))

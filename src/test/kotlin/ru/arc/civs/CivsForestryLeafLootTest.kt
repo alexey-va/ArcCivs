@@ -212,7 +212,6 @@ class CivsForestryLeafLootTest : FunSpec({
             storage.reserve(city, id)
             val plan = storage.prepareForestryLeafLoot(city, worker.id, listOf(item.uniqueId))
             plan.worker shouldBe worker
-            plan.stock shouldBe null
             plan.transfer!!.validated(city.copy(revision = city.revision + 1))
             plan.transfer!!.ground.single().entityId shouldBe item.uniqueId
             plan.transfer!!.containers.single().after shouldBe CivResidentItem("APPLE", 2)

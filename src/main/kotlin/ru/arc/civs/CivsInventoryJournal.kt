@@ -10,6 +10,9 @@ import java.util.logging.Level
 
 private val STORAGE_BLOCK_IDS = CIVS_STORAGE_TYPES.mapTo(hashSetOf()) { it.lowercase() }
 
+private fun CivInventoryTransaction.hasNativeItemFence(): Boolean = collected != null || containerRelocation != null ||
+    cargoDropoff != null || cargoPickup != null || trade != null || mixedBufferPickup()
+
 /** Main-thread inventory state machine. New intents live in RAM; only pre-existing disk receipts use crash fences. */
 internal class CivsInventoryJournal(
     private val plugin: Plugin,
@@ -38,15 +41,14 @@ internal class CivsInventoryJournal(
 ) {
     private val cities get() = settlements()
     private val closed get() = isClosed()
-    private val collectedWorldBusy = mutableMapOf<UUID, UUID>()
-    private val collectedNextAt = mutableMapOf<UUID, Long>()
     private val inventoryRecovery = linkedMapOf<UUID, CivInventoryTransaction>()
+    private val inventoryRetryAt = mutableMapOf<UUID, Long>()
     private val blockedRecovery = mutableSetOf<UUID>()
     private val activeRamReceipts = mutableSetOf<UUID>()
     val pendingCount: Int get() = inventoryRecovery.size
     val blockedCount: Int get() = blockedRecovery.size
     fun pending(cityId: UUID): Boolean = cityId in inventoryRecovery
-    fun pendingCount(cityId: UUID): Int = inventoryRecovery.values.count { it.cityId == cityId }
+    fun pendingCount(cityId: UUID): Int = if (pending(cityId)) 1 else 0
     fun pendingCityIds(): Set<UUID> = inventoryRecovery.keys.toSet()
 
     /** Validated durable receipts own bounded native reads even while their city is quarantined. */
@@ -77,19 +79,6 @@ internal class CivsInventoryJournal(
         keys
     }
 
-    fun collectionAvailable(worldId: UUID): Boolean = worldId !in collectedWorldBusy &&
-        now() >= (collectedNextAt[worldId] ?: 0L) &&
-        inventoryRecovery.values.none { it.collected != null && it.after.worldId == worldId }
-
-    fun reserveCollection(worldId: UUID, receiptId: UUID) {
-        collectedWorldBusy[worldId] = receiptId
-        collectedNextAt[worldId] = now() + 5_000
-    }
-
-    fun releaseCollection(worldId: UUID, receiptId: UUID) { collectedWorldBusy.remove(worldId, receiptId) }
-
-    fun submitCollected(city: Settlement, tx: CivInventoryTransaction): CompletableFuture<Settlement> = submitNative(city, tx)
-
     /** An evacuation owns the city and its exact source before asynchronous native persistence starts. */
     fun submitCargoPickup(city: Settlement, tx: CivInventoryTransaction,
         freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
@@ -113,14 +102,14 @@ internal class CivsInventoryJournal(
         return submitNative(city, tx, freshAdmission)
     }
 
-    private fun submitNative(city: Settlement, tx: CivInventoryTransaction,
+    /** Submit a sealed native receipt while its caller holds the city reservation. */
+    fun submitNative(city: Settlement, tx: CivInventoryTransaction,
         freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
         val id = tx.id
         val cityId = city.id
         val result = tracked<Settlement>()
         fun abort(failure: Throwable) {
             storage.unlock(id)
-            collectedWorldBusy.remove(city.worldId, id)
             busy -= cityId
             result.completeExceptionally(failure)
             updateHealth()
@@ -215,7 +204,6 @@ internal class CivsInventoryJournal(
                     // These admission failures precede the journal write; no native mutation has started.
                     storage.unlock(id)
                     activeRamReceipts -= id
-                    if (tx.collected != null) collectedWorldBusy.remove(tx.after.worldId, tx.id)
                     busy -= cityId
                     result.completeExceptionally(rejection)
                     updateHealth()
@@ -241,7 +229,8 @@ internal class CivsInventoryJournal(
         fun fail(error: Throwable, retry: Boolean = false) {
             busy -= tx.cityId
             unhealthy += tx.cityId
-            if (!retry) { blockedRecovery += tx.cityId; log("reconcile inventory ${tx.id}", error, tx.cityId) }
+            if (retry) deferNativeRecovery(tx)
+            else { blockedRecovery += tx.cityId; log("reconcile inventory ${tx.id}", error, tx.cityId) }
             result?.completeExceptionally(error)
             updateHealth()
         }
@@ -311,10 +300,7 @@ internal class CivsInventoryJournal(
                 }
             }
             when (val applied = storage.reconcile(tx, persistPlayer = tx.id !in activeRamReceipts)) {
-                is CivInventoryApplyResult.Retry -> {
-                    if (tx.cargoDropoff != null || tx.cargoPickup != null || tx.trade != null) collectedNextAt[tx.after.worldId] = now() + 5_000
-                    return fail(CivsRejection("inventory-recovery", applied.values), retry = true)
-                }
+                is CivInventoryApplyResult.Retry -> return fail(CivsRejection("inventory-recovery", applied.values), retry = true)
                 is CivInventoryApplyResult.Conflict -> return fail(CivsRejection("inventory-conflict", applied.values))
                 CivInventoryApplyResult.Applied -> Unit
             }
@@ -371,10 +357,10 @@ internal class CivsInventoryJournal(
                 // RAM mode performs the after-state check synchronously and never schedules native persistence.
                 storage.persistCollected(tx, durable = false)
                 commit()
-            } else if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null && tx.trade == null && !tx.mixedBufferPickup()) commit()
+            } else if (!tx.hasNativeItemFence()) commit()
             else persistCollectedReceipt(tx).whenCompleteSync(tasks) { _, persistenceFailure ->
                 if (persistenceFailure != null) fail(CivsRejection("inventory-recovery").also { it.initCause(persistenceFailure) },
-                    retry = retryCollectedPersistence(tx, persistenceFailure))
+                    retry = isNativePersistenceRetry(persistenceFailure))
                 else commit()
             }
         }.onFailure { fail(it) }
@@ -399,12 +385,11 @@ internal class CivsInventoryJournal(
         return result
     }
 
-    /** Retry the same locked receipt at most once per five seconds; exact mismatches remain blocked. */
-    private fun retryCollectedPersistence(tx: CivInventoryTransaction, failure: Throwable): Boolean {
-        if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null && tx.trade == null && !tx.mixedBufferPickup() ||
-            generateSequence(failure) { it.cause }.take(8).none { it is CivsNativePersistenceRetry }) return false
-        collectedNextAt[tx.after.worldId] = now() + 5_000
-        return true
+    private fun isNativePersistenceRetry(failure: Throwable): Boolean =
+        generateSequence(failure) { it.cause }.take(8).any { it is CivsNativePersistenceRetry }
+
+    private fun deferNativeRecovery(tx: CivInventoryTransaction) {
+        if (tx.hasNativeItemFence()) inventoryRetryAt[tx.id] = now() + 5_000
     }
 
     /** Untouched native endpoints can cancel safely; uncertain journal deletion retains the recovery lock. */
@@ -417,7 +402,6 @@ internal class CivsInventoryJournal(
                 unhealthy -= tx.cityId
                 blockedRecovery -= tx.cityId
                 storage.unlock(tx.id)
-                if (tx.collected != null) collectedWorldBusy.remove(tx.after.worldId, tx.id)
                 result?.completeExceptionally(reason)
             } else {
                 unhealthy += tx.cityId
@@ -443,7 +427,6 @@ internal class CivsInventoryJournal(
                 unhealthy -= tx.cityId
                 blockedRecovery -= tx.cityId
                 storage.unlock(tx.id)
-                if (tx.collected != null) collectedWorldBusy.remove(tx.after.worldId, tx.id)
                 val current = afterRetired(tx, result == null)
                 if (current.workers.any { it.cargo?.let { cargo -> !cargo.inventoryBacked && cargo.stockResource == null } == true }) {
                     // Retire the immutable old receipt first; migration owns a new durable revision.
@@ -468,11 +451,15 @@ internal class CivsInventoryJournal(
     }
 
     fun recover() {
+        val time = now()
         val tx = inventoryRecovery.values.firstOrNull { it.cityId !in busy && it.cityId !in blockedRecovery &&
-            (it.collected == null && it.containerRelocation == null && it.cargoDropoff == null && it.cargoPickup == null && it.trade == null ||
-                now() >= (collectedNextAt[it.after.worldId] ?: 0L)) &&
+            (inventoryRetryAt[it.id]?.let { retryAt -> time >= retryAt } ?: true) &&
             !storage.waitingForPlayer(it) } ?: return
+        inventoryRetryAt.remove(tx.id)
         val city = cities[tx.cityId] ?: run { blockedRecovery += tx.cityId; return }
+        // Move this attempt to the end so stuck receipts cannot keep later ones from running.
+        inventoryRecovery.remove(tx.cityId)
+        inventoryRecovery[tx.cityId] = tx
         busy += city.id
         runCatching {
             storage.lock(tx)
@@ -488,7 +475,7 @@ internal class CivsInventoryJournal(
                 if (city.revision == tx.after.revision || tx.trade != null || tx.residentTransfer != null || tx.resurrection != null || tx.collected != null ||
                     tx.containerRelocation != null || tx.cargoDropoff != null || tx.cargoPickup != null) when (val applied = storage.reconcile(tx, persistPlayer = tx.id !in activeRamReceipts)) {
                     is CivInventoryApplyResult.Retry -> {
-                        if (tx.cargoDropoff != null || tx.cargoPickup != null || tx.trade != null) collectedNextAt[tx.after.worldId] = now() + 5_000
+                        deferNativeRecovery(tx)
                         busy -= city.id; unhealthy += city.id; return@runCatching
                     }
                     is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", applied.values)
@@ -503,7 +490,8 @@ internal class CivsInventoryJournal(
                     }.exceptionOrNull()
                     if (problem != null) {
                         busy -= city.id; unhealthy += city.id
-                        if (!retryCollectedPersistence(tx, problem)) {
+                        if (isNativePersistenceRetry(problem)) deferNativeRecovery(tx)
+                        else {
                             blockedRecovery += city.id
                             log("recover inventory ${tx.id}", problem, tx.cityId)
                         }
@@ -544,10 +532,11 @@ internal class CivsInventoryJournal(
                     fun completeBootstrap() {
                         inventoryRecovery.values.forEach { storage.unlock(it.id) }
                         inventoryRecovery.clear()
-                        collectedWorldBusy.clear()
                         blockedRecovery.clear()
                         inventoryRecovery.putAll(retained.associateBy { it.cityId })
-                        activeRamReceipts.retainAll(retained.map { it.id }.toSet())
+                        val retainedIds = retained.mapTo(hashSetOf()) { it.id }
+                        inventoryRetryAt.keys.retainAll(retainedIds)
+                        activeRamReceipts.retainAll(retainedIds)
                         storage.completeReceiptBootstrap(retained, consumed)
                         cosmetic.forEach { tx ->
                             CivsDiagnostics.event("autonomous_visual_journal_retired", "city" to tx.cityId,

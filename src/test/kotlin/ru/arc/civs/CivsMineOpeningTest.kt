@@ -160,6 +160,42 @@ class CivsMineOpeningTest : FunSpec({
         }
     }
 
+    test("automatic reconciliation starts the next mine on the next pulse once the held repair completes") {
+        MineOpeningFixture().use { f ->
+            fun shifted(point: CivPosition) = point.copy(x = point.x - 32)
+            val second = f.mine.copy(id = UUID.randomUUID(), anchor = shifted(f.mine.anchor),
+                bounds = CivBox(shifted(f.mine.bounds.min), shifted(f.mine.bounds.max)),
+                entrance = shifted(f.mine.entrance), control = f.mine.control?.let(::shifted))
+            f.city = CivsRules.validate(f.city.copy(buildings = f.city.buildings + second))
+            f.storage.updateCity(f.city)
+            val secondPositions = CivsMineOpening.positions(second)
+            val secondCap = f.cap.map(::shifted)
+            secondPositions.forEach { f.put(it, "minecraft:air") }
+            secondCap.forEach { f.put(it, "minecraft:dirt") }
+            val held = CompletableFuture<CivInventoryTransaction>()
+            f.journalWrite = held
+
+            f.maintenance.pulse()
+            f.ticks()
+            f.writes shouldBe 1
+            f.maintenance.pulse()
+            f.ticks()
+            f.writes shouldBe 1
+            secondCap.forEach { f.state(it) shouldBe "minecraft:dirt" }
+            held.complete(requireNotNull(f.written))
+            f.ticks()
+            f.positions.forEach { f.state(it) shouldBe "minecraft:air" }
+            f.journalWrite = null
+            f.maintenance.pulse()
+            f.ticks()
+            f.writes shouldBe 2
+            secondPositions.forEach { f.state(it) shouldBe "minecraft:air" }
+            f.maintenance.pulse()
+            f.ticks()
+            f.writes shouldBe 2
+        }
+    }
+
     test("automatic reconciliation is independent of a sleeping miner and retries an occupied mouth") {
         MineOpeningFixture().use { f ->
             f.occupied = true

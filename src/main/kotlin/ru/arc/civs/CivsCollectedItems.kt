@@ -65,7 +65,7 @@ data class CivCollectedTransfer(val workerId: UUID, val before: List<CivResident
     }
 }
 
-internal data class CivCollectedPlan(val worker: CivWorker, val transfer: CivCollectedTransfer?, val stock: Stock? = null)
+internal data class CivCollectedPlan(val worker: CivWorker, val transfer: CivCollectedTransfer?)
 data class CivCollectedHome(val homeId: UUID, val container: CivPosition?, val surplus: Boolean)
 
 internal fun civsCollectionHome(city: Settlement, worker: CivWorker): CivBuilding? =
@@ -81,9 +81,19 @@ internal fun civsWithinFoodPickupReach(feet: Location, point: CivPosition): Bool
 
 internal fun civsCanReachContainer(feet: Location, point: CivPosition, nearbyFoodPickup: Boolean = false): Boolean {
     val world = feet.world ?: return false
+    val nearby = nearbyFoodPickup && civsWithinFoodPickupReach(feet, point)
+    val eyeY = feet.y + 1.5
+    if (!nearby) {
+        // Every native aim point lies inside this block, including its visible faces.
+        fun gap(coordinate: Double, block: Int) = coordinate - coordinate.coerceIn(block.toDouble(), block + 1.0)
+        val dx = gap(feet.x, point.x)
+        val dy = gap(eyeY, point.y)
+        val dz = gap(feet.z, point.z)
+        val inRayRange = dx * dx + dy * dy + dz * dz <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH
+        if (!inRayRange) return false
+    }
     return civsResidentStandingSafe(feet) && citizenChunkReady(world, point.x shr 4, point.z shr 4) &&
-        (nearbyFoodPickup && civsWithinFoodPickupReach(feet, point) ||
-            citizenCanReachBlock(world, feet.clone().add(0.0, 1.5, 0.0), point))
+        (nearby || citizenCanReachBlock(world, Location(world, feet.x, eyeY, feet.z), point))
 }
 
 internal fun civsGroundItemAvailable(item: Item, workerId: UUID): Boolean = item.isValid && !item.isDead &&

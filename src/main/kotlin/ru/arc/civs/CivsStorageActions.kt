@@ -33,10 +33,10 @@ internal class CivsStorageActions(
     private val residentSupplies get() = residentSuppliesOwner()
     private val cargoRequests get() = cargoRequestsOwner()
     private val cityResearch get() = researchOwner()
-    private var nextStorageTransferAt = 0L
-    private var storageCursor = 0
-    private var nextAutoMigrationAt = 0L
-    private var autoMigrationCursor = 0
+    private val storageTransfers = CivsCityTurns()
+    private val autoMigrations = CivsCityTurns()
+    private val constructionReturns = CivsCityTurns()
+    private val returnCursors = mutableMapOf<UUID, Int>()
 
     /** Explicit console maintenance only; never restores a chest again after a player removes it. */
     internal fun repairBuildingStorage(cityId: UUID, buildingId: UUID): CompletableFuture<Map<String, Int>> =
@@ -471,12 +471,9 @@ internal class CivsStorageActions(
         }
 
     fun pulseAutoStorage() {
-        if (authority.now() < nextAutoMigrationAt) return
-        val candidates = records.cities.values.filter { CivsAutoStorageMigration.canMigrate(it) && it.id !in records.busy &&
-            it.id !in records.unhealthy && it.pendingDeletion == null && !inventoryJournal.pending(it.id) }
-        if (candidates.isEmpty()) return
-        val city = candidates[Math.floorMod(autoMigrationCursor++, candidates.size)]
-        nextAutoMigrationAt = authority.now() + 1_000L
+        val city = autoMigrations.next(records.cities, authority.now(), 1_000L) {
+            storageAvailable(it) && CivsAutoStorageMigration.canMigrate(it) && !inventoryJournal.pending(it.id)
+        } ?: return
         runCatching { authority.mutate(city.id, transform = CivsAutoStorageMigration::migrate) }.onSuccess { accepted ->
             accepted.whenCompleteSync(tasks) { saved, failure ->
                 if (failure == null && saved != city) {
@@ -490,20 +487,30 @@ internal class CivsStorageActions(
         }.onFailure { authority.log("migrate autonomous storage ${city.id}", it, city.id) }
     }
 
-    private var returnCursor = 0
-    private var nextConstructionReturnAt = 0L
+    private fun storageAvailable(city: Settlement): Boolean =
+        city.id !in records.busy && city.id !in records.unhealthy && city.pendingDeletion == null
+
+    private fun constructionStorageReady(city: Settlement): Boolean =
+        storageAvailable(city) && city.inventory?.constructionBuffers.orEmpty().values.any {
+            it.parts.isNotEmpty() && !it.owner.held(city)
+        } && !construction.isPlacing(city.id) && authority.settlementActive(city)
+
     internal fun pulseConstructionStorage(completedCity: UUID? = null) {
-        if (completedCity == null && authority.now() < nextConstructionReturnAt) return
-        val cities = if (completedCity == null) records.cities.values else listOfNotNull(records.cities[completedCity])
-        val candidates = cities.asSequence().filter { city ->
-            city.id !in records.busy && city.id !in records.unhealthy && city.pendingDeletion == null &&
-                !city.inventory?.constructionBuffers.isNullOrEmpty() && !construction.isPlacing(city.id) && authority.settlementActive(city)
-        }.flatMap { city -> city.inventory!!.constructionBuffers.orEmpty().values.asSequence().filterNot { it.owner.held(city) }
-            .flatMap { group -> group.parts.asSequence().map { Triple(city, group, it) } } }.toList()
-        if (candidates.isEmpty()) return
-        val cursor = returnCursor++
-        val (city, group, part) = candidates[Math.floorMod(cursor, candidates.size)]
-        nextConstructionReturnAt = authority.now() + 5_000L
+        val now = authority.now()
+        val cities = records.cities
+        val city = if (completedCity == null) {
+            returnCursors.keys.retainAll(cities.keys)
+            constructionReturns.next(cities, now, 5_000L, ::constructionStorageReady) ?: return
+        } else {
+            val completed = cities[completedCity]?.takeIf(::constructionStorageReady) ?: return
+            constructionReturns.defer(completed.id, now, 5_000L)
+            completed
+        }
+        val candidates = city.inventory?.constructionBuffers.orEmpty().values.asSequence()
+            .filterNot { it.owner.held(city) }.flatMap { group -> group.parts.asSequence().map { group to it } }.toList()
+        val cursor = returnCursors.getOrDefault(city.id, 0)
+        val (group, part) = candidates[Math.floorMod(cursor, candidates.size)]
+        returnCursors[city.id] = cursor + 1
         runCatching { authority.returnConstructionStorage(city, group, part) }.onSuccess { future ->
             future.whenComplete { _, failure -> if (failure != null) authority.log("return construction storage ${city.id}", failure, city.id) }
         }.onFailure { authority.log("return construction storage ${city.id}", it, city.id) }
@@ -511,14 +518,10 @@ internal class CivsStorageActions(
 
     fun pulseStorage() {
         pulseConstructionStorage()
-        if (authority.now() < nextStorageTransferAt) return
-        val candidates = records.cities.values.filter { city ->
-            city.id !in records.busy && city.id !in records.unhealthy && city.pendingDeletion == null && city.inventory?.mode == CivStorageMode.PHYSICAL && pendingMaterials(city) > 0 &&
-                authority.settlementActive(city)
-        }
-        if (candidates.isEmpty()) return
-        val city = candidates[Math.floorMod(storageCursor++, candidates.size)]
-        nextStorageTransferAt = authority.now() + 5_000L
+        val city = storageTransfers.next(records.cities, authority.now(), 5_000L) {
+            storageAvailable(it) && it.inventory?.mode == CivStorageMode.PHYSICAL && pendingMaterials(it) > 0 &&
+                authority.settlementActive(it)
+        } ?: return
         runCatching { materialize(city.id, background = true) }
             .onSuccess { future -> future.whenComplete { _, failure ->
                 if (failure != null)

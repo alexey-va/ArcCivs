@@ -481,8 +481,6 @@ class CivsStorage(private val plugin: Plugin,
         residents.homeDestination(city, worker, reserve)
     internal fun residentFoodSource(city: Settlement, worker: CivWorker, feet: org.bukkit.Location,
         tavernService: Boolean = false): CivResidentFoodSource? = residents.residentFoodSource(city, worker, feet, tavernService)
-    internal fun prepareFoodMaterialization(city: Settlement, workerId: UUID, feet: org.bukkit.Location): CivCollectedPlan =
-        residents.prepareFoodMaterialization(city, workerId, feet)
     internal fun prepareFoodPickup(city: Settlement, workerId: UUID, target: CivResidentFoodSource, feet: org.bukkit.Location): CivCollectedPlan =
         residents.prepareFoodPickup(city, workerId, target, feet)
     internal fun prepareHomeDeposit(city: Settlement, workerId: UUID, destination: CivPosition,

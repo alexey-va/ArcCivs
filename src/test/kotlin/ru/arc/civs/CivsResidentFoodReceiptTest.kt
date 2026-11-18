@@ -239,7 +239,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
             if (it.id == keeper.id) prepared.worker else it
         }, revision = before.revision + 1), emptyList(), collected = requireNotNull(prepared.transfer))
         h.storage.seal(tx)
-        val saved = h.journal.submitCollected(before, tx)
+        val saved = h.journal.submitNative(before, tx)
         h.ticks()
         saved.join() shouldBe tx.after
         h.barrel.getItem(0) shouldBe null
@@ -313,26 +313,6 @@ class CivsResidentFoodReceiptTest : FunSpec({
         h.worker.hunger shouldBe 14
     }
 
-    test("Auto materialization debits one existing FOOD per real bread and pickup only transfers that bread") {
-        val initial = h.city
-        val tx = h.materialize()
-        h.barrel.getItem(0) shouldBe null
-        tx.after.stock.food shouldBe initial.stock.food - 4
-        tx.collected!!.food!!.materialized shouldBe 4
-        h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
-        h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
-        h.barrel.getItem(0)!!.amount shouldBe 4
-        h.storage.unlock(tx.id)
-        h.city = tx.after
-        val pickup = h.pickup()
-        pickup.after.stock shouldBe tx.after.stock
-        CivsEquipment.usableCount(pickup.after.workers.single(), "BREAD") shouldBe 4
-        h.storage.reconcile(pickup) shouldBe CivInventoryApplyResult.Applied
-        h.storage.reconcile(pickup) shouldBe CivInventoryApplyResult.Applied
-        h.barrel.getItem(0) shouldBe null
-        shouldThrow<IllegalArgumentException> { tx.copy(after = tx.after.copy(stock = initial.stock)).validated() }
-    }
-
     test("an ordinary native apple moves from its real chest to the bag and restores four hunger without FOOD debit") {
         val foods = CivsResidentFoods(mapOf("BREAD" to CivResidentFoodDefinition(6), "APPLE" to CivResidentFoodDefinition(4)))
         h.storage.residentFoods = foods
@@ -341,7 +321,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         selected.material shouldBe "APPLE"
         val before = h.city
         val tx = h.pickup(selected)
-        val picking = h.journal.submitCollected(before, tx)
+        val picking = h.journal.submitNative(before, tx)
         h.ticks()
         picking.join() shouldBe tx.after
         h.barrel.getItem(0) shouldBe null
@@ -384,47 +364,12 @@ class CivsResidentFoodReceiptTest : FunSpec({
         foods.available(h.city.copy(workers = listOf(courier)), courier, "APPLE") shouldBe 0
     }
 
-    test("empty stock never materializes bread and an empty chest never grants a personal item") {
-        h.city = h.city.copy(stock = Stock())
-        val id = UUID.randomUUID()
-        h.storage.reserve(h.city, id)
-        shouldThrow<CivsRejection> { h.storage.prepareFoodMaterialization(h.city, h.worker.id, h.feet) }.reason shouldBe "resident-food-missing"
-        shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id, h.source, h.feet) }.reason shouldBe "resident-food-missing"
+    test("an empty barrel cannot turn legacy stock into a personal food pickup") {
+        val before = h.city
+        shouldThrow<CivsRejection> { h.pickup() }.reason shouldBe "resident-food-missing"
         h.barrel.getItem(0) shouldBe null
         CivsEquipment.usableCount(h.worker, "BREAD") shouldBe 0
-    }
-
-    test("materialization is bounded by the remaining stock and never refills an existing four-bread buffer") {
-        h.city = h.city.copy(stock = Stock(food = 2))
-        val tx = h.materialize()
-        tx.after.stock.food shouldBe 0L
-        tx.collected!!.food!!.materialized shouldBe 2
-        h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
-        h.storage.unlock(tx.id)
-        h.city = tx.after.copy(stock = Stock(food = 20))
-        h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
-        val id = UUID.randomUUID()
-        h.storage.reserve(h.city, id)
-        h.storage.prepareFoodMaterialization(h.city, h.worker.id, h.feet).transfer shouldBe null
-        h.city.stock.food shouldBe 20L
-    }
-
-    test("a full resident still has a physical four-bread public reserve between distinct transfers") {
-        h.city = h.city.copy(workers = h.city.workers.map { it.copy(hunger = 20) })
-        val initial = h.city
-        val tx = h.materialize()
-        h.journal.reserveCollection(initial.worldId, tx.id)
-        val saving = h.journal.submitCollected(initial, tx)
-        h.ticks()
-        saving.join() shouldBe tx.after
-        repeat(4) { h.ticks(); h.barrel.getItem(0)!!.amount shouldBe 4 }
-        h.journal.collectionAvailable(h.city.worldId) shouldBe false
-        CivsEquipment.usableCount(h.worker, "BREAD") shouldBe 0
-        val id = UUID.randomUUID()
-        h.storage.reserve(h.city, id)
-        h.storage.prepareFoodMaterialization(h.city, h.worker.id, h.feet).transfer shouldBe null
-        h.barrel.getItem(0)!!.amount shouldBe 4
-        h.city.stock.food shouldBe initial.stock.food - 4
+        h.city shouldBe before
     }
 
     test("source search chooses the closest stocked actual permitted container and empty reserves fall back to the hall") {
@@ -443,11 +388,8 @@ class CivsResidentFoodReceiptTest : FunSpec({
         h.observedFoodSource(resident, Location(h.world, 7.5, 64.0, .5))!!.buildingId shouldBe hall.id
         h.barrel.setItem(0, null)
         h.observedFoodSource(resident, h.feet) shouldBe null
-        val tx = h.materialize()
-        tx.collected!!.food!!.buildingId shouldBe hall.id
-        h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
         home.getItem(0) shouldBe null
-        h.barrel.getItem(0)!!.amount shouldBe 4
+        h.barrel.getItem(0) shouldBe null
     }
 
     test("food access includes public stores own home and assigned work but rejects another home and city") {
@@ -532,7 +474,6 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val id = UUID.randomUUID()
         h.storage.reserve(h.city, id)
         shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(h.city, h.worker.id, h.source, h.feet) }.reason shouldBe "lands-denied"
-        h.storage.prepareFoodMaterialization(h.city, h.worker.id, h.feet).transfer shouldBe null
         h.storage.unlock(id)
         h.foodAllowed = true
         val tx = h.pickup()
@@ -548,7 +489,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         h.storage.persistCollectedNative = { _, before -> if (before) source else CompletableFuture.completedFuture(Unit) }
         val tx = h.pickup()
         val before = h.city
-        val result = h.journal.submitCollected(before, tx)
+        val result = h.journal.submitNative(before, tx)
         h.foodAllowed = false
         source.complete(Unit)
         h.ticks()
@@ -565,7 +506,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         every { h.store.saveInventoryTransaction(any()) } returns accepted
         val tx = h.pickup()
         val before = h.city
-        val result = h.journal.submitCollected(before, tx)
+        val result = h.journal.submitNative(before, tx)
         h.ticks() // The before fence must finish and the immutable intent must reach the store first.
         verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
         h.foodAllowed = false
@@ -618,7 +559,7 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val tx = h.pickup()
         val completed = CompletableFuture<Settlement>()
         every { h.store.completeInventoryTransaction(tx) } returns completed
-        val result = h.journal.submitCollected(h.city, tx)
+        val result = h.journal.submitNative(h.city, tx)
         h.ticks()
         h.barrel.getItem(0) shouldBe null
         h.foodAllowed = false
@@ -630,55 +571,75 @@ class CivsResidentFoodReceiptTest : FunSpec({
         verify(exactly = 1) { h.store.deleteInventoryTransaction(tx.id) }
     }
 
-    test("food intent and existing legacy home receipts round trip through the production store") {
-        val tx = h.materialize()
+    test("a saved legacy stock-to-bread receipt recovers once before the bread is picked up") {
+        val before = h.city
+        val after = before.copy(stock = before.stock.copy(food = before.stock.food - 4), revision = before.revision + 1)
+        val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after, emptyList(),
+            collected = CivCollectedTransfer(h.worker.id, CivsEquipment.slots(h.worker),
+                containers = listOf(CivNativeContainerChange(h.point, "BARREL", 0, null, CivResidentItem("BREAD", 4))),
+                food = CivResidentFoodReceipt(h.source.buildingId, before.stock, materialized = 4)))
         val root = Files.createTempDirectory("civs-food-store-")
-        try {
+        val loaded = try {
             CivsStore(root, Executor(Runnable::run)).use { store ->
-                writeLegacyInventoryReceipt(root, tx)
-                store.loadInventoryTransactions().join() shouldBe listOf(tx)
-                store.saveInventoryTransaction(tx).join() shouldBe tx
-                shouldThrow<CompletionException> { store.saveInventoryTransaction(tx.copy(after = tx.after.copy(stock = Stock()))).join() }
+                writeLegacyInventoryReceipt(root, receipt)
+                store.loadInventoryTransactions().join()
             }
         } finally { root.toFile().deleteRecursively() }
+        loaded shouldBe listOf(receipt)
+        shouldThrow<IllegalArgumentException> { receipt.copy(after = after.copy(stock = before.stock)).validated() }
+        every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(loaded)
+        every { h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
+        val boot = h.journal.bootstrap(); h.ticks(); boot.join()
+        h.barrel.getItem(0) shouldBe null
+        repeat(2) { h.journal.recover(); h.ticks() }
+        h.city shouldBe after
+        h.barrel.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
+        h.journal.pendingCount shouldBe 0
+        verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+
+        val pickup = h.journal.submitNative(h.city, h.pickup())
+        h.ticks()
+        pickup.join() shouldBe h.city
+        h.city.stock shouldBe after.stock
+        CivsEquipment.usableCount(h.worker, "BREAD") shouldBe 4
+        h.barrel.getItem(0) shouldBe null
     }
 
-    for ((material, materializing) in listOf("BREAD" to false, "BREAD" to true, "APPLE" to false)) {
-        test("new food transfer does not invoke forced native persistence material=$material materializing=$materializing") {
+    for (material in listOf("BREAD", "APPLE")) {
+        test("new food pickup does not invoke forced native persistence material=$material") {
             h.storage.residentFoods = CivsResidentFoods(mapOf("BREAD" to CivResidentFoodDefinition(6), "APPLE" to CivResidentFoodDefinition(4)))
-            if (!materializing) h.barrel.setItem(0, ItemStack(Material.valueOf(material), 4))
+            h.barrel.setItem(0, ItemStack(Material.valueOf(material), 4))
             h.storage.persistCollectedNative = { _, _ -> error("No per-operation persistence") }
-            val tx = if (materializing) h.materialize() else h.pickup(h.source.copy(material = material))
-            val future = h.journal.submitCollected(h.city, tx)
+            val tx = h.pickup(h.source.copy(material = material))
+            val future = h.journal.submitNative(h.city, tx)
             h.ticks()
             future.join() shouldBe tx.after
             h.city shouldBe tx.after
-            h.barrel.getItem(0)?.amount shouldBe if (materializing) 4 else null
+            h.barrel.getItem(0) shouldBe null
             verify(exactly = 1) { h.store.saveInventoryTransaction(tx) }
             h.busy.isEmpty() shouldBe true
         }
 
-        test("RAM completion failure recovers the same food operation once material=$material materializing=$materializing") {
+        test("RAM completion failure recovers the same food pickup once material=$material") {
             h.storage.residentFoods = CivsResidentFoods(mapOf("BREAD" to CivResidentFoodDefinition(6), "APPLE" to CivResidentFoodDefinition(4)))
-            if (!materializing) h.barrel.setItem(0, ItemStack(Material.valueOf(material), 4))
+            h.barrel.setItem(0, ItemStack(Material.valueOf(material), 4))
             h.storage.persistCollectedNative = { _, _ -> error("No forced persistence on RAM retry") }
             var attempts = 0
-            val tx = if (materializing) h.materialize() else h.pickup(h.source.copy(material = material))
+            val tx = h.pickup(h.source.copy(material = material))
             every { h.store.completeInventoryTransaction(tx) } answers {
                 if (++attempts == 1) CompletableFuture.failedFuture(IllegalStateException("RAM completion unavailable"))
                 else CompletableFuture.completedFuture(tx.after)
             }
             val before = h.city
-            h.journal.reserveCollection(before.worldId, tx.id)
-            val future = h.journal.submitCollected(before, tx)
+            val future = h.journal.submitNative(before, tx)
             h.ticks()
             shouldThrow<CompletionException> { future.join() }
             h.city shouldBe before
-            h.barrel.getItem(0)?.amount shouldBe if (materializing) 4 else null
+            h.barrel.getItem(0) shouldBe null
             every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
             every { h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
             val boot = h.journal.bootstrap(); h.ticks(); boot.join()
-            h.time += 5_000
             h.journal.recover(); h.ticks()
             h.city shouldBe tx.after
             h.journal.recover(); h.ticks()
@@ -1709,14 +1670,12 @@ private class ResidentFoodFixture : AutoCloseable {
         storage.capturePlanningStorage(city)
         return storage.residentFoodSource(city, worker, feet, tavernService)
     }
-    fun materialize(): CivInventoryTransaction = prepare { storage.prepareFoodMaterialization(city, worker.id, feet) }
-    fun pickup(target: CivResidentFoodSource = source): CivInventoryTransaction = prepare { storage.prepareFoodPickup(city, worker.id, target, feet) }
-    private fun prepare(plan: () -> CivCollectedPlan): CivInventoryTransaction {
+    fun pickup(target: CivResidentFoodSource = source): CivInventoryTransaction {
         val id = UUID.randomUUID()
         storage.reserve(city, id)
-        val prepared = plan()
+        val prepared = storage.prepareFoodPickup(city, worker.id, target, feet)
         val tx = CivInventoryTransaction(id, city.id, city.revision,
-            city.copy(stock = prepared.stock ?: city.stock, workers = listOf(prepared.worker), revision = city.revision + 1),
+            city.copy(workers = listOf(prepared.worker), revision = city.revision + 1),
             emptyList(), collected = requireNotNull(prepared.transfer))
         storage.seal(tx)
         return tx
