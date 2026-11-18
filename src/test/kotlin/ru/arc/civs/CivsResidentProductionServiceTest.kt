@@ -15,19 +15,26 @@ import org.bukkit.block.data.Ageable
 import org.bukkit.inventory.ItemStack
 
 class CivsResidentProductionServiceTest : FunSpec({
-    test("unfunded research journals the exact university barrel bill once before any researcher is assigned") {
+    for (auto in listOf(false, true)) test("unfunded research journals the exact university bill once with a full warehouse Auto=$auto") {
         serviceScenario { h ->
             val university = h.city.buildings.last().copy(type = BuildingType.UNIVERSITY,
                 control = CivPosition(10, 63, 0))
-            val prerequisites = listOf(BuildingType.FORESTER, BuildingType.QUARRY).mapIndexed { index, type ->
+            val workplaces = listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.WAREHOUSE).mapIndexed { index, type ->
                 university.copy(id = UUID.randomUUID(), type = type, anchor = CivPosition(20 + index * 10, 64, 0),
                     bounds = CivBox(CivPosition(18 + index * 10, 63, -2), CivPosition(22 + index * 10, 68, 2)),
                     entrance = CivPosition(20 + index * 10, 64, -2), control = CivPosition(20 + index * 10, 63, 0))
             }
-            val base = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), workers = emptyList(),
-                buildings = listOf(h.city.buildings.first(), university) + prerequisites)
+            val reserve = if (auto) mapOf("OAK_LOG" to 5L) else emptyMap()
+            val base = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL, materials = reserve),
+                autonomy = CivAutonomy().takeIf { auto }, workers = emptyList(),
+                buildings = listOf(h.city.buildings.first(), university) + workplaces)
             val before = CivsResearch.begin(base, CivResearchId.MATERIALS, UUID.randomUUID(), h.time)
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            val warehouse = requireNotNull(workplaces.last().control)
+            h.world.loadChunk(warehouse.x shr 4, warehouse.z shr 4)
+            val full = h.world.getBlockAt(warehouse.x, warehouse.y, warehouse.z).also { it.type = Material.BARREL }
+                .state.let { (it as org.bukkit.block.Barrel).inventory }
+            repeat(full.size) { full.setItem(it, ItemStack(Material.STONE, 64)) }
             h.world.getBlockAt(10, 63, 0).type = Material.BARREL
             val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, ItemStack(Material.BOOK, 1))
@@ -48,7 +55,7 @@ class CivsResidentProductionServiceTest : FunSpec({
                 mapOf("BOOK" to 1, "PAPER" to 8, "COBBLESTONE" to 8)
             tx.changes.all { it.after == null } shouldBe true
             barrel.getItem(0)!!.amount shouldBe 1
-            h.service.city(h.player)!!.research!!.project!!.funded shouldBe false
+            h.service.settlements().single().research!!.project!!.funded shouldBe false
             h.saves shouldBe emptyList()
             pulse.invokeService(h.service)
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
@@ -58,15 +65,17 @@ class CivsResidentProductionServiceTest : FunSpec({
             barrel.getItem(1) shouldBe null
             barrel.getItem(2) shouldBe null
             barrel.getItem(3) shouldBe ItemStack(Material.DIAMOND, 2)
-            h.service.city(h.player)!!.research!!.project!!.funded shouldBe false
+            h.service.settlements().single().research!!.project!!.funded shouldBe false
             tx.after.research!!.project!!.funded shouldBe true
             tx.after.workers shouldBe emptyList()
             tx.after.stock shouldBe Stock()
             h.commit()
             pulse.invokeService(h.service); h.tick()
-            val funded = h.service.city(h.player)!!
+            val funded = h.service.settlements().single()
             funded.research!!.project!!.funded shouldBe true
             funded.research!!.project!!.workDone shouldBe 0
+            funded.inventory!!.materials shouldBe reserve
+            full.contents.all { it == ItemStack(Material.STONE, 64) } shouldBe true
             h.saves.size shouldBe 1
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(tx.id) }
         }
@@ -382,6 +391,49 @@ class CivsCraftCompletionFreshnessTest : FunSpec({
         }
     }
 
+    for (ownInputChanged in listOf(false, true))
+        test(if (ownInputChanged) "craft pickup leaves the barrel intact when the bag already has the inputs"
+            else "craft pickup debits the real workshop after another worker receives food") {
+            serviceScenario { h ->
+                val (workshop, carpenter) = prepareFundedCraft(h, inputsInStore = true)
+                val receipts = mutableListOf<CivInventoryTransaction>()
+                val journal = CompletableFuture<CivInventoryTransaction>()
+                every { h.store.saveInventoryTransaction(any()) } answers { receipts += firstArg<CivInventoryTransaction>(); journal }
+                every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+                h.start()
+                val job = h.craftJob(carpenter.id)
+                job.inputs shouldBe mapOf("OAK_LOG" to 1L)
+                val captured = requireNotNull(h.service.city(h.player))
+                val recipient = if (ownInputChanged) carpenter else captured.workers.first { it.id != carpenter.id }
+                val changed = CivsEquipment.collectSupplies(recipient, mapOf((if (ownInputChanged) "OAK_LOG" else "BREAD") to 1L))
+                val current = captured.copy(workers = captured.workers.map { if (it.id == changed.id) changed else it })
+                h.replaceCityInMemory(current)
+                h.service.craftPlan(current, current.workers.first { it.id == carpenter.id }) shouldBe job
+                val barrel = craftTestBarrel(h, workshop)
+                val pickup = h.service.prepareResidentSupplies(current.id, carpenter.id, workshop.id, job.id)
+                if (ownInputChanged) {
+                    h.await(pickup) shouldBe current
+                    barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG)
+                    receipts shouldBe emptyList()
+                    h.saves shouldBe emptyList()
+                    h.service.city(h.player) shouldBe current
+                } else {
+                    h.tickUntil("craft pickup reaches its journal") { receipts.isNotEmpty() || pickup.isDone }
+                    if (pickup.isDone) h.await(pickup)
+                    barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG)
+                    journal.complete(receipts.single())
+                    h.tickUntil("craft pickup awaits city publication") { h.saves.size == 1 }
+                    barrel.getItem(0) shouldBe null
+                    h.commit()
+                    val saved = h.await(pickup)
+                    val supplied = saved.workers.first { it.id == carpenter.id }
+                    CivsEquipment.plainCount(supplied, "OAK_LOG") shouldBe 1
+                    supplied.completedCycles shouldBe carpenter.completedCycles
+                    saved.workers.first { it.id == changed.id } shouldBe changed
+                }
+            }
+        }
+
     for (guard in listOf("job", "cycle", "assignment", "missing-inputs", "output-full"))
         test("craft completion preserves its $guard rejection without a receipt or free output") {
             serviceScenario { h ->
@@ -418,15 +470,16 @@ class CivsCraftCompletionFreshnessTest : FunSpec({
         }
 })
 
-private fun prepareFundedCraft(h: ServiceScenario): Pair<CivBuilding, CivWorker> {
+private fun prepareFundedCraft(h: ServiceScenario, inputsInStore: Boolean = false): Pair<CivBuilding, CivWorker> {
     val (workshop, carpenter) = h.prepareCarpentry()
     val base = h.store.load().join().single()
-    val funded = CivsEquipment.collectSupplies(carpenter, mapOf("OAK_LOG" to 1L))
+    val funded = if (inputsInStore) carpenter else CivsEquipment.collectSupplies(carpenter, mapOf("OAK_LOG" to 1L))
     val ready = CivsRules.validate(base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
         buildings = base.buildings.map { if (it.type == BuildingType.TOWN_HALL) it.copy(control = CivPosition(0, 63, 0)) else it },
         workers = base.workers.map { if (it.id == carpenter.id) funded else it }))
     h.world.loadChunk(1, 0)
     ready.buildings.forEach { building -> requireNotNull(building.control).let { h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL } }
+    if (inputsInStore) craftTestBarrel(h, workshop).setItem(0, ItemStack(Material.OAK_LOG))
     every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
     return workshop to funded
 }

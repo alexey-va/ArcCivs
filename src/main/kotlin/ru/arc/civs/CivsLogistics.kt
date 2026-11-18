@@ -198,7 +198,7 @@ object CivsLogistics {
     internal fun redistributionAllowed(city: Settlement, cargo: CivCargo): Boolean {
         if (!cargo.redistribution || cargo.inventoryBacked || cargo.deliveryBuildingId != null ||
             city.autonomy?.paused != false || city.inventory?.mode != CivStorageMode.PHYSICAL ||
-            !CivsAutoStorageMigration.ready(city) || city.pendingDeletion != null || !validCargo(city, cargo)) return false
+            city.pendingDeletion != null || !validCargo(city, cargo)) return false
         val source = city.building(cargo.sourceBuildingId) ?: return false
         val target = city.building(cargo.targetBuildingId) ?: return false
         return source.type == BuildingType.WAREHOUSE && source.phase == BuildingPhase.ACTIVE && source.control != null &&
@@ -337,7 +337,10 @@ object CivsLogistics {
             (from.z.toDouble() - to.z).let { it * it }
 
     internal fun withinRoute(city: Settlement, from: CivPosition, to: CivPosition): Boolean =
-        distanceSquared(from, to) <= maximumTransferDistance(city).toDouble() * maximumTransferDistance(city)
+        withinRoute(maximumTransferDistance(city), from, to)
+
+    internal fun withinRoute(maximum: Int, from: CivPosition, to: CivPosition): Boolean =
+        distanceSquared(from, to) <= maximum.toDouble() * maximum
 
     fun pickup(city: Settlement, workerId: UUID, cargo: CivCargo,
         craftInputs: Map<UUID, Map<String, Long>> = emptyMap(),

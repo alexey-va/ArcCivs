@@ -2,11 +2,8 @@ package ru.arc.civs
 
 /** One-way conversion of old closed reserves. Native bags and accepted receipts keep their exact ownership. */
 internal object CivsAutoStorageMigration {
-    fun ready(city: Settlement): Boolean = city.autonomy == null || city.inventory?.let {
-        it.mode == CivStorageMode.PHYSICAL && it.materials.isEmpty() && it.buildingMaterials.orEmpty().isEmpty()
-    } == true
-
-    fun waiting(city: Settlement): Boolean = city.autonomy != null && !ready(city)
+    /** Once converted, the city can work while its owned items are waiting for native slots. */
+    fun ready(city: Settlement): Boolean = city.autonomy == null || city.inventory?.mode == CivStorageMode.PHYSICAL
 
     fun canMigrate(city: Settlement): Boolean = CivsAutonomy.legacyStock(city)
 

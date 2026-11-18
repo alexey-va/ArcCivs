@@ -138,26 +138,48 @@ class CivsChunkLoadingTest : FunSpec({
         }
     }
 
-    test("permanent acquisition waits for the late member of its two-load cohort") {
-        chunkRuntime { h ->
+    test("loaded demand shares the ticket budget with a late callback while cold loads wait for their cohort") {
+        chunkRuntime(limit = 16) { h ->
             h.perChunkLoads = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
             h.recoveryChunks = listOf((0..3).mapTo(linkedSetOf()) { PaperChunkKey(h.world.uid, it, 20) })
             h.pulse()
             h.loads.size shouldBe 2
+            val late = h.loads.keys.last()
             h.completeLoad(h.loads.keys.first(), evictUnticketed = true)
             h.runtime.retainedChunks shouldBe 1
-            h.pulse()
+
+            val firstLoaded = PaperChunkKey(h.world.uid, 20, 20)
+            val secondLoaded = PaperChunkKey(h.world.uid, 21, 20)
+            h.loadedKeys += listOf(firstLoaded, secondLoaded)
+            val first = h.runtime.request(UUID.randomUUID(), h.world.uid, setOf(firstLoaded))
+            val second = h.runtime.request(UUID.randomUUID(), h.world.uid, setOf(secondLoaded))
+            h.pulse() // The early reply and the still-pending callback take both slots.
+            h.runtime.retainedChunks shouldBe 1
             h.loads.size shouldBe 2
-            h.completeLoad(h.loads.keys.last(), evictUnticketed = true)
-            h.runtime.retainedChunks shouldBe 2
+
+            val before = h.added.size
+            h.pulse()
+            first.ready() shouldBe true
+            second.ready() shouldBe false
+            h.loads.size shouldBe 2
+            h.loads.getValue(late).isDone shouldBe false
+            h.completeLoad(late, evictUnticketed = true)
+            h.added.drop(before) shouldBe listOf(firstLoaded, late)
+
             h.pulse()
             h.loads.size shouldBe 3
+            h.pulse()
+            second.ready() shouldBe true
+            h.loads.size shouldBe 3
+            first.close()
+            second.close()
             h.recoveryChunks = emptyList()
             h.pulse()
             h.completeLoads(evictUnticketed = true)
             h.pulse()
             h.runtime.retainedChunks shouldBe 0
-            h.added.size shouldBe 2
+            h.added.size shouldBe 4
             h.removed.groupingBy { it }.eachCount() shouldBe h.added.groupingBy { it }.eachCount()
         }
     }

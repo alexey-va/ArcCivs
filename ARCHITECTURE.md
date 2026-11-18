@@ -124,8 +124,9 @@ A full local workplace never silently overflows its producer reserve into the ha
 Existing native bags, food and equipment are not converted again. Unfinished
 forestry jobs keep their selected tree, cursor and harvested prefix. Historical
 already-paid construction, research and replacement kits retain their saved terms.
-Native workers can consume or move existing items while reserves wait for space;
-new grants and automatic development wait for migration completion. Mode change
+Once the city has a physical inventory, workers, research and construction can use
+available slots while other goods wait for space. Auto top-ups account for pending
+units of the requested material at the destination and at depots serving it. Mode change
 invalidates worksite observations once rather than resetting their search every tick.
 
 Meals consume carried food through the same observed animation and receipt in

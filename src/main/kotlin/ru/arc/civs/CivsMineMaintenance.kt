@@ -26,11 +26,10 @@ internal class CivsMineMaintenance(
     private data class Identity(val city: UUID, val world: UUID, val owner: UUID, val building: CivBuilding)
     private val checked = mutableMapOf<UUID, Identity>()
     private val retryAt = mutableMapOf<UUID, Long>()
-    private var pending = false
+    private val pendingCities = mutableSetOf<UUID>()
 
     /** One bounded check per active construction identity, also repeated after restart or upgrade. */
     fun pulse() {
-        if (pending) return
         val candidates = records.cities.values.flatMap { city -> city.buildings.filter {
             it.type == BuildingType.QUARRY && it.phase == BuildingPhase.ACTIVE && CivsWorksiteLayouts.site(it)?.has("mine") == true
         }.map { city to it } }
@@ -39,15 +38,16 @@ internal class CivsMineMaintenance(
         retryAt.keys.retainAll(ids)
         val now = authority.now()
         val (city, building) = candidates.firstOrNull { (city, building) ->
-            checked[building.id] != identity(city, building) && now >= retryAt.getOrDefault(building.id, 0) &&
+            city.id !in pendingCities && checked[building.id] != identity(city, building) &&
+                now >= retryAt.getOrDefault(building.id, 0) &&
                 city.id !in records.busy && city.id !in records.unhealthy && city.pendingDeletion == null &&
                 !journal.pending(city.id) && !placing(city.id) && city.construction?.buildingId != building.id &&
                 building.id !in city.constructionQueue.orEmpty()
         } ?: return
-        pending = true
+        pendingCities += city.id
         runCatching { request(city.id, building.id) }.getOrElse { CompletableFuture.failedFuture(it) }
             .whenCompleteSync(tasks) { _, failure ->
-                pending = false
+                pendingCities -= city.id
                 if (failure != null) {
                     retryAt[building.id] = authority.now() + 30_000
                     CivsDiagnostics.event("mine_opening_waiting", "city" to city.id, "building" to building.id,

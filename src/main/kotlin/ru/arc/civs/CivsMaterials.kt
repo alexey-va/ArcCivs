@@ -57,6 +57,10 @@ data class CivInventory(
     }
 }
 
+internal fun Settlement.materializationDepot(): CivBuilding =
+    buildings.firstOrNull { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE }
+        ?: buildings.first { it.type == BuildingType.TOWN_HALL }
+
 /** Fixed deterministic layer tiles; a completed NPC trip authorizes exactly one tile. */
 data class CivConstructionBatches(val total: Int, val size: Int = 64, val atomicPairs: Boolean? = null)
 

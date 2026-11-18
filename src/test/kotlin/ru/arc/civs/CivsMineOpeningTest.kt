@@ -160,39 +160,48 @@ class CivsMineOpeningTest : FunSpec({
         }
     }
 
-    test("automatic reconciliation starts the next mine on the next pulse once the held repair completes") {
+    test("a held mine receipt delays the next mine in its own city while another city completes its repair") {
         MineOpeningFixture().use { f ->
             fun shifted(point: CivPosition) = point.copy(x = point.x - 32)
             val second = f.mine.copy(id = UUID.randomUUID(), anchor = shifted(f.mine.anchor),
                 bounds = CivBox(shifted(f.mine.bounds.min), shifted(f.mine.bounds.max)),
                 entrance = shifted(f.mine.entrance), control = f.mine.control?.let(::shifted))
-            f.city = CivsRules.validate(f.city.copy(buildings = f.city.buildings + second))
-            f.storage.updateCity(f.city)
-            val secondPositions = CivsMineOpening.positions(second)
-            val secondCap = f.cap.map(::shifted)
-            secondPositions.forEach { f.put(it, "minecraft:air") }
-            secondCap.forEach { f.put(it, "minecraft:dirt") }
+            f.publish(CivsRules.validate(f.city.copy(buildings = f.city.buildings + second)))
+            val secondCap = shifted(f.cap.first())
+            f.put(secondCap, "minecraft:dirt")
+
+            val other = spatialBuilding("nordic", "miner", 1, CivPosition(0, 75, 0))
+            val otherCity = spatialCity(f.world.uid, listOf(other), spatialWorker(other, "IRON_PICKAXE"))
+            f.publish(CivsRules.validate(otherCity.copy(inventory = CivInventory(CivStorageMode.PHYSICAL))))
+            val otherPositions = CivsMineOpening.positions(other)
+            otherPositions.forEach { f.world.loadChunk(it.x shr 4, it.z shr 4) }
+            val otherCap = otherPositions.first()
+            f.put(otherCap, "minecraft:dirt")
+
             val held = CompletableFuture<CivInventoryTransaction>()
             f.journalWrite = held
-
             f.maintenance.pulse()
             f.ticks()
             f.writes shouldBe 1
-            f.maintenance.pulse()
-            f.ticks()
-            f.writes shouldBe 1
-            secondCap.forEach { f.state(it) shouldBe "minecraft:dirt" }
-            held.complete(requireNotNull(f.written))
-            f.ticks()
-            f.positions.forEach { f.state(it) shouldBe "minecraft:air" }
+            val firstReceipt = requireNotNull(f.written)
+            firstReceipt.mineOpening?.building?.id shouldBe f.mine.id
             f.journalWrite = null
             f.maintenance.pulse()
             f.ticks()
+            f.state(otherCap) shouldBe "minecraft:air"
             f.writes shouldBe 2
-            secondPositions.forEach { f.state(it) shouldBe "minecraft:air" }
+            f.cap.forEach { f.state(it) shouldBe "minecraft:dirt" }
+            f.state(secondCap) shouldBe "minecraft:dirt"
+
+            held.complete(firstReceipt)
+            f.ticks()
+            f.positions.forEach { f.state(it) shouldBe "minecraft:air" }
             f.maintenance.pulse()
             f.ticks()
-            f.writes shouldBe 2
+            f.state(secondCap) shouldBe "minecraft:air"
+            f.maintenance.pulse()
+            f.ticks()
+            f.writes shouldBe 3
         }
     }
 
@@ -232,7 +241,7 @@ private class MineOpeningFixture(tall: Boolean = false) : AutoCloseable {
     val surroundings: Map<CivPosition, String>
     private val cities = linkedMapOf<UUID, Settlement>()
     var city: Settlement
-        get() = cities.values.single()
+        get() = cities.values.first()
         set(value) { cities[value.id] = value }
     private val busy = hashSetOf<UUID>()
     private val unhealthy = hashSetOf<UUID>()
@@ -302,9 +311,9 @@ private class MineOpeningFixture(tall: Boolean = false) : AutoCloseable {
         every { store.loadInventoryTransactions() } answers { CompletableFuture.completedFuture(recovered) }
         every { store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
         journal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy, unhealthy, { false },
-            { saved -> city = saved; storage.updateCity(saved); CompletableFuture.completedFuture(Unit) },
+            { saved -> publish(saved); CompletableFuture.completedFuture(Unit) },
             { _, _ -> error("Mine maintenance must not create a second city mutation") }, {}, {}, { _, _, _ -> null }, {},
-            { _, _ -> city }, {}, { clock })
+            { tx, _ -> cities.getValue(tx.cityId) }, {}, { clock })
         val authority = mockk<CivsService>(relaxed = true)
         every { authority.ready() } returns true
         every { authority.now() } answers { clock }
@@ -316,6 +325,8 @@ private class MineOpeningFixture(tall: Boolean = false) : AutoCloseable {
             { _, _, point, before -> initial[point] == before }, { false }, { _, _ -> occupied })
         storage.validateMineOpeningNative = maintenance::validateNative
     }
+
+    fun publish(saved: Settlement) { cities[saved.id] = saved; storage.updateCity(saved) }
 
     fun transaction(): CivInventoryTransaction {
         val cells = cap.map { CivPlanBlock(it, state(it), "minecraft:air") }

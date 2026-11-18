@@ -2,6 +2,10 @@ package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import net.kyori.adventure.text.Component
+import org.bukkit.Material
+import org.bukkit.block.Barrel
+import org.bukkit.inventory.ItemStack
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
@@ -49,6 +53,87 @@ class CivsAutoSuppliesTest : FunSpec({
         CivsAutoSupplies.demands(city, null, CivsResidentFoods.BREAD_ONLY, observed) shouldBe emptyList()
     }
 
+    test("warehouse stock without a collection route does not block a needed workshop grant") {
+        val base = supplyCity(BuildingType.SMELTERY, "STONE")
+        val nearby = base.buildings[1]
+        val workshop = base.buildings[2]
+        val source = nearby.copy(id = UUID.randomUUID(), anchor = CivPosition(48, 64, 0),
+            control = CivPosition(48, 64, 0), entrance = CivPosition(48, 64, -3),
+            bounds = CivBox(CivPosition(46, 62, -2), CivPosition(50, 68, 2)))
+        val world = paper.addSimpleWorld("auto-warehouse-route")
+        val city = CivsRules.validate(base.copy(worldId = world.uid, buildings = base.buildings + source))
+        val sourceBarrel = supplyBarrel(world, source)
+        supplyBarrel(world, base.buildings.first())
+        supplyBarrel(world, nearby)
+        supplyBarrel(world, workshop).setItem(0, ItemStack(Material.CHARCOAL, 1))
+        repeat(25) { sourceBarrel.setItem(it, ItemStack(Material.STONE, 64)) }
+        sourceBarrel.setItem(25, ItemStack(Material.COBBLESTONE, 8))
+        CivsStorage(paper.createSimplePlugin("AutoWarehouseRouteTest")) { emptyArray() }.use { storage ->
+            storage.foodCanModify = { _, _ -> true }
+            val unstaffed = captureAutoSupply(city, storage)
+            unstaffed.stores.getValue(source.id).capacity.emptySlots shouldBe 1
+            allocateCivSupplies(unstaffed.detached()).plans shouldBe emptyMap()
+            CivsAutoSupplies.demands(city, null, CivsResidentFoods.BREAD_ONLY, unstaffed) shouldBe
+                listOf(CivAutoSupplyDemand(workshop.id, mapOf("COBBLESTONE" to 8L)))
+
+            val porter = CivWorker(UUID.randomUUID(), "Source porter", source.id, nextDeliveryAt = 1)
+            val staffed = city.copy(workers = city.workers + porter)
+            val observed = captureAutoSupply(staffed, storage)
+            val delivery = allocateCivSupplies(observed.detached()).plans.getValue(porter.id)
+            delivery.cargo.sourceBuildingId shouldBe source.id
+            delivery.destinationBuildingId shouldBe workshop.id
+            delivery.cargo.material shouldBe "COBBLESTONE"
+            delivery.cargo.amount shouldBe 8L
+            CivsAutoSupplies.demands(staffed, null, CivsResidentFoods.BREAD_ONLY, observed) shouldBe emptyList()
+        }
+    }
+
+    test("a tavern grant counts only bread its busy courier can collect from a full neighbouring warehouse") {
+        val base = physicalAutoFixture()
+        val relay = base.buildings.single { it.type == BuildingType.WAREHOUSE }
+        val source = base.buildings.single { it.type == BuildingType.QUARRY }.copy(type = BuildingType.WAREHOUSE)
+        val tavern = base.buildings.single { it.type == BuildingType.FARM }.copy(type = BuildingType.TAVERN)
+        val forester = base.buildings.single { it.type == BuildingType.FORESTER }
+        val courier = CivWorker(UUID.randomUUID(), "Courier", relay.id, nextDeliveryAt = 1)
+        val world = paper.addSimpleWorld("auto-bread-busy-courier")
+        val city = CivsRules.validate(base.copy(worldId = world.uid, workers = listOf(courier),
+            buildings = listOf(base.buildings.first(), relay, source, tavern, forester)))
+        city.buildings.forEach { supplyBarrel(world, it) }
+        val full = supplyBarrel(world, source)
+        val keepsake = ItemStack(Material.STONE, 64).apply {
+            itemMeta = itemMeta.apply { displayName(Component.text("Named stone")) }
+        }
+        repeat(full.size - 1) { full.setItem(it, keepsake.clone()) }
+        full.setItem(full.size - 1, ItemStack(Material.BREAD, 4))
+
+        CivsStorage(paper.createSimplePlugin("BusyBreadCourier")) { emptyArray() }.use { storage ->
+            storage.foodCanModify = { _, _ -> true }
+            val reserved = captureAutoSupply(city, storage)
+            reserved.requests.single { it.material == "BREAD" }.needed shouldBe 4L
+            allocateCivSupplies(reserved.detached()).plans shouldBe emptyMap()
+            CivsAutoSupplies.demands(city, null, CivsResidentFoods.BREAD_ONLY, reserved) shouldBe
+                listOf(CivAutoSupplyDemand(relay.id, mapOf("BREAD" to 4L)))
+
+            full.setItem(full.size - 2, ItemStack(Material.BREAD, 64))
+            full.setItem(full.size - 1, ItemStack(Material.BREAD, 64))
+            val free = captureAutoSupply(city, storage)
+            val collection = allocateCivSupplies(free.detached()).plans.getValue(courier.id)
+            collection.cargo.sourceBuildingId shouldBe source.id
+            collection.destinationBuildingId shouldBe relay.id
+            collection.cargo.material shouldBe "BREAD"
+            collection.cargo.amount shouldBe 64L
+
+            val timber = requireNotNull(CivsProduction.material(forester))
+            val cargo = CivCargo(CivsLogistics.shipmentId(city.id, courier.id, courier.completedCycles, forester.id, relay.id, timber),
+                relay.id, forester.id, relay.id, forester.entrance, timber, 1L)
+            val busy = CivsLogistics.pickup(city, courier.id, cargo)
+            val observed = captureAutoSupply(busy, storage)
+            allocateCivSupplies(observed.detached()).plans.getValue(courier.id).cargo.id shouldBe cargo.id
+            CivsAutoSupplies.demands(busy, null, CivsResidentFoods.BREAD_ONLY, observed)
+                .mapNotNull { it.required["BREAD"] } shouldBe emptyList()
+        }
+    }
+
     test("only the exact global shortage is issued while the local planner subtracts its existing stock") {
         val city = supplyCity(BuildingType.SMELTERY, "STONE")
         val warehouse = city.buildings[1]; val workplace = city.buildings[2]
@@ -57,6 +142,61 @@ class CivsAutoSuppliesTest : FunSpec({
         val demand = CivsAutoSupplies.demands(city, null, CivsResidentFoods.BREAD_ONLY, observed).single()
         demand.buildingId shouldBe workplace.id
         demand.required shouldBe mapOf("COBBLESTONE" to 5L) // Existing local one leaves four new items.
+    }
+
+    test("a full warehouse still lets the hall top up only bread missing from both queues") {
+        val world = paper.addSimpleWorld("queued-auto-bread")
+        val base = physicalAutoFixture()
+        val hall = base.buildings.first()
+        val warehouse = base.buildings.single { it.type == BuildingType.WAREHOUSE }
+        val hallBarrel = supplyBarrel(world, hall)
+        val full = supplyBarrel(world, warehouse)
+        hallBarrel.setItem(0, ItemStack(Material.BREAD, 1))
+        repeat(full.size) { full.setItem(it, ItemStack(Material.STONE, 64)) }
+        val sharedReserve = mapOf("BREAD" to 1L, "OAK_LOG" to 5L)
+        var city = CivsRules.validate(base.copy(worldId = world.uid, buildings = listOf(hall, warehouse),
+            workers = listOf(CivWorker(UUID.randomUUID(), "Hungry", null, hunger = 10, homeId = hall.id),
+                CivWorker(UUID.randomUUID(), "Courier", warehouse.id, nextDeliveryAt = 1)),
+            inventory = CivInventory(CivStorageMode.PHYSICAL, sharedReserve,
+                buildingMaterials = mapOf(hall.id.toString() to mapOf("BREAD" to 1L)))))
+        CivsStorage(paper.createSimplePlugin("AutoBreadGrantTest")) { emptyArray() }.use { storage ->
+            storage.foodCanModify = { _, _ -> true }
+            fun demands() = CivsAutoSupplies.demands(city, null, CivsResidentFoods.BREAD_ONLY, captureAutoSupply(city, storage))
+            fun apply(prepare: () -> CivStoragePlan) {
+                val id = UUID.randomUUID()
+                storage.reserve(city, id)
+                val plan = prepare()
+                val next = city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1)
+                val tx = CivInventoryTransaction(id, city.id, city.revision, next, plan.changes,
+                    autoSupplyBuildingId = plan.autoSupplyBuildingId)
+                storage.seal(tx)
+                storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+                storage.unlock(id)
+                city = next
+            }
+
+            val demand = demands().single()
+            demand shouldBe CivAutoSupplyDemand(hall.id, mapOf("BREAD" to 2L))
+            apply { requireNotNull(storage.prepareAutoSupply(city, demand) { true }) }
+            hallBarrel.getItem(0) shouldBe ItemStack(Material.BREAD, 2)
+            city.inventory!!.buildingStock(hall.id) shouldBe mapOf("BREAD" to 1L)
+            storage.buildingAvailable(city, warehouse.id)["BREAD"] shouldBe null
+            demands() shouldBe emptyList()
+
+            apply { storage.prepareMaterialization(city) }
+            hallBarrel.getItem(0) shouldBe ItemStack(Material.BREAD, 3)
+            city.inventory!!.buildingStock(hall.id) shouldBe emptyMap()
+            city.inventory!!.materials shouldBe sharedReserve
+            full.contents.all { it == ItemStack(Material.STONE, 64) } shouldBe true
+            demands() shouldBe emptyList()
+
+            full.setItem(0, null)
+            apply { storage.prepareMaterialization(city) }
+            hallBarrel.getItem(0) shouldBe ItemStack(Material.BREAD, 3)
+            full.getItem(0) shouldBe ItemStack(Material.BREAD, 1)
+            city.inventory!!.materials shouldBe mapOf("OAK_LOG" to 5L)
+            demands() shouldBe emptyList()
+        }
     }
 
     test("a pinned sawmill batch uses its exact ingredients instead of configured output") {
@@ -216,6 +356,19 @@ class CivsAutoSuppliesTest : FunSpec({
             supplyObservation(city)) shouldBe emptyList()
     }
 })
+
+private fun supplyBarrel(world: org.bukkit.World, building: CivBuilding) = requireNotNull(building.control).let { point ->
+    world.loadChunk(point.x shr 4, point.z shr 4)
+    val block = world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
+    (block.state as Barrel).inventory
+}
+
+private fun captureAutoSupply(city: Settlement, storage: CivsStorage): CivSupplySnapshot {
+    storage.updateCity(city)
+    val planning = CivsSupplyPlanning(city, storage.startSupplyCapture(city, forceNative = true),
+        emptyMap(), { null }, { false })
+    return (1..20).firstNotNullOf { planning.step() }
+}
 
 private fun supplyCity(type: BuildingType, production: String): Settlement {
     val base = physicalAutoFixture()

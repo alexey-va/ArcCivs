@@ -323,10 +323,12 @@ internal class CivsChunkLoading(
             val reply = replies.peek() ?: break
             if (acquisitions >= 2 || nanoTime() >= deadline) break
             replies.poll()
-            if (pending[reply.key] != reply.generation) continue
-            pending.remove(reply.key)
-            if (reply.generation != generation || reply.key !in wanted) continue
-            acquisitions++
+            val matchingLoad = pending[reply.key] == reply.generation
+            if (matchingLoad) pending.remove(reply.key)
+            val requested = matchingLoad && reply.generation == generation && reply.key in wanted
+            // A callback can pin before its demand goes away.
+            if (reply.retained || requested) acquisitions++
+            if (!requested) continue
             if (!reply.retained || reply.failure != null) {
                 retryAt[reply.key] = clock() + 30_000
                 cities.filterValues { reply.key in it.chunks }.keys.forEach {
@@ -336,15 +338,16 @@ internal class CivsChunkLoading(
             }
         }
         retryAt.keys.retainAll(wanted.keys)
-        // Two native completions can pin in the same tick. Drain that cohort before reserving more admissions.
-        if (pending.isEmpty()) for (key in wanted.keys) {
-            if (acquisitions >= 2 || nanoTime() >= deadline) break
+        // Leave one slot for each outstanding callback that can still pin in this tick.
+        val pendingAtAdmission = pending.size
+        for (key in wanted.keys) {
+            if (acquisitions + pendingAtAdmission >= 2 || nanoTime() >= deadline) break
             if (key in leases || key in pending || clock() < (retryAt[key] ?: 0)) continue
             val world = plugin.server.getWorld(key.worldId) ?: continue
             if (world.isChunkLoaded(key.x, key.z)) {
                 acquisitions++
                 acquire(key)
-            } else if (pending.size < 2) {
+            } else if (pendingAtAdmission == 0) {
                 acquisitions++
                 val epoch = generation
                 pending[key] = epoch

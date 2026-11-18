@@ -19,7 +19,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private val forestryPaths: (Settlement) -> Set<Pair<Int, Int>> = { emptySet() },
     private val nanoTime: () -> Long = System::nanoTime,
     private val settings: CivsWorksiteSettings = CivsWorksiteSettings(),
-    initialMineBlock: (Settlement, CivBuilding, CivPosition, String) -> Boolean = { _, _, _, _ -> false }) {
+    initialMineBlock: (Settlement, CivBuilding, CivPosition, String) -> Boolean = { _, _, _, _ -> false },
+    private val writePending: (UUID) -> Boolean = { false }) {
     private val context = CivsWorksiteContext(plugin, worldAccess, stock, locked, { protectedPaths(it).columns }, { nanoTime() })
     private val approaches: CivsWorksiteApproaches = CivsWorksiteApproaches(context, { forestry }, { invalidate(it) })
     private val mine: CivsMineWorksite = CivsMineWorksite(context, approaches, initialMineBlock)
@@ -272,7 +273,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         mineSearches.keys.retainAll(workerIds)
         professions.values.forEach { it.retain(workerIds, jobs.mapTo(hashSetOf()) { job -> job.third.id }) }
         jobs.forEach { (city, worker, building) -> tickMineSearch(city, worker, building) }
-        // A persistence pause stops admission, not resident liveness or its bounded scan progress.
+        // Discovery retains only local observations; an unrelated write fences execution, not this scan.
         val availableJobs = jobs.filterNot { isPaused(it.first.id) }
         if (availableJobs.isEmpty()) return
         context.spotChecksRemaining = settings.standingChecksPerPulse
@@ -358,7 +359,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     }
 
     fun validate(city: Settlement, work: CivWorldWork) {
-        requireCivs(!isPaused(city.id), "city-busy")
+        requireCivs(!isPaused(city.id) && !writePending(city.id), "city-busy")
         val worker = city.workers.firstOrNull { it.id == work.workerId } ?: throw CivsRejection("worker-not-found")
         requireCivs(worker.assignment == work.buildingId && worker.completedCycles == work.cycle, "stale-delivery")
         requireCivs(plan(city, worker) == work, "stale-worksite")

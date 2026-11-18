@@ -75,6 +75,61 @@ class CivsCourierServiceTest : FunSpec({
         }
     }
 
+    test("another courier can take the same request after the first courier's bag fills") {
+        serviceScenario { h ->
+            val home = h.city.buildings.last()
+            val warehouse = home.copy(type = BuildingType.WAREHOUSE, level = 2, control = CivPosition(10, 63, 0))
+            val smith = home.copy(id = UUID.randomUUID(), type = BuildingType.BLACKSMITH, anchor = CivPosition(20, 64, 0),
+                bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)), entrance = CivPosition(20, 64, -2),
+                control = CivPosition(20, 63, 0), production = "IRON_PICKAXE")
+            val ready = CivsRules.validate(h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(h.city.buildings.first(), warehouse, smith), workers = h.city.workers.mapIndexed { index, worker ->
+                    worker.copy(assignment = when (index) { 0, 1 -> warehouse.id; 2 -> smith.id; else -> null }, nextDeliveryAt = 1)
+                }))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            h.world.loadChunk(1, 0)
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            h.world.getBlockAt(20, 63, 0).type = Material.BARREL
+            val source = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            source.setItem(0, ItemStack(Material.IRON_INGOT, 3))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            val receipts = mutableListOf<CivInventoryTransaction>()
+            every { h.store.saveInventoryTransaction(any()) } answers { receipts += firstArg<CivInventoryTransaction>(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val city = requireNotNull(h.service.city(h.player))
+            val couriers = city.workers.filter { it.assignment == warehouse.id }
+            h.tickUntil("one warehouse shipment is planned") { couriers.any { h.service.courierPlan(city, it) != null } }
+            val (first, original) = couriers.mapNotNull { worker -> h.service.courierPlan(city, worker)?.let { worker to it } }.single()
+            val second = couriers.single { it.id != first.id }
+            val full = CivsEquipment.replace(first, CivsEquipment.slots(first).mapIndexed { slot, item ->
+                if (slot >= CivsEquipment.BAG) CivResidentItem("DIRT", 64) else item
+            })
+            val current = city.copy(workers = city.workers.map { if (it.id == first.id) full else it })
+            h.replaceCityInMemory(current)
+            val at = h.time
+            val refused = h.service.pickupCargo(city.id, first.id, original.cargo)
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(refused) })?.reason shouldBe "resident-inventory-full"
+            receipts shouldBe emptyList()
+            source.getItem(0) shouldBe ItemStack(Material.IRON_INGOT, 3)
+
+            val replacement = h.supplyPlan(second.id)
+            h.time shouldBe at
+            replacement.cargo.copy(id = original.cargo.id) shouldBe original.cargo
+            val pickingUp = h.service.pickupCargo(city.id, second.id, replacement.cargo)
+            h.tickUntil("replacement pickup reaches its journal") { receipts.isNotEmpty() || pickingUp.isDone }
+            if (pickingUp.isDone) h.await(pickingUp)
+            source.getItem(0) shouldBe ItemStack(Material.IRON_INGOT, 3)
+            journal.complete(receipts.single())
+            h.tickUntil("replacement pickup awaits city publication") { h.saves.size == 1 }
+            h.commit()
+            val saved = h.await(pickingUp)
+            source.getItem(0) shouldBe null
+            saved.workers.first { it.id == first.id } shouldBe full
+            saved.workers.first { it.id == second.id }.cargo shouldBe replacement.cargo.copy(inventoryBacked = true)
+        }
+    }
+
     test("durable cargo with a removed source reserves only its surviving fallback destination") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))

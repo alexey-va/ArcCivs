@@ -612,9 +612,7 @@ internal class CivsStoragePlanner(
         val inventory = requireNotNull(city.inventory)
         val virtual = inventory.materials.toMutableMap()
         val warehouses = warehouses(inventory)
-        val depot = city.buildings.firstOrNull { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE }
-            ?: city.buildings.first { it.type == BuildingType.TOWN_HALL }
-        val sharedDestinations = containers.buildingPositions(city, depot.id)
+        val sharedDestinations = containers.buildingPositions(city, city.materializationDepot().id)
         val buildingDestinations = warehouses.keys.associateWith { id ->
             if (city.autonomy != null) containers.buildingPositions(city, UUID.fromString(id)).keys
             else containers.buildingPositions(city, UUID.fromString(id), controlOnly = true).keys + sharedDestinations.keys

@@ -25,7 +25,7 @@ internal fun civsControlOccupied(plugin: Plugin, worldId: UUID, point: CivPositi
         point.x + 1.0, point.y + 1.0, point.z + 1.0))
 }
 
-/** One bounded proof or relocation at a time; accepted inventory and pending-control receipts own recovery. */
+/** One bounded native route proof per pulse; each city owns its pending relocation until acknowledgement. */
 internal class CivsControlRelocations(
     private val plugin: Plugin,
     private val tasks: LifecycleTaskScope,
@@ -42,7 +42,7 @@ internal class CivsControlRelocations(
 ) : AutoCloseable {
     private val sources = linkedMapOf<CivBuilding, CompletableFuture<List<CivControlCandidate>>>()
     private val awaiting = linkedSetOf<CivBuilding>()
-    private val active = linkedSetOf<CompletableFuture<Settlement>>()
+    private val active = mutableMapOf<UUID, CompletableFuture<Settlement>>()
     private data class Failure(val reason: String, val after: Long)
     private val failures = mutableMapOf<UUID, Failure>()
     private var cursor = 0
@@ -58,7 +58,7 @@ internal class CivsControlRelocations(
     fun pulse() {
         checkCitizenMainThread()
         val now = clock()
-        if (closed || active.isNotEmpty()) return
+        if (closed) return
         proof?.let { pending -> prove(pending); return }
         if (now < after) return
         after = now + 1_000L
@@ -71,7 +71,7 @@ internal class CivsControlRelocations(
         }
         awaiting.retainAll(current)
         failures.keys.retainAll(current.map { it.id }.toSet())
-        val choices = cities.filter { it.autonomy != null && it.inventory?.mode == CivStorageMode.PHYSICAL &&
+        val choices = cities.filter { it.id !in active && it.autonomy != null && it.inventory?.mode == CivStorageMode.PHYSICAL &&
             it.pendingDeletion == null && available(it) }.flatMap { city ->
             city.buildings.filter { building ->
                 val pending = city.pendingControls.orEmpty().firstOrNull { it.buildingId == building.id }
@@ -102,16 +102,16 @@ internal class CivsControlRelocations(
     }
 
     private fun track(city: Settlement, building: CivBuilding, operation: CompletableFuture<Settlement>) {
-        active += operation
+        active[city.id] = operation
         operation.whenCompleteSync(tasks) { _, failure ->
-            active -= operation
+            active.remove(city.id, operation)
             if (failure == null) failures.remove(building.id) else report(city, building, failure)
         }
     }
 
     private fun prove(pending: Proof) {
         val city = cityProvider().firstOrNull { it.id == pending.cityId }
-        if (city == null || city.building(pending.building.id) != pending.building || !available(city) ||
+        if (city == null || city.id in active || city.building(pending.building.id) != pending.building || !available(city) ||
             pending.building.id in city.constructionQueue.orEmpty()) { proof = null; return }
         runCatching {
             val native = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
@@ -198,7 +198,7 @@ internal class CivsControlRelocations(
             installations.requirePresent(city.worldId, source)
             return CompletableFuture.completedFuture(city)
         }
-        reject(active.isNotEmpty(), "world-busy")
+        reject(city.id in active, "world-busy")
         return stage(city, source, point, existing = false, retirePrevious = true, support = null, order = order)
             .also { track(city, source, it) }
     }
@@ -312,7 +312,7 @@ internal class CivsControlRelocations(
             "ArcCivs control relocation waiting building=${building.id} schematic=${building.schematicId} reason=$reason retry_ms=5000", plugin.logger, failure)
     }
 
-    fun drained(): CompletableFuture<Unit> = CompletableFuture.allOf(*active.toTypedArray()).handle { _, _ -> Unit }
+    fun drained(): CompletableFuture<Unit> = CompletableFuture.allOf(*active.values.toTypedArray()).handle { _, _ -> Unit }
     override fun close() {
         checkCitizenMainThread()
         closed = true

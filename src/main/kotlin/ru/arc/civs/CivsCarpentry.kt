@@ -342,11 +342,20 @@ internal object CivsCarpentry {
                 snapshot.constructionId.takeIf { root.construction })
             if (outputsFit(jobs.values + job)) jobs[worker.workerId] = job
         }
+        return committedInputs(snapshot, jobs, workers)
+    }
+
+    /** Quantities for jobs already chosen by the recipe allocator. */
+    fun committedInputs(snapshot: CivSupplySnapshot, jobs: Map<UUID, CivCraftJob>,
+        workers: Map<UUID, CivCraftWorker> = snapshot.craftWorkers.associateBy(CivCraftWorker::workerId)): CivCraftAllocation {
         val required = linkedMapOf<UUID, MutableMap<String, Long>>()
         jobs.values.forEach { job ->
-            val worker = workers.getValue(job.workerId)
+            val worker = workers[job.workerId] ?: return@forEach
             val inputs = required.getOrPut(job.buildingId, ::linkedMapOf)
-            job.inputs.forEach { (material, count) -> add(inputs, material, (count - (worker.carried[material] ?: 0)).coerceAtLeast(0)) }
+            job.inputs.forEach { (material, count) ->
+                val needed = count - (worker.carried[material] ?: 0)
+                if (needed > 0) inputs.merge(material, needed, Math::addExact)
+            }
         }
         val requests = required.flatMap { (building, inputs) -> inputs.mapNotNull { (material, desired) ->
             val needed = (desired - (snapshot.stores[building]?.stock?.get(material) ?: 0)).coerceAtLeast(0)

@@ -370,7 +370,7 @@ class CivsNativeProductionParityTest : FunSpec({
                     buildings = listOf(h.city.buildings.first(), building), workers = listOf(worker))
                 val automatic = CivsRules.validate(physical.copy(autonomy = CivAutonomy(),
                     inventory = physical.inventory!!.copy(materials = mapOf("OAK_LOG" to 64L))))
-                CivsAutoStorageMigration.ready(automatic) shouldBe false
+                CivsAutoStorageMigration.ready(automatic) shouldBe true
                 for (city in listOf(physical, automatic)) {
                     h.service.productionReady(city, worker) shouldBe true
                     h.service.workInputsReady(city, worker) shouldBe true

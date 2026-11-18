@@ -29,8 +29,8 @@ class CivsAutoStorageMigrationTest : FunSpec({
         migrated.autonomy!!.products shouldBe null
         migrated.revision shouldBe legacy.revision + 1
         CivsAutoStorageMigration.migrate(migrated) shouldBe migrated
-        CivsAutoStorageMigration.ready(migrated) shouldBe false
-        CivsAutoStorageMigration.ready(migrated.copy(inventory = migrated.inventory!!.copy(materials = emptyMap(), buildingMaterials = null))) shouldBe true
+        CivsAutoStorageMigration.ready(legacy) shouldBe false
+        CivsAutoStorageMigration.ready(migrated) shouldBe true
     }
 
     test("migration preserves existing inventories and gives empty legacy reserves no materials") {
@@ -80,7 +80,6 @@ class CivsAutoStorageMigrationTest : FunSpec({
         migrated.inventory!!.buildingStock(forest.id) shouldBe mapOf("OAK_LOG" to 999_999L)
         migrated.workers.single().pendingStock shouldBe null
         CivsAutoStorageMigration.migrate(migrated) shouldBe migrated
-        CivsAutoStorageMigration.waiting(legacy) shouldBe true
         CivsAutoStorageMigration.canMigrate(legacy) shouldBe true
     }
 

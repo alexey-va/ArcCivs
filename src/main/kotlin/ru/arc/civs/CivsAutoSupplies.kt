@@ -44,10 +44,15 @@ internal class CivsAutoSupplies {
         fun demands(city: Settlement, constructionNeed: Map<String, Long>?, foods: CivsResidentFoods,
             observation: CivSupplySnapshot? = null, jobs: Map<UUID, CivCraftJob> = emptyMap(),
             selectedInputs: Map<UUID, Map<String, Long>> = emptyMap()): List<CivAutoSupplyDemand> {
-            if (city.autonomy?.paused != false || !CivsAutoStorageMigration.ready(city) || city.pendingDeletion != null ||
+            val inventory = city.inventory ?: return emptyList()
+            if (city.autonomy?.paused != false || inventory.mode != CivStorageMode.PHYSICAL || city.pendingDeletion != null ||
                 !observed(city, observation))
                 return emptyList()
             val snapshot = requireNotNull(observation)
+            val sharedDepot = if (inventory.materials.isEmpty()) null else city.materializationDepot().id
+            // Materialization owns these items. They reduce free grants without becoming courier stock.
+            fun pending(buildingId: UUID, material: String): Long = (inventory.buildingStock(buildingId)[material] ?: 0L) +
+                (if (buildingId == sharedDepot) inventory.materials[material] ?: 0L else 0L)
             val active = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.mapTo(hashSetOf(), CivBuilding::id)
             val maximumDistance = snapshot.maximumTransferDistance.toDouble() * snapshot.maximumTransferDistance
             fun distance(from: CivPosition, to: CivPosition): Double =
@@ -139,33 +144,36 @@ internal class CivsAutoSupplies {
             } }
             val exporters = snapshot.stores.values.filter { it.id in active &&
                 (it.type == BuildingType.WAREHOUSE || it.outputMaterial != null) }
-            fun elsewhere(targetId: UUID, to: CivPosition, material: String): Long =
-                exporters.sumOf { source ->
-                    if (source.id == targetId || relays.none { reachable(source.control, it.control) && reachable(it.control, to) }) 0L
-                    else {
-                        val reserve = craftReserves[source.id]?.get(material) ?: source.desiredStock[material] ?: 0L
-                        ((source.stock[material] ?: 0L) + (incoming[source.id]?.get(material) ?: 0L) - reserve).coerceAtLeast(0) +
-                            (returning[source.id]?.get(material) ?: 0L)
-                    }
-                }
+            val outstanding = snapshot.demandBeforeEvacuation(crafts)
+            fun elsewhere(sources: List<CivSupplyStore>, material: String, relays: List<CivSupplyStore>): Long = sources.sumOf { source ->
+                val reserve = craftReserves[source.id]?.get(material) ?: source.desiredStock[material] ?: 0L
+                val surplus = ((source.stock[material] ?: 0L) + pending(source.id, material) +
+                    (incoming[source.id]?.get(material) ?: 0L) - reserve).coerceAtLeast(0) + (returning[source.id]?.get(material) ?: 0L)
+                snapshot.exportableAmount(source, material, surplus, relays, outstanding)
+            }
             val grants = linkedMapOf<UUID, MutableMap<String, Long>>()
             desired.forEach { (buildingId, materials) ->
                 val building = city.building(buildingId) ?: return@forEach
                 val target = building.control ?: return@forEach
-                val local = snapshot.stores[buildingId]?.stock.orEmpty()
+                val targetRelays = relays.filter { reachable(it.control, target) }
+                val sources = exporters.filter { it.id != buildingId && snapshot.canSupply(it, targetRelays) }
+                val local = snapshot.stores[buildingId]
                 materials.toSortedMap().forEach material@{ (material, count) ->
-                    val required = (count - (incoming[buildingId]?.get(material) ?: 0L) - elsewhere(buildingId, target, material))
+                    val required = (count - (incoming[buildingId]?.get(material) ?: 0L) - elsewhere(sources, material, targetRelays))
                         .coerceIn(0, BUFFER_PER_MATERIAL)
-                    val present = local[material] ?: 0L
-                    if (required <= present) return@material
+                    val shortage = required - (local?.stock?.get(material) ?: 0L) - pending(buildingId, material)
+                    if (shortage <= 0) return@material
                     // Food enters a real depot; the ordinary tavern request owns its physical courier delivery.
-                    val depot = if (building.type == BuildingType.TAVERN && material == "BREAD") relays.filter {
-                        reachable(it.control, target) && CivSupplyRoom(it.capacity, snapshot.stackSizes).fits(material) > 0
+                    val depot = if (building.type == BuildingType.TAVERN && material == "BREAD") targetRelays.filter {
+                        CivSupplyRoom(it.capacity, snapshot.stackSizes).fits(material) > 0
                     }.minByOrNull { distance(it.control, target) } ?: return@material else null
                     val destination = depot?.id ?: buildingId
-                    val total = if (depot == null) required else ((depot.stock[material] ?: 0L) + required - present)
-                        .coerceAtMost(BUFFER_PER_MATERIAL)
-                    grants.getOrPut(destination, ::linkedMapOf).merge(material, total, Math::max)
+                    val receiver = depot ?: local
+                    // The slot planner tops up a native count. Construction buffers already belong to this building.
+                    val buffered = receiver?.bufferedStock?.get(material) ?: 0L
+                    val native = (receiver?.stock?.get(material) ?: 0L) - buffered
+                    val total = minOf(native + shortage, BUFFER_PER_MATERIAL - buffered - pending(destination, material))
+                    if (total > native) grants.getOrPut(destination, ::linkedMapOf).merge(material, total, Math::max)
                 }
             }
             return grants.flatMap { (id, materials) -> materials.entries.map { it.key to it.value }

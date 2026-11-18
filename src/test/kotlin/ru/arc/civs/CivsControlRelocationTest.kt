@@ -257,6 +257,66 @@ class CivsControlRelocationTest : FunSpec({
         }
     }
 
+    test("a pending relocation admits another city's maintenance and hall handoff on the same world") {
+        ControlRelocationFixture().use { h ->
+            h.acceptIntent(staging = true)
+            fun east(p: CivPosition) = p.copy(x = p.x + 256)
+            fun east(b: CivBuilding) = b.copy(id = UUID.randomUUID(), anchor = east(b.anchor), entrance = east(b.entrance),
+                bounds = CivBox(east(b.bounds.min), east(b.bounds.max)), control = east(requireNotNull(b.control)))
+            val hall = east(h.hall).copy(phase = BuildingPhase.SITE)
+            val shop = east(h.original)
+            val from = requireNotNull(hall.control)
+            val target = CivsAutonomousGeometry.atHeight(hall, hall.anchor.y + 1).copy(phase = BuildingPhase.CONSTRUCTING)
+            val to = requireNotNull(target.control)
+            val order = controlTestOrder(target).copy(phase = ConstructionPhase.READY_TO_PLACE)
+            val other = CivsRules.validate(h.city.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), center = from,
+                buildings = listOf(hall, shop), construction = order, pendingControls = emptyList()))
+            h.world.loadChunk(from.x shr 4, from.z shr 4)
+            h.block(from).type = Material.BARREL
+            val cities = mutableMapOf(h.city.id to h.city, other.id to other)
+            h.storage.replaceCities(cities.values)
+            h.storage.relocationCurrentCity = cities::get
+            val hallStaged = CompletableFuture<Unit>()
+            h.storage.persistControlStagingNative = { city, _ -> if (city.id == other.id) hallStaged else h.stagingFence }
+            h.storage.persistControlRetirementNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+            fun mutate(id: UUID, change: (Settlement) -> Settlement): CompletableFuture<Settlement> {
+                val saved = change(cities.getValue(id))
+                cities[id] = saved
+                h.storage.updateCity(saved)
+                return CompletableFuture.completedFuture(saved)
+            }
+            val installs = CivsControlInstallations(h.plugin, h.worldAdapter, h.storage, mockk(relaxed = true),
+                { cities }, emptySet(), emptySet(), { true }, ::mutate)
+            val inspected = mutableListOf<UUID>()
+            var now = 0L
+            CivsControlRelocations(h.plugin, h.tasks, h.worldAdapter, h.storage, installs, { building ->
+                inspected += building.id
+                CompletableFuture.completedFuture(listOf(h.candidate(requireNotNull(building.control), true)))
+            }, { cities.values }, { true }, { city, _, source, _ ->
+                (h.block(source).state as Barrel).inventory.isEmpty shouldBe true
+                CompletableFuture.completedFuture(city)
+            }, ::mutate, { now }).use { owner ->
+                owner.pulse()
+                h.block(h.replacement).type shouldBe Material.BARREL
+                now += 1_000
+                owner.pulse()
+                inspected shouldBe listOf(shop.id)
+                val handoff = owner.handoffHall(other, order)
+                shouldThrow<CivsRejection> { owner.handoffHall(other, order) }.reason shouldBe "world-busy"
+                hallStaged.complete(Unit); h.ticks()
+                handoff.join().building(hall.id)?.control shouldBe to
+                h.block(from).type shouldBe Material.AIR
+                h.block(to).type shouldBe Material.BARREL
+                h.block(h.old).type shouldBe Material.BARREL
+                val drained = owner.drained()
+                drained.isDone shouldBe false
+                h.stagingFence.complete(Unit); h.ticks(); drained.join()
+                cities.getValue(h.city.id).building(h.original.id)?.control shouldBe h.replacement
+                cities.values.all { it.pendingControls.isNullOrEmpty() } shouldBe true
+            }
+        }
+    }
+
     test("unfinished source work does not stall other buildings and is retired only when its identity disappears") {
         ControlRelocationFixture().use { h ->
             h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.original, h.hall)))

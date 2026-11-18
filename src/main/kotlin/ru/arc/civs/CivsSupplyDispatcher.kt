@@ -21,7 +21,23 @@ internal data class CivSupplyStore(val id: UUID, val entrance: CivPosition, val 
     val stock: Map<String, Long>, val desiredStock: Map<String, Long>, val outputMaterial: String?, val capacity: CivSupplyCapacity,
     val type: BuildingType? = null,
     /** Complete permitted native Auto depot capture, excluding an in-progress upgrade. */
-    val redistributionDepot: Boolean = false, val bufferedStock: Map<String, Long> = emptyMap())
+    val redistributionDepot: Boolean = false, val bufferedStock: Map<String, Long> = emptyMap()) {
+    fun canEvacuate(): Boolean = redistributionDepot && type == BuildingType.WAREHOUSE &&
+        capacity.virtualRoom == null && capacity.emptySlots == 0
+
+    fun canReceiveEvacuation(emptySlots: Int = capacity.emptySlots): Boolean = redistributionDepot &&
+        (type == BuildingType.WAREHOUSE || type == BuildingType.TOWN_HALL) && capacity.virtualRoom == null && emptySlots >= 2
+
+    fun evacuationBatch(material: String, stack: Int?, reserved: Long, demand: Long,
+        remaining: Long = stock.getOrDefault(material, 0L)): Long {
+        if (stack == null || stack !in 1..64) return 0L
+        val buffered = bufferedStock.getOrDefault(material, 0L)
+        val free = (remaining - buffered - reserved - demand).coerceAtLeast(0)
+        val amount = minOf(free, stack.toLong())
+        // Moving a partial stack only frees a slot if it takes every native item of this material.
+        return if (amount == stack.toLong() || amount == stock.getOrDefault(material, 0L) - buffered) amount else 0L
+    }
+}
 internal data class CivSupplyCourier(val workerId: UUID, val warehouseId: UUID, val cycle: Long,
     val position: CivPosition, val bagRoom: Map<String, Long>)
 internal data class CivSupplyWorkerSource(val workerId: UUID, val buildingId: UUID,
@@ -235,13 +251,14 @@ internal class CivsSupplyDispatcher(
     }
 
     /** Release only before pickup or after a definitive receipt outcome; unknown commits stay reserved. */
-    fun release(cityId: UUID, workerId: UUID, failed: Boolean = false) {
+    fun release(cityId: UUID, workerId: UUID, failed: Boolean = false, blockTrip: Boolean = true) {
         checkOwner()
         val city = cities[cityId] ?: return
         val old = city.plans[workerId]
         if (failed && old != null && !old.carrying) {
-            city.blockedWorkers[workerId] = clock() + REFRESH_MILLIS
-            city.blockedTrips[CivSupplyTrip.of(old)] = clock() + REFRESH_MILLIS
+            val retryAt = clock() + REFRESH_MILLIS
+            city.blockedWorkers[workerId] = retryAt
+            if (blockTrip) city.blockedTrips[CivSupplyTrip.of(old)] = retryAt
             CivsDiagnostics.event("supply_dispatch_released", "city" to cityId, "worker" to workerId,
                 "shipment" to old.cargo.id, "reason" to "route-or-transfer-failed")
         }
@@ -391,6 +408,9 @@ internal class CivsSupplyDispatcher(
 }
 
 internal data class CivSupplyTask(val source: UUID?, val worker: UUID?, val target: UUID, val material: String, val construction: Boolean)
+internal fun CivSupplySnapshot.workRequests(crafts: List<CivSupplyRequest>) = (requests + crafts).associateBy { request ->
+    CivSupplyTask(null, null, request.buildingId, request.material, request.construction)
+}
 internal data class CivSupplyTrip(val source: UUID, val worker: UUID?, val target: UUID, val material: String) {
     companion object { fun of(plan: CivCourierPlan) = CivSupplyTrip(plan.cargo.sourceBuildingId, plan.cargo.sourceWorkerId,
         plan.destinationBuildingId, plan.cargo.material) }
@@ -469,8 +489,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
     val busySources = hashSetOf<UUID>()
     val evacuated = snapshot.retained.values.filter { it.carrying && it.cargo.redistribution }
         .mapTo(hashSetOf()) { it.cargo.sourceBuildingId }
-    fun task(request: CivSupplyRequest) = CivSupplyTask(null, null, request.buildingId, request.material, request.construction)
-    val requests = (snapshot.requests + crafts.requests).associateBy(::task)
+    val requests = snapshot.workRequests(crafts.requests)
     val missingWorkTools = requests.values.filter { request ->
         val target = stores[request.buildingId] ?: return@filter false
         !request.construction && request.needed > request.inTransit && target.type in CivsWorksites.TYPES &&
@@ -506,25 +525,18 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             it.material == plan.cargo.material && (it.target == plan.destinationBuildingId ||
             it.construction && plan.destinationBuildingId in snapshot.constructionTargets.values)
     }
-    fun redistributionFree(source: UUID, material: String): Long {
-        val reserved = maxOf(stores[source]?.desiredStock?.get(material) ?: 0L,
-            snapshot.stockTargets[source]?.get(material) ?: 0L)
-        val pending = demand.entries.filter { it.key.material == material }.sumOf { it.value }
-        return ((stock[source]?.get(material) ?: 0L) - (stores[source]?.bufferedStock?.get(material) ?: 0L) - reserved - pending).coerceAtLeast(0)
+    fun redistributionBatch(source: CivSupplyStore, material: String): Long {
+        val reserved = maxOf(source.desiredStock[material] ?: 0L, snapshot.stockTargets[source.id]?.get(material) ?: 0L)
+        val pending = demand.entries.sumOf { if (it.key.material == material) it.value else 0L }
+        return source.evacuationBatch(material, snapshot.stackSizes[material], reserved, pending, stock[source.id]?.get(material) ?: 0L)
     }
     fun redistributionReady(plan: CivCourierPlan): Boolean {
         val cargo = plan.cargo
         val source = stores[cargo.sourceBuildingId] ?: return false
         val target = stores[plan.destinationBuildingId] ?: return false
-        val stack = snapshot.stackSizes[cargo.material] ?: return false
-        val available = redistributionFree(source.id, cargo.material)
-        return !snapshot.autonomousStock && source.redistributionDepot && source.type == BuildingType.WAREHOUSE &&
-            source.capacity.virtualRoom == null && source.capacity.emptySlots == 0 && source.id !in evacuated &&
-            target.redistributionDepot && target.capacity.virtualRoom == null &&
-            target.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) &&
-            (actualRooms[target.id]?.freeEmptySlots ?: 0) >= 2 &&
-            available >= cargo.amount && (cargo.amount >= stack ||
-                available == ((source.stock[cargo.material] ?: 0L) - source.bufferedStock.getOrDefault(cargo.material, 0L)) && cargo.amount == available)
+        return !snapshot.autonomousStock && source.canEvacuate() && source.id !in evacuated &&
+            target.canReceiveEvacuation(actualRooms[target.id]?.freeEmptySlots ?: 0) &&
+            redistributionBatch(source, cargo.material) == cargo.amount
     }
     fun remaining(plan: CivCourierPlan): Long {
         val cargo = plan.cargo
@@ -691,16 +703,13 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         // A native depot evacuation is the last ordinary option. One whole removable stack
         // opens its full source; the destination retains an empty slot after its single-stack credit.
         if (!snapshot.autonomousStock) for (source in stores.values) {
-            if (!source.redistributionDepot || source.type != BuildingType.WAREHOUSE || source.id in evacuated ||
-                source.capacity.virtualRoom != null || source.capacity.emptySlots != 0) continue
+            if (!source.canEvacuate() || source.id in evacuated) continue
             for (target in stores.values) {
                 if (source.id == target.id || source.id != warehouse.id && target.id != warehouse.id ||
-                    !target.redistributionDepot || (actualRooms[target.id]?.freeEmptySlots ?: 0) < 2) continue
+                    !target.canReceiveEvacuation(actualRooms[target.id]?.freeEmptySlots ?: 0)) continue
                 for ((material, _) in stock[source.id].orEmpty().toSortedMap()) {
-                    val stack = snapshot.stackSizes[material]?.takeIf { it in 1..64 } ?: continue
-                    val free = redistributionFree(source.id, material)
-                    val count = minOf(free, stack.toLong())
-                    if (count <= 0 || count < stack && free != ((source.stock[material] ?: 0L) - source.bufferedStock.getOrDefault(material, 0L))) continue
+                    val count = redistributionBatch(source, material)
+                    if (count <= 0) continue
                     offer(source, target, material, count, CivSupplyTask(source.id, null, target.id, material, false),
                         redistribution = true)
                 }

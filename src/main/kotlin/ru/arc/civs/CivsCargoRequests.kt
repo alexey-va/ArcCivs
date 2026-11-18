@@ -193,9 +193,10 @@ internal class CivsCargoRequests(
                 }
                 rejectIf(accepted.sourceWorkerId != null, "stale-delivery")
                 rejectIf(accepted.directInput && !CivsLogistics.directInputAllowed(city, accepted), "stale-delivery")
-                val releaseSlot = accepted.sourceBuildingId != accepted.warehouseId && !accepted.directInput &&
+                val builderSource = accepted.sourceBuildingId != accepted.warehouseId &&
                     city.building(accepted.sourceBuildingId)?.type == BuildingType.BUILDER_HUT
-                val sourceCount = storage.buildingAvailable(city, accepted.sourceBuildingId, nativeOnly = releaseSlot)[accepted.material] ?: 0L
+                val sourceCount = storage.buildingAvailable(city, accepted.sourceBuildingId,
+                    nativeOnly = builderSource && !accepted.directInput)[accepted.material] ?: 0L
                 val available = run {
                     val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else {
                         val constructionReserve = CivsLogistics.constructionBufferReserve(city, accepted.sourceBuildingId,
@@ -218,15 +219,16 @@ internal class CivsCargoRequests(
                     }?.let { (it.needed - it.inTransit).coerceAtLeast(0) } ?: 0L
                 }
                 val material = Material.valueOf(accepted.material)
-                val amount = minOf(accepted.amount, requested.amount, available, needed,
-                    CivsEquipment.supplyRoom(worker, material).toLong(),
+                val availableForTrip = minOf(accepted.amount, requested.amount, available, needed,
                     storage.cargoRoom(city, accepted.targetBuildingId, accepted.material))
-                rejectIf(amount <= 0L, "stale-delivery")
-                rejectIf(city.inventory?.mode == CivStorageMode.PHYSICAL && accepted.sourceBuildingId != accepted.warehouseId &&
-                    city.building(accepted.sourceBuildingId)?.type == BuildingType.BUILDER_HUT &&
-                    (amount != accepted.amount || amount < material.maxStackSize && amount != sourceCount), "stale-delivery")
-                val cargo = accepted.copy(amount = amount)
-                rejectIf(!CivsLogistics.validCargo(city, cargo), "stale-delivery")
+                val entireStack = city.inventory?.mode == CivStorageMode.PHYSICAL && builderSource
+                rejectIf(availableForTrip <= 0L || entireStack && (availableForTrip != accepted.amount ||
+                    availableForTrip < material.maxStackSize && availableForTrip != sourceCount), "stale-delivery")
+                val offered = accepted.copy(amount = availableForTrip)
+                rejectIf(!CivsLogistics.validCargo(city, offered), "stale-delivery")
+                val bagRoom = CivsEquipment.supplyRoom(worker, material).toLong()
+                rejectIf(bagRoom <= 0L || entireStack && bagRoom < availableForTrip, "resident-inventory-full")
+                val cargo = if (bagRoom >= availableForTrip) offered else offered.copy(amount = bagRoom)
                 citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
                 val carriedBefore = CivsEquipment.plainCount(worker, cargo.material)
                 authority.inventoryMutation(cityId, { storage.prepareCargoPickup(it, cargo, workerId) }, keepViewersOpen = true) { before, inventory ->
@@ -244,12 +246,12 @@ internal class CivsCargoRequests(
             }
         }.whenComplete { _, failure ->
             val current = if (!records.closed) supply.plan(cityId, workerId)?.cargo else null
+            val reason = CivsDiagnostics.rejection(failure)?.reason
             if (!records.closed && failure != null && cityId !in records.unhealthy && current?.id == requested.id &&
                 current.sourceEntrance == requested.sourceEntrance &&
-                CivsDiagnostics.rejection(failure)?.reason in
-                setOf("stale-delivery", "materials-missing", "storage-full", "route-unreachable", "building-not-found", "control-missing",
-                    "storage-transaction-too-large", "lands-denied", "storage-unavailable"))
-                supply.release(cityId, workerId, failed = true)
+                reason in setOf("stale-delivery", "materials-missing", "storage-full", "route-unreachable", "building-not-found",
+                    "control-missing", "storage-transaction-too-large", "lands-denied", "storage-unavailable", "resident-inventory-full"))
+                supply.release(cityId, workerId, failed = true, blockTrip = reason != "resident-inventory-full")
         }
 
     private fun pickupRedistribution(expected: Settlement, worker: CivWorker, cargo: CivCargo): CompletableFuture<Settlement> {
@@ -272,7 +274,7 @@ internal class CivsCargoRequests(
                 supply.observation(current.id)?.stockTargets?.get(cargo.sourceBuildingId)?.get(cargo.material) ?: 0L)
             val count = local(cargo.sourceBuildingId)[cargo.material] ?: 0L
             rejectIf(count - required - otherDebits - retain < cargo.amount, "materials-missing")
-            rejectIf(CivsEquipment.supplyRoom(worker, Material.valueOf(cargo.material)).toLong() < cargo.amount, "storage-full")
+            rejectIf(CivsEquipment.supplyRoom(worker, Material.valueOf(cargo.material)).toLong() < cargo.amount, "resident-inventory-full")
             if (fenced) storage.requireRedistributionCapacity(current, cargo, reservations(current))
         }
         var freedSlots = 0

@@ -14,9 +14,78 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.block.Barrel
 import org.bukkit.inventory.ItemStack
 
 class CivsAutonomousWorkServiceTest : FunSpec({
+    test("a farmer discovers work during another resident's held barrel receipt but execution keeps the write fence") {
+        serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(30, 63, 0)).copy(production = "WHEAT")
+            val hungry = h.city.workers.first().copy(hunger = 10)
+            val farmer = spatialWorker(farm, "IRON_HOE")
+            val town = CivsRules.validate(h.city.copy(buildings = listOf(hall, farm), workers = listOf(hungry, farmer),
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+            for (x in -1..4) for (z in -3..1) h.world.loadChunk(x, z)
+            val plots = CivsWorksiteLayouts.field(farm)
+            plots.forEach { soil ->
+                h.world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                h.world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData = Bukkit.createBlockData("minecraft:wheat[age=2]")
+            }
+            val water = CivsWorksiteLayouts.irrigation(farm)
+            water.forEach { h.world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+            val ripe = plots[20].copy(y = plots[20].y + 1)
+            h.world.getBlockAt(ripe.x, ripe.y, ripe.z).blockData = Bukkit.createBlockData("minecraft:wheat[age=7]")
+            val fieldBefore = (plots.flatMap { listOf(it, it.copy(y = it.y + 1)) } + water).associateWith {
+                h.world.getBlockAt(it.x, it.y, it.z).blockData.asString
+            }
+            val source = CivResidentFoodSource(hall.id, requireNotNull(hall.control), CivPosition(0, 64, 1))
+            val barrel = h.world.getBlockAt(source.container.x, source.container.y, source.container.z)
+                .also { it.type = Material.BARREL }.let { (it.state as Barrel).inventory }
+            barrel.setItem(0, ItemStack(Material.BREAD, 4))
+            every { h.citizens.residentCollectionFeet(hungry.id, false) } returns source.standing.location(h.world)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(town))
+            val admission = CompletableFuture<CivInventoryTransaction>()
+            var held: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { held = firstArg(); admission }
+            every { h.store.completeInventoryTransaction(any()) } answers {
+                CompletableFuture.completedFuture(firstArg<CivInventoryTransaction>().after)
+            }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.world.time = 18_000
+            h.start()
+            val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
+                .get(h.service) as CivsWorksites
+            CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }.set(worksites, { 0L })
+            val pickup = h.service.pickupResidentFood(town.id, hungry.id, source)
+            h.tickUntil("unrelated barrel receipt waits for storage acknowledgement") { held != null }
+            h.service.collectionAvailable(town.id) shouldBe false
+            repeat(2) { worksites.pulse(listOf(town)) }
+            worksites.plan(town, farmer) shouldBe null
+
+            h.world.time = 6_000
+            repeat(16) { worksites.pulse(listOf(town)) }
+            val work = requireNotNull(worksites.plan(town, farmer))
+            work.focus shouldBe ripe
+            shouldThrow<CivsRejection> { worksites.validate(town, work) }.reason shouldBe "city-busy"
+            pickup.isDone shouldBe false
+            barrel.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
+            h.service.settlements().single() shouldBe town
+            fieldBefore.forEach { (point, before) -> h.world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe before }
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.completeInventoryTransaction(any()) }
+
+            admission.complete(requireNotNull(held))
+            val after = h.await(pickup)
+            CivsEquipment.plainCount(after.workers.first { it.id == hungry.id }, "BREAD") shouldBe 4L
+            barrel.isEmpty shouldBe true
+            worksites.plan(after, farmer) shouldBe work
+            worksites.validate(after, work)
+            h.world.getBlockAt(ripe.x, ripe.y, ripe.z).type = Material.STONE
+            shouldThrow<CivsRejection> { worksites.validate(after, work) }.reason shouldBe "stale-worksite"
+        }
+    }
+
     test("autonomous production requires entrance arrival and a durable unique trip receipt without physical inventory") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))

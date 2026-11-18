@@ -144,22 +144,20 @@ internal class CivsCityResearch(
 
 /** A conservative admission estimate, never a debit: actual local funding still uses the inventory receipt. */
 internal fun civsResearchAvailableMaterials(city: Settlement, snapshot: CivSupplySnapshot): Map<String, Long> {
-    val university = CivsResearch.university(city)?.control ?: return emptyMap()
+    val university = CivsResearch.university(city) ?: return emptyMap()
+    val destination = university.control ?: return emptyMap()
     val active = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.associateBy { it.id }
-    val radius = snapshot.maximumTransferDistance.toDouble()
-    fun reachable(a: CivPosition, b: CivPosition): Boolean {
-        val dx = a.x.toDouble() - b.x; val dy = a.y.toDouble() - b.y; val dz = a.z.toDouble() - b.z
-        return dx * dx + dy * dy + dz * dz <= radius * radius
-    }
     val relays = snapshot.stores.values.filter { store -> active[store.id]?.type == BuildingType.WAREHOUSE &&
-        city.workers.any { !CivsResidents.isChild(it) && it.assignment == store.id } && reachable(store.control, university) }
+        city.workers.any { !CivsResidents.isChild(it) && it.assignment == store.id } &&
+        CivsLogistics.withinRoute(snapshot.maximumTransferDistance, store.control, destination) }
     val available = linkedMapOf<String, Long>()
-    snapshot.stores.values.filter { store -> store.id in active && (store.control == university ||
-        (store.type == BuildingType.WAREHOUSE || store.outputMaterial != null) &&
-            relays.any { reachable(store.control, it.control) }) }.forEach { store ->
+    val outstanding = snapshot.demandBeforeEvacuation()
+    snapshot.stores.values.filter { it.id in active && (it.id == university.id || snapshot.canSupply(it, relays)) }.forEach { store ->
         store.stock.forEach { (material, count) ->
             val reserve = maxOf(store.desiredStock[material] ?: 0L, snapshot.stockTargets[store.id]?.get(material) ?: 0L)
-            available.merge(material, (count - reserve).coerceAtLeast(0), Math::addExact)
+            val surplus = (count - reserve).coerceAtLeast(0)
+            val movable = if (store.id == university.id) surplus else snapshot.exportableAmount(store, material, surplus, relays, outstanding)
+            available.merge(material, movable, Math::addExact)
         }
     }
     // Queued construction and workplace demands retain their existing priority over optional studies.

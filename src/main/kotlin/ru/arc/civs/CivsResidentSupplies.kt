@@ -65,11 +65,8 @@ internal class CivsResidentSupplies(
             storage.supplyCaptureCurrent(city, observation.capture, snapshot.stores.keys)
     }
 
-    private fun requireCraftJob(city: Settlement, worker: CivWorker, id: UUID?): CivCraftJob {
-        val job = craftPlan(city, worker)?.takeIf { it.id == id } ?: throw CivsRejection("stale-delivery")
-        rejectIf(!craftObservationCurrent(city), "stale-delivery")
-        return job
-    }
+    private fun requireCraftJob(city: Settlement, worker: CivWorker, id: UUID?): CivCraftJob =
+        craftPlan(city, worker)?.takeIf { it.id == id } ?: throw CivsRejection("stale-delivery")
 
     internal fun craftRequired(city: Settlement, buildingId: UUID): Map<String, Long> {
         val required = linkedMapOf<String, Long>()

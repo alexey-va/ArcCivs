@@ -15,6 +15,29 @@ internal fun civSupplyInputs(city: Settlement): Any = listOf(
 /** Owner metadata is stripped before dispatch; no native inventory or callback enters the worker. */
 internal data class CivSupplyObservation(val inputs: Any, val capture: CivSupplyCaptureResult)
 
+/** Stock estimates include a staffed depot even while its courier is finishing another job. */
+internal fun CivSupplySnapshot.canSupply(source: CivSupplyStore, relaysInReachOfTarget: List<CivSupplyStore>): Boolean {
+    fun reachable(relay: CivSupplyStore) = CivsLogistics.withinRoute(maximumTransferDistance, source.control, relay.control)
+    if (source.type != BuildingType.WAREHOUSE) return source.outputMaterial != null && relaysInReachOfTarget.any(::reachable)
+    return relaysInReachOfTarget.any { it.id == source.id } || source.canEvacuate() &&
+        relaysInReachOfTarget.any { it.canReceiveEvacuation() && reachable(it) }
+}
+
+internal fun CivSupplySnapshot.demandBeforeEvacuation(jobs: Map<UUID, CivCraftJob> = craftJobs): Map<String, Long> {
+    if (stores.values.none(CivSupplyStore::canEvacuate)) return emptyMap()
+    val craftRequests = if (jobs.isEmpty()) emptyList() else CivsCarpentry.committedInputs(this, jobs).requests
+    return workRequests(craftRequests).values.groupingBy(CivSupplyRequest::material).fold(0L) { sum, request ->
+        sum + (request.needed - request.inTransit).coerceAtLeast(0)
+    }
+}
+
+internal fun CivSupplySnapshot.exportableAmount(source: CivSupplyStore, material: String, surplus: Long,
+    relaysInReachOfTarget: List<CivSupplyStore>, demand: Map<String, Long>): Long {
+    if (source.type != BuildingType.WAREHOUSE || relaysInReachOfTarget.any { it.id == source.id }) return surplus
+    val reserve = maxOf(source.desiredStock[material] ?: 0L, stockTargets[source.id]?.get(material) ?: 0L)
+    return minOf(surplus, source.evacuationBatch(material, stackSizes[material], reserve, demand[material] ?: 0L))
+}
+
 internal class CivsSupplyPlanning(
     private val city: Settlement,
     private val capture: CivsSupplyCapture,
@@ -48,7 +71,6 @@ internal class CivsSupplyPlanning(
                     CivsProduction.material(building).takeIf { building.phase == BuildingPhase.ACTIVE && !CivsRules.isBuilder(city, building) },
                     observed.capacity, building.type,
                     redistributionDepot = city.autonomy?.paused == false && city.inventory?.mode == CivStorageMode.PHYSICAL &&
-                        CivsAutoStorageMigration.ready(city) &&
                         building.phase == BuildingPhase.ACTIVE && building.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) &&
                         observed.unavailable == 0 && observed.containers in 1..64 && observed.key.upgradingOrder == null, bufferedStock = buffered)
             }.toMap()
