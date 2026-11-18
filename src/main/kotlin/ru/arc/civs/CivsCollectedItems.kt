@@ -72,10 +72,18 @@ internal fun civsCollectionHome(city: Settlement, worker: CivWorker): CivBuildin
     worker.homeId?.let(city::building)?.takeIf { it.type.isResidence || it.type == BuildingType.TOWN_HALL }
         ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }
 
-internal fun civsCanReachContainer(feet: Location, point: CivPosition): Boolean {
+internal fun civsWithinFoodPickupReach(feet: Location, point: CivPosition): Boolean {
+    val dx = feet.x - (point.x + .5)
+    val dy = feet.y - (point.y + .5)
+    val dz = feet.z - (point.z + .5)
+    return dx * dx + dy * dy + dz * dz <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH
+}
+
+internal fun civsCanReachContainer(feet: Location, point: CivPosition, nearbyFoodPickup: Boolean = false): Boolean {
     val world = feet.world ?: return false
     return civsResidentStandingSafe(feet) && citizenChunkReady(world, point.x shr 4, point.z shr 4) &&
-        citizenCanReachBlock(world, feet.clone().add(0.0, 1.5, 0.0), point, 3.0)
+        (nearbyFoodPickup && civsWithinFoodPickupReach(feet, point) ||
+            citizenCanReachBlock(world, feet.clone().add(0.0, 1.5, 0.0), point))
 }
 
 internal fun civsGroundItemAvailable(item: Item, workerId: UUID): Boolean = item.isValid && !item.isDead &&

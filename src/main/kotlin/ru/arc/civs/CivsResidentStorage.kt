@@ -221,7 +221,10 @@ internal class CivsResidentStorage(
                 residentFoods().mayPickUp(city, worker, it) && CivsEquipment.supplyRoom(worker, Material.valueOf(it)) > 0
             } ?: continue
             if (!foodCanModify(city, point)) continue
-            val target = citizenCollectedHomeTarget(city, building, world, point) ?: continue
+            val target = if (!tavernService && civsWithinFoodPickupReach(feet, point)) {
+                if (!citizenChunkReady(world, point.x shr 4, point.z shr 4)) continue
+                CivPosition(feet.blockX, feet.blockY, feet.blockZ)
+            } else citizenCollectedHomeTarget(city, building, world, point) ?: continue
             return CivResidentFoodSource(building.id, point, target, material)
         }
         return null
@@ -261,8 +264,10 @@ internal class CivsResidentStorage(
         reject((target.servingFor == null) != (target.servingTicket == null), "stale-meal")
         val worker = city.workers.single { it.id == workerId }
         val building = city.building(target.buildingId) ?: throw CivsRejection("building-not-found")
+        val nearbyFoodPickup = CivsResidentFood.allowsNearbyPickup(city, target.servingFor, target.servingTicket)
         reject(!CivsResidentFood.eligible(city, worker, building) ||
-            target.container !in containers.buildingPositions(city, building.id) || !civsCanReachContainer(feet, target.container), "worker-too-far")
+            target.container !in containers.buildingPositions(city, building.id) ||
+            !civsCanReachContainer(feet, target.container, nearbyFoodPickup), "worker-too-far")
         reject(!foodCanModify(city, target.container), "lands-denied")
         val serving = target.servingFor?.let { guestId ->
             city.workers.firstOrNull { it.id == guestId }?.let { CivsTavernMeals.keeper(city, worker, it, building) } == true

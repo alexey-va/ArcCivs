@@ -353,18 +353,14 @@ Both the five-tick work pulse and the twenty-tick owner pulse advance the same
 resident observation clock before updating actors. Meal admission checks existing
 body occupancy and route reservations when choosing a supported hall barrel side;
 an unadmitted route cannot leave the actor claiming to travel to food.
-Food route arrival also requires the same exact native container reach as motion
-and pickup; the coarse standing radius alone cannot finish that detour.
-Living-worker pickup retains the full body, liquid, hazard and nine-point support
-checks with the same 0.13-block floor tolerance as packet movement. Legal path
-heights must not be rejected as floating; corpse placement and resurrection keep
-their existing 0.02-block support tolerance.
-Physical food first accepts an already supported, body-clear native pickup in reach.
-A new route uses the same bounded supported-side candidates with live body
-occupancy and arrival reservations. A free selected side stays stable; an occupied
-side is replaced before routing. If every candidate is occupied, the normal
-blocked route retains existing resident separation; pickup still requires
-actual supported, body-clear feet and native reach.
+Residents collecting food for themselves can take it through a wall when their
+feet are within three blocks of the selected container's center. They can stop
+there on the way to the container. The transfer debits its actual inventory once.
+Outside that radius, residents can use ordinary eye reach or walk to a supported
+side. The route checks body occupancy and arrival reservations when selecting a
+side. An innkeeper collecting food for a guest still needs ordinary eye reach.
+Living-worker pickup uses the same 0.13-block floor tolerance as packet movement.
+Corpse placement and resurrection use their existing 0.02-block tolerance.
 An interrupted work detour returns to its existing target without earning travel
 time or losing already observed work. Child lessons likewise require four fresh
 seconds after interruption and grant at most ten education points before adulthood.

@@ -2,7 +2,7 @@ package ru.arc.civs
 
 import java.util.UUID
 
-/** A real container and a supported adjacent place; contents are rechecked by the receipt owner. */
+/** A real container and its pickup position; the receipt owner rechecks live contents and reach. */
 data class CivResidentFoodSource(val buildingId: UUID, val container: CivPosition, val standing: CivPosition,
     val material: String = "BREAD", val servingFor: UUID? = null, val servingTicket: UUID? = null)
 
@@ -59,6 +59,9 @@ data class CivResidentFoodReceipt(val buildingId: UUID, val stockBefore: Stock, 
 internal object CivsResidentFood {
     // Retain the existing four-bread supply batch; no new hunger, reward or production rate.
     const val BATCH = 4
+
+    fun allowsNearbyPickup(city: Settlement, servingFor: UUID?, servingTicket: UUID?): Boolean =
+        city.inventory?.mode != CivStorageMode.VIRTUAL && servingFor == null && servingTicket == null
 
     fun tavern(city: Settlement): CivBuilding? = city.buildings.firstOrNull {
         it.type == BuildingType.TAVERN && it.phase == BuildingPhase.ACTIVE && it.control != null

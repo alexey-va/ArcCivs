@@ -7,6 +7,12 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentLinkedQueue
 
+internal fun CitizenActor.canReachSelectedFood(city: Settlement, source: CivResidentFoodSource): Boolean {
+    val nearbyFoodPickup = outputReturn != source.buildingId &&
+        CivsResidentFood.allowsNearbyPickup(city, source.servingFor, source.servingTicket)
+    return civsCanReachContainer(npc.location, source.container, nearbyFoodPickup)
+}
+
 /** Supplies, collected items and durable work-transfer completions. */
 internal class CivsCitizenLogistics(
     private val runtime: CitizenRuntime,
@@ -71,7 +77,7 @@ internal class CivsCitizenLogistics(
                     actor.foodSource = candidate.buildingId
                 }
                 actor.cycle.deferWork(now)
-                if (civsCanReachContainer(actor.npc.location, candidate.container) && routes.arrivalBodyClear(actor)) {
+                if (actor.canReachSelectedFood(city, candidate) && routes.arrivalBodyClear(actor)) {
                     actor.foodRouteFailure = null
                     actor.route?.takeIf { !it.intermediate && it.authored == candidate.standing &&
                         actor.foodSource == candidate.buildingId }?.motion?.observeAcceptedArrival(actor.npc.location.point())

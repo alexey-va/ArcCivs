@@ -521,7 +521,11 @@ internal class CivsCargoRequests(
             val item = world.getEntity(change.entityId) as? org.bukkit.entity.Item ?: throw CivsRejection("stale-delivery")
             rejectIf(!civsCanCollect(feet, item, collected.workerId), "worker-too-far")
         }
-        collected.containers.forEach { rejectIf(!civsCanReachContainer(feet, it.container), "worker-too-far") }
+        val food = collected.food
+        val nearbyFoodPickup = food != null && CivsResidentFood.allowsNearbyPickup(tx.after, food.servingFor, food.servingTicket)
+        collected.containers.forEach {
+            rejectIf(!civsCanReachContainer(feet, it.container, nearbyFoodPickup), "worker-too-far")
+        }
     }
 
     private fun rejectIf(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason) }

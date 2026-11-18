@@ -170,7 +170,7 @@ internal class CivsCitizenMotion(
             }
             if (travelTarget != null && !actor.sheltering && actor.mealVisit == null && actor.tavernService == null && actor.collectionSeek == null && actor.collectionHome == null &&
                 (actor.returningToWarehouse || actor.plan.idleReason in listOf(null, "placing")) &&
-                (physicalFood?.let { routes.arrivalBodyClear(actor) && civsCanReachContainer(npc.location, it.container) }
+                (physicalFood?.let { routes.arrivalBodyClear(actor) && actor.canReachSelectedFood(city, it) }
                     ?: routes.arrivedAt(actor, city, npc.world, travelTarget))) {
                 motion.observeAcceptedArrival(npc.location.point())
                 motion.cancel()
