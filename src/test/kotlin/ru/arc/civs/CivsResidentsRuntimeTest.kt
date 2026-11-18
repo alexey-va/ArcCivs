@@ -1447,8 +1447,17 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.status(h.workerId) shouldBe "workers.status.defending"
             h.owner.status(helperId) shouldBe "workers.status.defending"
             for (idle in listOf(distantId, outsiderId)) {
-                (h.owner.status(idle) in setOf("workers.status.unassigned", "workers.status.wandering")) shouldBe true
-                h.actor(idle).attacker shouldBe null
+                val actor = h.actor(idle)
+                actor.attacker shouldBe null
+                actor.combatStatus shouldBe null
+                actor.combatDestination shouldBe null
+                val route = actor.route
+                val status = when {
+                    route?.wanderWalk == null -> "workers.status.unassigned"
+                    route.motion.turning -> "workers.status.route-preparing"
+                    else -> "workers.status.wandering"
+                }
+                h.owner.status(idle) shouldBe status
             }
             verify(exactly = 1) { victim.swingMainHand() }
             verify(exactly = 1) { helper.swingMainHand() }
@@ -3927,69 +3936,37 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("an unassigned resident below a distant home crosses the hall frontage on foot then resumes local walks") {
-        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
-            for (x in -2..4) for (z in -5..2) h.world.loadChunk(x, z)
-            // Auto1 translated by (-12258, -5, -9647). North is a private plot, east is one block lower.
-            val hall = h.city.buildings.single().copy(anchor = CivPosition(-1, 64, 0), entrance = CivPosition(-1, 64, 0),
-                bounds = CivBox(CivPosition(-18, 61, -29), CivPosition(11, 89, -1)), control = null)
-            val entrance = CivPosition(38, 66, -38)
+    test("an unassigned resident 14 blocks from home follows a bend in a nearby dirt path") {
+        residentRuntime(workerId = UUID(0, 42)) { h ->
+            val hall = h.city.buildings.single()
+            val entrance = CivPosition(4, 64, -14)
             val home = hall.copy(id = UUID(2306, 6), type = BuildingType.HOUSE, anchor = entrance, entrance = entrance,
-                bounds = CivBox(CivPosition(32, 64, -52), CivPosition(48, 88, -39)))
+                bounds = CivBox(CivPosition(2, 63, -18), CivPosition(6, 68, -15)))
             h.city = h.city.copy(buildings = listOf(hall, home), workers = h.city.workers.map { it.copy(homeId = home.id) })
-            val street = Location(h.world, .5, 64.0, .5)
-            h.world.getBlockAt(0, 63, 0).blockData =
-                Bukkit.createBlockData("minecraft:spruce_stairs[facing=west,half=bottom,shape=outer_right]")
-            h.world.getBlockAt(0, 63, -1).type = Material.GRASS_BLOCK
-            h.world.getBlockAt(1, 63, 0).type = Material.AIR
-            h.world.getBlockAt(1, 62, 0).blockData =
-                Bukkit.createBlockData("minecraft:spruce_stairs[facing=west,half=bottom,shape=straight]")
-            h.world.getBlockAt(0, 63, 1).type = Material.AIR
-            h.world.getBlockAt(0, 62, 1).type = Material.DIRT_PATH
-            for (x in 36..40) for (z in -40..-36) h.world.getBlockAt(x, 64, z).type = Material.STONE
-            for (x in 37..39) for (z in -39..-37) h.world.getBlockAt(x, 65, z).type = Material.STONE
-            val actor = h.actor()
-            actor.npc.teleport(street)
-            val east = requireNotNull(citizenWanderFeet(h.world, 1, 0, street.y))
-            east.y shouldBe 63.0
-            citizenIdleRouteAllowed(entrance, street.point(), CivPosition(1, 63, 0)) shouldBe false
-            citizenIdleRouteAllowed(entrance, street.point(), CivPosition(-1, 64, 0)) shouldBe false
-            citizenIdleRouteAllowed(entrance, street.point(), CivPosition(0, 63, 1)) shouldBe false
-            CivRouteTerritory(h.city).allows(CivPosition(0, 64, -1), setOf(home.id), null) shouldBe false
+            val road = (5..7).map { it to 0 } + (1..3).map { 7 to it }
+            for ((x, z) in road) h.world.getBlockAt(x, 63, z).type = Material.DIRT_PATH
 
+            val actor = h.actor()
+            actor.npc.teleport(Location(h.world, 4.5, 64.0, .5, 180f, 0f)) // Faces north toward home. The path runs east, then south.
+            h.holdNavigation = true
+            val captures = h.world.chunkSnapshotCaptures
             h.navigationNow = 3_000
             h.owner.pulse(3_000)
-            val returnRoute = requireNotNull(actor.route)
-            returnRoute.idleAnchor shouldBe entrance
-            returnRoute.wanderWalk shouldBe null
-            returnRoute.motion.planningFailed("no-path")
-            val routes = h.owner.javaClass.getDeclaredField("routes").apply { isAccessible = true }.get(h.owner) as CivsCitizenRoutes
-            val runtime = h.owner.javaClass.getDeclaredField("runtime").apply { isAccessible = true }.get(h.owner) as CitizenRuntime
-            val budget = runtime.recoveryBudget
-            routes.recoverNavigation(actor, returnRoute.target, 100_000, idleAnchor = entrance) shouldBe false
-            runtime.recoveryBudget shouldBe budget
-            actor.npc.location.point() shouldBe street.point()
-            routes.cancelRoute(actor)
-            h.owner.pulse(3_001)
-            var previous = actor.npc.location
-            val walked = mutableSetOf<CitizenPoint>()
-            for (tick in 1..1_500) {
+            val walked = mutableSetOf<Pair<Int, Int>>()
+            for (tick in 1..120) {
                 h.navigate()
                 if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
                 val at = actor.npc.location
-                (kotlin.math.hypot(at.x - previous.x, at.z - previous.z) <= .118251) shouldBe true
-                (kotlin.math.abs(at.y - previous.y) <= 1.000001) shouldBe true
-                hall.bounds.contains(at.blockX, at.blockY, at.blockZ) shouldBe false
-                walked += at.point()
-                previous = at
-                if (actor.route?.wanderWalk != null) break
+                val cell = at.blockX to at.blockZ
+                walked += cell
+                if (cell == (7 to 2)) break
             }
-            withClue(h.navigationState()) {
-                citizenWithinIdleArea(entrance, actor.npc.location.point()) shouldBe true
-                actor.route?.wanderWalk?.home?.id shouldBe home.id
-                (walked.size > 50) shouldBe true
+            withClue("walked=$walked ${h.navigationState()}") {
+                walked.containsAll(listOf(5 to 0, 7 to 2)) shouldBe true
+                walked.all { it == (4 to 0) || it in road } shouldBe true
+                h.pendingNavigationWorkers shouldBe 0
+                h.world.chunkSnapshotCaptures shouldBe captures
             }
-            h.deliveries shouldBe 0
         }
     }
 

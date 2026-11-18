@@ -632,8 +632,11 @@ on waking. Support and standing headroom are rechecked during sleep. If the head
 is blocked, the shared recovery budget can select a clear spot in the same home
 through a clear swept sleeping envelope; without room the low pose is retained
 without work or travel. A cramped shelter does not start a sleeping pose.
-Idle residents choose safe loaded wandering targets within eight blocks of their
-workplace, otherwise home or town hall, at 0.55 of base motion speed. Base motion is
+Unassigned residents already away from home wander within eight blocks of their
+starting position or departure doorway. They can join a public path within four
+blocks and follow its walkable neighbours. Without a path they take safe local steps.
+Workers waiting at a required post still return to their workplace entrance.
+Idle walks use 0.55 of base motion speed. Base motion is
 0.215 blocks per tick; productive journeys use 0.8 of that, or 3.44 blocks/second
 at 20 TPS before the current Trails surface multiplier. Idle and combat movement
 retain their existing factors. Routes avoid horizontal footprints

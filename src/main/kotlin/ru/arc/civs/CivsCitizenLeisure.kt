@@ -253,8 +253,7 @@ internal class CivsCitizenLeisure(
         val minePost = outsideHome && !inside(home, home.entrance.x, home.entrance.z)
         val workPost = !outsideHome && worker.assignment == home.id &&
             actor.plan.idleReason in setOf("waiting-tool", "storage-surplus")
-        val returningHome = !outsideHome && actor.plan.idleReason == "unassigned"
-        if ((minePost || workPost || returningHome) && travelToPost(actor, city, world, home, now,
+        if ((minePost || workPost) && travelToPost(actor, city, world, home, now,
                 !withinArea || minePost && inside(home, at.blockX, at.blockZ))) return
         val active = actor.route
         if (active != null) {

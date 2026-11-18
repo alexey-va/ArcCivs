@@ -297,7 +297,7 @@ internal class CivsCitizenRoutes(
     }
 
     fun startWander(actor: CitizenActor, city: Settlement, home: CivBuilding, outsideHome: Boolean, now: Long) {
-        val territory = workFrame(city.id)?.territory?.takeIf { it.matches(city) } ?: return
+        val frame = workFrame(city.id)?.takeIf { it.territory.matches(city) } ?: return
         val at = actor.npc.location
         val departure = city.buildings.singleOrNull { building ->
             building.id != home.id && building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure &&
@@ -305,7 +305,13 @@ internal class CivsCitizenRoutes(
                 building.bounds.contains(at.blockX, at.blockY, at.blockZ) &&
                 !CivsAutonomousGeometry.horizontalContains(building.bounds, building.entrance)
         }
-        val walk = CitizenWanderWalk(home, outsideHome, territory, actor.plan.token, now, actor.wander.legLimit(), departure)
+        val unassigned = actor.plan.idleReason == "unassigned" && !outsideHome
+        val away = unassigned && !citizenWithinIdleArea(home.entrance, at.point())
+        val anchor = if (away) departure?.entrance ?: CivPosition(at.blockX, at.blockY, at.blockZ) else home.entrance
+        val street = if (unassigned && departure == null)
+            citizenNearbyStreet(actor.npc.world, at, frame.roads, frame.territory) else null
+        val walk = CitizenWanderWalk(home, outsideHome, frame.territory, actor.plan.token, now, actor.wander.legLimit(),
+            departure, anchor, frame.roads.takeIf { street != null }, street)
         if (nextWanderLeg(actor, city, walk, now)) {
             CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
                 "mode" to "local", "outcome" to "started", "target" to actor.route?.authored)
@@ -319,7 +325,7 @@ internal class CivsCitizenRoutes(
         if (!citizenPacketSupported(world, origin, allowClimbable = false)) return false
         val departure = CivPosition(from.blockX, from.blockY, from.blockZ)
         val leaving = walk.departureBuilding?.takeIf { it.bounds.contains(departure.x, departure.y, departure.z) }
-        val anchor = leaving?.entrance ?: walk.home.entrance
+        val anchor = leaving?.entrance ?: walk.anchor
         val outside = walk.outsideHome && walk.outside(departure.x, departure.z)
         val destinations = when {
             leaving != null -> setOf(leaving.id)
@@ -348,6 +354,8 @@ internal class CivsCitizenRoutes(
         val freeWander = leaving == null && (!walk.outsideHome || outside) && withinArea
         val heading = actor.wander.directions(actor.npc.bodyYaw, allowDiagonal = freeWander)
             .map { (dx, dz) -> departure.copy(x = departure.x + dx, z = departure.z + dz) }
+        val previous = actor.route?.takeIf { freeWander && it.wanderWalk === walk && it.motion.finished }?.from
+        val roads = walk.streets.takeIf { freeWander }
         val candidates = if (leaving != null) {
             val exit = anchor.point()
             val distance = departure.point().distanceSquared(exit)
@@ -357,21 +365,17 @@ internal class CivsCitizenRoutes(
             heading.filter { walk.distanceToExit(it.x, it.z) < depth }
         } else if (!withinArea) {
             heading.sortedBy { it.point().distanceSquared(anchor.point()) }
-        } else {
-            val previous = actor.route?.takeIf { it.wanderWalk === walk && it.motion.finished }?.from
-            if (previous == null) heading else {
-                val previousX = floor(previous.x).toInt()
-                val previousZ = floor(previous.z).toInt()
-                heading.sortedBy { it.x == previousX && it.z == previousZ }
-            }
-        }
-        for (cell in candidates) {
-            if (!permitted(cell, destinations)) continue
-            val at = citizenWanderFeet(world, cell.x, cell.z, origin.y) ?: continue
-            val point = cell.copy(y = floor(at.y + .001).toInt())
+        } else if (roads == null && previous != null) {
+            heading.sortedBy { it.x == floor(previous.x).toInt() && it.z == floor(previous.z).toInt() }
+        } else heading
+        val steps = candidates.asSequence().filter { permitted(it, destinations) }
+            .mapNotNull { citizenWanderFeet(world, it.x, it.z, origin.y) }
+        val ordered = if (roads == null) steps else walk.preferStreetSteps(world, steps, roads, previous)
+        for (at in ordered) {
+            val point = CivPosition(floor(at.x).toInt(), floor(at.y + .001).toInt(), floor(at.z).toInt())
             if (!feetAllowed(point) || !sweepAllowed(origin, at) ||
                 at.y == origin.y && !citizenFlatSupportClear(origin, at) { citizenPacketSupported(world, it, false) }) continue
-            if (cell.x != departure.x && cell.z != departure.z) {
+            if (point.x != departure.x && point.z != departure.z) {
                 // A diagonal is optional. Require a level floor on both sides of its corner.
                 if (at.y != origin.y) continue
                 val sides = listOf(point.copy(x = departure.x), point.copy(z = departure.z))
@@ -388,8 +392,11 @@ internal class CivsCitizenRoutes(
             motion.readyWanderStep()
             val chunks = CitizenChunks(minOf(from.blockX, point.x) shr 4, maxOf(from.blockX, point.x) shr 4,
                 minOf(from.blockZ, point.z) shr 4, maxOf(from.blockZ, point.z) shr 4)
+            if (walk.approachingStreet != null && roads != null &&
+                citizenStreetSupport(world, point.x, citizenSupportY(at.y), point.z, roads, territory) != null)
+                walk.approachingStreet = null
             actor.route = CitizenRoute(origin, to, chunks, now, 3_000, allowed, motion, null, point,
-                idleAnchor = walk.home.entrance, wanderWalk = walk).also { it.progressTick = runtime.navigationTick }
+                idleAnchor = walk.anchor, wanderWalk = walk).also { it.progressTick = runtime.navigationTick }
             return true
         }
         return false
@@ -1053,9 +1060,6 @@ internal class CivsCitizenRoutes(
                                   nightHome: CivBuilding? = null): Boolean {
         val failed = actor.route ?: return false
         if (failed.wanderWalk != null || actor.mineVisit != null) return false
-        // An optional walk back to the resident's own leisure area grants no relocation.
-        if (actor.plan.idleReason == "unassigned" && failed.idleAnchor == failed.authored &&
-            actor.social.visit == null && actor.mealVisit == null) return false
         // Recovery relocates to a centered block. A fractional shelter must be reached on foot.
         if (actor.sheltering && (failed.authored != actor.shelter || actor.shelterFeet?.point() != failed.authored.point())) return false
         val nightRecovery = nightHome != null

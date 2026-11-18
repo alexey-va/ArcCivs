@@ -46,7 +46,9 @@ internal class CitizenWander(workerId: UUID) {
 }
 
 internal class CitizenWanderWalk(val home: CivBuilding, val outsideHome: Boolean, val territory: CivRouteTerritory,
-    val token: CitizenToken, val startedAt: Long, val legLimit: Int, val departureBuilding: CivBuilding?) {
+    val token: CitizenToken, val startedAt: Long, val legLimit: Int, val departureBuilding: CivBuilding?,
+    val anchor: CivPosition = home.entrance, val streets: CivsPaths.RetainedRoads? = null,
+    var approachingStreet: CivPosition? = null) {
     var legs = 0
     var reachedAt: Long? = null
     var maxHandoffMillis = 0L
@@ -57,6 +59,53 @@ internal class CitizenWanderWalk(val home: CivBuilding, val outsideHome: Boolean
     fun distanceToExit(x: Int, z: Int): Long = if (outside(x, z)) -1 else
         minOf(x.toLong() - home.bounds.min.x, home.bounds.max.x.toLong() - x,
             z.toLong() - home.bounds.min.z, home.bounds.max.z.toLong() - z)
+}
+
+// A short look around the starting feet, once per walk. A path outside this radius is optional.
+private val streetOffsets = (-4..4).flatMap { x -> (-4..4).map { z -> x to z } }
+    .filter { (x, z) -> x * x + z * z <= 16 }.sortedBy { (x, z) -> x * x + z * z }
+
+internal fun citizenNearbyStreet(world: World, from: Location, roads: CivsPaths.RetainedRoads,
+    territory: CivRouteTerritory): CivPosition? {
+    val supportY = citizenSupportY(from.y)
+    for ((dx, dz) in streetOffsets) {
+        val x = from.blockX + dx
+        val z = from.blockZ + dz
+        if (!world.isChunkLoaded(x shr 4, z shr 4)) continue
+        for (offset in WANDER_STREET_GRADES) {
+            val support = citizenStreetSupport(world, x, supportY + offset, z, roads, territory) ?: continue
+            val feet = citizenWanderFeet(world, x, z, support.y + 1.0) ?: continue
+            if (citizenSupportY(feet.y) == support.y && citizenPacketBodyClear(world, feet, false)) return support
+        }
+    }
+    return null
+}
+
+/** Inspect only the actual support grade. A covered path on another floor gives no preference. */
+internal fun citizenStreetSupport(world: World, x: Int, y: Int, z: Int, roads: CivsPaths.RetainedRoads,
+    territory: CivRouteTerritory): CivPosition? {
+    if (y !in world.minHeight until world.maxHeight) return null
+    val block = world.getBlockAt(x, y, z)
+    val type = block.type
+    if (type.isAir || type in CivsTerrainPolicy.AUTONOMOUS_SOIL && type != Material.COARSE_DIRT) return null
+    val support = CivPosition(x, y, z)
+    return support.takeIf { (type == Material.DIRT_PATH || support in roads &&
+        (type == Material.COARSE_DIRT || CivsRoadMaintenance.surface(block.blockData.asString))) &&
+        territory.allows(support, emptySet(), null) }
+}
+
+private val WANDER_STREET_GRADES = intArrayOf(0, -1, 1, -2, 2)
+
+internal fun CitizenWanderWalk.preferStreetSteps(world: World, steps: Sequence<CitizenPoint>,
+    roads: CivsPaths.RetainedRoads, previous: CitizenPoint?): Sequence<CitizenPoint> {
+    val approach = approachingStreet
+    val (paved, other) = steps.partition { feet ->
+        citizenStreetSupport(world, floor(feet.x).toInt(), citizenSupportY(feet.y), floor(feet.z).toInt(), roads, territory) != null
+    }
+    val ordered = paved + if (approach == null) other else other.sortedBy { approach.roadDistanceSquared(it) }
+    return (if (previous == null) ordered else ordered.sortedBy {
+        floor(it.x) == floor(previous.x) && floor(it.z) == floor(previous.z)
+    }).asSequence()
 }
 
 private val CITIZEN_WANDER_DIRECTIONS = listOf(0 to 1, -1 to 0, 0 to -1, 1 to 0)
