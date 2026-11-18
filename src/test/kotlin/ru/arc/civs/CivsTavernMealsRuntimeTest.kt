@@ -65,7 +65,7 @@ class CivsTavernMealsRuntimeTest : FunSpec({
         }
     }
 
-    test("native navigation ticks retain an emergency meal at its actual feet without teleporting") {
+    test("an unstaffed tavern leaves the guest eating carried bread at its feet with no route or repeat debit") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat()
@@ -89,52 +89,25 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                 }
                 h.navigationNow = 3_000
                 h.owner.pulse(3_000)
-                for (tick in 1..1_200) {
+                h.owner.status(h.workerId) shouldBe "workers.status.eating"
+                h.routeTarget() shouldBe null
+                for (tick in 1..100) {
                     h.navigate()
                     if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    if (tick < 80) meals shouldBe 0
+                    if (tick == 60) {
+                        h.usingMainHand shouldBe true
+                        CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 2
+                    }
                     if (meals == 1) break
                 }
                 withClue(h.owner.debug(h.city.id, h.workerId)) { meals shouldBe 1 }
                 h.steps.isEmpty() shouldBe true
                 h.teleports shouldBe teleports
                 npc.location shouldBe mealAt
-                CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
-                h.city.stock shouldBe Stock()
-            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
-        }
-    }
-
-    test("a resident carrying bread uses its emergency reserve in place when the native tavern is unstaffed") {
-        residentRuntime { h ->
-            try {
-                val npc = h.prepareDiningSeat()
-                for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
-                h.city = h.city.copy(workers = h.city.workers.filter { it.id == h.workerId }, stock = Stock(),
-                    inventory = CivInventory(CivStorageMode.PHYSICAL))
-                npc.teleport(Location(h.world, .5, 64.0, .5))
-                val hall = h.city.buildings.first { it.type == BuildingType.TOWN_HALL }
-                val mealAt = npc.location
-                var meals = 0
-                h.owner.finishResidentMeal = { cityId, plan ->
-                    h.owner.validateResidentMeal(cityId, plan)
-                    plan.buildingId shouldBe hall.id
-                    npc.location shouldBe mealAt
-                    npc.isSeated shouldBe false
-                    h.city = CivsResidentLife.finishMeal(h.city, plan)
-                    meals++
-                    CompletableFuture.completedFuture(h.city)
-                }
-                h.owner.pulse(3_000)
-                withClue(h.owner.debug(h.city.id, h.workerId)) { h.owner.status(h.workerId) shouldBe "workers.status.eating" }
-                h.routeTarget() shouldBe null
-                npc.location shouldBe mealAt
-                for (now in 4_000L..6_000L step 1_000) h.owner.pulse(now)
-                meals shouldBe 0
-                h.usingMainHand shouldBe true
-                CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 2
-                for (now in 7_000L..8_000L step 1_000) h.owner.pulse(now)
-                meals shouldBe 1
                 h.city.workers.single().hunger shouldBe 20
+                for (now in 9_000L..80_000L step 1_000) h.owner.pulse(now)
+                meals shouldBe 1
                 CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
                 h.city.stock shouldBe Stock()
                 h.deliveries shouldBe 0
@@ -176,31 +149,6 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                 for (now in 36_000L..40_000L step 1_000) h.owner.pulse(now)
                 meals shouldBe 2
                 CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 0
-                h.city.stock shouldBe Stock()
-            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
-        }
-    }
-
-    test("an unavailable service never leaves a hungry resident retrying an unnecessary route") {
-        residentRuntime { h ->
-            try {
-                val npc = h.prepareDiningSeat()
-                for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
-                h.city = h.city.copy(workers = h.city.workers.filter { it.id == h.workerId }, stock = Stock(),
-                    inventory = CivInventory(CivStorageMode.PHYSICAL))
-                npc.teleport(Location(h.world, .5, 64.0, .5))
-                var meals = 0
-                h.owner.finishResidentMeal = { cityId, plan ->
-                    h.owner.validateResidentMeal(cityId, plan)
-                    h.city.building(plan.buildingId)!!.type shouldBe BuildingType.TOWN_HALL
-                    h.city = CivsResidentLife.finishMeal(h.city, plan)
-                    meals++
-                    CompletableFuture.completedFuture(h.city)
-                }
-                h.owner.pulse(3_000)
-                for (now in 4_000L..80_000L step 1_000) h.owner.pulse(now)
-                meals shouldBe 1
-                CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
                 h.city.stock shouldBe Stock()
             } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
         }

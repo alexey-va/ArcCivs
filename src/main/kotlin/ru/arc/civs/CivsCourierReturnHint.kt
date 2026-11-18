@@ -2,79 +2,7 @@ package ru.arc.civs
 
 import java.util.UUID
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.floor
-import kotlin.math.max
-
-/** Detached search preference, never a path or permission to move. */
-internal class CitizenSearchCorridor private constructor(
-    private val columns: Set<Long>, private val minimumY: Double, private val maximumY: Double,
-) {
-    fun contains(point: CitizenPoint): Boolean = point.y in minimumY..maximumY &&
-        civsTerrainKey(floor(point.x).toInt(), floor(point.z).toInt()) in columns
-
-    private val snapshotChunks by lazy {
-        buildSet {
-            for (column in columns) {
-                val x = (column shr 32).toInt(); val z = column.toInt()
-                for (cx in ((x - 1) shr 4)..((x + 1) shr 4))
-                    for (cz in ((z - 1) shr 4)..((z + 1) shr 4)) add(CitizenSnapshotKey(cx, cz))
-            }
-        }
-    }
-    internal fun snapshotSection(section: CitizenSnapshotSectionKey): Boolean =
-        CitizenSnapshotKey(section.x, section.z) in snapshotChunks &&
-            section.y in ((floor(minimumY).toInt() - 3) shr 4)..((floor(maximumY).toInt() + 3) shr 4)
-
-    companion object {
-        private const val ANCHOR_DISTANCE = 12
-        private const val WAREHOUSE_ANCHOR_DISTANCE = 64
-        fun fromWalked(walked: Set<CivPosition>, from: CitizenPoint, to: CitizenPoint,
-                       warehouseAccess: Boolean = false): CitizenSearchCorridor? {
-            if (walked.size !in 2..CivsPaths.MAX_TRIP_CELLS) return null
-            val columns = hashSetOf<Long>()
-            fun add(x: Int, z: Int, radius: Int) {
-                for (dx in -radius..radius) for (dz in -radius..radius)
-                    columns += civsTerrainKey(x + dx, z + dz)
-            }
-            walked.forEach { add(it.x, it.z, 0) }
-            for ((index, endpoint) in listOf(from, to).withIndex()) {
-                val nearest = walked.minByOrNull { it.copy(y = it.y + 1).point().distanceSquared(endpoint) } ?: return null
-                val target = nearest.copy(y = nearest.y + 1).point()
-                val access = if (warehouseAccess && index == 1) WAREHOUSE_ANCHOR_DISTANCE else ANCHOR_DISTANCE
-                if (target.distanceSquared(endpoint) > access * access) return null
-                val dx = target.x - endpoint.x
-                val dz = target.z - endpoint.z
-                val steps = ceil(max(abs(dx), abs(dz))).toInt().coerceAtLeast(1)
-                for (step in 0..steps) {
-                    val fraction = step.toDouble() / steps
-                    add(floor(endpoint.x + dx * fraction).toInt(), floor(endpoint.z + dz * fraction).toInt(), 2)
-                }
-            }
-            // Outdoor observation omits building interiors. Only the two bounded
-            // access tubes may bridge those omissions; the warehouse side may
-            // also connect a recent nearby delivery. All cells still need fresh A*.
-            val start = civsTerrainKey(floor(from.x).toInt(), floor(from.z).toInt())
-            val goal = civsTerrainKey(floor(to.x).toInt(), floor(to.z).toInt())
-            val remaining = columns.toMutableSet()
-            val pending = ArrayDeque<Pair<Int, Int>>()
-            pending += floor(from.x).toInt() to floor(from.z).toInt()
-            remaining.remove(start)
-            var connected = false
-            while (pending.isNotEmpty()) {
-                val (x, z) = pending.removeFirst()
-                if (civsTerrainKey(x, z) == goal) { connected = true; break }
-                for (dx in -1..1) for (dz in -1..1)
-                    if (remaining.remove(civsTerrainKey(x + dx, z + dz))) pending += x + dx to z + dz
-            }
-            if (!connected) return null
-            val low = minOf(from.y, to.y, walked.minOf { it.y + 1.0 })
-            val high = maxOf(from.y, to.y, walked.maxOf { it.y + 1.0 })
-            if (high - low > 16) return null
-            return CitizenSearchCorridor(columns, low - 2, high + 2)
-        }
-    }
-}
 
 /** One observed source leg, retired on use or any changed shipment/geometry. */
 internal class CitizenCourierReturnHint private constructor(

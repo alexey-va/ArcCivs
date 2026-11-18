@@ -245,7 +245,9 @@ internal class CivsCitizenRoutes(
                 !actor.sheltering && actor.attacker == null && actor.combatDestination == null &&
                 actor.foodSource == null && actor.mealVisit == null && actor.workDetour == null &&
                 actor.collectionSeek == null && actor.collectionHome == null && actor.tavernService == null && actor.social.visit == null)
-                CitizenRouteReuseKey.of(routeCosts, allowed) else null, supportCost = supportCost, cityId = city.id)
+                CitizenRouteReuseKey.of(routeCosts, allowed) else null, supportCost = supportCost, cityId = city.id,
+            roadCorridor = if (idleAnchor == null && corridor == null && routeMine == null && waitingMine == null &&
+                actor.attacker == null && actor.combatDestination == null) routeCosts.weights.roads::corridor else null)
         val motion = navigation.request(world, from, to, { point -> policy.allowed(point) { p ->
             if (p.y in minimumY until maximumY && world.isChunkLoaded(p.x shr 4, p.z shr 4)) world.getBlockAt(p.x, p.y, p.z).type
             else null
@@ -471,6 +473,9 @@ internal class CivsCitizenRoutes(
 
     private fun storageFeet(world: World, point: CivPosition): Location? = citizenStorageFeet(world, point)
 
+    fun failedFoodApproach(actor: CitizenActor, source: CivResidentFoodSource, at: Long = recoveryClock()): CitizenFoodRouteFailure? =
+        actor.foodRouteFailure?.takeIf { it.matches(actor, source, at) }
+
     /** Keep a clear food approach stable; other residents' bodies and arrival goals retain their existing reservations. */
     fun foodStanding(actor: CitizenActor, city: Settlement, source: CivResidentFoodSource): CivPosition? {
         val building = city.building(source.buildingId) ?: return null
@@ -481,7 +486,7 @@ internal class CivsCitizenRoutes(
             } == true
         }
         val clock = recoveryClock()
-        val blocked = actor.foodRouteFailure?.takeIf { it.matches(actor, source, clock) }
+        val blocked = failedFoodApproach(actor, source, clock)
         // Try every fresh approach before retrying a failed side of this same food holder.
         if (blocked != null && actor.route == null) {
             citizenCollectedHomeTarget(city, building, world, source.container, source.standing) {
@@ -522,7 +527,7 @@ internal class CivsCitizenRoutes(
         val attemptAt = if (stationarySearchFailure) {
             clock - (now - route.startedAt).coerceIn(0L, FOOD_CAPTURE_RETRY_PREPARATION_LIMIT)
         } else clock
-        val previous = actor.foodRouteFailure?.takeIf { it.matches(actor, source, attemptAt) }
+        val previous = failedFoodApproach(actor, source, attemptAt)
             ?: CitizenFoodRouteFailure(actor.plan.token, source, actor.npc.location.point(), clock)
                 .also { actor.foodRouteFailure = it }
         previous.record(source.standing, clock)
@@ -826,6 +831,7 @@ internal class CivsCitizenRoutes(
             "blocked_waypoint" to route?.blockedWaypoint?.coordinates(),
             "searching" to route?.motion?.searching, "collision_wait" to route?.motion?.waitingForCollision,
             "search_state" to route?.motion?.preparationPhase,
+            "road_routing" to route?.motion?.roadRouting?.name?.lowercase(),
             "preparation_ms" to route?.timing?.preparationElapsed(now), "travel_ms" to route?.timing?.elapsed(now),
             "captured_blocks" to route?.motion?.capturedBlocks, "native_shape_reads" to route?.motion?.nativeShapeReads, "search_nanos" to route?.motion?.searchNanos,
             "tick" to Bukkit.getCurrentTick(), "navigation_tick" to runtime.navigationTick, "cadence_ms" to runtime.navigationCadenceMillis,

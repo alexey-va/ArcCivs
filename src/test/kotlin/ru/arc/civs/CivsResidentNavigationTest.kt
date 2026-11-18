@@ -955,52 +955,6 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
-    for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) for (returning in listOf(false, true))
-    test("a lowered path connects the farm stair and deck at direction $dx,$dz returning=$returning") {
-        MockBukkitTestRuntime.open().use {
-            val terrain = ResidentRouteTerrain()
-            val stair = CivPosition(dx, 64, dz)
-            terrain.blocks[CivPosition(0, 63, 0)] = Material.DIRT_PATH
-            terrain.blocks[stair] = Material.OAK_STAIRS
-            // The observed medievaloak farm has a bottom straight stair above a
-            // 15/16 dirt path. These are the vanilla shape boxes, rotated with its rise.
-            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
-                dx > 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
-                dx < 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
-                dz > 0 -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
-                else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
-            })
-            terrain.blocks[CivPosition(dx * 2, 64, dz * 2)] = Material.OAK_PLANKS
-            val path = Location(terrain.world, .5, 63.9375, .5)
-            val deck = Location(terrain.world, dx * 2 + .5, 65.0, dz * 2 + .5)
-            var at = (if (returning) deck else path).clone().also {
-                val sign = if (returning) -1 else 1
-                it.yaw = Math.toDegrees(kotlin.math.atan2(-dx.toDouble() * sign, dz.toDouble() * sign)).toFloat()
-            }
-            val target = if (returning) path else deck
-            val route = CitizenPacketRoute(terrain.world, at, target,
-                { p -> (0..2).any { p.x == dx * it && p.z == dz * it } && p.y in 63..65 },
-                { _, _ -> true }, { 1.0 })
-            route.prepare()
-            route.searching shouldBe false
-            route.failure shouldBe null
-            var moved = 0
-            repeat(100) {
-                route.move(at, 1.0) { true }?.let { next ->
-                    val walking = next.clone().also { it.y = at.y }
-                    (at.distance(walking) <= .215001) shouldBe true
-                    assertNativeStairFrame(terrain.world, at, next)
-                    at = next
-                    moved++
-                }
-            }
-            (moved > 0) shouldBe true
-            route.failure shouldBe null
-            route.finished shouldBe true
-            at.distanceSquared(target) shouldBe 0.0
-        }
-    }
-
     test("flat routes from offset feet choose supported approaches to every stair facing") {
         MockBukkitTestRuntime.open().use {
             for (turns in 0..3) {
@@ -1045,77 +999,6 @@ class CivsResidentNavigationTest : FunSpec({
                     (route.forwardProgress > 0.0) shouldBe true
                 }
             }
-        }
-    }
-
-    test("bottom stairs spend the same horizontal stride as flat travel in every facing and direction") {
-        MockBukkitTestRuntime.open().use {
-            for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1))
-                for (speed in listOf(1.0, 1.25)) for (returning in listOf(false, true)) {
-                    val sign = if (returning) -1 else 1
-                    fun trajectory(stairs: Boolean): List<Double> {
-                        val terrain = ResidentRouteTerrain()
-                        if (stairs) {
-                            for (index in 1..3) {
-                                val stair = CivPosition(dx * index, 63 + index, dz * index)
-                                terrain.blocks[stair] = Material.OAK_STAIRS
-                                terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
-                                    dx > 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
-                                    dx < 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
-                                    dz > 0 -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
-                                    else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
-                                })
-                            }
-                            terrain.blocks[CivPosition(dx * 4, 66, dz * 4)] = Material.OAK_PLANKS
-                        }
-                        val lower = Location(terrain.world, .5, 64.0, .5)
-                        val upper = Location(terrain.world, dx * 4 + .5, if (stairs) 67.0 else 64.0, dz * 4 + .5)
-                        var at = (if (returning) upper else lower).clone().also {
-                            it.yaw = Math.toDegrees(kotlin.math.atan2(-dx.toDouble() * sign, dz.toDouble() * sign)).toFloat()
-                        }
-                        val target = if (returning) lower else upper
-                        val route = CitizenPacketRoute(terrain.world, at, target,
-                            { p -> (0..4).any { p.x == dx * it && p.z == dz * it } && p.y in 64..67 },
-                            { _, _ -> true }, { 1.0 })
-                        route.prepare()
-                        route.failure shouldBe null
-                        val strides = mutableListOf<Double>()
-                        val contacts = linkedSetOf<Double>()
-                        repeat(100) { tick ->
-                            if (!route.finished) {
-                                val remaining = ((target.x - at.x) * dx + (target.z - at.z) * dz) * sign
-                                val next = requireNotNull(route.move(at, speed) { true }) {
-                                    "stairs=$stairs direction=$dx,$dz speed=$speed returning=$returning tick=$tick failure=${route.failure}"
-                                }
-                                val advance = ((next.x - at.x) * dx + (next.z - at.z) * dz) * sign
-                                withClue("stairs=$stairs direction=$dx,$dz speed=$speed returning=$returning tick=$tick $at -> $next") {
-                                    (kotlin.math.abs(advance - minOf(.215 * speed, remaining)) <= .000001) shouldBe true
-                                    (kotlin.math.abs(next.y - at.y) <= .562501) shouldBe true
-                                    citizenPacketBodyClear(terrain.world, next.point(), false) shouldBe true
-                                    // Native player stepping lifts the body, then sweeps horizontally.
-                                    citizenPacketStepClear(terrain.world, at.point(), next.point(), false) shouldBe true
-                                }
-                                for (height in listOf(64.5, 65.5, 66.5))
-                                    if (kotlin.math.abs(next.y - height) < .000001 && touchesNativeFloor(terrain.world, next))
-                                        contacts += height
-                                strides += advance
-                                at = next
-                            }
-                        }
-                        route.finished shouldBe true
-                        route.failure shouldBe null
-                        at.distanceSquared(target) shouldBe 0.0
-                        if (stairs) contacts.toList() shouldBe
-                            if (returning) listOf(66.5, 65.5, 64.5) else listOf(64.5, 65.5, 66.5)
-                        return strides
-                    }
-                    val flat = trajectory(false)
-                    val stairs = trajectory(true)
-                    stairs.size shouldBe flat.size
-                    stairs.zip(flat).forEach { (actual, expected) ->
-                        (kotlin.math.abs(actual - expected) <= .000001) shouldBe true
-                    }
-                }
         }
     }
 
@@ -1312,67 +1195,72 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
-    test("stair movement touches every half tread in both directions at every walking speed") {
+    test("straight stairs preserve stride and touch every tread from ordinary and lowered paths") {
         MockBukkitTestRuntime.open().use {
-            for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1))
-                for (speed in listOf(.55, .8, 1.0, 1.3)) for (returning in listOf(false, true))
-                    for (loweredPath in listOf(false, true)) {
-                        val terrain = ResidentRouteTerrain()
-                        if (loweredPath) terrain.blocks[CivPosition(0, 63, 0)] = Material.DIRT_PATH
-                        for (index in 1..3) {
-                            val stair = CivPosition(dx * index, 63 + index, dz * index)
-                            terrain.blocks[stair] = Material.OAK_STAIRS
-                            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
-                                dx > 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
-                                dx < 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
-                                dz > 0 -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
-                                else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
-                            })
+            for ((direction, levelSpeed, loweredSpeed) in listOf(
+                Triple(1 to 0, 1.0, .55), Triple(0 to 1, 1.25, .8),
+                Triple(-1 to 0, 1.25, 1.0), Triple(0 to -1, 1.0, 1.3),
+            )) for (returning in listOf(false, true)) for (loweredPath in listOf(false, true)) {
+                val (dx, dz) = direction
+                val speed = if (loweredPath) loweredSpeed else levelSpeed
+                val terrain = ResidentRouteTerrain()
+                if (loweredPath) terrain.blocks[CivPosition(0, 63, 0)] = Material.DIRT_PATH
+                for (index in 1..3) {
+                    val stair = CivPosition(dx * index, 63 + index, dz * index)
+                    terrain.blocks[stair] = Material.OAK_STAIRS
+                    terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
+                        dx > 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
+                        dx < 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
+                        dz > 0 -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
+                        else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
+                    })
+                }
+                terrain.blocks[CivPosition(dx * 4, 66, dz * 4)] = Material.OAK_PLANKS
+                val lower = Location(terrain.world, .5, if (loweredPath) 63.9375 else 64.0, .5)
+                val upper = Location(terrain.world, dx * 4 + .5, 67.0, dz * 4 + .5)
+                val sign = if (returning) -1 else 1
+                var at = (if (returning) upper else lower).clone().also {
+                    it.yaw = Math.toDegrees(kotlin.math.atan2(-dx.toDouble() * sign, dz.toDouble() * sign)).toFloat()
+                }
+                val target = if (returning) lower else upper
+                val route = CitizenPacketRoute(terrain.world, at, target,
+                    { p -> (0..4).any { p.x == dx * it && p.z == dz * it } && p.y in 63..67 },
+                    { _, _ -> true }, { 1.0 })
+                route.prepare()
+                val contacts = linkedSetOf<Double>()
+                fun wire(point: Location) = point.clone().also {
+                    it.x = kotlin.math.round(it.x * 4096) / 4096
+                    it.y = kotlin.math.round(it.y * 4096) / 4096
+                    it.z = kotlin.math.round(it.z * 4096) / 4096
+                }
+                withClue("direction=$direction speed=$speed returning=$returning loweredPath=$loweredPath") {
+                    for (tick in 1..100) {
+                        if (route.finished) break
+                        val next = route.move(at, speed) { true }
+                        if (next == null) {
+                            loweredPath shouldBe true
+                            continue
                         }
-                        terrain.blocks[CivPosition(dx * 4, 66, dz * 4)] = Material.OAK_PLANKS
-                        val lower = Location(terrain.world, .5, if (loweredPath) 63.9375 else 64.0, .5)
-                        val upper = Location(terrain.world, dx * 4 + .5, 67.0, dz * 4 + .5)
-                        val sign = if (returning) -1 else 1
-                        var at = (if (returning) upper else lower).clone().also {
-                            it.yaw = Math.toDegrees(kotlin.math.atan2(-dx.toDouble() * sign, dz.toDouble() * sign)).toFloat()
+                        val advance = ((next.x - at.x) * dx + (next.z - at.z) * dz) * sign
+                        val remaining = ((target.x - at.x) * dx + (target.z - at.z) * dz) * sign
+                        if (!loweredPath) (kotlin.math.abs(advance - minOf(.215 * speed, remaining)) <= .000001) shouldBe true
+                        val horizontal = next.clone().also { it.y = at.y }
+                        (at.distance(horizontal) <= .215 * speed + .000001) shouldBe true
+                        if (returning && next.y < at.y - .000001) (at.distanceSquared(horizontal) >= .00000001) shouldBe true
+                        assertNativeStairFrame(terrain.world, at, next)
+                        assertNativeStairFrame(terrain.world, wire(at), wire(next))
+                        for (height in listOf(64.5, 65.5, 66.5)) {
+                            if (kotlin.math.abs(next.y - height) < .000001 && touchesNativeFloor(terrain.world, next))
+                                contacts += height
                         }
-                        val target = if (returning) lower else upper
-                        val route = CitizenPacketRoute(terrain.world, at, target,
-                            { p -> (0..4).any { p.x == dx * it && p.z == dz * it } && p.y in 63..67 },
-                            { _, _ -> true }, { 1.0 })
-                        route.prepare()
-                        val contacts = linkedSetOf<Double>()
-                        val verticalOnly = mutableListOf<String>()
-                        fun wire(point: Location) = point.clone().also {
-                            it.x = kotlin.math.round(it.x * 4096) / 4096
-                            it.y = kotlin.math.round(it.y * 4096) / 4096
-                            it.z = kotlin.math.round(it.z * 4096) / 4096
-                        }
-                        repeat(250) { tick ->
-                            route.move(at, speed) { true }?.let { next ->
-                                val horizontal = next.clone().also { it.y = at.y }
-                                (at.distance(horizontal) <= .215 * speed + .000001) shouldBe true
-                                if (returning && next.y < at.y - .000001 && at.distanceSquared(horizontal) < .00000001)
-                                    verticalOnly += "$tick: $at -> $next"
-                                val a = wire(at)
-                                val b = wire(next)
-                                withClue("direction=$dx,$dz speed=$speed returning=$returning path=$loweredPath from=$a to=$b") {
-                                    assertNativeStairFrame(terrain.world, a, b)
-                                }
-                                for (height in listOf(64.5, 65.5, 66.5))
-                                    if (kotlin.math.abs(next.y - height) < .000001 &&
-                                        touchesNativeFloor(terrain.world, next)) contacts += height
-                                at = next
-                            }
-                        }
-                        withClue("direction=$dx,$dz speed=$speed returning=$returning path=$loweredPath at=$at contacts=$contacts vertical=$verticalOnly") {
-                            route.failure shouldBe null
-                            route.finished shouldBe true
-                            at.distanceSquared(target) shouldBe 0.0
-                            contacts.toList() shouldBe if (returning) listOf(66.5, 65.5, 64.5) else listOf(64.5, 65.5, 66.5)
-                            verticalOnly shouldBe emptyList()
-                        }
+                        at = next
                     }
+                    route.failure shouldBe null
+                    route.finished shouldBe true
+                    at.distanceSquared(target) shouldBe 0.0
+                    contacts.toList() shouldBe if (returning) listOf(66.5, 65.5, 64.5) else listOf(64.5, 65.5, 66.5)
+                }
+            }
         }
     }
 

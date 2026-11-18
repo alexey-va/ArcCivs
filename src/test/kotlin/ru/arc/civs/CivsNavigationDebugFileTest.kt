@@ -79,6 +79,23 @@ class CivsNavigationDebugFileTest : FunSpec({
         }
     }
 
+    test("a failed road search records its original corridor once and replays the transition to ordinary search") {
+        navigationFileFixture { h ->
+            val network = h.paths.begin(h.city).network
+            for (x in 0..20) network.remember(CivPosition(x, 63, 0))
+            val arm = h.arm()
+            val route = h.request(roads = true)
+            h.attach(route)
+            h.finish(route)
+            route.roadRouting shouldBe CitizenRoadRouting.FALLBACK
+            h.io.runNext()
+            val receipt = arm.completion.join()
+            val json = JsonParser.parseString(Files.readString(h.root.resolve(receipt["path"] as String))).asJsonObject
+            json["road_corridor"].asJsonObject["columns"].asJsonArray.isEmpty shouldBe false
+            replayNavigationCapture(json)
+        }
+    }
+
     test("a full supported capture fits the unchanged file limit and replays every original search round") {
         navigationFileFixture(fullCapture = true) { h ->
             val arm = h.arm()
@@ -371,7 +388,7 @@ private class NavigationFileFixture(private val paper: MockBukkitTestRuntime, fu
                 world.getBlockAt(x, y, anchor.z - 2).type = Material.STONE
         } else {
             world.getBlockAt(-1, 63, 0).type = Material.DIRT_PATH
-            paths.begin(city).network.cells += CivPosition(0, 63, 1)
+            paths.begin(city).network.remember(CivPosition(0, 63, 1))
         }
     }
     fun arm(save: (CitizenNavigationDebugFrame) -> CompletableFuture<Map<String, Any?>> = file::save) =
@@ -380,11 +397,12 @@ private class NavigationFileFixture(private val paper: MockBukkitTestRuntime, fu
         origin, target, 1_000, paths.begin(city, preferCourierRoads = true).weights.debugPolicy(emptySet(), Tag.LOGS.values.toSet(), Tag.LEAVES.values.toSet()))
     fun attach(route: CitizenPacketRoute, target: CitizenPoint = this.target) =
         owner.attachDebug(route, identity, true) { context(target) }
-    fun request(target: CitizenPoint = this.target): CitizenPacketRoute {
+    fun request(target: CitizenPoint = this.target, roads: Boolean = false): CitizenPacketRoute {
         val trip = paths.begin(city, preferCourierRoads = true)
         val territory = CivRouteTerritory(city)
         val policy = CitizenSnapshotPolicy({ p, _ -> territory.allows(p, emptySet(), null) && territory.controls.clear(p) },
-            territory.controls::stepClear, supportCost = trip.weights.detached(Tag.LOGS.values.toSet(), Tag.LEAVES.values.toSet()))
+            territory.controls::stepClear, supportCost = trip.weights.detached(Tag.LOGS.values.toSet(), Tag.LEAVES.values.toSet()),
+            roadCorridor = if (roads) trip.weights.roads::corridor else null)
         return owner.request(world, Location(world, origin.x, origin.y, origin.z), Location(world, target.x, target.y, target.z),
             { territory.allows(it, emptySet(), null) }, policy.stepAllowed, { trip.cost(it) { 1.0 } }, null, policy)
     }
@@ -424,8 +442,15 @@ private fun replayNavigationCapture(json: JsonObject) {
     val origin = point(context["origin"])
     val target = point(context["target"])
     val bounds = CitizenSearchBounds.between(origin, target, settings.initialHorizontalMargin, settings.initialVerticalMargin)
+    val road = json["road_corridor"]?.takeUnless(JsonElement::isJsonNull)?.asJsonObject?.let { captured ->
+        val columns = captured["columns"].asJsonArray.mapTo(hashSetOf()) {
+            civsTerrainKey(it.asJsonArray[0].asInt, it.asJsonArray[1].asInt)
+        }
+        CitizenSearchCorridor(columns, captured["minimum_y"].asDouble, captured["maximum_y"].asDouble)
+    }
     fun probe(value: JsonElement): CitizenSearchProbe = value.asJsonObject.let {
         CitizenSearchProbe(gson.fromJson(it["node"], CitizenSearchNode::class.java), point(it["from"]), it["incoming"].asBoolean,
+            corridor = road.takeIf { _ -> it["road_corridor"]?.asBoolean == true },
             bounds = bounds.takeIf { _ -> it["initial_bounds"].asBoolean })
     }
     val palette = json["palette"].asJsonArray.map { entry -> entry.asJsonObject.let {
@@ -445,8 +470,9 @@ private fun replayNavigationCapture(json: JsonObject) {
         }
         CitizenSearchCapture(probe, blocks, it["edges"].asJsonArray.map(::navigationCaptureEdge))
     }
-    fun signature(probe: CitizenSearchProbe) = listOf(probe.node, probe.from, probe.incoming, probe.bounds != null)
-    val search = CitizenNavigationSearch(origin, target, json["minimum_y"].asInt, json["maximum_y"].asInt, emptyList(), settings)
+    fun signature(probe: CitizenSearchProbe) = listOf(probe.node, probe.from, probe.incoming, probe.bounds != null, probe.corridor != null)
+    val search = CitizenNavigationSearch(origin, target, json["minimum_y"].asInt, json["maximum_y"].asInt, emptyList(), settings,
+        roadCorridor = road?.let { captured -> { _, _ -> captured } })
     var last: CitizenSearchResult? = null
     for (round in json["rounds"].asJsonArray.map(JsonElement::getAsJsonObject)) {
         val replay = search.advance(round["captures"].asJsonArray.map(::capture))

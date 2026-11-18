@@ -95,16 +95,20 @@ internal class CitizenSnapshotTerrain {
         return publishedPayloads
     }
 
-    fun collectMissingStates(palette: Map<BlockData, CivPosition>, missing: MutableMap<BlockData, CivPosition>) {
-        if (palette in resolvedPalettes) return
+    fun collectMissingStates(palette: Map<BlockData, CivPosition>, missing: MutableMap<BlockData, CivPosition>?):
+        MutableMap<BlockData, CivPosition>? {
+        if (palette in resolvedPalettes) return missing
+        var requested = missing
         var complete = true
         for (data in palette.keys) {
             if (data in states) continue
             complete = false
-            if (missing.size == 256) break
-            missing.putIfAbsent(data, palette.getValue(data))
+            if (requested?.size == 256) break
+            if (requested == null) requested = linkedMapOf()
+            requested.putIfAbsent(data, palette.getValue(data))
         }
         if (complete) resolvedPalettes.add(palette)
+        return requested
     }
 }
 
@@ -224,6 +228,7 @@ internal class CitizenSnapshotCapture(
     private val probeStates = arrayOfNulls<CitizenSnapshotState>(3 * 3 * 7)
     private val probePositions = arrayOfNulls<CivPosition>(3 * 3 * 7)
     private val cancelled = AtomicBoolean()
+    private val materialAt: (CivPosition) -> Material? = ::material
     private var next = 0
 
     fun cancel() { cancelled.set(true) }
@@ -309,13 +314,13 @@ internal class CitizenSnapshotCapture(
                 terrain.sections[section] = revision
                 newSections[section] = revision
             }
-            val missingStates = linkedMapOf<BlockData, CivPosition>()
+            var missingStates: MutableMap<BlockData, CivPosition>? = null
             for (key in chunkKeys) {
-                terrain.chunks[key]?.states(ys.first, ys.last)?.let { terrain.collectMissingStates(it, missingStates) }
+                terrain.chunks[key]?.states(ys.first, ys.last)?.let { missingStates = terrain.collectMissingStates(it, missingStates) }
             }
-            if (missingStates.isNotEmpty()) return request(states = missingStates)
+            missingStates?.let { return request(states = it) }
             val cells = arrayOfNulls<CitizenSnapshotCell>(if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) 0 else probeStates.size)
-            val dynamic = linkedMapOf<CivPosition, BlockData>()
+            var dynamic: MutableMap<CivPosition, BlockData>? = null
             var positionIndex = 0
             for (x in xs) for (z in zs) {
                 var chunk: CitizenSnapshotChunk? = null
@@ -335,10 +340,13 @@ internal class CitizenSnapshotCapture(
                     } else null
                     val state = cell?.state(terrain.states)
                     probeStates[index] = state
-                    if (cell != null && state?.dynamic == true && point !in terrain.dynamics) dynamic[point] = cell.data
+                    if (cell != null && state?.dynamic == true && point !in terrain.dynamics) {
+                        if (dynamic == null) dynamic = linkedMapOf()
+                        dynamic[point] = cell.data
+                    }
                 }
             }
-            if (dynamic.isNotEmpty()) return request(dynamics = dynamic)
+            dynamic?.let { return request(dynamics = it) }
             for (index in cells.indices) {
                 if (cells[index] != null) continue
                 val point = requireNotNull(probePositions[index])
@@ -349,18 +357,13 @@ internal class CitizenSnapshotCapture(
                 }
                 val state = probeStates[index]
                 val block = if (state == null) unavailableSnapshotBlock else {
-                    state.block(policy.allowed(point, ::material),
+                    state.block(policy.allowed(point, materialAt),
                         if (state.dynamic) terrain.dynamics.getValue(point) else state.shape.boxes)
                 }
                 cells[index] = terrain.blocks.add(point, block)
             }
             val blocks = CitizenSnapshotBlocks(cells.requireNoNulls())
-            val edges = citizenSearchCandidates(probe, blocks, minimumY, maximumY).map { edge ->
-                val point = edge.node.point()
-                val permitted = if (probe.incoming) policy.stepAllowed(point, probe.from)
-                    else policy.stepAllowed(probe.from, point)
-                if (permitted == edge.permitted) edge else edge.copy(permitted = permitted)
-            }
+            val edges = citizenSearchCandidates(probe, blocks, minimumY, maximumY, policy.stepAllowed)
             edges.forEach { edge -> requiredCosts += blocks.key(edge.node.x, citizenSupportY(edge.node.y), edge.node.z) }
             completed += CapturedProbe(probe, blocks, edges)
             prefetch(probe, edges)

@@ -365,7 +365,7 @@ internal class CivsResidentNavigation(
         retireCancelled()
         if (closed || !tasks.isCurrent(epoch)) { route.planningFailed("cancelled"); return route }
         if (jobs.size >= settings.maximumJobs) { route.planningFailed("planner-busy"); return route }
-        val job = Job(route, route.newSearch(), nanoTime())
+        val job = Job(route, route.newWorkerSearch(), nanoTime())
         jobs[route] = job
         route.attachAsync { job.search.cancel() }
         val key = route.reuseIdentity()
@@ -745,7 +745,7 @@ internal class CivsResidentNavigation(
         job.seededInitial = false
         job.publishedPayloads = emptyList()
         job.snapshotRevisions.clear()
-        job.search = job.route.newSearch()
+        job.search = job.route.newWorkerSearch()
         job.lastNodes = 0
         job.lastCells = 0
         job.progressTick = Bukkit.getCurrentTick().toLong()

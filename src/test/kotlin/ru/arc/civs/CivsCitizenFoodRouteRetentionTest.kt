@@ -14,6 +14,80 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsCitizenFoodRouteRetentionTest : FunSpec({
+    test("a failed food approach keeps its short retry wait before walking an untried side") {
+        residentRuntime(workerId = UUID(0, 20)) { h ->
+            for (x in -2..2) for (z in -2..2) h.world.loadChunk(x, z)
+            val quarry = h.assignQuarry()
+            h.work = CivWorldWork(h.workerId, 0, quarry.id, CivPosition(21, 64, 0), emptyList(),
+                durationMillis = 60_000, status = "mining")
+            val barrel = CivPosition(8, 64, 0)
+            val preferred = barrel.copy(x = 9)
+            val alternate = barrel.copy(x = 7)
+            val tavern = CivBuilding(UUID.randomUUID(), BuildingType.TAVERN, 1, barrel, 0, "food-wait-fixture",
+                CivBox(CivPosition(7, 63, -2), CivPosition(13, 68, 3)), preferred, BuildingPhase.ACTIVE, control = barrel)
+            h.city = h.city.copy(buildings = h.city.buildings + tavern,
+                workers = h.city.workers.map { it.copy(hunger = 0) })
+            h.world.getBlockAt(barrel.x, barrel.y, barrel.z).type = Material.BARREL
+            val actor = h.actor()
+            actor.npc.teleport(requireNotNull(h.work).standing.location(h.world))
+            h.owner.pulse(1_500)
+            actor.cycle.phase shouldBe CitizenPhase.WORKING
+            val origin = Location(h.world, 3.5, 64.0, .5)
+            actor.npc.teleport(origin)
+            val source = CivResidentFoodSource(tavern.id, barrel, preferred)
+            h.physicalFoodSource = source
+            h.holdNavigation = true
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            actor.workDetour shouldBe actor.plan.token
+            val failed = requireNotNull(actor.route)
+            failed.authored shouldBe preferred
+            failed.motion.planningFailed("capture-budget")
+            failed.completion = CitizenNavigationCompletion("capture-budget")
+            h.navigationNow = 10_000
+            h.recoveryMillis = 10_000
+            h.owner.pulse(10_000)
+            val witness = requireNotNull(actor.foodRouteFailure)
+            actor.foodPickupSource shouldBe null // The eventual retry must select the current source again.
+            val before = h.city
+            for (at in 11_000L..14_000L step 1_000L) {
+                h.navigationNow = at
+                h.recoveryMillis = at
+                h.owner.pulse(at)
+                actor.route shouldBe null // Returning to work here would erase the stance failure by movement.
+                actor.foodSource shouldBe tavern.id
+                actor.npc.location.point() shouldBe origin.point()
+                actor.cycle.observedWorkMillis shouldBe 0L
+                actor.foodRouteFailure shouldBe witness
+            }
+            val pickups = mutableListOf<CivResidentFoodSource>()
+            val receipt = CompletableFuture<Settlement>()
+            h.physicalFoodPickup = { selected ->
+                civsCanReachContainer(actor.npc.location, barrel) shouldBe true
+                pickups += selected
+                receipt
+            }
+            h.navigationNow = 15_000
+            h.recoveryMillis = 15_000
+            h.owner.pulse(15_000)
+            actor.route?.authored shouldBe alternate
+            h.releaseNavigation()
+            for (tick in 1..400) {
+                val from = actor.npc.location
+                h.navigate()
+                (from.distance(actor.npc.location) <= .215001) shouldBe true
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (pickups.isNotEmpty()) break
+            }
+            withClue(h.navigationState()) { pickups shouldBe listOf(source.copy(standing = alternate)) }
+            h.city shouldBe before
+            actor.cycle.observedWorkMillis shouldBe 0L
+            h.deliveries shouldBe 0
+            h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
+            pickups.size shouldBe 1
+        }
+    }
+
     test("repeated physical food routes recover past a native door leaf before one ordinary pickup") {
         residentRuntime(workerId = UUID(0, 20), worldFactory = ::FoodDoorWorld) { h ->
             for (x in -3..2) for (z in -2..2) h.world.loadChunk(x, z)

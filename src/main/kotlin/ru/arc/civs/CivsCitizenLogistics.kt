@@ -49,10 +49,18 @@ internal class CivsCitizenLogistics(
     fun collectedPending(actor: CitizenActor): Boolean = collectedRequests.pending(actor.workerId, actor.instanceId)
 
     fun supplyFood(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
-        if (actor.residentYield != null || actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) ||
-            now < actor.supplyRetryAt) return false
-        if (world.time !in 12_000L..23_000L && worker.cargo == null && CivsResidents.hunger(worker) <= 14 &&
-            residentFoods.carried(city, worker) == null) {
+        if (actor.residentYield != null || actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) return false
+        if (now < actor.supplyRetryAt && (actor.foodSource == null || actor.foodRouteFailure == null)) return false
+        val needsFood = world.time !in 12_000L..23_000L && worker.cargo == null && CivsResidents.hunger(worker) <= 14 &&
+            residentFoods.carried(city, worker) == null
+        if (now < actor.supplyRetryAt) {
+            if (!needsFood) return false
+            // Work/leisure movement during this short wait invalidates the failed stance's origin.
+            actor.cycle.deferWork(now)
+            runtime.statuses[worker.id] = "waiting"
+            return true
+        }
+        if (needsFood) {
             val candidate = actor.foodPickupSource ?: residentFoodSource(city, worker)
             if (candidate != null) {
                 if (actor.foodPickupSource != candidate) {
@@ -74,19 +82,19 @@ internal class CivsCitizenLogistics(
                         if (routes.recoverFoodRoute(actor, city, worker, route, candidate, now) {
                                 residentFoodSource(city, worker)
                             }) return true
-                        retryFoodLater(actor, now)
+                        retryFoodLater(actor, candidate, now)
                         return true
                     }
                     if (route != null) return true
                     val standing = routes.foodStanding(actor, city, candidate)
                     if (standing == null) {
                         runtime.statuses[worker.id] = "waiting"
-                        retryFoodLater(actor, now)
+                        retryFoodLater(actor, candidate, now)
                         return true
                     }
                     actor.foodPickupSource = candidate.copy(standing = standing)
                     if (!routes.startRoute(actor, world, standing, now))
-                        retryFoodLater(actor, now)
+                        retryFoodLater(actor, candidate, now)
                 }
                 return true
             }
@@ -108,10 +116,11 @@ internal class CivsCitizenLogistics(
         return true
     }
 
-    private fun retryFoodLater(actor: CitizenActor, now: Long) {
+    private fun retryFoodLater(actor: CitizenActor, source: CivResidentFoodSource, now: Long) {
         routes.cancelRoute(actor)
+        // Only a failed route needs the same origin for its next approach. Occupied sides release the detour.
+        actor.foodSource = source.buildingId.takeIf { routes.failedFoodApproach(actor, source) != null }
         actor.foodPickupSource = null
-        actor.foodSource = null
         actor.supplyRetryAt = now + 5_000
     }
 

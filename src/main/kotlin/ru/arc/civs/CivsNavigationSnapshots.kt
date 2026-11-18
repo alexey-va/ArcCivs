@@ -22,6 +22,8 @@ internal data class CitizenSnapshotPolicy(
     val reuseKey: CitizenRouteReuseKey? = null,
     val supportCost: ((CivPosition, BlockData) -> Double)? = null,
     val cityId: UUID? = null,
+    /** Detached sparse lookup, evaluated by the worker only after shared-route reuse misses. */
+    val roadCorridor: CitizenRoadLookup? = null,
 )
 
 /** Explicit trip cost identity; arbitrary caller closures never become cache keys. */
@@ -35,7 +37,7 @@ internal data class CitizenRouteReuseKey private constructor(
     companion object {
         fun of(trip: CivsPaths.Trip, allowedBuildings: Set<UUID>) = CitizenRouteReuseKey(
             trip.network.geometry.copy(buildings = trip.network.geometry.buildings.toList()),
-            allowedBuildings.toSet(), trip.reuseSignature.toSet(), trip.preferCourierRoads, trip.retainedRoads)
+            allowedBuildings.toSet(), trip.reuseSignature, trip.preferCourierRoads, trip.retainedRoads)
     }
 }
 

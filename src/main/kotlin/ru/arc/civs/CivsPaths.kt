@@ -34,7 +34,18 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
                 point.z in it.bounds.min.z..it.bounds.max.z || CivsWorksiteLayouts.isField(it, point.x, point.z) }
     }
 
-    internal class Network(val geometry: Geometry, val cells: LinkedHashSet<CivPosition> = linkedSetOf()) {
+    internal class Network(val geometry: Geometry) {
+        private val learned = linkedSetOf<CivPosition>()
+        val cells: Set<CivPosition> get() = learned
+        private var snapshot: CivsRoadGraph.Supports? = null
+
+        fun remember(point: CivPosition) { if (learned.add(point)) snapshot = null }
+        fun forget(point: CivPosition) { if (learned.remove(point)) snapshot = null }
+
+        // Jobs share one detached projection until this city's learned support actually changes.
+        fun learnedRoads(): CivsRoadGraph.Supports = snapshot ?: CivsRoadGraph.Supports(
+            buildSet(learned.size) { addAll(learned) }).also { snapshot = it }
+
         var completedTrips = 0L
         var tripsAlongRoad = 0L
         var longestRoadRun = 0
@@ -45,6 +56,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         private val guardApproaches: Map<UUID, List<CivPosition>> = emptyMap()) {
         // Navigation cost identity depends on the support grades, independently of patrol order.
         private val signature = supports.hashCode()
+        internal val index = CivsRoadGraph.Supports(supports)
         operator fun contains(point: CivPosition): Boolean = point in supports
         fun guardApproach(towerId: UUID): List<CivPosition> = guardApproaches[towerId].orEmpty()
         internal fun debugSupports(): Set<CivPosition> = supports
@@ -86,7 +98,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         internal val preferCourierRoads: Boolean, internal val retainedRoads: RetainedRoads,
         territory: CivRouteTerritory?) {
         // Costs cannot change halfway through one A* search as other residents finish their trips.
-        internal val weights = Weights(network.geometry, network.cells.toHashSet(), preferCourierRoads, retainedRoads, territory)
+        internal val weights = Weights(network.geometry, network.learnedRoads(), preferCourierRoads, retainedRoads, territory)
         internal val reuseSignature: Set<CivPosition> get() = weights.preferred
         internal val walked = linkedSetOf<CivPosition>()
         internal var complete = false
@@ -125,11 +137,14 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     /** The detached cost callback retains only these admitted weights and a copy of the material tags. */
     internal class Weights(
         private val geometry: Geometry,
-        val preferred: Set<CivPosition>,
+        learned: CivsRoadGraph.Supports,
         private val preferCourierRoads: Boolean,
         private val retainedRoads: RetainedRoads,
         private val territory: CivRouteTerritory? = null,
     ) {
+        val preferred = learned.cells
+        val roads = CivsRoadGraph(retainedRoads.index, learned)
+
         internal fun debugPolicy(allowedBuildings: Set<UUID>, logs: Set<Material>, leaves: Set<Material>) = CitizenNavigationDebugPolicy(
             geometry.center, geometry.radius, (geometry.buildings + listOfNotNull(geometry.planned))
                 .map(CitizenNavigationDebugBuilding::of), allowedBuildings.toSet(), preferred.toSet(),
@@ -160,7 +175,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
                     CivsRoadMaintenance.surface(data().asString)) -> 1.0
                 // The provider may recognize untracked materials when its configuration permits it.
                 recognizedSurface() -> 1.0
-                point in preferred -> 1.5
+                point in preferred -> LEARNED_COST
                 else -> ORDINARY_COST
             }
         }
@@ -205,11 +220,11 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
             }
             // Snapshot when this completed trip reaches the queue head, after earlier trips.
             // Comparing against its own newly added cells would leave a dotted corridor.
-            val existing = batch.existing ?: network.cells.toHashSet().also { batch.existing = it }
+            val existing = batch.existing ?: network.learnedRoads().cells.also { batch.existing = it }
             val point = batch.points.next()
             remaining--
             if (point !in network.cells && !nearCorridor(existing, point) && network.cells.size < MAX_CELLS_PER_CITY)
-                network.cells += point
+                network.remember(point)
         }
     }
 
@@ -237,7 +252,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
     fun invalidateBlock(world: UUID, changed: CivPosition) {
         networks.values.filter { it.geometry.world == world }.forEach { network ->
             for (dx in -1..1) for (dz in -1..1) for (dy in 0..2)
-                network.cells.remove(CivPosition(changed.x + dx, changed.y - dy, changed.z + dz))
+                network.forget(CivPosition(changed.x + dx, changed.y - dy, changed.z + dz))
         }
     }
 
@@ -261,6 +276,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
 
     companion object {
         const val ORDINARY_COST = 2.25
+        const val LEARNED_COST = 1.5
         const val MAX_CITIES = 32
         const val MAX_CELLS_PER_CITY = 512
         const val MAX_TRIP_CELLS = 256

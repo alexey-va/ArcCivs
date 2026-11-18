@@ -151,6 +151,44 @@ class CivsStorePlanCacheTest : FreeSpec({
         laterLoad.join() shouldBe null
     }
 
+    "plan generations fence queued and finished changes without invalidating unrelated dependencies" {
+        val original = plan()
+        val unrelated = plan()
+        val executor = QueuedExecutor()
+        val store = CivsStore(root, executor)
+        val ids = listOf(original.id)
+        val before = store.planGeneration(ids)
+        val saving = store.savePlan(original)
+        val pending = store.planGeneration(ids)
+        (pending > before) shouldBe true
+        store.planGeneration(listOf(unrelated.id)) shouldBe before
+        executor.runNext()
+        saving.join() shouldBe original
+        val committed = store.planGeneration(ids)
+        (committed > pending) shouldBe true
+        val other = store.savePlan(unrelated)
+        store.planGeneration(ids) shouldBe committed
+        executor.runNext()
+        other.join() shouldBe unrelated
+        store.planGeneration(ids) shouldBe committed
+    }
+
+    "bounded plan history falls back to a global fence and explicit reload always invalidates dependencies" {
+        val original = plan()
+        val store = CivsStore(root, directExecutor)
+        store.savePlan(original).join()
+        val ids = listOf(original.id)
+        val before = store.planGeneration(ids)
+        store.deletePlan(UUID(4, 1)).join() shouldBe false
+        store.planGeneration(ids) shouldBe before
+        repeat(256) { store.deletePlan(UUID(5, it.toLong())).join() shouldBe false }
+        val afterOverflow = store.planGeneration(ids)
+        (afterOverflow > before) shouldBe true
+        store.load().join() shouldBe emptyList()
+        (store.planGeneration(ids) > afterOverflow) shouldBe true
+        store.loadPlan(original.id).join() shouldBe original
+    }
+
     "cached plan collections cannot alias a caller mutation of native or terrain work" {
         val original = plan().let { plan -> plan.copy(building = plan.building.copy(transit = listOf(CivPosition(0, 64, 0))),
             terrain = CivTerraformPlan(CivBox(CivPosition(0, 63, 0), CivPosition(0, 63, 0)),

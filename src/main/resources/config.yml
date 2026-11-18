@@ -38,6 +38,8 @@ navigation:
   # Detached A* nodes per worker batch; each node needs several surrounding block reads.
   nodes-per-batch: 256
   maximum-nodes: 4096
+  # Unique block positions examined by one route search, including clearance and support around each node.
+  # Overlapping probes count a position once. Shared terrain and snapshot cache sizes are configured below.
   maximum-captured-blocks: 32768
   maximum-jobs: 48
   close-route-distance: 16.0

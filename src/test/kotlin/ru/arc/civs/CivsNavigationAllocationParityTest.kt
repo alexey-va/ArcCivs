@@ -57,7 +57,27 @@ class CivsNavigationAllocationParityTest : FunSpec({
                             put(CivPosition(x, y, z), palette[random.nextInt(palette.size)])
                     }
                     withClue("node=$node") {
-                        citizenSearchCandidates(probe, blocks, -64, 320) shouldBe previousSearchCandidates(probe, blocks, -64, 320)
+                        val previous = previousSearchCandidates(probe, blocks, -64, 320)
+                        citizenSearchCandidates(probe, blocks, -64, 320) shouldBe previous
+                        for (incoming in listOf(false, true)) {
+                            val directed = probe.copy(incoming = incoming)
+                            val expectedChecks = mutableListOf<Pair<CitizenPoint, CitizenPoint>>()
+                            val actualChecks = mutableListOf<Pair<CitizenPoint, CitizenPoint>>()
+                            fun permitted(checks: MutableList<Pair<CitizenPoint, CitizenPoint>>, from: CitizenPoint,
+                                to: CitizenPoint): Boolean {
+                                checks += from to to
+                                return from.x <= to.x && from.z <= to.z
+                            }
+                            val expected = previous.map { edge ->
+                                val point = edge.node.point()
+                                edge.copy(permitted = if (incoming) permitted(expectedChecks, point, probe.from)
+                                    else permitted(expectedChecks, probe.from, point))
+                            }
+                            citizenSearchCandidates(directed, blocks, -64, 320) { from, to ->
+                                permitted(actualChecks, from, to)
+                            } shouldBe expected
+                            actualChecks shouldBe expectedChecks
+                        }
                     }
                 }
     }

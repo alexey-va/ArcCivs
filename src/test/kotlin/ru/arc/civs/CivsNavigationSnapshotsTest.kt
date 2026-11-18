@@ -33,7 +33,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
     test("detached support costs keep the weighted route and defer arbitrary or enabled Trails costs to the owner") {
         sharedRouteRuntime { h ->
             h.allowedZ = 0..2
-            h.paths.begin(h.city).network.cells += (1..7).map { CivPosition(it, 63, 1) }
+            (1..7).map { CivPosition(it, 63, 1) }.forEach(h.paths.begin(h.city).network::remember)
             var customReads = 0
             val native = h.request(reuseKey = null, surfaceSpeed = {
                 customReads++
@@ -176,7 +176,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
             // Eight distinct cost identities with the same endpoint, geometry and allowed buildings.
             val network = h.paths.begin(h.city).network
             for (x in 1..7) {
-                network.cells += CivPosition(x, 63, 0)
+                network.remember(CivPosition(x, 63, 0))
                 val route = h.request(from = distantOrigin); h.finish(route); h.walk(route, distantOrigin)
             }
             val candidates = h.suffixes()["candidates"] as Long
@@ -193,7 +193,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
         sharedRouteRuntime { h ->
             h.allowedZ = 0..2
             val first = h.request(); h.finish(first); h.walk(first)
-            h.paths.begin(h.city).network.cells += CivPosition(7, 63, 0)
+            h.paths.begin(h.city).network.remember(CivPosition(7, 63, 0))
             val from = CitizenPoint(4.5, 64.0, 2.5)
             val joined = h.request(from = from); h.finish(joined)
             joined.nodeCount shouldBe 0
@@ -278,9 +278,9 @@ class CivsNavigationSnapshotsTest : FunSpec({
             val changedCity = h.city.copy(radius = 95)
             (identity(CitizenRouteReuseKey.of(CivsPaths().begin(changedCity), emptySet())) != original) shouldBe true
             val trip = h.paths.begin(h.city)
-            trip.network.cells += CivPosition(1, 63, 0)
+            trip.network.remember(CivPosition(1, 63, 0))
             (identity(h.key()) != original) shouldBe true
-            trip.network.cells.clear()
+            trip.network.forget(CivPosition(1, 63, 0))
             val corridor = requireNotNull(CitizenSearchCorridor.fromWalked((0..8).mapTo(hashSetOf()) {
                 CivPosition(it, 63, 0) }, source, h.target))
             val hinted = h.request(corridor = corridor)
@@ -1474,13 +1474,13 @@ private fun completeSnapshotCapture(terrain: CitizenSnapshotTerrain, probes: Lis
     return requireNotNull(capture.advance(CitizenSnapshotInput(costs = request.costs.associateWith { cost })).captures)
 }
 
-private fun sharedRouteRuntime(settings: CivsNavigationSettings = CivsNavigationSettings(), block: (SharedRouteRuntime) -> Unit) {
+internal fun sharedRouteRuntime(settings: CivsNavigationSettings = CivsNavigationSettings(), block: (SharedRouteRuntime) -> Unit) {
     MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
         SharedRouteRuntime(paper, settings).use(block)
     }
 }
 
-private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, settings: CivsNavigationSettings) : AutoCloseable {
+internal class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, settings: CivsNavigationSettings) : AutoCloseable {
     val world = CivsWorksiteWorldFixture("shared-route-cache").also(paper.server::addWorld)
     val paths = CivsPaths()
     val city = Settlement(UUID(0, 1), UUID(0, 2), "Shared", world.uid, CivPosition(0, 64, 0),
@@ -1503,15 +1503,18 @@ private class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, setti
     fun request(from: CitizenPoint = CitizenPoint(.5, 64.0, .5), target: CitizenPoint = this.target,
         reuseKey: CitizenRouteReuseKey? = key(), corridor: CitizenSearchCorridor? = null,
         permitted: () -> Boolean = { true }, allowedPoint: (CivPosition) -> Boolean = { true },
-        world: org.bukkit.World = this.world, surfaceSpeed: (Block) -> Double = { 1.0 }, cityId: UUID? = city.id): CitizenPacketRoute {
+        world: org.bukkit.World = this.world, surfaceSpeed: (Block) -> Double = { 1.0 }, cityId: UUID? = city.id,
+        roadCorridor: CitizenRoadLookup? = null): CitizenPacketRoute {
         val trip = paths.begin(city)
         fun allowed(p: CivPosition) = permitted() && allowedPoint(p) && p.x in 0..8 && p.y in allowedY && p.z in allowedZ
         val supportCost = (surfaceSpeed as? CivsFootTraffic)?.detachedSupportCost(trip.weights, Tag.LOGS.values.toSet(),
             Tag.LEAVES.values.toSet())
-        val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> permitted() }, reuseKey, supportCost, cityId)
+        val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> permitted() }, reuseKey, supportCost, cityId, roadCorridor)
         return owner.request(world, Location(world, from.x, from.y, from.z), Location(world, target.x, target.y, target.z),
             ::allowed, policy.stepAllowed, { trip.cost(it, surfaceSpeed) }, corridor, policy)
     }
+
+    fun runNextWorker() = workers.removeFirst().run()
 
     fun finish(route: CitizenPacketRoute) {
         prepareUntil { !route.searching }

@@ -274,20 +274,19 @@ The ordinary layout cases still run without those inputs.
 
 ## Optional mine preview exports
 
-The export-only cases in `CivsMineV3Test` and `CivsMineV4Test` run only with
-`CIVS_EXPORT_MINE_PREVIEWS=1`. Their ordinary regression cases remain enabled.
-Export both versions with:
+Use `CIVS_EXPORT_MINE_PREVIEWS=1` to write the V3, V4 and V5 preview files.
+The ordinary tests always check V5 material accounting and the legacy mine regressions.
 
 ```sh
 CIVS_EXPORT_MINE_PREVIEWS=1 ./gradlew :test --rerun \
   --tests 'ru.arc.civs.CivsMineV3Test' \
-  --tests 'ru.arc.civs.CivsMineV4Test'
+  --tests 'ru.arc.civs.CivsMineV4Test' \
+  --tests 'ru.arc.civs.CivsMineV5Test'
 ```
 
-V3 writes `build/mine-plan-preview`; V4 writes `build/mine-plan-v4-preview`.
-The [V4 preview workflow](mine-v4-frontier-design.md) consumes the V4 files at
-their existing paths.
-The V5 material-accounting assertions continue to run in ordinary tests.
+V3 writes `build/mine-plan-preview`, V4 writes `build/mine-plan-v4-preview`
+and V5 writes `build/mine-plan-v5-preview`. The
+[V4 preview workflow](mine-v4-frontier-design.md) consumes the V4 files.
 
 ## Opt-in local replays with private inputs
 

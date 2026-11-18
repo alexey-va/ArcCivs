@@ -87,6 +87,20 @@ internal abstract class CivsWorldScan<T>(
         validateIdentity(city)
     }
 
+    protected fun currentCity(): Settlement? = access.scanCities().firstOrNull { it.id == cityId }
+
+    protected fun ownerCanModify(block: Block, placing: Material? = null): Boolean =
+        access.canModify(owner, block, placing)
+
+    /** A null expected building means a new site within an existing city. */
+    protected fun requireUnchangedBuilding(city: Settlement?, expected: CivBuilding?) {
+        requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == expected, "stale-building")
+    }
+
+    protected fun requireCivs(condition: Boolean, reason: String) {
+        if (!condition) throw CivsRejection(reason)
+    }
+
     abstract fun validateIdentity(city: Settlement?)
     abstract fun step()
     open fun ready(): Boolean = true
@@ -161,7 +175,7 @@ internal abstract class CivsWorldScan<T>(
                 rejectAt("autonomy-terrain", ground)
         }
         requireCivs(after.material.isAir || after.material in TERRAFORM_GROUND, "invalid-plan")
-        if (!access.canModify(owner, block, after.material)) rejectAt("lands-denied", block)
+        if (!ownerCanModify(block, after.material)) rejectAt("lands-denied", block)
     }
 
     /** Nearby original canopy evidence survives top-down cuts, bottom-up fill and a partial crash. */
@@ -228,7 +242,7 @@ internal abstract class CivsWorldScan<T>(
         val block = read(position)
         requireCivs(world.worldBorder.isInside(Location(world, position.x + .5, position.y.toDouble(), position.z + .5)),
             "outside-border")
-        requireCivs(access.scanCities().firstOrNull { it.id == cityId }?.contains(position.x, position.z) == true, "outside-city")
+        requireCivs(currentCity()?.contains(position.x, position.z) == true, "outside-city")
         val change = overlay[position]
         if (cursor < 3) requireCivs(change == null || change.before == change.after, "autonomy-no-path")
         val after = change?.let { parse(it.after) }
@@ -248,7 +262,7 @@ internal abstract class CivsWorldScan<T>(
     }
 
     protected fun checkPaidGateCell(block: Block, floor: Boolean) {
-        if (!access.canModify(owner, block)) rejectAt("lands-denied", block)
+        if (!ownerCanModify(block)) rejectAt("lands-denied", block)
         val safe = if (floor) naturalTerraform(block) && routeTerraformSupport(block) else passableTerraform(block)
         if (!safe) rejectAt("gate-paid-floor", block)
     }
@@ -270,7 +284,7 @@ internal abstract class CivsWorldScan<T>(
 
     protected open fun checkControl(block: Block) {
         if (block.type != Material.BARREL) rejectAt("control-position-missing", block)
-        if (!access.canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+        if (!ownerCanModify(block, Material.BARREL)) rejectAt("lands-denied", block)
     }
 
     /** Only the preserved control needs a separate read; approach terrain is not part of construction. */
@@ -278,7 +292,7 @@ internal abstract class CivsWorldScan<T>(
         retargetSource?.takeIf { it.control != building.control }?.control?.let { source ->
             val block = read(source)
             if (block.type != Material.BARREL) rejectAt("control-position-missing", block)
-            if (!access.canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+            if (!ownerCanModify(block, Material.BARREL)) rejectAt("lands-denied", block)
             return
         }
         val position = building.control ?: return
@@ -287,7 +301,7 @@ internal abstract class CivsWorldScan<T>(
         // Legacy controls can lie outside the old footprint and still must not replace player data.
         if (block.type != Material.BARREL && (block.state is TileState || block.type in PROTECTED_TERRAIN))
             rejectAt("control-obstructed", block)
-        if (!access.canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+        if (!ownerCanModify(block, Material.BARREL)) rejectAt("lands-denied", block)
     }
 
     protected fun finish(value: T) {
@@ -320,6 +334,3 @@ internal abstract class CivsWorldScan<T>(
         future.completeExceptionally(failure)
     }
 }
-
-
-private fun requireCivs(condition: Boolean, reason: String) { if (!condition) throw CivsRejection(reason) }

@@ -154,7 +154,7 @@ internal class CivsCityPlans(
             else {
                 val (sources, routes) = requireNotNull(captured)
                 if (records.cities[city.id]?.let {
-                    routes.matchesAccess(it, store.planGeneration, retainedEpoch)
+                    routes.matchesAccess(it, store.planGeneration(sources.ids), retainedEpoch)
                 } == true) {
                     retainedSources[city.id] = sources
                     retainedRoutes[city.id] = routes
@@ -173,7 +173,7 @@ internal class CivsCityPlans(
     /** Callers needing exact construction before-images still receive the complete validated journals. */
     fun loadAutonomousPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
         val ids = retainedIds(city)
-        val generation = store.planGeneration
+        val generation = store.planGeneration(ids)
         val epoch = retainedEpoch
         val plans = ids.map(store::loadPlan)
         val loading = CompletableFuture.allOf(*plans.toTypedArray()).thenApplyAsync({
@@ -185,9 +185,10 @@ internal class CivsCityPlans(
 
     fun loadAutonomousAccess(city: Settlement): CompletableFuture<CivAutonomousAccess> {
         if (records.closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
-        val generation = store.planGeneration
-        val cached = retainedRoutes[city.id]?.takeIf { routes -> routes.matchesAccess(city, generation, retainedEpoch) &&
-            records.cities[city.id]?.let { routes.matchesAccess(it, generation, retainedEpoch) } == true
+        val retained = retainedSources[city.id]
+        val retainedGeneration = store.planGeneration(retained?.ids.orEmpty())
+        val cached = retainedRoutes[city.id]?.takeIf { routes -> routes.matchesAccess(city, retainedGeneration, retainedEpoch) &&
+            records.cities[city.id]?.let { routes.matchesAccess(it, retainedGeneration, retainedEpoch) } == true
         }
         if (cached != null) {
             // A repeated grade-refresh receipt still owns its wait; publish the same network without rebuilding it.
@@ -195,8 +196,9 @@ internal class CivsCityPlans(
             return CompletableFuture.completedFuture(cached.access)
         }
         val ids = retainedIds(city)
+        val generation = store.planGeneration(ids)
         val epoch = retainedEpoch
-        val sources = retainedSources[city.id]?.takeIf { it.ids == ids && it.generation == generation && it.epoch == epoch }
+        val sources = retained?.takeIf { it.ids == ids && it.generation == generation && it.epoch == epoch }
         if (sources != null) return prepareRetained(city, CompletableFuture.completedFuture(sources))
         // Project each read immediately. allOf must not keep every full building's block graph alive.
         val loading = ids.map(store::loadRetainedPlanSource)
@@ -221,7 +223,8 @@ internal class CivsCityPlans(
                 require(access.hallWitness == proof && access.hallApproach(before)?.surfaces?.get(upkeep.floor) == upkeep.after)
             }
         }
-        val cached = retainedRoutes[before.id]?.takeIf { it.matchesAccess(before, store.planGeneration, retainedEpoch) }
+        val generation = store.planGeneration(retainedSources[before.id]?.ids.orEmpty())
+        val cached = retainedRoutes[before.id]?.takeIf { it.matchesAccess(before, generation, retainedEpoch) }
         if (cached != null) return try { verify(cached.access); CompletableFuture.completedFuture(Unit) }
             catch (failure: IllegalArgumentException) { CompletableFuture.failedFuture(failure) }
         return loadAutonomousAccess(before).thenApply(::verify)

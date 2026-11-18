@@ -107,6 +107,8 @@ internal class CitizenPacketRoute(
     val remainingNodes: Int get() = path.size
     /** The request received a hint; ordinary wider-search fallback may still be needed. */
     internal val hasCourierCorridorHint: Boolean get() = corridor != null
+    internal var roadRouting: CitizenRoadRouting? = null
+        private set
 
     internal fun reuseIdentity(): CitizenRouteIdentity? = snapshotPolicy?.reuseKey
         ?.takeIf { corridor == null && avoiding.isEmpty() }
@@ -166,7 +168,7 @@ internal class CitizenPacketRoute(
 
     /** Bounded replay validation uses current caller permissions, support, costs and native body sweeps. */
     internal fun validatedCachedStepCost(from: CitizenPoint, step: CitizenPlannedStep): Double {
-        if (step.action != CitizenRouteAction.WALK && step.action != CitizenRouteAction.STEP) return Double.POSITIVE_INFINITY
+        if (!step.action.isGroundStep) return Double.POSITIVE_INFINITY
         val to = step.point
         val point = CivPosition(floor(to.x).toInt(), floor(to.y + .001).toInt(), floor(to.z).toInt())
         if (point.y !in minimumY until maximumY || !citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
@@ -260,8 +262,11 @@ internal class CitizenPacketRoute(
         }
     }
 
-    internal fun newSearch() = CitizenNavigationSearch(origin, CitizenPoint(target.x, target.y, target.z),
-        minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) }, settings, corridor)
+    internal fun newWorkerSearch() = newSearch(snapshotPolicy?.roadCorridor?.takeIf { avoiding.isEmpty() })
+
+    internal fun newSearch(roadLookup: CitizenRoadLookup? = null) = CitizenNavigationSearch(origin, target.point(),
+        minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) },
+        settings, corridor, roadLookup)
 
     internal fun attachAsync(cancel: () -> Unit) {
         check(directSearch == null) { "A direct route cannot be submitted after search started" }
@@ -273,6 +278,7 @@ internal class CitizenPacketRoute(
     internal fun recordSearch(result: CitizenSearchResult) {
         visited = result.nodes
         searchNanos += result.searchNanos
+        roadRouting = result.roadRouting
     }
     internal fun planningFailed(reason: String) { if (searching) fail(reason) }
     internal fun captureLimits() = minimumY to maximumY
@@ -378,6 +384,7 @@ internal class CitizenPacketRoute(
 
     internal fun acceptSearch(result: CitizenSearchResult) {
         if (!searching) return
+        roadRouting = result.roadRouting
         blockedPositions = result.blockedPositions
         result.failure?.let { fail(it); return }
         val steps = result.path?.toMutableList() ?: return
@@ -393,7 +400,7 @@ internal class CitizenPacketRoute(
         // Detached paths omit their root. An offset pose can need its own cell centre
         // before crossing an open panel, or before opening rotates a closed panel.
         val centre = CitizenPoint(floor(origin.x) + .5, origin.y, floor(origin.z) + .5)
-        val first = steps.firstOrNull()?.takeIf { it.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) }
+        val first = steps.firstOrNull()?.takeIf { it.action.isGroundStep }
         if (first != null && origin.distanceSquared(centre) > .000001) {
             val flat = first.point.y == origin.y
             val cell = CivPosition(floor(first.point.x).toInt(), floor(first.point.y).toInt(), floor(first.point.z).toInt())
@@ -414,7 +421,7 @@ internal class CitizenPacketRoute(
         }
         reusableSteps = steps.takeIf { reuseObserver != null && !result.continuation &&
             it.size in 1..CivsPaths.MAX_TRIP_CELLS &&
-            it.all { step -> step.action == CitizenRouteAction.WALK || step.action == CitizenRouteAction.STEP } }?.toList()
+            it.all { step -> step.action.isGroundStep } }?.toList()
         searching = false
         continuation = result.continuation
         continuationReason = result.continuationReason
@@ -477,7 +484,7 @@ internal class CitizenPacketRoute(
             if (segment > 0) straightenCorridor(CitizenPoint(point.x, point.y, point.z))
             var entry = path.firstOrNull()
             if (entry == null) { finishSegment(); break }
-            if (!entry.profileChecked && entry.profileTerrain == null) {
+            if (entry.action == CitizenRouteAction.STEP && !entry.profileChecked && entry.profileTerrain == null) {
                 entry.profileChecked = true
                 prepareStepProfile(entry, point)
                 entry = requireNotNull(path.firstOrNull())
@@ -506,7 +513,7 @@ internal class CitizenPacketRoute(
             val waypoint = to.clone()
             // A native profile already contains the clear ramps and mandatory tread contacts.
             if (profile == null) {
-                if ((entry.action == CitizenRouteAction.CLIMB || entry.action == CitizenRouteAction.LADDER_ENTER) &&
+                if (entry.action.alignsToLadder &&
                     (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
                     waypoint.y = point.y
                 } else if (to.y > point.y + .0001) {
@@ -576,7 +583,7 @@ internal class CitizenPacketRoute(
             val nextEntry = path.elementAtOrNull(1)
             if (point.distanceSquared(to) < .000001 || profile == null && descending &&
                 abs(point.x - to.x) < .000001 && abs(point.z - to.z) < .000001 &&
-                nextEntry != null && nextEntry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&
+                nextEntry != null && nextEntry.action.isGroundStep &&
                 nextEntry.point.y <= to.y + .0001) path.removeFirst()
             if (path.isEmpty()) { finishSegment(); break }
             if (remaining < .000001 || advance < .000001) break
@@ -608,7 +615,7 @@ internal class CitizenPacketRoute(
     }
 
     private fun gravityStep(entry: Waypoint, y: Double): Boolean = entry.profileTerrain == null && entry.point.y < y - .0001 &&
-        entry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&
+        entry.action.isGroundStep &&
         (floor(entry.start.x) != floor(entry.point.x) || floor(entry.start.z) != floor(entry.point.z))
 
     /** Refine only this admitted edge; the A* cells, route policy and capture budgets stay unchanged. */
@@ -616,7 +623,7 @@ internal class CitizenPacketRoute(
         val from = CitizenPoint(at.x, at.y, at.z)
         val to = entry.point
         val horizontal = (to.x - from.x) * (to.x - from.x) + (to.z - from.z) * (to.z - from.z)
-        if (entry.action != CitizenRouteAction.STEP || horizontal !in .0025..4.0 ||
+        if (horizontal !in .0025..4.0 ||
             abs(to.y - from.y) <= .13 || !citizenStepHeightAllowed(from.y, to.y)) return
         val low = min(from.y, to.y)
         val high = max(from.y, to.y)

@@ -135,7 +135,7 @@ internal class SettlementScenario private constructor(
             }
         }
 
-    /** Same private callback seam used by CivsServiceTest; production API and scheduling stay untouched. */
+    /** Uses the same private callback seam as the service specs. */
     @Suppress("UNCHECKED_CAST")
     private fun <T> serviceField(name: String): T = CivsService::class.java.getDeclaredField(name)
         .also { it.isAccessible = true }.get(service) as T

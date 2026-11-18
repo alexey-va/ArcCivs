@@ -58,6 +58,11 @@ lifecycle facts. Each activity owns its private queues and cursors:
 - `CivsCitizenLogistics` and `Couriers` own observed transfers and their callbacks.
 - `CivsCitizenLeisure`, `Shelters` and `Combat` own their interruption and cleanup.
 
+`CivsRoadGraph` connects known road and trail positions for the navigation worker.
+When a resident needs a new route, this graph can narrow the first terrain search.
+The worker still checks clearance and permissions for every step and can widen
+the search when a connection is blocked.
+
 The generic world-work path consumes `CitizenPlan` and `CivWorldWork`. Ordinary
 new gathering professions do not add branches to its phase loop. The existing
 builder, guard, child and tavern-specific behavior remains explicit.
@@ -77,6 +82,10 @@ set derives from it rather than maintaining a second handwritten list.
 one admitted request's captured state; it cannot create another scheduler.
 `CivsTerrainPolicy` supplies the common natural-ground and equivalent-state
 rules. `CivsRoadWorld` owns current road-maintenance authority and geometry.
+`CivsSiteSurvey` reads heights and slopes. `CivsFoundationCapture` captures
+foundation and terrace material, and `CivsAutonomousRouteScan` checks access to
+an entrance. `CivsPlacementScan` captures a placement and checks it again before
+the write. All four use the same scan queue.
 
 `CivsStorage` owns reservation, protection and reconciliation. Preparation is
 separated into `CivsStoragePlanner`, `CivsResidentStorage`, `CivsStorageContainers`
@@ -86,8 +95,10 @@ the same `CivsInventoryJournal`; there is no alternative native debit path.
 
 New producer output leaves two empty slots per physical holder for required
 supplies. Existing contents and accepted receipts keep their original quantities.
-Upgrade preparation can relocate exact native items between existing holders of
-the same building. `CivContainerRelocation` enters the existing inventory journal
+`CivsContainerRelocationPlanner` reads the actual source and destination slots
+and prepares the item moves. `CivsStorageRelocations` reserves the city and
+containers while construction evacuates or returns stored items, or moves the
+contents of a control barrel. `CivContainerRelocation` enters the existing inventory journal
 and native before/after checks; it never creates a second transfer journal.
 Unchanged destination container cells are excluded from schematic paste, including
 their inventory and metadata. Insufficient space prevents the transfer and upgrade.

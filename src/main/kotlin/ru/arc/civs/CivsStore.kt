@@ -15,7 +15,7 @@ import java.nio.file.StandardOpenOption
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 internal class CivsCheckpointFailure(val failures: Map<UUID, Throwable>) :
     IllegalStateException("Could not checkpoint settlements ${failures.keys}", failures.values.first()) {
@@ -59,8 +59,14 @@ class CivsStore(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<UUID, CivPlacementPlan>): Boolean = size > 4
     }
     private val consumedItems = CivsConsumedItems()
-    private val planChanges = AtomicLong()
-    internal val planGeneration: Long get() = planChanges.get()
+    private data class PlanChanges(val sequence: Long = 0, val all: Long = 0, val byId: Map<UUID, Long> = emptyMap())
+    private val planChanges = AtomicReference(PlanChanges())
+    internal fun planGeneration(ids: List<UUID>): Long {
+        val changes = planChanges.get()
+        var generation = changes.all
+        for (id in ids) generation = maxOf(generation, changes.byId[id] ?: 0)
+        return generation
+    }
     private var closed = false
     private var closeDrain: CompletableFuture<Unit>? = null
 
@@ -383,7 +389,7 @@ class CivsStore(
                 requiredGrass = it.requiredGrass?.toList(), paidGateFloors = it.paidGateFloors?.toList(),
                 paidWaterFloors = it.paidWaterFloors?.toList())
         })
-        return submitPlanChange {
+        return submitPlanChange(snapshot.id) {
             // A failed atomic write can have reached rename; never retain its previous cached value.
             planCache.remove(snapshot.id)
             validatePlan(snapshot)
@@ -406,7 +412,7 @@ class CivsStore(
         return planStore(trustedRoot, id).loadOrNull()?.plan?.let(::cachePlan)
     }
 
-    fun deletePlan(id: UUID): CompletableFuture<Boolean> = submitPlanChange {
+    fun deletePlan(id: UUID): CompletableFuture<Boolean> = submitPlanChange(id) {
         planCache.remove(id)
         val trustedRoot = trustedRoot()
         val store = planStore(trustedRoot, id)
@@ -1188,11 +1194,20 @@ class CivsStore(
         return requireNotNull(record) { "JSON record is empty" }
     }
 
-    private fun <T> submitPlanChange(action: () -> T): CompletableFuture<T> {
+    private fun <T> submitPlanChange(id: UUID? = null, action: () -> T): CompletableFuture<T> {
         // Fence both queued readers and projections completed while an uncertain write was in flight.
-        planChanges.incrementAndGet()
+        markPlanChanged(id)
         return submit {
-            try { action() } finally { planChanges.incrementAndGet() }
+            try { action() } finally { markPlanChanged(id) }
+        }
+    }
+
+    private fun markPlanChanged(id: UUID?) {
+        planChanges.updateAndGet { before ->
+            val sequence = before.sequence + 1
+            // Retain only bounded ID metadata. Reload or overflow conservatively invalidates every projection.
+            if (id == null || id !in before.byId && before.byId.size >= 64) PlanChanges(sequence, sequence)
+            else PlanChanges(sequence, before.all, before.byId + (id to sequence))
         }
     }
 

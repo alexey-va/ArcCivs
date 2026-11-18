@@ -124,6 +124,41 @@ class CivsCityPlansCacheTest : FunSpec({
         }
     }
 
+    test("another city's capture changes preserve warm access and an owner move invalidates its old references") {
+        accessCacheFixture { h ->
+            val otherBuildings = h.city.buildings.map { it.copy(id = UUID(1, it.id.leastSignificantBits)) }
+            val otherCity = h.city.copy(id = UUID(1, 81), owner = UUID(1, 82), buildings = otherBuildings)
+            val otherPlans = h.plans.mapIndexed { index, plan -> plan.copy(id = otherBuildings[index].id,
+                cityId = otherCity.id, building = otherBuildings[index].copy(phase = BuildingPhase.CONSTRUCTING)) }
+            h.additionalCities[otherCity.id] = otherCity
+            otherPlans.forEach(h::write)
+            h.countReads {
+                val first = h.load()
+                h.load(otherCity)
+                h.reads shouldBe 10
+                val replacement = otherPlans[1].copy(terrain = otherPlans[1].terrain!!.copy(
+                    route = otherPlans[1].terrain!!.route.map { it.copy(y = 64) }))
+                h.store.savePlan(replacement).join()
+                var before = h.reads
+                val unchanged = h.load()
+                println("retained-plan-unrelated-save reread_journals=${h.reads - before}")
+                h.reads shouldBe before
+                (unchanged === first) shouldBe true
+                h.load(otherCity).routes.getValue(replacement.building.id)[2].y shouldBe 64
+
+                h.store.deletePlan(replacement.id).join()
+                before = h.reads
+                (h.load() === first) shouldBe true
+                h.reads shouldBe before
+                h.load(otherCity).routes.containsKey(replacement.building.id) shouldBe false
+
+                // Plan identity is the dependency: replacing its owner must invalidate the old city's view too.
+                h.store.savePlan(h.flattenedForesterPlan().copy(cityId = otherCity.id)).join()
+                h.load().routes.containsKey(h.city.buildings[1].id) shouldBe false
+            }
+        }
+    }
+
     test("late retained-plan completions cannot republish after lifecycle or input changes") {
         for (change in listOf("clear", "remove", "capture", "adopted-plan")) {
         val queued = AccessProjectionExecutor()

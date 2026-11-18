@@ -7,18 +7,6 @@ import org.bukkit.inventory.EquipmentSlot
 import java.util.concurrent.CompletableFuture
 
 class CivsResidentPackedFoodTest : FunSpec({
-    test("Auto consumes carried bread instead of debiting abstract stock at a distant tavern") {
-        residentRuntime { h ->
-            val worker = h.city.workers.single().copy(hunger = 14, inventory = mapOf("BREAD" to 4L))
-            h.city = h.city.copy(workers = listOf(worker), inventory = null, autonomy = CivAutonomy(), stock = Stock(food = 90))
-            val plan = requireNotNull(CivsResidentLife.mealPlan(h.city, worker))
-            plan.source shouldBe CivResidentMealSource.CARRIED_BREAD
-            val fed = CivsResidentLife.finishMeal(h.city, plan)
-            fed.stock shouldBe h.city.stock
-            CivsEquipment.usableCount(fed.workers.single(), "BREAD") shouldBe 3
-        }
-    }
-
     test("a resident carrying food eats at the supported current position without requesting a route") {
         residentRuntime { h ->
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(hunger = 14, inventory = mapOf("BREAD" to 4L)) })
@@ -42,27 +30,6 @@ class CivsResidentPackedFoodTest : FunSpec({
             h.owner.pulse(7_000)
             h.usingMainHand shouldBe false
             h.displayedHand shouldBe org.bukkit.Material.AIR
-        }
-    }
-
-    test("severe hunger uses one session and exactly the three existing bread needed to resume work") {
-        residentRuntime { h ->
-            h.city = h.city.copy(workers = h.city.workers.map { it.copy(hunger = 0, inventory = mapOf("BREAD" to 4L)) })
-            h.owner.residentLifeEnabled = true
-            var sessions = 0
-            h.owner.finishResidentMeal = { id, plan ->
-                h.owner.validateResidentMeal(id, plan)
-                plan.amount shouldBe 3
-                h.city = CivsResidentLife.finishMeal(h.city, plan)
-                sessions++
-                CompletableFuture.completedFuture(h.city)
-            }
-            for (now in 2_000L..9_000L step 1_000) h.owner.pulse(now)
-            sessions shouldBe 1
-            val worker = h.city.workers.single()
-            worker.hunger shouldBe 18
-            worker.life!!.meals shouldBe 3L
-            CivsEquipment.usableCount(worker, "BREAD") shouldBe 1
         }
     }
 

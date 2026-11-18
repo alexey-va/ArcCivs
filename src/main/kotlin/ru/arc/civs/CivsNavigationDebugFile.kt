@@ -97,11 +97,19 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
                 throw CivsRejection("invalid-navigation-capture")
             return palette.getOrPut(value) { palette.size }
         }
+        val road = if (frame.terminal.roadRouting != null) frame.rounds.firstNotNullOfOrNull { round ->
+            round.probes.firstNotNullOfOrNull(CitizenSearchProbe::corridor)
+        } else null
         fun probe(value: CitizenSearchProbe): Map<String, Any?> {
-            if (++probeCount > MAX_PROBES || value.corridor != null)
+            if (++probeCount > MAX_PROBES || value.corridor != null && value.corridor !== road)
                 throw CivsRejection("unsupported-navigation-probes")
-            return mapOf("node" to value.node, "from" to value.from, "incoming" to value.incoming,
-                "initial_bounds" to (value.bounds != null))
+            return buildMap {
+                put("node", value.node)
+                put("from", value.from)
+                put("incoming", value.incoming)
+                put("initial_bounds", value.bounds != null)
+                if (value.corridor != null) put("road_corridor", true)
+            }
         }
         fun edge(value: CitizenSearchEdge): List<Any> {
             val node = value.node
@@ -149,7 +157,7 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
             "step_policy" to "CitizenRouteControls.stepClear", "cell_policy" to "CivRouteTerritory.allows+CitizenRouteControls.clear",
             "cost_policy" to "CivsPaths.Weights.detached", "mine_bottom" to null,
             "autonomous_soil" to CivsTerrainPolicy.AUTONOMOUS_SOIL.map { it.name }.sorted(),
-            "ordinary_cost" to CivsPaths.ORDINARY_COST, "observed_corridor_cost" to 1.5, "recognized_surface_provider" to false)
+            "ordinary_cost" to CivsPaths.ORDINARY_COST, "observed_corridor_cost" to CivsPaths.LEARNED_COST, "recognized_surface_provider" to false)
         val costsKnown = frame.terrain.costs.keys
         // BlockData is from already detached, already decoded snapshot sections. No World or native capture is accessed.
         val states = frame.terrain.blocks.keys.mapNotNull { point ->
@@ -163,11 +171,14 @@ internal class CivsNavigationDebugFile(private val root: Path, private val execu
                 "city_revision" to frame.context.cityRevision, "plugin_version" to frame.context.pluginVersion,
                 "origin" to frame.context.origin, "target" to frame.context.target, "started_at_ms" to frame.context.startedAtMillis),
             "settings" to frame.settings, "avoiding" to emptyList<Any>(), "preferred_corridor" to null, "minimum_y" to frame.minimumY, "maximum_y" to frame.maximumY,
+            "road_corridor" to road?.let { corridor -> mapOf("minimum_y" to corridor.minimumY, "maximum_y" to corridor.maximumY,
+                "columns" to corridor.columns.sorted().map { listOf((it shr 32).toInt(), it.toInt()) }) },
             "captured_at_ms" to frame.capturedAtMillis, "native_reads_added" to 0,
             "reported_blocks" to frame.reportedBlocks, "actual_blocks" to frame.terrain.blocks.size,
             "terminal" to mapOf("failure" to frame.terminal.failure, "nodes" to frame.terminal.nodes,
                 "path" to frame.terminal.path, "continuation" to frame.terminal.continuation,
                 "continuation_reason" to frame.terminal.continuationReason, "budget_call" to frame.budgetCall,
+                "road_routing" to frame.terminal.roadRouting?.name?.lowercase(),
                 "blocked_positions" to frame.terminal.blockedPositions, "search_nanos" to frame.terminal.searchNanos),
             "chunk_generations" to frame.terrain.chunks.map { (key, chunk) -> mapOf("chunk" to key, "revision" to chunk.revision) },
             "unavailable_chunks" to frame.terrain.unavailable,

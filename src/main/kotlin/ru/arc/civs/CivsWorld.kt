@@ -1,16 +1,13 @@
 package ru.arc.civs
 
-import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import me.angeschossen.lands.api.LandsIntegration
 import me.angeschossen.lands.api.flags.type.Flags
 import org.bukkit.Bukkit
-import org.bukkit.HeightMap
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.Particle
 import org.bukkit.SoundCategory
-import org.bukkit.Tag
 import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.BlockFace
@@ -27,23 +24,15 @@ import ru.arc.paper.chunk.PaperChunkKey
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
-import kotlin.math.floor
-
-import ru.arc.civs.CivsTerrainPolicy.checkAutonomousTerrain
-import ru.arc.civs.CivsTerrainPolicy.naturalLeaves
 import ru.arc.civs.CivsTerrainPolicy.naturalTerraform
 import ru.arc.civs.CivsTerrainPolicy.fullTerraformSupport
-import ru.arc.civs.CivsTerrainPolicy.routeTerraformSupport
-import ru.arc.civs.CivsTerrainPolicy.passableTerraform
 import ru.arc.civs.CivsTerrainPolicy.requireTerrainRoute
-import ru.arc.civs.CivsTerrainPolicy.MAXIMUM_TREE_READS
 import ru.arc.civs.CivsTerrainPolicy.TREE_GROUND
 import ru.arc.civs.CivsTerrainPolicy.terraformMaterial
-import ru.arc.civs.CivsTerrainPolicy.PROTECTED_TERRAIN
-import ru.arc.civs.CivsTerrainPolicy.FALLING_GROUND
+
 /**
  * Settlement-specific placement policy; Core remains the sole schematic mutation owner.
- * Requests may arrive on any thread. All Bukkit reads run in one lifecycle-owned timer,
+ * Requests may arrive on any thread. Native scan steps run in one lifecycle-owned timer,
  * sharing a time-bounded 2048-cell budget across at most four scans. The existing chunk
  * lifecycle prepares each scan's temporary footprint before its first native read.
  * Explicit storage rack repair is the guarded maintenance mutation in the same native budget.
@@ -76,7 +65,9 @@ class CivsWorld(
         adminPlacement: Boolean = false, constructionStorage: Boolean = false, acceptedStorage: List<CivPlanBlock>? = null,
     ): CompletableFuture<CivPlacementPlan> = admit(terrainPoints(terrain)) {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-        Capture(cityId, owner, worldId, building, cells.toList(), previous, terrain = terrain, adminPlacement = adminPlacement, constructionStorage = constructionStorage, acceptedStorage = acceptedStorage)
+        CivsPlacementScan.Capture(this, ::includeScanColumns, cityId, owner, worldId, building, cells.toList(), previous,
+            terrain = terrain, adminPlacement = adminPlacement, constructionStorage = constructionStorage,
+            acceptedStorage = acceptedStorage)
     }
 
     /** A new site reserves its marker; an owned queued upgrade only records a proposal until fresh activation. */
@@ -84,8 +75,8 @@ class CivsWorld(
         cells: List<ArcSchematicBlock>, previous: CivBuilding?,
         terrain: CivTerraformPlan? = null, adminPlacement: Boolean = false): CompletableFuture<CivPlacementPlan> = admit(terrainPoints(terrain)) {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-        Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true,
-            terrain = terrain, adminPlacement = adminPlacement, upgradeProposal = true)
+        CivsPlacementScan.Capture(this, ::includeScanColumns, cityId, owner, worldId, building, cells.toList(), previous,
+            allowControlPlacement = true, terrain = terrain, adminPlacement = adminPlacement, upgradeProposal = true)
     }
 
     internal fun captureWallRefit(building: CivBuilding, cells: List<ArcSchematicBlock>, previous: CivBuilding,
@@ -94,7 +85,7 @@ class CivsWorld(
         admit(terrainPoints(terrain)) {
             val city = approach.city
             requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-            Capture(city.id, city.owner, city.worldId, building, cells.toList(), previous,
+            CivsPlacementScan.Capture(this, ::includeScanColumns, city.id, city.owner, city.worldId, building, cells.toList(), previous,
                 allowControlPlacement = proposal, terrain = terrain, upgradeProposal = proposal, wallApproach = approach,
                 constructionStorage = !proposal, acceptedStorage = acceptedStorage)
         }
@@ -104,7 +95,7 @@ class CivsWorld(
         cells: List<ArcSchematicBlock>, terrain: CivTerraformPlan? = null,
         previous: CivBuilding? = null): CompletableFuture<CivPlacementPlan> = admit(terrainPoints(terrain)) {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-        Capture(cityId, owner, worldId, building, cells.toList(), previous,
+        CivsPlacementScan.Capture(this, ::includeScanColumns, cityId, owner, worldId, building, cells.toList(), previous,
             allowControlPlacement = true, strictAutonomous = true, terrain = terrain, constructionStorage = true)
     }
 
@@ -115,7 +106,7 @@ class CivsWorld(
         admit(area = if (localFootprint) null else surveyArea(city)) {
         requireCivs(waterColumns.size <= CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS, "autonomy-search-budget")
         // Keep an owned snapshot without rebuilding packed coordinates in a boxed Long hash set.
-        AutonomousHeightField(city, envelope, previous, LongOpenHashSet(waterColumns), localFootprint = localFootprint,
+        AutonomousHeightField(this, city, envelope, previous, LongOpenHashSet(waterColumns), localFootprint = localFootprint,
             markWaterTop = markWaterTop)
     }
 
@@ -130,7 +121,7 @@ class CivsWorld(
             requireCivs(city.building(hall.id) == hall && hall.type == BuildingType.TOWN_HALL &&
                 hall.phase == BuildingPhase.ACTIVE && city.pendingDeletion == null, "stale-building")
             requireCivs(keys.size == samples.size && samples.all { city.contains(it.x, it.z) }, "autonomy-search-budget")
-            AutonomousHeightField(city, hall, hall, keys, requested = samples, markWaterTop = true)
+            AutonomousHeightField(this, city, hall, hall, keys, requested = samples, markWaterTop = true)
         }
     }
 
@@ -146,14 +137,14 @@ class CivsWorld(
                     requested.map { it.x to it.z }.distinct().size == requested.size &&
                     requested.all { city.contains(it.x, it.z) }, "autonomy-search-budget")
             }
-            AutonomousHeightField(city, envelope, null, emptySet(), prospective = true, requested = samples)
+            AutonomousHeightField(this, city, envelope, null, emptySet(), prospective = true, requested = samples)
         }
     }
 
     internal fun captureTerraform(city: Settlement, draft: CivTerraformDraft, executor: Executor,
         previous: CivBuilding? = null): CompletableFuture<CivTerraformPlan> = admit(
         (draft.columns.asSequence().map { CivPosition(it.x, it.floorY, it.z) } + draft.route.asSequence()).asIterable()) {
-        TerraformCapture(city, draft, executor, previous)
+        TerraformCapture(this, city, draft, executor, previous)
     }
 
     /** Manual sites receive the same journaled earthworks without requiring an existing graded road. */
@@ -163,7 +154,7 @@ class CivsWorld(
         adminPlacement: Boolean = false): CompletableFuture<CivTerraformPlan?> {
         val capture = admit {
             requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan")
-            ManualFoundationCapture(cityId, owner, worldId, building, cells.size, executor, previous, autonomous)
+            ManualFoundationCapture(this, cityId, owner, worldId, building, cells.size, executor, previous, autonomous)
         }
         if (!adminPlacement) return capture
         val result = capture.exceptionally { failure ->
@@ -177,18 +168,18 @@ class CivsWorld(
     }
 
     internal fun autonomousSurface(city: Settlement, envelope: CivBuilding): CompletableFuture<Int> = admit {
-        AutonomousSurface(city, envelope)
+        AutonomousSurface(this, city, envelope)
     }
 
     internal fun validateAutonomousSite(city: Settlement, envelope: CivBuilding): CompletableFuture<Unit> = admit {
-        AutonomousTerrain(city, envelope)
+        AutonomousTerrain(this, city, envelope)
     }
 
     internal fun autonomousRoute(city: Settlement, envelope: CivBuilding, from: CivPosition,
         executor: Executor, terrain: CivTerraformPlan? = null,
         previous: CivBuilding? = null): CompletableFuture<Unit> =
         admit(terrainPoints(terrain) + from, CivsChunkArea.of(city)) {
-        AutonomousRoute(city, envelope, from, executor, terrain, previous)
+        AutonomousRoute(this, city, envelope, from, executor, terrain, previous, navigationSettings)
     }
 
     /** The service journals the batch and fences worker arrival before permitting each native write. */
@@ -274,7 +265,8 @@ class CivsWorld(
             val paidGate = !plan.terrain?.paidGateFloors.isNullOrEmpty()
             requireCivs(plan.blocks.size <= CivsStore.MAX_PLAN_BLOCKS &&
                 (plan.blocks.isNotEmpty() || paidGate) && (!terrainBatch || paidGate), "invalid-plan")
-            Revalidation(plan.copy(blocks = plan.blocks.toList()), owner, terrainBatch)
+            CivsPlacementScan.Revalidation(this, ::includeScanColumns, plan.copy(blocks = plan.blocks.toList()),
+                owner, terrainBatch)
         }
 
     /** Exact owner identity, including material-specific Lands role flags. Server thread only. */
@@ -422,6 +414,15 @@ class CivsWorld(
         }
     }
 
+    /** A validated gate replacement can extend its footprint only before the loader receives the demand. */
+    private fun includeScanColumns(scan: CivsWorldScan<*>, columns: List<CivPosition>) {
+        synchronized(monitor) {
+            requireCivs(scanDemands[scan] == null, "stale-building")
+            val extra = requireNotNull(CivsChunkArea.around(scan.worldId, columns)).keys()
+            scanFootprints[scan] = scanFootprints.getValue(scan) + extra
+        }
+    }
+
     private fun chunksReady(scan: CivsWorldScan<*>): Boolean {
         val request = scanChunks ?: return true
         val demand = synchronized(monitor) {
@@ -458,407 +459,6 @@ class CivsWorld(
             if (scan.future.isDone || !scan.ready()) continue
             scan.guarded { scan.step() }
             remaining--
-        }
-    }
-
-    private inner class AutonomousHeightField(private val citySnapshot: Settlement, envelope: CivBuilding,
-        private val previous: CivBuilding?, private val waterColumns: Set<Long>,
-        private val prospective: Boolean = false, private val requested: List<CivPosition>? = null,
-        private val localFootprint: Boolean = false, private val markWaterTop: Boolean = false) :
-        CivsWorldScan<CivTerrainSurface>(this@CivsWorld, citySnapshot.id, citySnapshot.owner, citySnapshot.worldId, envelope) {
-        private val shore = requested != null && !prospective
-        private val radius = citySnapshot.radius.coerceIn(0, 127)
-        private val width = if (localFootprint) building.bounds.max.x - building.bounds.min.x + 1 else radius * 2 + 1
-        private val depth = if (localFootprint) building.bounds.max.z - building.bounds.min.z + 1 else width
-        private val area = requested?.size ?: (width * depth)
-        // Packed adjacent X/Z keys collide under Long.hashCode; retain raster order with mixed long hashing.
-        private val columns = Long2ObjectLinkedOpenHashMap<CivTerrainSurfaceColumn>()
-        private var topY: Int? = null
-        private var waterTopY: Int? = null
-        private var probeY = 0
-        private var probes = 0
-
-        init { requireCivs(area <= CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS, "autonomy-search-budget") }
-        override fun validateIdentity(city: Settlement?) {
-            requireCivs(if (prospective) city == null else
-                city != null && city.pendingDeletion == null && city.building(building.id) == previous, "stale-building")
-        }
-        override fun step() {
-            if (index == area) return finish(CivTerrainSurface(world.minHeight, world.maxHeight, columns))
-            val sample = requested?.get(index)
-            val x = sample?.x ?: if (localFootprint) building.bounds.min.x + index % width
-                else Math.addExact(citySnapshot.center.x, index % width - radius)
-            val z = sample?.z ?: if (localFootprint) building.bounds.min.z + index / width
-                else Math.addExact(citySnapshot.center.z, index / width - radius)
-            val key = civsTerrainKey(x, z)
-            fun complete(ground: Int, natural: Boolean, loaded: Boolean = true, water: CivTerrainSurfaceColumn? = null,
-                dirtPath: Boolean = false, cleanGrass: Boolean = false) {
-                columns[key] = water?.copy(topY = topY ?: ground) ?:
-                    CivTerrainSurfaceColumn(ground, natural, loaded, topY ?: ground, dirtPath = dirtPath, cleanGrass = cleanGrass)
-                index++; topY = null; waterTopY = null; probes = 0
-            }
-            if (!world.isChunkLoaded(x shr 4, z shr 4) ||
-                !world.worldBorder.isInside(Location(world, x + .5, building.anchor.y.toDouble(), z + .5))) {
-                complete(world.minHeight, false, false)
-                return
-            }
-            if (topY == null) {
-                probeY = world.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING)
-                topY = probeY
-                if (shore && probeY != sample?.y) { complete(probeY, false); return }
-            }
-            if (probeY !in world.minHeight until world.maxHeight) {
-                complete(waterTopY ?: probeY, false)
-                return
-            }
-            val block = read(CivPosition(x, probeY, z))
-            probes++
-            if ((prospective || shore) && !canModify(owner, block)) {
-                complete(probeY, false)
-                return
-            }
-            val waterTop = waterTopY
-            if (waterTop != null) {
-                if (block.type == Material.WATER && waterTop.toLong() - probeY < MAXIMUM_SURFACE_WATER_DEPTH) {
-                    probeY--
-                    return
-                }
-                val water = civsWaterSurfaceColumn(waterTop, probeY, block.type,
-                    naturalTerraform(block) && (!shore || fullTerraformSupport(block)))
-                complete(waterTop, false, water = water ?: observedWater(waterTop))
-                return
-            }
-            if (block.type == Material.WATER && (key in waterColumns || markWaterTop)) {
-                if (key in waterColumns) { waterTopY = probeY; probeY-- }
-                else complete(probeY, false, water = observedWater(probeY))
-                return
-            }
-            if (shore) { complete(probeY, false); return }
-            if (block.type == Material.DIRT_PATH) {
-                complete(probeY, false, dirtPath = true)
-                return
-            }
-            val canopy = Tag.LOGS.isTagged(block.type) || block.blockData is org.bukkit.block.data.type.Leaves
-            if (!canopy && block.type.isSolid && naturalTerraform(block)) {
-                complete(probeY, true, cleanGrass = block.type == Material.GRASS_BLOCK && topY == probeY)
-                return
-            }
-            val clearable = naturalTerraform(block)
-            if (!clearable || probes >= MAXIMUM_TREE_READS) complete(probeY, false) else probeY--
-        }
-
-        private fun observedWater(y: Int) = if (markWaterTop && y == topY)
-            CivTerrainSurfaceColumn(y, natural = false, waterTopY = y) else null
-    }
-
-    /** A downward probe is one queue unit; deep foundations share every other scan's tick budget. */
-    private inner class ManualFoundationCapture(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
-        private val schematicCells: Int, private val executor: Executor, private val previous: CivBuilding?,
-        private var strictAutonomous: Boolean) :
-        CivsWorldScan<CivTerraformPlan?>(this@CivsWorld, cityId, owner, worldId, building) {
-        private val width = building.bounds.max.x - building.bounds.min.x + 1
-        private val footprintColumns = width * (building.bounds.max.z - building.bounds.min.z + 1)
-        private val entranceOutside = !CivsAutonomousGeometry.horizontalContains(building.bounds, building.entrance)
-        private val totalColumns = footprintColumns + if (entranceOutside) 1 else 0
-        private val captured = linkedMapOf<CivPosition, CivTerraformCell>()
-        private val columns = ArrayList<CivTerraformColumn>()
-        private var columnIndex = 0
-        private var y: Int? = null
-        private var topY = 0
-        private var planned: CompletableFuture<CivTerraformPlan?>? = null
-
-        init { future.whenComplete { _, _ -> if (future.isCancelled) planned?.cancel(false) } }
-
-        override fun validateIdentity(city: Settlement?) {
-            if (city?.autonomy != null) strictAutonomous = true
-            requireCivs(city?.pendingDeletion == null && city?.building(building.id) == previous, "stale-building")
-        }
-
-        override fun ready(): Boolean = planned?.isDone != false
-
-        override fun step() {
-            planned?.let { return finish(it.join()) }
-            if (columnIndex == totalColumns) {
-                val prepareControl = retargetSource != null
-                planned = CompletableFuture.supplyAsync({
-                    val draft = CivTerraformDraft(building, columns, emptyList(), building.anchor.y,
-                        prepareControl = prepareControl)
-                    CivsAutonomousTerraform.materialize(draft, captured).takeIf { it.blocks.isNotEmpty() }.also {
-                        requireCivs(schematicCells.toLong() + (it?.blocks?.size ?: 0) <= CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-                    }
-                }, executor)
-                return
-            }
-            val footprint = columnIndex < footprintColumns
-            val x = if (footprint) building.bounds.min.x + columnIndex % width else building.entrance.x
-            val z = if (footprint) building.bounds.min.z + columnIndex / width else building.entrance.z
-            // Completed buildings retain their authored structure and already accepted foundations.
-            if (previous?.phase == BuildingPhase.ACTIVE &&
-                (CivsAutonomousGeometry.horizontalContains(previous.bounds, CivPosition(x, 0, z)) || !footprint)) {
-                columnIndex++
-                return
-            }
-            val ground = if (footprint) building.anchor.y else building.entrance.y - 1
-            val floor = minOf(ground, building.bounds.min.y - 1)
-            requireCivs(floor >= world.minHeight && ground + 2 < world.maxHeight, "outside-world")
-            val currentY = y ?: run {
-                requireCivs(world.isChunkLoaded(x shr 4, z shr 4), "chunks-unloaded")
-                topY = world.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING)
-                requireCivs(maxOf(topY, ground) + 2 < world.maxHeight, "outside-world")
-                maxOf(topY, ground) + 2
-            }
-            requireCivs(index < CivsAutonomousTerraform.MAXIMUM_CAPTURE_CELLS, "autonomy-search-budget")
-            val position = CivPosition(x, currentY, z)
-            val block = read(position)
-            val data = block.blockData
-            if (position == previous?.control && previous?.control != building.control && retargetSource != null)
-                rejectAt("hall-source-overlap", block)
-            if (position == building.control && !(previous?.control == position && block.type == Material.BARREL) &&
-                (if (strictAutonomous) !naturalTerraform(block) else block.isLiquid ||
-                    (data as? Waterlogged)?.isWaterlogged == true || block.state is TileState || block.type in PROTECTED_TERRAIN))
-                rejectAt(if (retargetSource != null) "hall-target-control-incompatible" else "autonomy-terrain", block)
-            // Air above the terrace stays untouched; schematic capture still validates its own cells.
-            val accessFailure = if (currentY > ground && block.type.isAir) null
-                else if (!canModify(owner, block)) "lands-denied"
-                else try {
-                    checkTerrainOwnership(position, allowUnpublished = true); null
-                } catch (failure: CivsRejection) { failure.reason }
-            val accessible = accessFailure == null
-            val safe = naturalTerraform(block) && accessible
-            val solid = !block.type.hasGravity() && !naturalLeaves(data) && fullTerraformSupport(block)
-            val supportSafe = safe || accessible && solid && block.state !is TileState
-            captured[position] = CivTerraformCell(position, data.asString, safe, solid, passableTerraform(block), supportSafe)
-            index++
-            val supportingBase = currentY <= floor && solid && block.type !in FALLING_GROUND
-            // A proved obstruction must not wait for all remaining columns and the planning executor.
-            if (position != building.control && !safe && (if (currentY > ground) !block.type.isAir
-                    else !supportSafe && !(supportingBase && block.type == Material.BEDROCK)))
-                rejectAt(accessFailure ?: "autonomy-terrain", block)
-            if (supportingBase) {
-                columns += CivTerraformColumn(x, z, ground, floor, topY, supportY = currentY)
-                columnIndex++; y = null
-            } else {
-                if (currentY == world.minHeight) rejectAt("autonomy-foundation", block)
-                y = currentY - 1
-            }
-        }
-    }
-
-    private inner class TerraformCapture(city: Settlement, private val draft: CivTerraformDraft,
-        private val executor: Executor, private val previous: CivBuilding?) :
-        CivsWorldScan<CivTerraformPlan>(this@CivsWorld, city.id, city.owner, city.worldId, draft.building) {
-        private val captured = linkedMapOf<CivPosition, CivTerraformCell>()
-        private val columns = draft.columns.toList()
-        private val protectedAccess = draft.access.standing(city, draft.building.id)
-        private var columnIndex = 0
-        private var y: Int? = null
-        private var planned: CompletableFuture<CivTerraformPlan>? = null
-
-        init {
-            requireCivs(columns.size in 1..CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS &&
-                columns.map { civsTerrainKey(it.x, it.z) }.distinct().size == columns.size, "invalid-plan")
-            requireTerrainRoute(draft.route, building)
-            requireCivs(columns.sumOf { (maxOf(it.surfaceY, it.groundY).toLong() + 3 - it.supportY).coerceAtLeast(0) } <=
-                CivsAutonomousTerraform.MAXIMUM_CAPTURE_CELLS, "autonomy-search-budget")
-            future.whenComplete { _, _ -> if (future.isCancelled) planned?.cancel(false) }
-        }
-        override fun validateIdentity(city: Settlement?) {
-            requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == previous, "stale-building")
-        }
-        override fun ready(): Boolean = planned?.isDone != false
-        override fun step() {
-            planned?.let { return finish(it.join()) } // ready() only resumes completed detached work.
-            if (columnIndex == columns.size) {
-                planned = CompletableFuture.supplyAsync({ CivsAutonomousTerraform.materialize(draft, captured) }, executor)
-                return
-            }
-            val column = columns[columnIndex]
-            val low = maxOf(world.minHeight, column.supportY)
-            val high = minOf(world.maxHeight - 1, maxOf(column.surfaceY, column.groundY) + 2)
-            requireCivs(low <= high, "outside-world")
-            val currentY = y ?: high
-            val position = CivPosition(column.x, currentY, column.z)
-            val block = read(position)
-            val shoulderFill = column.shoulderFill(currentY)?.let { parse(it).material }
-            val safe = (column.preserve || civsTerrainKey(position.x, position.z) !in protectedAccess) &&
-                naturalTerraform(block) && canModify(owner, block, shoulderFill) && try {
-                checkTerrainOwnership(position); true
-            } catch (_: CivsRejection) { false }
-            captured[position] = CivTerraformCell(position, block.blockData.asString, safe,
-                !naturalLeaves(block.blockData) && (column.preserve || !block.type.hasGravity()) &&
-                    (if (column.preserve) routeTerraformSupport(block) else fullTerraformSupport(block)), passableTerraform(block))
-            index++
-            if (currentY == low) { columnIndex++; y = null } else y = currentY - 1
-        }
-    }
-
-    private inner class AutonomousSurface(city: Settlement, envelope: CivBuilding) :
-        CivsWorldScan<Int>(this@CivsWorld, city.id, city.owner, city.worldId, envelope) {
-        private val width = building.bounds.max.x - building.bounds.min.x + 1
-        private val area = width * (building.bounds.max.z - building.bounds.min.z + 1)
-        private var low = Int.MAX_VALUE
-        private var high = Int.MIN_VALUE
-        override fun validateIdentity(city: Settlement?) {
-            requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == null, "stale-building")
-        }
-        override fun step() {
-            if (index == area) return finish(low)
-            val x = building.bounds.min.x + index % width
-            val z = building.bounds.min.z + index / width
-            index++
-            requireCivs(world.isChunkLoaded(x shr 4, z shr 4), "chunks-unloaded")
-            // Heightmap and one block read are a fixed native unit, never a downward unbounded scan.
-            val y = world.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES)
-            val surface = read(CivPosition(x, y, z))
-            if (!surface.type.isSolid || !naturalTerraform(surface)) rejectAt("autonomy-terrain", surface)
-            low = minOf(low, y); high = maxOf(high, y)
-            requireCivs(high - low <= 1, "autonomy-slope")
-        }
-    }
-
-    private inner class AutonomousTerrain(city: Settlement, envelope: CivBuilding) :
-        CivsWorldScan<Unit>(this@CivsWorld, city.id, city.owner, city.worldId, envelope) {
-        private val width = building.bounds.max.x - building.bounds.min.x + 1
-        private val depth = building.bounds.max.z - building.bounds.min.z + 1
-        private val area = width * depth
-        private val volume = civsBoxVolume(building.bounds).toInt()
-        private val approach = CivsAutonomousGeometry.approach(building)
-        override fun validateIdentity(city: Settlement?) {
-            requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == null, "stale-building")
-        }
-        override fun step() {
-            val cursor = index++
-            if (cursor < area) {
-                val block = read(CivPosition(building.bounds.min.x + cursor % width, building.bounds.min.y - 1,
-                    building.bounds.min.z + cursor / width))
-                if (!block.type.isSolid || block.isLiquid || block.collisionShape.boundingBoxes.none { it.maxY >= 1.0 })
-                    rejectAt("autonomy-terrain", block)
-                return
-            }
-            val cell = cursor - area
-            if (cell < volume) {
-                val block = read(CivPosition(building.bounds.min.x + cell % width,
-                    building.bounds.min.y + cell / area, building.bounds.min.z + cell / width % depth))
-                checkAutonomousTerrain(block, building.anchor.y)
-                if (!canModify(owner, block)) rejectAt("lands-denied", block)
-                return
-            }
-            val entry = cell - volume
-            if (entry >= approach.size * 3) return finish(Unit)
-            val p = approach[entry / 3]
-            val offset = entry % 3 - 1
-            val block = read(p.copy(y = p.y + offset))
-            if (offset == -1) {
-                if (!block.type.isSolid || block.isLiquid || block.collisionShape.boundingBoxes.none { it.maxY >= 1.0 })
-                    rejectAt("autonomy-terrain", block)
-            } else if (!passableTerraform(block)) rejectAt("autonomy-terrain", block)
-        }
-    }
-
-    /** Same detached A* and collision capture as resident movement, sharing the world scan budget. */
-    private inner class AutonomousRoute(private val citySnapshot: Settlement, envelope: CivBuilding,
-        private val from: CivPosition, private val executor: Executor,
-        private val terraform: CivTerraformPlan?, private val previous: CivBuilding?) :
-        CivsWorldScan<Unit>(this@CivsWorld, citySnapshot.id, citySnapshot.owner, citySnapshot.worldId, envelope) {
-        private var route: CitizenPacketRoute? = null
-        private var search: CitizenNavigationSearch? = null
-        private var searching: CompletableFuture<CitizenSearchResult>? = null
-        private var capture: CitizenNavigationCapture? = null
-        private val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
-        private val obstacles = citySnapshot.buildings.filter { it.id != previous?.id }
-            .flatMap { civsRouteObstacles(citySnapshot, it) } + civsRouteObstacles(citySnapshot, building, allowPlanned = true)
-        private var overlayIndex = 0
-        private var routeIndex = 0
-        private val overlay = terraform?.blocks.orEmpty().associateBy { it.position }
-        private val routeColumns = terraform?.route.orEmpty().flatMap { p ->
-            (-1..1).flatMap { dx -> (-1..1).map { dz -> civsTerrainKey(p.x + dx, p.z + dz) } }
-        }.toSet()
-
-        init {
-            terraform?.let {
-                requireTerrainRoute(it.route, building)
-                requireCivs(it.route.first() == from, "invalid-plan")
-            }
-            future.whenComplete { _, _ -> search?.cancel() }
-        }
-        override fun validateIdentity(city: Settlement?) {
-            requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == previous, "stale-building")
-        }
-        override fun ready(): Boolean = searching?.isDone != false
-        override fun step() {
-            index++
-            terraform?.let { plan ->
-                if (overlayIndex < plan.blocks.size) {
-                    val cell = plan.blocks[overlayIndex]
-                    val tree = treeLedgerProof(plan.blocks, overlayIndex)
-                    if (tree && !treeSupportReady(cell.position)) return
-                    overlayIndex++
-                    checkTerraformCell(cell, plan)
-                    val block = read(cell.position)
-                    val after = parse(cell.after)
-                    checkTerraformBlock(block, after, tree)
-                    if (civsTerrainKey(cell.position.x, cell.position.z) in routeColumns) {
-                        terrain[cell.position] = CitizenTerrainBlock(true, false, false, false, false,
-                            citySnapshot.contains(cell.position.x, cell.position.z) && obstacles.none {
-                                CivsAutonomousGeometry.horizontalContains(it, cell.position)
-                            }, 1.0, if (after.material.isAir) emptyList() else listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)))
-                    }
-                    return
-                }
-                if (routeIndex < plan.route.size * 3) {
-                    checkTerrainRouteCell(plan, overlay, routeIndex++)
-                    return
-                }
-            }
-            if (route == null) {
-                val endpoint = building.entrance
-                val corridor = terraform?.route?.mapTo(hashSetOf()) { it.copy(y = it.y - 1) }?.let {
-                    CitizenSearchCorridor.fromWalked(it, from.point(), endpoint.point())
-                }
-                val path = CitizenPacketRoute(world, Location(world, from.x + .5, from.y.toDouble(), from.z + .5),
-                    Location(world, endpoint.x + .5, endpoint.y.toDouble(), endpoint.z + .5),
-                    { p -> citySnapshot.contains(p.x, p.z) && obstacles.none { CivsAutonomousGeometry.horizontalContains(it, p) } &&
-                        citySnapshot.buildings.none { CivsWorksiteLayouts.isField(it, p.x, p.z) } },
-                    { a, b -> citizenControlStepClear(citySnapshot, a, b) }, { 1.0 }, settings = navigationSettings,
-                    corridor = corridor)
-                route = path
-                search = path.newSearch()
-                dispatch(emptyList())
-                return
-            }
-            searching?.let { pending ->
-                if (!pending.isDone) return
-                searching = null
-                val result = pending.join() // Observed complete; no gameplay-thread waiting.
-                result.failure?.let {
-                    throw CivsRejection(when (it) {
-                        "chunk-unloaded" -> "chunks-unloaded"
-                        "search-budget" -> "autonomy-search-budget"
-                        else -> "autonomy-no-path"
-                    }, mapOf("stage" to "native-route-search", "corridor" to requireNotNull(route).hasCourierCorridorHint.toString(),
-                        "failure" to it, "nodes" to result.nodes.toString()))
-                }
-                // A movement segment does not prove access to a future building entrance.
-                if (result.continuation) throw CivsRejection(
-                    if (result.continuationReason == "no-path") "autonomy-no-path" else "autonomy-search-budget",
-                    mapOf("stage" to "native-route-continuation", "corridor" to requireNotNull(route).hasCourierCorridorHint.toString(),
-                        "continuation_reason" to result.continuationReason.orEmpty(), "nodes" to result.nodes.toString()))
-                if (result.path != null) return finish(Unit)
-                capture = CitizenNavigationCapture(requireNotNull(route), result.probes, terrain)
-            }
-            val cursor = capture ?: return
-            val complete = try { cursor.step() } catch (_: CitizenNavigationCaptureLimit) {
-                throw CivsRejection("autonomy-search-budget", mapOf("stage" to "native-route-capture",
-                    "corridor" to requireNotNull(route).hasCourierCorridorHint.toString(), "terrain_cache_entries" to terrain.size.toString()))
-            }
-            if (complete) {
-                capture = null
-                dispatch(cursor.result)
-            }
-        }
-        private fun dispatch(captured: List<CitizenSearchCapture>) {
-            val solver = requireNotNull(search)
-            searching = CompletableFuture.supplyAsync({ solver.advance(captured) }, executor)
         }
     }
 
@@ -1035,326 +635,6 @@ class CivsWorld(
         }
     }
 
-    /** A small cursor inside ordinary capture/revalidation, never a separate planner or world writer. */
-    private inner class GateReadiness(val gate: CivBuilding) {
-        private val lines = CivsInfrastructureRebuild.readyLines(gate)
-        private val core = lines.flatMap { it.drop(1).dropLast(1) }.distinct()
-        private val approaches = lines.flatMap { listOf(it.first(), it.last()) }.flatMap { p ->
-            (-1..1).map { dy -> p.copy(y = p.y + dy) }
-        }.distinct()
-        private val samples = (core.flatMap { p -> (-1..2).map { dy -> p.copy(y = p.y + dy) to (dy == -1) } } +
-            approaches.flatMap { p -> (-1..1).map { dy -> p.copy(y = p.y + dy) to (dy == -1) } }).distinct()
-        private val observed = hashMapOf<Pair<CivPosition, Boolean>, Boolean>()
-        private var cursor = 0
-        val columns: List<CivPosition> get() = lines.flatten()
-
-        fun step(read: (CivPosition) -> Block): Boolean {
-            if (cursor < samples.size) {
-                val sample = samples[cursor++]
-                val block = read(sample.first)
-                observed[sample] = if (sample.second) routeTerraformSupport(block) else passableTerraform(block)
-                return false
-            }
-            fun stands(p: CivPosition, head: Int = 1) = (-1..head).all { dy ->
-                observed[p.copy(y = p.y + dy) to (dy == -1)] == true
-            }
-            requireCivs(core.all { stands(it, 2) }, "gate-refit-exit-not-ready")
-            requireCivs(lines.any { line ->
-                line.drop(1).dropLast(1).zipWithNext().all { (a, b) -> kotlin.math.abs(a.y - b.y) <= 1 } &&
-                    listOf(line.first(), line.last()).all { p -> (-1..1).any { dy -> stands(p.copy(y = p.y + dy)) } }
-            }, "gate-refit-exit-not-ready")
-            return true
-        }
-    }
-
-    /** Add only the proved survivor's few approach columns before the normal chunk demand is created. */
-    private fun includeGateReadiness(scan: CivsWorldScan<*>, gate: CivBuilding): GateReadiness = GateReadiness(gate).also { proof ->
-        synchronized(monitor) {
-            requireCivs(scanDemands[scan] == null, "stale-building")
-            val extra = requireNotNull(CivsChunkArea.around(scan.worldId, proof.columns)).keys()
-            scanFootprints[scan] = scanFootprints.getValue(scan) + extra
-        }
-    }
-
-    private inner class Capture(
-        cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
-        private val cells: List<ArcSchematicBlock>, private val previous: CivBuilding?,
-        private val allowControlPlacement: Boolean = false,
-        private var strictAutonomous: Boolean = false,
-        terrain: CivTerraformPlan? = null,
-        private val adminPlacement: Boolean = false,
-        private val upgradeProposal: Boolean = false,
-        private val constructionStorage: Boolean = false,
-        acceptedStorage: List<CivPlanBlock>? = null,
-        private val wallApproach: CivWallRefitApproach? = null,
-    ) : CivsWorldScan<CivPlacementPlan>(this@CivsWorld, cityId, owner, worldId, building) {
-        private val acceptedHolders = acceptedStorage?.associateBy { it.position }
-        private val blocks = ArrayList<CivPlanBlock>()
-        private var terraform = terrain?.copy(blocks = terrain.blocks.toList(), route = terrain.route.toList(),
-            waterFoundations = terrain.waterFoundations?.toList(), requiredGrass = terrain.requiredGrass?.toList(),
-            paidGateFloors = terrain.paidGateFloors?.toList(), paidWaterFloors = terrain.paidWaterFloors?.toList())
-        private val paidGateFloors = terraform?.paidGateFloors.orEmpty().toSet()
-        private val paidGateCells = civsPaidGateFloorCells(building, terraform?.paidGateFloors.orEmpty())
-        private val terrainOverlay = terraform?.blocks.orEmpty().associateBy { it.position }
-        private val requiredGrass = terraform?.requiredGrass.orEmpty().toSet()
-        private val terrainBlocks = ArrayList<CivPlanBlock>()
-        private val waterColumns = civsWaterFoundationColumns(building, terraform?.waterFoundations.orEmpty(), terraform?.blocks.orEmpty())
-        private val waterFoundations = waterColumns.values.toList()
-        private val waterCells = if (waterColumns.isEmpty()) emptyMap() else cells.filterNot { it.isBarrier }
-            .associateBy { CivPosition(it.position.x, it.position.y, it.position.z) }
-        private val infrastructureGround = (if (building.type.isInfrastructure) cells.filterNot { it.isBarrier || it.isAir }
-            .groupBy { civsTerrainKey(it.position.x, it.position.z) }.mapValues { (_, values) -> values.minOf { it.position.y } }
-            else emptyMap()) + waterColumns.mapValues { it.value.floorY }
-        private var waterIndex = 0
-        private var waterY: Int? = null
-        private var terrainIndex = 0
-        private var routeIndex = 0
-        private var loweredWallStep: Int? = null
-        private var gateReadiness: GateReadiness? = null
-        private var gateReady = false
-
-        init {
-            requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan")
-            waterFoundations.forEach { f -> for (y in f.bottomY + 1..f.floorY) {
-                requireCivs(waterCells[CivPosition(f.x, y, f.z)]?.let { !it.isAir && civsPaidWaterFoundationBlock(it.blockData) } == true,
-                    "invalid-plan")
-            } }
-            terraform?.let {
-                requireCivs(cells.size.toLong() + it.blocks.size <= CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-                requireTerrainRoute(it.route, building, allowManualFoundation = true)
-                requireCivs(requiredGrass.isEmpty() || building.type == BuildingType.WALL && it.route.isNotEmpty() &&
-                    requiredGrass.all { p -> infrastructureGround[civsTerrainKey(p.x, p.z)] == p.y }, "invalid-plan")
-                requireCivs(paidGateCells.isEmpty() || !adminPlacement && it.route.isNotEmpty() &&
-                    paidGateCells.none { p -> p in terrainOverlay } &&
-                    (previous?.phase == BuildingPhase.ACTIVE || building.schematicId ==
-                        CivsInfrastructureRebuild.schematicId(building.type, CivsInfrastructureRebuild.stage(building), building.id)),
-                    "invalid-plan")
-                if (it.route.isNotEmpty()) strictAutonomous = true
-            }
-            wallApproach?.let { approach ->
-                val plan = requireNotNull(terraform)
-                requireCivs(previous?.type == BuildingType.WALL && building.type == BuildingType.WALL &&
-                    CivsInfrastructureRebuild.refit(previous, building) && !adminPlacement && plan.blocks.isEmpty() &&
-                    plan.waterFoundations.isNullOrEmpty() && plan.requiredGrass.isNullOrEmpty() &&
-                    plan.cutCount == 0 && plan.fillCount == 0 && plan.route.size == approach.original.size, "invalid-plan")
-                requireTerrainRoute(approach.original, building)
-                if (upgradeProposal) requireCivs(plan.route == approach.original, "invalid-plan")
-                else {
-                    val at = plan.route.indices.singleOrNull { plan.route[it] != approach.original[it] }
-                        ?: throw CivsRejection("invalid-plan")
-                    val original = approach.original[at]
-                    requireCivs(at in 1 until plan.route.lastIndex && plan.route[at] == original.copy(y = original.y - 1),
-                        "invalid-plan")
-                    loweredWallStep = at
-                }
-            }
-        }
-
-        override fun checkControl(block: Block) {
-            val oldControl = retargetSource?.control
-            if (oldControl != null && oldControl != building.control) {
-                val preparation = terrainOverlay[building.control]
-                if (!block.type.isAir && (preparation == null || preparation.after != "minecraft:air" ||
-                        preparation.before != block.blockData.asString)) rejectAt("hall-target-control-incompatible", block)
-                if (preparation != null) checkTerraformBlock(block, parse(preparation.after))
-                if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
-                return
-            }
-            if (adminPlacement && previous?.control != building.control &&
-                civsContainerHasItems(block.state))
-                rejectAt("container-not-empty", block)
-            // Only an already accepted building owns this marker; an unrelated barrel is terrain.
-            if (strictAutonomous && (previous == null || previous.control != building.control))
-                checkControlTerrain(block)
-            if (!allowControlPlacement || block.type == Material.BARREL) return super.checkControl(block)
-            if (strictAutonomous) checkControlTerrain(block)
-            if (block.type in PROTECTED_TERRAIN || block.state is TileState) rejectAt("control-obstructed", block)
-            if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
-        }
-
-        private fun checkControlTerrain(block: Block) {
-            if (allowControlPlacement && terraform?.route.isNullOrEmpty()) {
-                if (!naturalTerraform(block)) rejectAt("autonomy-terrain", block)
-            } else checkAutonomousTerrain(block, building.anchor.y)
-        }
-
-        override fun validateIdentity(city: Settlement?) {
-            if (city?.autonomy != null && !adminPlacement) strictAutonomous = true
-            requireCivs(city?.building(building.id) == previous, "invalid-building")
-            wallApproach?.let { proof ->
-                requireCivs(city != null && city.buildings == proof.city.buildings &&
-                    city.roadRouteOverrides == proof.city.roadRouteOverrides, "stale-building")
-            }
-            val retarget = retargetSource != null && !adminPlacement && city?.construction == null
-            if (previous != null && !retarget) requireCivs(previous.id == building.id &&
-                (previous.type == building.type || city != null && CivsInfrastructureRebuild.refit(city, previous, building)) &&
-                previous.entrance == building.entrance && previous.rotation == building.rotation &&
-                (previous.phase == BuildingPhase.ACTIVE && (previous.level + 1 == building.level ||
-                    CivsPlanBoardBlueprint.refit(previous, building) || CivsInfrastructureRebuild.refit(previous, building)) ||
-                    previous.level == building.level && previous.phase == BuildingPhase.SITE), "invalid-building")
-            if (previous != null && !retarget) requireCivs(civsContainsBox(building.bounds, previous.bounds), "upgrade-footprint-changed")
-            if (previous?.type == BuildingType.GATE && building.type == BuildingType.WALL) {
-                val survivor = requireNotNull(CivsInfrastructureRebuild.closureSurvivor(requireNotNull(city), previous, building))
-                requireCivs(gateReadiness == null || gateReadiness!!.gate == survivor, "stale-building")
-                if (gateReadiness == null) gateReadiness = includeGateReadiness(this, survivor)
-            }
-        }
-
-        /** At most one existing paid road cell can replace an unsupported interior wall step. */
-        private fun selectWallApproach(plan: CivTerraformPlan, approach: CivWallRefitApproach, at: Int) {
-            if (!upgradeProposal || loweredWallStep != null || at !in 1 until plan.route.lastIndex) return
-            val original = plan.route[at]
-            val lower = original.copy(y = original.y - 1)
-            if (lower.copy(y = lower.y - 1) !in approach.paidFloors ||
-                (at - 1..at + 1).any { kotlin.math.abs(plan.route[it].y - lower.y) > 1 } ||
-                !read(lower).type.isAir) return
-            terraform = plan.copy(route = plan.route.toMutableList().also { it[at] = lower })
-            loweredWallStep = at
-        }
-
-        private fun validateWallApproach(plan: CivTerraformPlan, approach: CivWallRefitApproach, at: Int) {
-            // None of the two proved steps can intersect cells this refit is about to write.
-            requireCivs((at - 1..at + 1).none {
-                CivsAutonomousGeometry.horizontalContains(building.bounds, plan.route[it])
-            }, "autonomy-no-path")
-            val lower = plan.route[at]
-            val lowerFloor = lower.copy(y = lower.y - 1)
-            val removedFloor = read(lower)
-            if (!removedFloor.type.isAir) rejectAt("autonomy-no-path", removedFloor)
-            val road = read(lowerFloor)
-            if (lowerFloor !in approach.paidFloors || !CivsRoadMaintenance.surface(road.blockData.asString))
-                rejectAt("autonomy-no-path", road)
-
-            fun standing(position: CivPosition): CitizenPoint {
-                val floor = read(position.copy(y = position.y - 1))
-                val top = floor.collisionShape.boundingBoxes
-                    .filter { .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ }.maxOfOrNull { it.maxY }
-                if (top == null || !routeTerraformSupport(floor)) rejectAt("autonomy-no-path", floor)
-                return CitizenPoint(position.x + .5, floor.y + top, position.z + .5)
-            }
-            val centre = standing(lower)
-            val collision = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
-            fun shape(x: Int, y: Int, z: Int) = collision.getOrPut(CivPosition(x, y, z)) {
-                citizenCollisionSnapshot(world, x, y, z)
-            }
-            for (neighbour in listOf(plan.route[at - 1], plan.route[at + 1])) {
-                val beside = standing(neighbour)
-                if (!citizenPacketStepClear(world, centre, beside, false, ::shape) ||
-                    !citizenPacketStepClear(world, beside, centre, false, ::shape))
-                    rejectAt("autonomy-no-path", road, mapOf("stage" to "wall-refit-approach"))
-            }
-        }
-
-        override fun step() {
-            gateReadiness?.let { if (!gateReady) { gateReady = it.step(::read); return } }
-            if (waterIndex < waterFoundations.size) {
-                val f = waterFoundations[waterIndex]
-                val y = waterY ?: f.bottomY
-                val block = read(CivPosition(f.x, y, f.z))
-                checkTerrainOwnership(CivPosition(f.x, y, f.z))
-                if (!canModify(owner, block)) rejectAt("lands-denied", block)
-                if ((block.state as? InventoryHolder)?.inventory?.any { it != null && !it.type.isAir } == true)
-                    rejectAt("container-not-empty", block)
-                if (y == f.bottomY) {
-                    if (!naturalTerraform(block) || !fullTerraformSupport(block))
-                        rejectAt("autonomy-foundation", block)
-                } else if (y <= f.floorY) {
-                    if (if (y <= f.waterTopY) block.type != Material.WATER else !block.type.isAir)
-                        rejectAt("autonomy-terrain", block)
-                } else if (block.isLiquid || (block.blockData as? Waterlogged)?.isWaterlogged == true)
-                    rejectAt("autonomy-terrain", block)
-                if (y == f.floorY + 1) { waterIndex++; waterY = null } else waterY = y + 1
-                return
-            }
-            terraform?.let { plan ->
-                if (terrainIndex < plan.blocks.size) {
-                    val cell = plan.blocks[terrainIndex]
-                    val tree = treeLedgerProof(plan.blocks, terrainIndex)
-                    if (tree && !treeSupportReady(cell.position)) return
-                    terrainIndex++
-                    checkTerraformCell(cell, plan)
-                    val block = read(cell.position)
-                    val after = parse(cell.after)
-                    checkTerraformBlock(block, after, tree, allowUnpublished = plan.route.isEmpty())
-                    // Capture the current permitted natural ground. Earlier analysis is a proposal,
-                    // not an exact mutation receipt; ordinary terrain drift must not cancel the site.
-                    terrainBlocks += cell.copy(before = block.blockData.asString, after = after.asString)
-                    return
-                }
-                if (routeIndex < plan.route.size * 3) {
-                    if (routeIndex % 3 == 0) wallApproach?.let { selectWallApproach(plan, it, routeIndex / 3) }
-                    checkTerrainRouteCell(requireNotNull(terraform), terrainOverlay, routeIndex++)
-                    return
-                }
-            }
-            if (index == cells.size) {
-                checkPreservedControl()
-                loweredWallStep?.let { validateWallApproach(requireNotNull(terraform), requireNotNull(wallApproach), it) }
-                requireCivs(blocks.isNotEmpty(), "invalid-plan")
-                val captured = CivPlacementPlan(UUID.randomUUID(), cityId, worldId, building, blocks.toList(),
-                    terrain = terraform?.copy(blocks = terrainBlocks.toList()), adminPlacement = adminPlacement)
-                civsValidateWaterFoundations(captured)
-                finish(captured)
-                return
-            }
-            val cell = cells[index++]
-            val position = CivPosition(cell.position.x, cell.position.y, cell.position.z)
-            checkCell(position)
-            // Even skipped barrier cells must belong to loaded chunks; Core skips these exact cells.
-            val block = read(position)
-            if (position in requiredGrass && (block.type != Material.GRASS_BLOCK ||
-                    world.getHighestBlockYAt(position.x, position.z, HeightMap.MOTION_BLOCKING) != position.y))
-                rejectAt("world-changed", block)
-            requireCivs(position !in paidGateCells || cell.isBarrier, "invalid-plan")
-            if (cell.isBarrier) {
-                requireCivs(parse(cell.blockData).material == Material.BARRIER, "invalid-plan")
-                if (position in paidGateCells) checkPaidGateCell(block, position in paidGateFloors)
-                else if (!canModify(owner, block)) rejectAt("lands-denied", block)
-                return
-            }
-            if (position == building.control && parse(cell.blockData).material == Material.STRUCTURE_VOID) {
-                requireCivs(!cell.isAir, "invalid-plan")
-                checkControl(block)
-                return
-            }
-            if (position == retargetSource?.control && position != building.control)
-                rejectAt("hall-source-overlap", block)
-            val state = if (block.type.isAir) null else block.state
-            val waterFoundation = waterColumns[civsTerrainKey(position.x, position.z)]?.takeIf { it.contains(position) }
-            if (waterFoundation != null) {
-                requireCivs(civsPaidWaterFoundationBlock(cell.blockData), "invalid-plan")
-                if (if (position.y <= waterFoundation.waterTopY) block.type != Material.WATER else !block.type.isAir)
-                    rejectAt("autonomy-terrain", block)
-            }
-            val after = parse(cell.blockData)
-            val holder = if ((constructionStorage || upgradeProposal) && state is org.bukkit.block.Container &&
-                block.type.name in CIVS_STORAGE_TYPES && position !in terrainOverlay && waterFoundation == null) {
-                val captured = CivPlanBlock(position, block.blockData.asString, after.asString)
-                val city = cities().firstOrNull { it.id == cityId }
-                val accepted = acceptedHolders?.get(position) == captured
-                val custody = city?.inventory?.constructionBuffers?.get(building.id.toString())
-                val evacuated = custody != null && civsSameBuildingGeometry(custody.owner.target, building) &&
-                    custody.parts.any { it.cell == captured }
-                val acceptedEmpty = (accepted || evacuated) && !civsContainerHasItems(state)
-                city != null && civsStorageChangingCell(captured) && civsConstructionStorageOwns(city, previous, building,
-                    position, acceptedEmpty) && (previous?.phase != BuildingPhase.SITE || acceptedHolders == null || accepted)
-            } else false
-            if (!holder && strictAutonomous && waterFoundation == null && position !in terrainOverlay && (previous?.phase != BuildingPhase.ACTIVE ||
-                    !previous.bounds.contains(position.x, position.y, position.z)))
-                checkAutonomousTerrain(block, infrastructureGround[civsTerrainKey(position.x, position.z)] ?: building.anchor.y)
-            if (block.type in PROTECTED_TERRAIN || !holder && previous?.bounds?.contains(position.x, position.y, position.z) != true &&
-                state is TileState) rejectAt("protected-terrain", block)
-            val retained = previous?.phase == BuildingPhase.ACTIVE && previous.bounds.contains(position.x, position.y, position.z) &&
-                block.blockData.asString == after.asString && civsRetainContainerState(after.asString)
-            if (!retained && !holder && civsContainerHasItems(state)) rejectAt("container-not-empty", block)
-            if (!retained && !holder && cities().firstOrNull { it.id == cityId }?.inventory?.containers?.contains(position) == true)
-                rejectAt("registered-container", block)
-            requireCivs(after.material != Material.BARRIER && cell.isAir == after.material.isAir, "invalid-plan")
-            if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)
-            blocks += CivPlanBlock(position, terrainOverlay[position]?.after ?: block.blockData.asString, after.asString)
-        }
-    }
-
     private inner class TerraformApply(private val plan: CivPlacementPlan, owner: UUID,
         private val cells: List<CivPlanBlock>, private val terrainStart: Int, private val canAdvance: () -> Boolean,
         private val onPlaced: (CivPlanBlock) -> Unit) : CivsWorldScan<Unit>(this@CivsWorld, plan.cityId, owner, plan.worldId, plan.building) {
@@ -1431,80 +711,6 @@ class CivsWorld(
             finish(Unit)
             CivsDiagnostics.event("terraform_native_batch", "city" to cityId, "order" to plan.id,
                 "terrain_start" to terrainStart, "changed" to changed, "unchanged" to unchanged)
-        }
-    }
-
-    private inner class Revalidation(private val plan: CivPlacementPlan, owner: UUID, private val terrainBatch: Boolean) :
-        CivsWorldScan<Unit>(this@CivsWorld, plan.cityId, owner, plan.worldId, plan.building) {
-        private val paidGateFloors = plan.terrain?.paidGateFloors.orEmpty()
-        private var paidGateCursor = 0
-        private val waterColumns = civsWaterFoundationColumns(building, plan.terrain?.waterFoundations.orEmpty(), plan.terrain?.blocks.orEmpty())
-        private val paidWaterFloors = plan.terrain?.paidWaterFloors.orEmpty().associateBy { civsTerrainKey(it.x, it.z) }
-        private val waterFoundations = if (waterColumns.isEmpty()) emptyList() else plan.blocks.mapNotNull { cell ->
-            waterColumns[civsTerrainKey(cell.position.x, cell.position.z)]?.takeIf { it.contains(cell.position) }
-        }.distinctBy { civsTerrainKey(it.x, it.z) }
-        private var waterIndex = 0
-        private var gateReadiness: GateReadiness? = null
-        private var gateReady = false
-        init {
-            requireCivs(!CivsBlueprints.hasAuthoredControl(building) || plan.blocks.none { it.position == building.control }, "invalid-plan")
-            civsValidateWaterFoundations(plan, complete = false)
-            civsValidatePaidGateFloors(plan)
-        }
-        override fun validateIdentity(city: Settlement?) {
-            val current = city?.building(building.id)
-            val retarget = retargetSource != null && city?.construction?.id == plan.id
-            requireCivs(current == null || current == building || retarget ||
-                (current.type == building.type || CivsInfrastructureRebuild.refit(city, current, building)) &&
-                current.entrance == building.entrance && current.rotation == building.rotation &&
-                (current.level + 1 == building.level || CivsPlanBoardBlueprint.refit(current, building) ||
-                    CivsInfrastructureRebuild.refit(current, building)) &&
-                current.phase == BuildingPhase.ACTIVE, "invalid-building")
-            if (current != null && !retarget) requireCivs(civsContainsBox(building.bounds, current.bounds), "upgrade-footprint-changed")
-            if (current?.type == BuildingType.GATE && building.type == BuildingType.WALL) {
-                val survivor = requireNotNull(CivsInfrastructureRebuild.closureSurvivor(requireNotNull(city), current, building))
-                requireCivs(gateReadiness == null || gateReadiness!!.gate == survivor, "stale-building")
-                if (gateReadiness == null) gateReadiness = includeGateReadiness(this, survivor)
-            }
-            city?.construction?.let {
-                requireCivs(it.id == plan.id && it.buildingId == building.id && it.plannedBuilding == building, "invalid-plan")
-            }
-        }
-
-        override fun step() {
-            gateReadiness?.let { if (!gateReady) { gateReady = it.step(::read); return } }
-            if (waterIndex < waterFoundations.size) {
-                val f = waterFoundations[waterIndex++]
-                val bed = read(CivPosition(f.x, f.bottomY, f.z))
-                if (!canModify(owner, bed)) rejectAt("lands-denied", bed)
-                if (!naturalTerraform(bed) || !fullTerraformSupport(bed))
-                    rejectAt("autonomy-foundation", bed)
-                return
-            }
-            if (paidGateCursor < paidGateFloors.size * 3) {
-                checkPaidGateCell(paidGateFloors, paidGateCursor++)
-                return
-            }
-            if (terrainBatch || index == plan.blocks.size) {
-                checkPreservedControl()
-                finish(Unit)
-                return
-            }
-            val cell = plan.blocks[index++]
-            checkCell(cell.position)
-            val block = read(cell.position)
-            if (block.type in PROTECTED_TERRAIN) rejectAt("protected-terrain", block)
-            val column = civsTerrainKey(cell.position.x, cell.position.z)
-            val water = waterColumns[column]?.contains(cell.position) == true ||
-                paidWaterFloors[column]?.let { cell.position.y <= it.y } == true
-            if (water && block.blockData.asString != cell.before && block.blockData.asString != cell.after) rejectAt("world-changed", block)
-            val retained = civsRetainedContainer(cell)
-            if (retained && block.blockData.asString != cell.before) rejectAt("world-changed", block)
-            if (!retained && civsContainerHasItems(block.state)) rejectAt("container-not-empty", block)
-            // Players may clear or remodel a cell before this one-pass construction batch reaches it.
-            val after = parse(cell.after)
-            requireCivs(after.material != Material.BARRIER, "invalid-plan")
-            if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)
         }
     }
 

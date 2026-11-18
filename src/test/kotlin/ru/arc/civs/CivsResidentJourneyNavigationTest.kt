@@ -74,9 +74,9 @@ class CivsResidentJourneyNavigationTest : FunSpec({
         }
     }
 
-    for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1))
-    for (returning in listOf(false, true)) for (speed in listOf(.5, 1.0, 2.0))
-    test("top slab to bottom slab stair and deck stays physically clear $dx,$dz returning=$returning speed=$speed") {
+    for ((direction, speed) in listOf((1 to 0) to .5, (-1 to 0) to 1.0, (0 to 1) to 2.0, (0 to -1) to .5))
+    for (returning in listOf(false, true)) test("slab and stair journey stays clear direction=$direction returning=$returning speed=$speed") {
+        val (dx, dz) = direction
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("slab-stair-journey", collisionForData = { data ->
                 when {

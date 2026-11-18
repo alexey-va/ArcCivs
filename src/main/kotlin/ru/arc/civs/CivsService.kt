@@ -229,9 +229,13 @@ class CivsService(
         { city, block -> world.canModify(city.owner, block, Material.AIR) }, storage::isWorldLocked,
         citizens::growthBlocked, citizens::terrainChanged, clock, loadAuthored = blueprints::authoredVegetation)
 
+    private val storageRelocations = CivsStorageRelocations(
+        tasks, store, storage, inventoryJournal, records, checkMain = ::checkMain, ready = ::ready,
+        reserveCity = ::reserveCity, releaseCity = ::releaseCity, track = ::track)
+
     private val controlRelocations = CivsControlRelocations(plugin, tasks, world, storage, controlInstallations,
         blueprints::interiorControls, { cities.values }, { city -> ready() && city.id !in busy && city.id !in unhealthy &&
-            !inventoryJournal.pending(city.id) && settlementActive(city) }, ::relocateControlStorage,
+            !inventoryJournal.pending(city.id) && settlementActive(city) }, storageRelocations::relocateControlStorage,
         { id, transform -> afterCityAvailable(id) { mutate(id, transform = transform) } }, clock,
         blocked = citizens::growthBlocked)
 
@@ -790,143 +794,15 @@ class CivsService(
         return result
     }
 
-    /** Preflight owns the city until the changed cells are ready. Journal one exact native half at a time. */
     internal fun evacuateConstruction(initial: Settlement, plan: CivPlacementPlan, cells: List<CivPlanBlock>,
-        admit: (Settlement) -> Unit): CompletableFuture<Settlement> {
-        checkMain()
-        val building = initial.building(plan.building.id) ?: return CompletableFuture.completedFuture(initial)
-        if (cells.isEmpty() || initial.inventory == null || civsAutonomousHallRetarget(initial, building, plan.building))
-            return CompletableFuture.completedFuture(initial)
-        val owner = CivConstructionStorageOwner.forPlan(initial, building, plan)
-        val result = tracked<Settlement>()
-        fun batch(city: Settlement, start: Int) {
-            val id = UUID.randomUUID()
-            runCatching {
-                rejectIf(!ready() || cities[city.id] != city || city.id in busy || city.id in unhealthy, "city-busy")
-                admit(city)
-                storage.reserve(city, id)
-                busy += city.id
-            }.onFailure { result.completeExceptionally(it); return }
-            fun finish(failure: Throwable?) {
-                storage.unlock(id)
-                busy -= city.id
-                if (failure == null) result.complete(city) else result.completeExceptionally(failure)
-            }
-            fun scan(offset: Int, recheckEarlier: Boolean) {
-                val end = minOf(cells.size, offset + CivContainerRelocation.MAX_CONTAINERS)
-                val page = cells.subList(offset, end)
-                val prepared = runCatching {
-                    rejectIf(!ready() || cities[city.id] != city || city.id !in busy, "stale-city")
-                    admit(city)
-                    storage.prepareConstructionStorage(city, plan.building, page)
-                }.getOrElse { finish(it); return }
-                if (prepared == null) {
-                    // Leave the city reserved while a broad empty footprint is examined over multiple ticks.
-                    if (end < cells.size) tasks.runLater(1) { scan(end, recheckEarlier) }
-                    else if (recheckEarlier) tasks.runLater(1) { scan(0, false) }
-                    else finish(null)
-                    return
-                }
-                val holder = prepared.holder
-                val resume = offset + page.indexOf(prepared.cell) + 1
-                val save = if (holder.before.all { it == null }) CompletableFuture.completedFuture(null)
-                    else store.saveConstructionStorage(CivConstructionStorageSnapshot(id, owner, prepared.cell, holder.before, plan.id))
-                save.whenCompleteSync(tasks) { part, failure ->
-                    if (failure != null) return@whenCompleteSync finish(failure)
-                    val tx = runCatching {
-                        rejectIf(!ready() || cities[city.id] != city, "stale-city")
-                        admit(city)
-                        val retirement = prepared.retirement?.let { if (part == null) it.copy(planId = plan.id) else it }
-                        val move = CivContainerRelocation(building, listOf(holder), retirement,
-                            part?.let { CivConstructionStorageMove(owner, null, it, prepared.cell) })
-                        CivInventoryTransaction(id, city.id, city.revision, move.after(city),
-                            emptyList(), containerRelocation = move).also { storage.seal(it) }
-                    }.getOrElse { finish(it); return@whenCompleteSync }
-                    inventoryJournal.submitRelocation(city, tx) { admit(city) }.whenCompleteSync(tasks) { saved, error ->
-                        if (error != null) result.completeExceptionally(error) else batch(requireNotNull(saved), resume)
-                    }
-                }
-            }
-            scan(start, recheckEarlier = start > 0)
-        }
-        batch(initial, 0)
-        return result
-    }
+        admit: (Settlement) -> Unit): CompletableFuture<Settlement> =
+        storageRelocations.evacuateConstruction(initial, plan, cells, admit)
 
     private fun returnCompletedStorage(cityId: UUID) = storageActions.pulseConstructionStorage(cityId)
 
-    /** Return one part to freshly admitted native holders. Insufficient room leaves its exact remainder durable. */
     internal fun returnConstructionStorage(city: Settlement, group: CivConstructionStorageBuffer,
-        part: CivConstructionStoragePart): CompletableFuture<Settlement> {
-        checkMain()
-        rejectIf(!ready() || cities[city.id] != city || city.id in busy || city.id in unhealthy, "city-busy")
-        rejectIf(group.owner.held(city), "construction-busy")
-        val id = UUID.randomUUID()
-        storage.reserveConstructionReturn(city, id, group, part)
-        busy += city.id
-        val result = tracked<Settlement>()
-        fun abort(error: Throwable?) {
-            storage.unlock(id); busy -= city.id
-            if (error == null) result.complete(city) else result.completeExceptionally(error)
-        }
-        store.loadConstructionStorage(group.owner, part).whenCompleteSync(tasks) { snapshot, failure ->
-            if (failure != null) return@whenCompleteSync abort(failure)
-            val proof = requireNotNull(snapshot)
-            val candidates = runCatching { storage.constructionReturnCandidates(city, proof) }.getOrElse {
-                abort(it); return@whenCompleteSync
-            }
-            fun scan(offset: Int) {
-                val end = minOf(candidates.size, offset + CivContainerRelocation.MAX_CONTAINERS)
-                val move = runCatching {
-                    rejectIf(!ready() || cities[city.id] != city || group.owner.held(city), "stale-city")
-                    storage.prepareConstructionReturn(city, proof, part, candidates.subList(offset, end))
-                }.getOrElse { abort(it); return }
-                if (move == null) {
-                    if (end < candidates.size) tasks.runLater(1) { scan(end) } else abort(null)
-                    return
-                }
-                val tx = runCatching {
-                    CivInventoryTransaction(id, city.id, city.revision, move.after(city), emptyList(),
-                        containerRelocation = move).also { storage.seal(it) }
-                }.getOrElse { abort(it); return }
-                inventoryJournal.submitRelocation(city, tx) {}.whenCompleteSync(tasks) { saved, error ->
-                    if (error == null) result.complete(requireNotNull(saved)) else result.completeExceptionally(error)
-                }
-            }
-            scan(0)
-        }
-        return result
-    }
-
-    /** Same-level control moves use the same exact slot receipt as upgrade evacuation. */
-    private fun relocateControlStorage(city: Settlement, building: CivBuilding, from: CivPosition,
-        to: CivPosition): CompletableFuture<Settlement> {
-        checkMain()
-        rejectIf(!ready(), "not-ready")
-        rejectIf(cities[city.id] != city || city.id in busy || city.id in unhealthy, "city-busy")
-        val id = UUID.randomUUID()
-        storage.reserve(city, id)
-        busy += city.id
-        val tx = try {
-            val move = storage.prepareControlRelocation(city, building, from, to)
-            if (move == null) {
-                storage.unlock(id)
-                busy -= city.id
-                return CompletableFuture.completedFuture(city)
-            }
-            CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1),
-                emptyList(), containerRelocation = move).also(storage::seal)
-        } catch (failure: Throwable) {
-            storage.unlock(id)
-            busy -= city.id
-            return CompletableFuture.failedFuture(failure)
-        }
-        val result = inventoryJournal.submitRelocation(city, tx) {
-            rejectIf(!ready() || cities[city.id] != city || city.id !in busy, "stale-city")
-        }
-        track(result)
-        return result
-    }
+        part: CivConstructionStoragePart): CompletableFuture<Settlement> =
+        storageRelocations.returnConstructionStorage(city, group, part)
 
     internal fun inventoryMutation(
         cityId: UUID, prepare: (Settlement) -> CivStoragePlan?,

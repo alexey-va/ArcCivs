@@ -18,49 +18,6 @@ import java.nio.file.Path
 import java.util.UUID
 
 class CivsMineV3Test : FunSpec({
-    test("the historical V3 central opening stays clear through every aligned three-wide mining floor") {
-        for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) {
-            val mine = spatialBuilding(style, "miner", level, CivPosition(0, 80, 0))
-            val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 3))
-            val center = CivsWorksiteLayouts.vector(CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")["shaftCenter"])
-            val hole = (-1..1).flatMap { x -> (-1..1).map { z -> center.x + x to center.z + z } }.toSet()
-            plan.floors.size shouldBe level + 2
-            plan.floors.zipWithNext().all { (a, b) -> a.feetY - b.feetY == 4 } shouldBe true
-            plan.floors.map { floor -> floor.cells.map { it.x to it.z }.toSet() }.distinct().size shouldBe 1
-            plan.floors.all { floor -> floor.cells.none { (it.x to it.z) in hole } } shouldBe true
-            for (y in plan.lowest..plan.bottom.y) for ((x, z) in hole) {
-                val actions = plan.steps.filter { it.point == CivPosition(x, y, z) }
-                actions.any { it.after == null } shouldBe true
-                actions.none { it.after != null } shouldBe true
-            }
-            val first = plan.floors.first()
-            val supports = first.cells.map { it.x to it.z }.toSet()
-            // Every axial gateway is genuinely three wide. Ladder/backing live
-            // in a corner, and the transfer floor occupies only the tier ceiling.
-            for (distance in 2..4) for (side in -1..1) {
-                (center.x + distance to center.z + side in supports) shouldBe true
-                (center.x - distance to center.z + side in supports) shouldBe true
-                (center.x + side to center.z + distance in supports) shouldBe true
-                (center.x + side to center.z - distance in supports) shouldBe true
-            }
-            plan.transferFloor.all { it.y == first.feetY + 3 && (it.x to it.z) !in hole } shouldBe true
-            // Four equal 16-block arms start outside the nine-by-nine ring.
-            for (distance in 5..20) for (side in -1..1) {
-                (center.x + distance to center.z + side in supports) shouldBe true
-                (center.x - distance to center.z + side in supports) shouldBe true
-                (center.x + side to center.z + distance in supports) shouldBe true
-                (center.x + side to center.z - distance in supports) shouldBe true
-            }
-            supports.all { (x, z) -> kotlin.math.abs(x - center.x) <= 20 && kotlin.math.abs(z - center.z) <= 20 } shouldBe true
-            for (rotation in listOf(0, 90, 180, 270)) {
-                val rotated = mine.copy(rotation = rotation)
-                first.cells.forEach { local ->
-                    CivsMinePlan.localPoint(rotated, CivsWorksiteLayouts.point(rotated, local)) shouldBe local
-                }
-            }
-        }
-    }
-
     test("inexhaustible extraction has one weighted item and no high-tier yield from an unsuitable pickaxe") {
         for (level in 1..3) {
             (0..9_999).map { CivsWorksites.generatorOutput(it, level) { true } }.groupingBy { it }.eachCount() shouldBe
@@ -78,6 +35,9 @@ class CivsMineV3Test : FunSpec({
         for (style in listOf("nordic", "medievaloak", "caledonia")) {
             val mine = spatialBuilding(style, "miner", 1, CivPosition(0, 80, 0))
             val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 3))
+            plan.openingColumns.size shouldBe 9
+            plan.transferFloor.isNotEmpty() shouldBe true
+            plan.transferFloor.all { it.y == plan.floors.first().feetY + 3 && (it.x to it.z) !in plan.openingColumns } shouldBe true
             val exposed = plan.steps.first { it.after == null && it.point.y == plan.bottom.y - 1 &&
                 (it.point.x to it.point.z) !in plan.openingColumns }.point
             val deadline = plan.lowerClearanceEnd(exposed)

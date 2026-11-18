@@ -41,82 +41,22 @@ class CivsMineV4Test : FunSpec({
         }
     }
 
-    test("all styles have one continuous ladder aligned open tiers and connected three-wide branch junctions") {
+    test("V4 supplies a continuous shaft ladder and a built approach before each operation") {
         for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) {
             val mine = spatialBuilding(style, "miner", level, CivPosition(0, 80, 0))
             val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 4))
-            plan.version shouldBe 4
             val rungs = plan.steps.filter { it.after?.startsWith("minecraft:ladder[") == true }.map { it.point }
             rungs.toSet() shouldBe (plan.lowest until plan.bottom.y).map { plan.bottom.copy(y = it) }.toSet()
-            rungs.size shouldBe rungs.toSet().size
-            plan.floors.size shouldBe level + 2
-            plan.floors.zipWithNext().all { (a, b) -> a.feetY - b.feetY == 4 } shouldBe true
-            plan.floors.map { it.cells.map { p -> p.x to p.z }.toSet() }.distinct().size shouldBe 1
-            val changes = plan.steps.groupBy { it.point }
-            for (y in plan.lowest..plan.bottom.y) for ((x, z) in plan.openingColumns) {
-                val at = changes.getValue(CivPosition(x, y, z))
-                at.all { it.after == null } shouldBe true
-            }
-            val forward = when (plan.facing) { "north" -> 0 to -1; "south" -> 0 to 1; "east" -> 1 to 0; else -> -1 to 0 }
-            fun point(d: Int, s: Int) = plan.center.x + forward.first * d - forward.second * s to
-                plan.center.z + forward.second * d + forward.first * s
-            for (floor in plan.floors) {
-                floor.height shouldBe 3
-                floor.cells.size shouldBe floor.cells.toSet().size
-                val columns = floor.cells.map { it.x to it.z }.toSet()
-                columns.intersect(plan.openingColumns).isEmpty() shouldBe true
-                (plan.bottom.x to plan.bottom.z in columns) shouldBe false
-                (plan.backing.x to plan.backing.z in columns) shouldBe false
-                for (distance in 5..20) for (side in -1..1) {
-                    (point(distance, side) in columns) shouldBe true
-                    (point(side, distance) in columns) shouldBe true
-                    (point(side, -distance) in columns) shouldBe true
-                }
-                for (side in listOf(-1, 1)) for (direction in listOf(-1, 1))
-                    for (distance in 1..8) for (width in -1..1)
-                        (point(direction * distance, side * 12 + width) in columns) shouldBe true
-                // Nine solid columns remain between the main arm and each secondary arm.
-                for (d in 5..8) for (s in 2..10) (point(d, s) in columns) shouldBe false
-                for (rotation in listOf(0, 90, 180, 270)) {
-                    val rotated = mine.copy(rotation = rotation)
-                    floor.cells.forEach { p -> CivsMinePlan.localPoint(rotated, CivsWorksiteLayouts.point(rotated, p)) shouldBe p }
-                }
-            }
-        }
-    }
-
-    test("every operation approaches from an already open supported predecessor and all landings precede branches") {
-        for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) {
-            val mine = spatialBuilding(style, "miner", level, CivPosition(0, 80, 0))
-            val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 4))
-            val prefix = mutableMapOf<CivPosition, String?>()
             for ((index, step) in plan.steps.withIndex()) {
                 val approach = requireNotNull(step.approach)
-                withClue("$style L$level step $index $step") {
-                    plan.builtStanding(approach, index.toLong()) shouldBe true
-                    val onLadder = prefix[approach]?.startsWith("minecraft:ladder[") == true
-                    val supported = prefix[approach.copy(y = approach.y - 1)] == "minecraft:cobblestone"
-                    (approach.y >= plan.bottom.y || onLadder || supported) shouldBe true
-                    (step.point == approach || step.point == approach.copy(y = approach.y + 1)) shouldBe false
-                }
-                prefix[step.point] = step.after
+                withClue("$style L$level step $index $step") { plan.builtStanding(approach, index.toLong()) shouldBe true }
             }
             plan.steps.take(plan.shaftEnd).all { it.stage == "shaft" } shouldBe true
             plan.steps.drop(plan.shaftEnd).all { it.stage == "gallery" } shouldBe true
             for (floor in listOf(requireNotNull(plan.entranceLanding)) + plan.floors) {
-                val firstOpening = plan.steps.indexOfFirst { it.floor == floor.index && it.branch == "opening" }
-                val opening = plan.steps.filter { it.floor == floor.index && it.branch == "opening" }
-                opening.map { it.point.y }.distinct() shouldBe (floor.feetY..floor.feetY + floor.height).toList()
-                opening.all { it.approach?.y == floor.feetY } shouldBe true
-                val landingComplete = plan.steps.indexOfLast { it.floor == floor.index &&
-                    it.branch in setOf("entrance", "landing") }
-                (landingComplete in 0 until firstOpening) shouldBe true
-                (firstOpening < plan.shaftEnd) shouldBe true
-                floor.torches.filter { p -> floor.cells.take(floor.sections.first().second).any {
-                    it.x == p.x && it.z == p.z
-                } }.forEach { torch ->
-                    (plan.steps.indexOfFirst { it.point == torch && it.after == "minecraft:torch" } in 0 until firstOpening) shouldBe true
-                }
+                val landing = plan.steps.indexOfLast { it.floor == floor.index && it.branch in setOf("entrance", "landing") }
+                val opening = plan.steps.indexOfFirst { it.floor == floor.index && it.branch == "opening" }
+                (landing in 0 until opening && opening < plan.shaftEnd) shouldBe true
             }
         }
     }

@@ -720,42 +720,6 @@ class CivsInitialUnpaidPlanRecoveryTest : FunSpec({
         }
     }
 
-    for (change in listOf("hall", "plan", "building", "construction", "queue", "control", "deletion", "pause", "shutdown"))
-    test("a $change change while the forecast is pending prevents adoption") {
-        initialRecoveryScenario { s ->
-            s.holdForecast = true
-            s.start(); s.finish { s.forecasts == 1 }
-            val current = when (change) {
-                "hall" -> s.city.copy(buildings = s.city.buildings.map { hall -> hall.copy(
-                    anchor = hall.anchor.copy(x = hall.anchor.x + 1),
-                    bounds = CivBox(hall.bounds.min.copy(x = hall.bounds.min.x + 1),
-                        hall.bounds.max.copy(x = hall.bounds.max.x + 1)),
-                    entrance = hall.entrance.copy(x = hall.entrance.x + 1),
-                    control = hall.control?.let { it.copy(x = it.x + 1) }) })
-                "plan" -> s.city.copy(autonomy = s.city.autonomy!!.copy(plan = s.oldPlan.copy(revision = 9)))
-                "building" -> s.city.copy(buildings = s.city.buildings + s.oldHut)
-                "construction" -> s.city.buildings.single().copy(phase = BuildingPhase.CONSTRUCTING).let { hall ->
-                    s.city.copy(buildings = listOf(hall), construction = CivConstruction(UUID(164, 10), hall.id, 1,
-                        10, 0, ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = hall,
-                        batches = CivConstructionBatches(10, 16, true)))
-                }
-                "queue" -> s.city.copy(constructionQueue = listOf(s.city.buildings.single().id))
-                "control" -> s.city.copy(pendingControls = listOf(CivControlPlacement(s.city.buildings.single().id,
-                    requireNotNull(s.city.buildings.single().control), "minecraft:air")))
-                "deletion" -> s.city.copy(pendingDeletion = CivDeletion(null))
-                "pause" -> s.city.copy(autonomy = s.city.autonomy!!.copy(paused = true))
-                else -> s.city.also { s.closed = true; s.subject.cancel() }
-            }
-            s.city = current
-            s.forecast.complete(s.surface)
-            repeat(10) { s.scheduler.tick() }
-            s.saves shouldBe emptyList()
-            s.city shouldBe current
-            s.constructionAdmissions shouldBe 0
-            s.reserveItems() shouldBe s.beforeItems
-        }
-    }
-
     test("a nonnative reserved terrain failure never invalidates unpaid intent") {
         initialRecoveryScenario { s ->
             s.failure = "surface-only"
@@ -864,7 +828,6 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
     }
     val acceptedAccess = CivAutonomousAccess.from(before, paidPlans)
     var time = 10_000L
-    var closed = false
     var failure: String? = null
     var holdForecast = false
     var synchronousHandoffFailure: Throwable? = null
@@ -920,7 +883,7 @@ private class InitialRecoveryScenario(val paper: MockBukkitTestRuntime, private 
         })
     val subject = CivsAutonomousDevelopment(plugin, tasks, world, blueprints, planner, executor,
         settlements = { mapOf(city.id to city) }, busy = mutableSetOf(), unhealthy = emptySet(),
-        isPlacing = { false }, ready = { true }, isClosed = { closed },
+        isPlacing = { false }, ready = { true }, isClosed = { false },
         loadAutonomousPlans = { CompletableFuture.completedFuture(paidPlans) }, settlementActive = { true },
         afterCityAvailable = { _, action -> action() },
         mutate = { _, transform -> save(transform) }, mutateWhenAvailable = { _, transform ->

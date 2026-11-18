@@ -365,7 +365,7 @@ private class SharedGateFixture : AutoCloseable {
             every { store.deleteInventoryTransaction(any()) } answers { retirements++; CompletableFuture.completedFuture(true) }
             every { store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
             every { store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
-            every { store.planGeneration } returns 0L
+            every { store.planGeneration(any()) } returns 0L
             every { store.loadPlan(any()) } answers { CompletableFuture.completedFuture(saved.singleOrNull { it.id == firstArg<UUID>() }) }
             every { store.loadRetainedPlanSource(any()) } answers {
                 CompletableFuture.completedFuture(saved.singleOrNull { it.id == firstArg<UUID>() }?.let(CivRetainedPlanSource::from))

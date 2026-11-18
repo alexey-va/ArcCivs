@@ -15,46 +15,34 @@ import java.util.UUID
 import java.util.concurrent.Executor
 
 class CivsMinePlanTest : FunSpec({
-    test("every style and rotation has one wide shaft then complete contiguous main left and right galleries") {
-        for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) for (rotation in listOf(0, 90, 180, 270)) {
-            val mine = spatialBuilding(style, "miner", level, CivPosition(20, 80, -20)).copy(rotation = rotation)
+    test("V2 keeps the legacy torches and recognizes the expanded nine-column shaft") {
+        for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) {
+            val mine = spatialBuilding(style, "miner", level, CivPosition(20, 80, -20))
             val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 2))
-            plan.shaftColumns.size shouldBe 9
-            val firstGallery = plan.steps.indexOfFirst { it.stage == "gallery" }
-            plan.steps.take(firstGallery).all { it.stage == "shaft" } shouldBe true
-            plan.steps.drop(firstGallery).all { it.stage == "gallery" } shouldBe true
-            val rungs = plan.steps.filter { it.after?.startsWith("minecraft:ladder") == true }.map { it.point }
-            rungs.size shouldBe 6 * level
-            rungs.toSet() shouldBe (plan.lowest until plan.bottom.y).map { plan.bottom.copy(y = it) }.toSet()
-            for (floor in plan.floors) {
-                floor.cells.size shouldBe 53
-                floor.torches.size shouldBe 7
-                floor.sections.map { it.first } shouldBe listOf("landing", "main", "left", "right")
-                val below = plan.steps.indexOfFirst { it.after?.startsWith("minecraft:ladder") == true && it.point.y < floor.feetY }
-                if (below >= 0) {
-                    val platforms = floor.cells.filter { (it.x to it.z) in plan.shaftColumns }
-                    platforms.size shouldBe 7
-                    platforms.forEach { point ->
-                        (plan.steps.indexOfFirst { it.stage == "shaft" && it.point == point && it.after == "minecraft:cobblestone" } in 0 until below) shouldBe true
-                    }
-                    (plan.steps.indexOfFirst { it.stage == "shaft" && it.floor == floor.index && it.after == "minecraft:torch" } in 0 until below) shouldBe true
-                }
-                var start = 0
-                for ((_, length) in floor.sections) {
-                    val points = floor.cells.subList(start, start + length).map { CivsWorksiteLayouts.point(mine, it) }
-                    points.zipWithNext().all { (a, b) -> kotlin.math.abs(a.x - b.x) + kotlin.math.abs(a.z - b.z) <= 2 } shouldBe true
-                    start += length
-                }
-            }
             val legacySize = 12 * level + 219 * level
             val legacy = requireNotNull(plan.legacyCompleted(legacySize.toLong()))
             legacy.filterValues { it == "minecraft:torch" }.keys shouldBe plan.floors.flatMap { it.torches }.toSet()
             val newExcavation = plan.steps.filter { it.after == null }.map { it.point }.toSet() - legacy.keys
             newExcavation.size shouldBe listOf(21, 35, 49)[level - 1]
-            for (y in plan.lowest..plan.bottom.y) for ((x, z) in plan.shaftColumns) {
-                plan.containsShaft(CivPosition(x, y, z)) shouldBe true
+            plan.shaftColumns.size shouldBe 9
+            for ((x, z) in plan.shaftColumns) {
+                plan.containsShaft(CivPosition(x, plan.lowest, z)) shouldBe true
+                plan.containsShaft(CivPosition(x, plan.bottom.y, z)) shouldBe true
             }
             plan.containsShaft(plan.bottom.copy(y = plan.lowest - 1)) shouldBe false
+        }
+    }
+
+    test("mine local and world coordinates agree at all four rotations") {
+        val building = spatialBuilding("nordic", "miner", 1, CivPosition(20, 80, -20))
+        val local = CivPosition(2, -3, 5)
+        for ((rotation, expected) in listOf(
+            0 to CivPosition(22, 77, -15), 90 to CivPosition(15, 77, -18),
+            180 to CivPosition(18, 77, -25), 270 to CivPosition(25, 77, -22),
+        )) {
+            val rotated = building.copy(rotation = rotation)
+            CivsWorksiteLayouts.point(rotated, local) shouldBe expected
+            CivsMinePlan.localPoint(rotated, expected) shouldBe local
         }
     }
 

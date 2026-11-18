@@ -93,6 +93,89 @@ class CivsReservedPlotFallbackTest : FunSpec({
         }
     }
 
+    test("late unpaid recovery only applies while the original city and request are current") {
+        val hallWithControl = base.buildings.single().copy(control = base.center)
+        val town = base.copy(buildings = listOf(hallWithControl))
+        val adopted = plan.copy(plots = plan.plots.map { plot ->
+            if (plot.building.id == hallWithControl.id) plot.copy(building = plot.building.copy(control = town.center)) else plot
+        })
+        val accepted = adopted.copy(revision = adopted.revision + 1)
+        for (change in listOf("unchanged", "hall", "plan", "building", "construction", "queue", "control", "deletion", "pause", "shutdown")) {
+            withClue("City change while recovery forecast is pending: $change") {
+                ReservedFallbackHarness(town, adopted, BuildingType.BUILDER_HUT).use { h ->
+                    val before = h.city
+                    val hall = before.buildings.single()
+                    val plot = h.plots.single()
+                    val building = plot.building
+                    val route = adopted.routes.getValue(building.id.toString())
+                    val replacement = h.design(plot).copy(terrain = CivTerraformPlan(
+                        building.bounds, emptyList(), route, building.anchor.y, 0, 0))
+                    h.replies[building.id] = CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
+                    h.start()
+                    h.attempted shouldBe listOf(building.id)
+                    h.recoveries shouldBe 1
+                    h.pendingRecovery.complete(replacement) shouldBe true
+                    h.drain()
+                    h.forecastDesigns shouldBe listOf(replacement)
+                    h.pendingForecast.isDone shouldBe false
+                    (h.development.debug(before.id)["request"] != null) shouldBe true
+                    h.city shouldBe before
+                    h.saveAttempts shouldBe 0
+
+                    val current = when (change) {
+                        "unchanged" -> before
+                        "hall" -> {
+                            fun shift(point: CivPosition) = point.copy(x = point.x + 1)
+                            val shifted = hall.copy(anchor = shift(hall.anchor),
+                                bounds = CivBox(shift(hall.bounds.min), shift(hall.bounds.max)),
+                                entrance = shift(hall.entrance), control = hall.control?.let(::shift))
+                            before.copy(buildings = listOf(shifted))
+                        }
+                        "plan" -> before.copy(autonomy = before.autonomy!!.copy(
+                            plan = adopted.copy(revision = accepted.revision + 1)))
+                        "building" -> before.copy(buildings = before.buildings + building)
+                        "construction" -> {
+                            val constructing = hall.copy(phase = BuildingPhase.CONSTRUCTING)
+                            before.copy(buildings = listOf(constructing), construction = CivConstruction(
+                                UUID(164, 10), hall.id, 1, 10, 0, ConstructionPhase.CONSTRUCTING, Stock(),
+                                plannedBuilding = constructing, batches = CivConstructionBatches(10, 16, true),
+                                materials = emptyMap(), payment = CivConstructionPayment()))
+                        }
+                        "queue" -> before.copy(constructionQueue = listOf(hall.id))
+                        "control" -> before.copy(pendingControls = listOf(
+                            CivControlPlacement(hall.id, before.center, "minecraft:air")))
+                        "deletion" -> before.copy(pendingDeletion = CivDeletion(null))
+                        "pause" -> before.copy(autonomy = before.autonomy!!.copy(paused = true))
+                        "shutdown" -> {
+                            h.shutdown()
+                            h.development.debug(before.id)["request"] shouldBe null
+                            before
+                        }
+                        else -> error("Unknown city change $change")
+                    }
+                    h.city = CivsRules.validate(current)
+                    h.pendingForecast.complete(accepted) shouldBe true
+                    h.drain()
+
+                    h.development.debug(before.id)["request"] shouldBe null
+                    h.committed shouldBe emptyList()
+                    if (change == "unchanged") {
+                        val saved = before.copy(revision = before.revision + 1, autonomy = before.autonomy!!.copy(plan = accepted))
+                        h.city shouldBe saved
+                        h.saves shouldBe listOf(saved)
+                        h.development.progress(before.id) shouldBe null
+                    } else {
+                        h.city shouldBe current
+                        h.saves shouldBe emptyList()
+                        val expectedReason = if (change == "shutdown") null else "stale-development"
+                        h.development.progress(before.id)?.reason shouldBe expectedReason
+                        if (change == "shutdown") h.saveAttempts shouldBe 0
+                    }
+                }
+            }
+        }
+    }
+
     test("all refused FARM reservations enter the existing recovery for the first slot only after exhaustion") {
         ReservedFallbackHarness(base, plan, BuildingType.FARM).use { h ->
             h.plots.forEach { h.replies[it.building.id] = CompletableFuture.failedFuture(CivsRejection("autonomy-no-site")) }
@@ -140,9 +223,20 @@ private class ReservedFallbackHarness(base: Settlement, plan: CivSettlementPlan,
     val committed = mutableListOf<UUID>()
     var recoveries = 0
     var recoveredTarget: UUID? = null
-    private val pendingRecovery = CompletableFuture<CivAutonomousDesign>()
+    val pendingRecovery = CompletableFuture<CivAutonomousDesign>()
+    val pendingForecast = CompletableFuture<CivSettlementPlan>()
+    val forecastDesigns = mutableListOf<CivAutonomousDesign>()
+    val saves = mutableListOf<Settlement>()
+    var saveAttempts = 0
+        private set
+    private var closed = false
     private val mutation: (UUID, (Settlement) -> Settlement) -> CompletableFuture<Settlement> = { _, transform ->
-        runCatching { transform(city) }.fold({ city = it; CompletableFuture.completedFuture(it) }, { CompletableFuture.failedFuture(it) })
+        saveAttempts++
+        runCatching { transform(city) }.fold({ next ->
+            city = next
+            saves += next
+            CompletableFuture.completedFuture(next)
+        }, { CompletableFuture.failedFuture(it) })
     }
     init {
         if (type == BuildingType.FARM) {
@@ -174,10 +268,14 @@ private class ReservedFallbackHarness(base: Settlement, plan: CivSettlementPlan,
             arg<CivSettlementPlan>(5) shouldBe plan
             pendingRecovery
         }
+        every { placement.plan(any(), any(), false) } answers {
+            forecastDesigns += arg<CivAutonomousDesign>(1)
+            pendingForecast
+        }
         every { placement.debug(any()) } returns emptyMap()
     }
     val development = CivsAutonomousDevelopment(plugin, tasks, mockk(), blueprints, placement, Executor(Runnable::run),
-        { mapOf(city.id to city) }, mutableSetOf(), emptySet(), { false }, { true }, { false },
+        { mapOf(city.id to city) }, mutableSetOf(), emptySet(), { false }, { true }, { closed },
         { CompletableFuture.completedFuture(paidPlans) }, { true }, { _, action -> action() }, mutation, mutation,
         { current, design ->
             val building = design.blueprint.building
@@ -205,5 +303,10 @@ private class ReservedFallbackHarness(base: Settlement, plan: CivSettlementPlan,
             scheduler.executeAll()
         }
     }
-    override fun close() { development.cancel(); tasks.close() }
+    fun shutdown() {
+        closed = true
+        development.cancel()
+    }
+
+    override fun close() { shutdown(); tasks.close() }
 }

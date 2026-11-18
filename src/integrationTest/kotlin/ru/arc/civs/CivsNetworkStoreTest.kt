@@ -244,7 +244,7 @@ class CivsNetworkStoreTest : FreeSpec({
         val receipt = CivInventoryTransaction(UUID.randomUUID(), canonical.id, canonical.revision, after,
             listOf(CivInventorySlotChange(control, "BARREL", 0, null, CivPlainItem("COAL", 1))))
         writeCity(spawn.root.resolve("cities/${old.id}.json"), old)
-        CivsStore(spawn.root, directExecutor).saveInventoryTransaction(receipt).await()
+        writeLegacyReceipt(spawn.root, receipt)
         val endpoint = requireNotNull(mysql).endpoint
         endpoint.connect().use { connection ->
             connection.createStatement().use { statement ->
@@ -263,8 +263,8 @@ class CivsNetworkStoreTest : FreeSpec({
         migrated.store.load().await() shouldBe listOf(canonical)
         migrated.store.loadInventoryTransactions().await() shouldBe listOf(receipt)
         directoryRow(endpoint, canonical.id)["pending_snapshot"] shouldBe null
-        migrated.store.save(after).await() shouldBe after
-        migrated.store.deleteInventoryTransaction(receipt.id).await()
+        migrated.store.completeInventoryTransaction(receipt).await() shouldBe after
+        migrated.store.loadInventoryTransactions().await() shouldBe emptyList()
         home("spawn", spawn.root).store.load().await() shouldBe listOf(after)
         endpoint.connect().use { connection -> connection.createStatement().use { statement ->
             shouldThrow<SQLException> { statement.executeQuery("SELECT snapshot FROM arc_civs_city") }
@@ -305,13 +305,20 @@ class CivsNetworkStoreTest : FreeSpec({
                 List(STORAGE_SLOTS) { null })), buffer = CivConstructionStorageMove(owner, null, part, cell))
             val after = move.after(city)
             val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(), containerRelocation = move)
-            failure { store.save(after).await() }
-            val forged = tx.copy(after = after.copy(name = "Invented before city"))
-            store.saveInventoryTransaction(forged).await()
-            failure { store.save(forged.after).await() }
-            store.deleteInventoryTransaction(forged.id).await()
-            store.saveInventoryTransaction(tx).await()
-            store.save(after).await()
+            failure { store.save(after).await() }.message.orEmpty() shouldContain "requires its pending inventory receipt"
+            val renamed = tx.copy(after = after.copy(name = "Invented before city"))
+            failure { store.saveInventoryTransaction(renamed).await() }
+                .shouldBeInstanceOf<CivsRejection>().reason shouldBe "stale-city"
+            val differentBefore = tx.copy(after = after.copy(settings = CivSettlementSettings(chunkLoading = true)))
+            store.saveInventoryTransaction(differentBefore).await() shouldBe differentBefore
+            failure { store.completeInventoryTransaction(differentBefore).await() }.message.orEmpty() shouldContain
+                "different canonical before-city"
+            store.deleteInventoryTransaction(differentBefore.id).await() shouldBe true
+
+            // Recover a pre-upgrade pending receipt after its city write reached disk.
+            writeLegacyReceipt(root, tx)
+            store.loadInventoryTransactions().await() shouldBe listOf(tx)
+            store.save(after).await() shouldBe after
             val cold = CivsStore(root, directExecutor, network = spawn.network)
             cold.load().await() shouldBe listOf(after)
             cold.loadInventoryTransactions().await() shouldBe listOf(tx)
@@ -323,7 +330,8 @@ class CivsNetworkStoreTest : FreeSpec({
             failure { cold.loadInventoryTransactions().await() }
             Files.write(blob, bytes)
             cold.verifyConstructionReceipt(tx).await()
-            cold.deleteInventoryTransaction(tx.id).await()
+            cold.completeInventoryTransaction(tx).await() shouldBe after
+            cold.loadInventoryTransactions().await() shouldBe emptyList()
             val free = after.copy(revision = after.revision + 1, inventory = after.inventory!!.copy(constructionBuffers = null))
             failure { cold.save(free).await() }
             cold.load().await() shouldBe listOf(after)
@@ -458,6 +466,12 @@ class CivsNetworkStoreTest : FreeSpec({
         private fun writeCity(path: Path, city: Settlement) {
             Files.createDirectories(path.parent)
             Files.writeString(path, Gson().toJson(mapOf("schemaVersion" to CivsStore.SCHEMA_VERSION, "city" to city)))
+        }
+
+        private fun writeLegacyReceipt(root: Path, receipt: CivInventoryTransaction) {
+            val path = root.resolve("inventory-transactions/${receipt.id}.json")
+            Files.createDirectories(path.parent)
+            Files.writeString(path, Gson().toJson(mapOf("schemaVersion" to CivsStore.SCHEMA_VERSION, "transaction" to receipt)))
         }
 
         private fun tableCount(endpoint: MySqlTestEndpoint, table: String): Int = endpoint.connect().use { connection ->
