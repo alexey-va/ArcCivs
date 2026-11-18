@@ -293,12 +293,17 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val world = plugin.server.getWorld(city.worldId) ?: continue
             val profession = professions.getValue(building.type)
             if (world.time in 12_000L..23_000L || !profession.active(city, building)) continue
+            if (worldWritePending(city, worker)) continue
             val current = plan(city, worker)
             if (!profession.hasBudget(city, worker, building, current)) continue
             lastAdmittedWorker = worker.id
             pulseWorker(city, worker, building, world, current)
         }
     }
+
+    // Keep the accepted action through publication, when plan() can already see the next worker cycle.
+    private fun worldWritePending(city: Settlement, worker: CivWorker): Boolean = writePending(city.id) &&
+        cached[worker.id]?.work?.changes?.any { locked(city.worldId, it.position) } == true
 
     private fun pulseWorker(city: Settlement, worker: CivWorker, building: CivBuilding, world: World, previous: CivWorldWork?) {
         context.spotSearchPending = false
@@ -424,7 +429,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun mineSearchEligible(city: Settlement, worker: CivWorker): Boolean {
         val building = worker.assignment?.let(city::building) ?: return false
         val world = plugin.server.getWorld(city.worldId) ?: return false
-        if (isPaused(city.id) || city.autonomy?.paused == true || world.time in 12_000L..23_000L ||
+        if (isPaused(city.id) || worldWritePending(city, worker) || city.autonomy?.paused == true || world.time in 12_000L..23_000L ||
             plan(city, worker) != null || context.currentNeed(city, worker)?.status != "searching-work") return false
         val target = workSpots[worker.id]?.target ?: rejectedWorkSpots[worker.id]?.pending?.work?.let(::citizenWorkFocus)
         if (target != null && !citizenChunkReady(world, target.x shr 4, target.z shr 4)) return false

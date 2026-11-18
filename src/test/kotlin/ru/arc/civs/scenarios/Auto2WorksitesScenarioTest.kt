@@ -59,12 +59,24 @@ class Auto2WorksitesScenarioTest : FunSpec({
             checkpoint()
             val beforeQuarry = city
             val pendingQuarry = observedCompletion(quarry)
-            // Background vegetation captures share the storage executor with RAM intent admission.
-            (pendingIo >= 1) shouldBe true
+            var quarryIntent: CivInventoryTransaction? = null
+            advanceUntil("quarry RAM intent") {
+                if (pendingQuarry.isDone) return@advanceUntil true
+                quarryIntent = try {
+                    admittedInventoryIntent().takeIf { it.worldChanges == quarry.changes }
+                } catch (_: NoSuchElementException) {
+                    null // The city may still be finishing an earlier reservation.
+                }
+                quarryIntent != null
+            }
+            pendingQuarry.isDone shouldBe false
+            val acceptedQuarry = requireNotNull(quarryIntent)
+            acceptedQuarry.beforeRevision shouldBe beforeQuarry.revision
             receipts() shouldBe emptyList()
             savedCity() shouldBe beforeQuarry
             quarry.changes.forEach { state(it.position) shouldBe it.before }
             val quarried = await(pendingQuarry)
+            quarried shouldBe acceptedQuarry.after
             quarry.changes.forEach { state(it.position) shouldBe it.after }
             quarried.stock shouldBe beforeQuarry.stock
             quarried.workers.filterNot { it.id == quarry.workerId } shouldBe beforeQuarry.workers.filterNot { it.id == quarry.workerId }

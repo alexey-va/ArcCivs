@@ -391,7 +391,8 @@ class CivsBuilderBufferReserveServiceTest : FunSpec({
                 every { dispatcher.plan(city.id, courier.id) } returns accepted
                 if (condition != "surplus") {
                     val rejected = shouldThrow<CompletionException> { h.await(h.service.pickupCargo(city.id, courier.id, cargo)) }
-                    CivsDiagnostics.rejection(rejected)?.reason shouldBe "stale-delivery"
+                    val expectedReason = if (condition == "bag-room") "resident-inventory-full" else "stale-delivery"
+                    CivsDiagnostics.rejection(rejected)?.reason shouldBe expectedReason
                     source.contents.toList() shouldBe beforeSlots
                     destination.contents.toList() shouldBe destinationSlots
                     h.service.settlements().single() shouldBe city

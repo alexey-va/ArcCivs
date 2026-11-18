@@ -120,7 +120,7 @@ class CivsService(
     internal var corpseLocation: (UUID, UUID, Long) -> org.bukkit.Location? = { _, _, _ -> null }
     private val footTraffic = CivsFootTraffic(plugin) { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() }
     private val worksites = CivsWorksites(plugin, world, ::planningBuildingStock,
-        storage::isWorldLocked, { !ready() || it in unhealthy || cities[it]?.autonomy?.paused == true },
+        storage::isWorldLocked, { it in unhealthy },
         { cityPlans.forestryRoute(it.id) }, settings = settings.worksites,
         initialMineBlock = { city, building, point, before -> cityPlans.initialMineBlock(city, building, point, before) },
         writePending = { it in busy })
