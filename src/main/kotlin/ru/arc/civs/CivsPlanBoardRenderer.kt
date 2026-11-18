@@ -78,13 +78,15 @@ class CivsPlanBoardRenderer(
         scenes.keys.filter { it !in boardIds }.forEach { scenes.remove(it)?.scene?.close() }
         for (city in wanted) {
             val boards = city.buildings.filter { it.type == BuildingType.PLAN_BOARD && it.phase == BuildingPhase.ACTIVE }
+            val observed = boards.filter { observed(city.worldId, it) }
+            // A pending callback still needs the current layout key before it can publish.
+            if (observed.isEmpty() && cities[city.id]?.pending != true) continue
             val key = civsPlanBoardLayoutKey(city)
             val state = cities.getOrPut(city.id) { City(key, boards, city.worldId) }
             state.boards = boards
             if (state.key != key) {
                 state.key = key; state.retryAfter = 0
             }
-            val observed = boards.filter { observed(city.worldId, it) }
             if (observed.isEmpty()) continue
             state.ready?.let { (data, layout) ->
                 observed.forEach { draw(it, data, layout, data.layoutKey != key) }
