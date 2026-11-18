@@ -207,6 +207,17 @@ internal class CivsCityPlans(
         })
     }
 
+    fun loadVegetationPlans(city: Settlement): CompletableFuture<CivVegetationPlanCapture> {
+        val ids = retainedIds(city)
+        val generation = store.planGeneration(ids)
+        val epoch = retainedEpoch
+        return loadAutonomousPlans(city).thenApply { plans ->
+            CivVegetationPlanCapture(plans) {
+                !records.closed && epoch == retainedEpoch && generation == store.planGeneration(ids)
+            }
+        }
+    }
+
     /** Reuse the sealed projection for a fresh receipt; a restarted server reopens the retained plan journals. */
     fun verifyHallCaptures(tx: CivInventoryTransaction): CompletableFuture<Unit> {
         val upkeep = requireNotNull(tx.upkeep?.work?.upkeep)

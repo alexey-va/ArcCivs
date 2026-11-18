@@ -20,7 +20,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private val nanoTime: () -> Long = System::nanoTime,
     private val settings: CivsWorksiteSettings = CivsWorksiteSettings(),
     initialMineBlock: (Settlement, CivBuilding, CivPosition, String) -> Boolean = { _, _, _, _ -> false }) {
-    private val context: CivsWorksiteContext = CivsWorksiteContext(plugin, worldAccess, stock, locked, forestryPaths, { nanoTime() })
+    private val context = CivsWorksiteContext(plugin, worldAccess, stock, locked, { protectedPaths(it).columns }, { nanoTime() })
     private val approaches: CivsWorksiteApproaches = CivsWorksiteApproaches(context, { forestry }, { invalidate(it) })
     private val mine: CivsMineWorksite = CivsMineWorksite(context, approaches, initialMineBlock)
     private val forestry: CivsForestryWorksite = CivsForestryWorksite(context, approaches)
@@ -46,8 +46,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         var admissions: Long = 0, var target: CivPosition? = null, var targetSwitches: Long = 0)
     private val mineSearches = hashMapOf<UUID, MineSearch>()
     private val workplaces = hashMapOf<UUID, Pair<UUID, CivBuilding>>()
-    private data class ZoneProtection(val world: UUID, val boundary: CivBox,
-        val areas: Set<Pair<BuildingType, CivBox>>, val paths: Set<Pair<Int, Int>>)
+    private class ZoneProtection(val world: UUID, val boundary: CivBox,
+        val areas: Set<Pair<BuildingType, CivBox>>, val paths: CivsForestry.PathColumns)
     private val zoneProtections = hashMapOf<UUID, ZoneProtection>()
     private var lastAdmittedWorker: UUID? = null
     private var cursor = 0
@@ -184,6 +184,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         }
     }
 
+    private fun protectedPaths(city: Settlement): CivsForestry.PathColumns {
+        val retained = forestryPaths(city)
+        val previous = zoneProtections[city.id]?.paths
+        return if (previous != null && previous.matches(city, retained)) previous else CivsForestry.PathColumns(city, retained)
+    }
+
     /** Protection metadata can change without a block event; compare it once per active city. */
     private fun refreshProtection(city: Settlement, workerIds: List<UUID>) {
         fun bounds(points: List<CivPosition>) = CivBox(
@@ -197,11 +203,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     add(building.type to building.bounds)
                     CivsWorksiteLayouts.field(building).takeIf { it.isNotEmpty() }?.let { add(BuildingType.FARM to bounds(it)) }
                 }
-            }, CivsForestry.paths(city, forestryPaths(city)))
+            }, protectedPaths(city))
         val previous = zoneProtections.put(city.id, current) ?: return
-        if (current == previous) return
+        if (current.world == previous.world && current.boundary == previous.boundary &&
+            current.areas == previous.areas && current.paths.columns == previous.paths.columns) return
         val changedAreas = (current.areas - previous.areas) + (previous.areas - current.areas)
-        val changedPaths = (current.paths - previous.paths) + (previous.paths - current.paths)
+        val changedPaths = (current.paths.columns - previous.paths.columns) + (previous.paths.columns - current.paths.columns)
         fun affected(point: CivPosition, margin: Int): Boolean {
             fun inside(box: CivBox) = point.x.toLong() - margin >= box.min.x && point.x.toLong() + margin <= box.max.x &&
                 point.z.toLong() - margin >= box.min.z && point.z.toLong() + margin <= box.max.z

@@ -342,7 +342,8 @@ internal sealed class CivsPlacementScan<T>(
                 state is TileState) rejectAt("protected-terrain", block)
             val retained = previous?.phase == BuildingPhase.ACTIVE && previous.bounds.contains(position.x, position.y, position.z) &&
                 block.blockData.asString == after.asString && civsRetainContainerState(after.asString)
-            if (!retained && !holder && civsContainerHasItems(state)) rejectAt("container-not-empty", block)
+            if (!retained && !holder && civsContainerHasItems(state)) rejectAt("container-not-empty", block,
+                mapOf("before" to block.blockData.asString, "after" to after.asString))
             if (!retained && !holder && currentCity()?.inventory?.containers?.contains(position) == true)
                 rejectAt("registered-container", block)
             requireCivs(after.material != Material.BARRIER && cell.isAir == after.material.isAir, "invalid-plan")

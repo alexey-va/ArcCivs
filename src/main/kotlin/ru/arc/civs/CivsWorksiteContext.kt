@@ -61,7 +61,7 @@ internal class CivsWorksiteContext(
     val worldAccess: CivsWorld,
     val stock: (Settlement, UUID) -> Map<String, Long>,
     val locked: (UUID, CivPosition) -> Boolean,
-    val forestryPaths: (Settlement) -> Set<Pair<Int, Int>>,
+    val protectedForestryPaths: (Settlement) -> Set<Pair<Int, Int>>,
     val nanoTime: () -> Long,
 ) {
     lateinit var professionTypes: Set<BuildingType>

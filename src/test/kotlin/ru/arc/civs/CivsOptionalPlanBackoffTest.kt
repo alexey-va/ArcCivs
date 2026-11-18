@@ -5,9 +5,13 @@ import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import org.bukkit.Material
+import org.bukkit.block.Barrel
+import org.bukkit.inventory.ItemStack
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.TestTaskScheduler
+import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
@@ -150,6 +154,52 @@ class CivsOptionalPlanBackoffTest : FunSpec({
         }
     }
 
+    for (unload in listOf(false, true)) test("a warehouse retries its occupied upgrade cell when unloaded=$unload") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val native = paper.addSimpleWorld("upgrade-retry")
+            val world = mockk<CivsWorld>()
+            every { world.scanWorld(native.uid) } returns native
+            OptionalPlanHarness(world = world).use { h ->
+                h.city = h.city.copy(worldId = native.uid, buildings = h.city.buildings.map {
+                    when (it.type) {
+                        BuildingType.WAREHOUSE -> it.copy(level = 1)
+                        BuildingType.QUARRY -> it.copy(level = it.type.maxLevel)
+                        else -> it
+                    }
+                })
+                val warehouse = h.city.buildings.single { it.type == BuildingType.WAREHOUSE }
+                val position = requireNotNull(warehouse.control)
+                native.loadChunk(position.x shr 4, position.z shr 4)
+                val block = native.getBlockAt(position.x, position.y, position.z).also { it.type = Material.BARREL }
+                val inventory = (block.state as Barrel).inventory
+                inventory.setItem(0, ItemStack(Material.DIAMOND))
+                h.captureFailure = CivsRejection("container-not-empty", mapOf("world" to native.uid.toString(),
+                    "x" to position.x.toString(), "y" to position.y.toString(), "z" to position.z.toString(),
+                    "block" to "BARREL", "before" to block.blockData.asString, "after" to "minecraft:air"))
+                h.start()
+                for (at in listOf(5_001L, 35_002L, 65_003L)) { h.time = at; h.pulse() }
+                h.upgrades shouldBe listOf(warehouse.id to 2)
+                h.finalAdmissionChecks shouldBe 1
+                inventory.getItem(0)?.type shouldBe Material.DIAMOND
+                if (unload) {
+                    native.unloadChunk(position.x shr 4, position.z shr 4, false) shouldBe true
+                    h.captureFailure = CivsRejection("chunks-unloaded")
+                } else {
+                    inventory.clear()
+                    h.captureFailure = null
+                }
+                h.time = 95_004
+                h.pulse()
+                h.upgrades shouldBe List(2) { warehouse.id to 2 }
+                h.finalAdmissionChecks shouldBe 2
+                if (unload) {
+                    native.isChunkLoaded(position.x shr 4, position.z shr 4) shouldBe false
+                    h.development.progress(h.city.id)?.reason shouldBe "chunks-unloaded"
+                } else h.committed shouldBe listOf(warehouse.id)
+            }
+        }
+    }
+
     test("an optional infrastructure backoff does not bypass an ordinary upgrade refusal and expires at the same deadline") {
         OptionalPlanHarness().use { h ->
             h.infrastructureFailure = "autonomy-no-site"
@@ -245,7 +295,7 @@ class CivsOptionalPlanBackoffTest : FunSpec({
 })
 
 private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean = false,
-    compactFounding: Boolean = false) : AutoCloseable {
+    compactFounding: Boolean = false, world: CivsWorld = mockk()) : AutoCloseable {
     private val types = if (noOrdinary) CivsAutonomy.completeProfile else
         CivsAutonomy.profile + List(2) { BuildingType.HOUSE } + if (newPlot) emptyList() else listOf(BuildingType.QUARRY)
     var city = CivsRules.validate(Settlement(UUID(177, 1), UUID(177, 2), "Legacy optional plan", UUID(177, 3),
@@ -262,6 +312,7 @@ private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean 
     val quarry get() = city.buildings.firstOrNull { it.type == BuildingType.QUARRY && it.level == 1 }
     var time = 0L
     var upgradeFailure: String? = null
+    var captureFailure: CivsRejection? = null
     var infrastructureFailure = "autonomy-layout-complete"
     var admitted = true
     var finalAdmitted = true
@@ -300,12 +351,14 @@ private class OptionalPlanHarness(newPlot: Boolean = false, noOrdinary: Boolean 
         every { placement.infrastructure(any()) } answers { CompletableFuture.failedFuture(CivsRejection(infrastructureFailure)) }
         every { placement.debug(any()) } returns emptyMap()
     }
-    val development = CivsAutonomousDevelopment(plugin, tasks, mockk(), blueprints, placement, Executor(Runnable::run),
+    val development = CivsAutonomousDevelopment(plugin, tasks, world, blueprints, placement, Executor(Runnable::run),
         { mapOf(city.id to city) }, mutableSetOf(), emptySet(), { false }, { true }, { false },
         { CompletableFuture.completedFuture(emptyList()) }, { true }, { _, action -> action() }, mutation, mutation,
         { current, design ->
             finalAdmissionChecks++
+            val failure = captureFailure
             if (!finalAdmitted) CompletableFuture.failedFuture(CivsRejection("city-busy"))
+            else if (failure != null) CompletableFuture.failedFuture(failure)
             else {
                 val id = design.blueprint.building.id
                 committed += id

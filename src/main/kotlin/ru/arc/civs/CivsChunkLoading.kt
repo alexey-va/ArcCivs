@@ -120,7 +120,8 @@ internal class CivsChunkLoading(
     private data class Load(val key: PaperChunkKey, val generation: Long, val retained: Boolean, val failure: Throwable?)
     private var registry = registryFactory()
     private val cities = linkedMapOf<UUID, City>()
-    private val wanted = linkedMapOf<PaperChunkKey, Int>()
+    private var wanted = linkedMapOf<PaperChunkKey, Int>()
+    private var wantedNeedsRebuild = false
     private var recoveryKeys = emptySet<PaperChunkKey>()
     private val temporary = linkedSetOf<CivsChunkDemand>()
     private val leases = linkedMapOf<PaperChunkKey, PaperChunkTicketLease>()
@@ -267,25 +268,10 @@ internal class CivsChunkLoading(
                 !permissions.allowed(state.owner, state.worldName)) retire(id)
         }
         statuses.keys.retainAll(byId.keys)
-        temporary.removeIf { it.closed }
-        // Reconcile demand, not native leases: the common intersection keeps the same registry lease.
-        val nextWanted = linkedMapOf<PaperChunkKey, Int>()
-        fun retain(keys: Set<PaperChunkKey>) { keys.forEach { key -> nextWanted[key] = (nextWanted[key] ?: 0) + 1 } }
-        cities.values.forEach { retain(it.chunks) }
-        val nextRecovery = linkedSetOf<PaperChunkKey>()
-        for (receipt in recoveryChunks) {
-            if (receipt.any { it.worldId in unloading || plugin.server.getWorld(it.worldId) == null } ||
-                nextWanted.size + receipt.count { it !in nextWanted } > maximumChunks) continue
-            retain(receipt); nextRecovery += receipt
+        val closedDemands = temporary.removeIf { it.closed }
+        if (wantedNeedsRebuild || closedDemands || recoveryChunks.isNotEmpty() || recoveryKeys.isNotEmpty()) {
+            rebuildWanted(recoveryChunks)
         }
-        recoveryKeys = nextRecovery
-        for (demand in temporary) {
-            if (demand.failure != null) continue
-            if (nextWanted.size + demand.keys.count { it !in nextWanted } > maximumChunks)
-                demand.failure = CivsRejection("chunk-capacity")
-            else retain(demand.keys)
-        }
-        wanted.clear(); wanted.putAll(nextWanted)
         ready.retainAll(wanted.keys)
         observedLevels.keys.retainAll(wanted.keys)
         for ((id, state) in cities) {
@@ -306,6 +292,7 @@ internal class CivsChunkLoading(
             }
             for (key in chunks - state.chunks) wanted[key] = (wanted[key] ?: 0) + 1
             state.area = area; state.chunks = chunks; state.ready = false
+            wantedNeedsRebuild = true
             status(id, "loading")
         }
         val candidates = available.filter { (city, name) -> city.id !in cities && permissions.allowed(city.owner, name) }
@@ -320,6 +307,8 @@ internal class CivsChunkLoading(
                 else {
                     cities[city.id] = City(city.owner, name, city, base, area, chunks)
                     chunks.forEach { wanted[it] = (wanted[it] ?: 0) + 1 }
+                    // On the next pulse, admitted cities precede temporary and recovery demand.
+                    wantedNeedsRebuild = true
                     status(city.id, "loading")
                 }
             }
@@ -380,6 +369,28 @@ internal class CivsChunkLoading(
         }
     }
 
+    private fun rebuildWanted(recoveryChunks: Collection<Set<PaperChunkKey>>) {
+        // Reconcile demand, not native leases: the common intersection keeps the same registry lease.
+        val nextWanted = linkedMapOf<PaperChunkKey, Int>()
+        fun retain(keys: Set<PaperChunkKey>) { keys.forEach { key -> nextWanted[key] = (nextWanted[key] ?: 0) + 1 } }
+        cities.values.forEach { retain(it.chunks) }
+        val nextRecovery = linkedSetOf<PaperChunkKey>()
+        for (receipt in recoveryChunks) {
+            if (receipt.any { it.worldId in unloading || plugin.server.getWorld(it.worldId) == null } ||
+                nextWanted.size + receipt.count { it !in nextWanted } > maximumChunks) continue
+            retain(receipt); nextRecovery += receipt
+        }
+        recoveryKeys = nextRecovery
+        for (demand in temporary) {
+            if (demand.failure != null) continue
+            if (nextWanted.size + demand.keys.count { it !in nextWanted } > maximumChunks)
+                demand.failure = CivsRejection("chunk-capacity")
+            else retain(demand.keys)
+        }
+        wanted = nextWanted
+        wantedNeedsRebuild = false
+    }
+
     private fun sameFootprint(first: Settlement, second: Settlement): Boolean = first.center == second.center &&
         first.buildings == second.buildings && first.construction?.plannedBuilding == second.construction?.plannedBuilding &&
         first.inventory?.containers == second.inventory?.containers && first.pendingControls == second.pendingControls &&
@@ -433,6 +444,7 @@ internal class CivsChunkLoading(
             val count = wanted.getValue(key) - 1
             if (count == 0) { wanted.remove(key); ready -= key; observedLevels.remove(key) } else wanted[key] = count
         }
+        wantedNeedsRebuild = true
         status(id, "released")
     }
 
@@ -451,6 +463,7 @@ internal class CivsChunkLoading(
         generation++
         permissions.reset()
         cities.clear(); wanted.clear(); ready.clear(); observedLevels.clear(); retryAt.clear(); statuses.clear()
+        wantedNeedsRebuild = false
         recoveryKeys = emptySet()
         temporary.forEach(CivsChunkDemand::close); temporary.clear()
         failed = runCatching { registry.close() }.onFailure {
@@ -462,6 +475,7 @@ internal class CivsChunkLoading(
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun worldUnloading(event: WorldUnloadEvent) {
         unloading += event.world.uid
+        wantedNeedsRebuild = true
         temporary.filter { it.worldId == event.world.uid }.forEach { it.failure = CivsRejection("world-unavailable") }
         cities.filterValues { it.area.world == event.world.uid }.keys.toList().forEach(::retire)
         leases.keys.filter { it.worldId == event.world.uid }.toList().forEach(::release)

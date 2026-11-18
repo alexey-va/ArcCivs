@@ -426,6 +426,21 @@ class CivsChunkLoadingTest : FunSpec({
         }
     }
 
+    test("admitted city chunks precede outstanding temporary demand on the next pulse") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            val survey = (20..25).mapTo(linkedSetOf()) { PaperChunkKey(city.worldId, it, 30) }
+            h.runtime.request(city.owner, city.worldId, survey)
+            h.cities = listOf(city)
+            h.loaded = true
+            h.pulse()
+            h.pulse()
+            h.added shouldBe survey.take(4)
+            h.pulse()
+            h.added.takeLast(2) shouldBe CivsChunkArea.developed(city).keys().take(2)
+        }
+    }
+
     test("temporary survey loads remain bounded and never activate an unrelated city") {
         chunkRuntime { h ->
             val city = chunkCity(h.world.uid, radius = 32)
@@ -468,6 +483,7 @@ class CivsChunkLoadingTest : FunSpec({
             h.pulse()
             h.added shouldBe emptyList()
             h.runtime.retainedChunks shouldBe 0
+            h.runtime.debug(null)["wantedChunks"] shouldBe 0
             shouldThrow<CivsRejection> { demand.ready() }
         }
     }

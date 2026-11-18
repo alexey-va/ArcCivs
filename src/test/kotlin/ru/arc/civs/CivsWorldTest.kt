@@ -1422,7 +1422,12 @@ class CivsWorldTest : FunSpec({
             val target = site.copy(phase = BuildingPhase.CONSTRUCTING)
             val capture = s.subject.capture(city.id, city.owner, city.worldId, target, worldCells(target), site)
             s.scheduler.tick()
-            failureReason(capture) shouldBe if (registered) "registered-container" else "container-not-empty"
+            val refusal = rejection(capture)
+            refusal.reason shouldBe if (registered) "registered-container" else "container-not-empty"
+            if (!registered) {
+                refusal.values["before"] shouldBe block.blockData.asString
+                refusal.values["after"] shouldBe "minecraft:air"
+            }
             block.type shouldBe Material.CHEST
             if (!registered) (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
         }

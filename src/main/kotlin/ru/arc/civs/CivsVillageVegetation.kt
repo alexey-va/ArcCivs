@@ -40,6 +40,8 @@ internal fun civsNestBackedBy(material: Material, data: org.bukkit.block.data.Bl
     (material == Material.BEE_NEST || material == Material.BEEHIVE) &&
         (data as? Directional)?.facing?.let { it.modX == dx && it.modZ == dz } == true
 
+internal data class CivVegetationPlanCapture(val plans: List<CivPlacementPlan>, val current: () -> Boolean)
+
 private data class CivVegetationRemnant(val logs: List<CivVegetationCell>, val air: Set<CivPosition>)
 
 private data class CivVegetationSelection(val cells: List<CivVegetationCell>,
@@ -58,10 +60,13 @@ internal fun civsVillageVegetationStump(cell: CivVegetationCell, typeAt: (CivPos
     } }
 }
 
+private fun civsVegetationSweepReady(city: Settlement): Boolean =
+    city.autonomy != null && city.pendingDeletion == null && city.construction == null &&
+        city.constructionQueue.isNullOrEmpty() && city.buildings.any { it.phase == BuildingPhase.ACTIVE }
+
 private fun civsVegetationProtectionMatches(before: Settlement, after: Settlement): Boolean =
     before.worldId == after.worldId && before.center == after.center && before.radius == after.radius &&
-        before.buildings == after.buildings && before.construction?.id == after.construction?.id &&
-        before.construction?.plannedBuilding == after.construction?.plannedBuilding &&
+        before.buildings == after.buildings &&
         before.autonomy?.plan == after.autonomy?.plan && before.autonomy?.layoutHalfWidth == after.autonomy?.layoutHalfWidth &&
         before.roadRouteOverrides == after.roadRouteOverrides && before.pendingControls == after.pendingControls
 
@@ -70,7 +75,7 @@ internal class CivsVillageVegetation(
     private val plugin: Plugin,
     private val tasks: LifecycleTaskScope,
     private val executor: Executor,
-    private val loadPlans: (Settlement) -> CompletableFuture<List<CivPlacementPlan>>,
+    private val loadPlans: (Settlement) -> CompletableFuture<CivVegetationPlanCapture>,
     private val city: (UUID) -> Settlement?,
     private val canModify: (Settlement, org.bukkit.block.Block) -> Boolean,
     private val locked: (UUID, CivPosition) -> Boolean,
@@ -78,13 +83,13 @@ internal class CivsVillageVegetation(
     private val changed: (UUID, Collection<CivPosition>) -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
     private val nanoTime: () -> Long = System::nanoTime,
-    private val loadAuthored: (CivBuilding, Set<String>) -> CompletableFuture<Set<CivPosition>>,
 ) : AutoCloseable {
     private data class Frame(val city: Settlement, val area: CivBox, val minimumY: Int, val maximumY: Int,
         val chunks: Map<Pair<Int, Int>, ChunkSnapshot>, val plans: List<CivPlacementPlan>,
         val logs: Set<Material>, val leaves: Set<Material>, val productiveGroves: Set<Pair<Int, Int>>,
-        val reserved: Set<CivPosition>, val currentAuthored: List<Set<CivPosition>>)
+        val reserved: Set<CivPosition>)
     private data class Sweep(val city: Settlement, val selection: CivVegetationSelection, val reserved: Set<CivPosition>,
+        val plansCurrent: () -> Boolean,
         val deferred: MutableSet<CivPosition> = hashSetOf(),
         var next: Int = 0, var removed: Int = 0, var skipped: Int = 0)
     private val epoch = tasks.token()
@@ -98,46 +103,50 @@ internal class CivsVillageVegetation(
         sweep?.let { apply(it); return }
         if (preparing) return
         val now = clock()
-        val selected = cities.filter { it.autonomy != null && it.pendingDeletion == null &&
-            now >= (nextSweep[it.id] ?: 0) }.minByOrNull { nextSweep[it.id] ?: 0 } ?: return
-        nextSweep[selected.id] = now + 120_000
+        var dueCity: Settlement? = null
+        var earliest = Long.MAX_VALUE
+        for (candidate in cities) {
+            val due = nextSweep[candidate.id] ?: 0L
+            if (due <= now && due < earliest && civsVegetationSweepReady(candidate) && city(candidate.id) != null) {
+                dueCity = candidate
+                earliest = due
+            }
+        }
+        val selected = dueCity ?: return
+        nextSweep[selected.id] = now + RETRY_MILLIS
+        val loadedWorld = plugin.server.getWorld(selected.worldId) ?: return
+        val area = civsVillageVegetationArea(selected) ?: return
+        val chunkXs = (area.min.x shr 4)..(area.max.x shr 4)
+        val chunkZs = (area.min.z shr 4)..(area.max.z shr 4)
+        if (chunkXs.none { cx -> chunkZs.any { cz -> loadedWorld.isChunkLoaded(cx, cz) } }) return
         preparing = true
         val logs = Tag.LOGS.values.toSet()
         val leaves = Tag.LEAVES.values.toSet()
-        val materials = (logs + leaves + Material.SNOW).mapTo(hashSetOf()) { "minecraft:${it.name.lowercase()}" }
-        loadPlans(selected).thenCompose { retained ->
-            val expected = retained.associateBy { it.building.id }
-            val masks = selected.buildings.filter { building -> building.phase == BuildingPhase.ACTIVE &&
-                !civsSameBuildingGeometry(expected[building.id]?.building?.copy(phase = building.phase,
-                    control = building.control), building)
-            }.map { loadAuthored(it, materials) }
-            // A missing or failed current source cannot authorize a sweep using stale ownership.
-            CompletableFuture.allOf(*masks.toTypedArray()).thenApply { retained to masks.map { it.join() } }
-        }.whenCompleteSync(tasks) loaded@ { prepared, failure ->
+        val loading = runCatching { loadPlans(selected) }.getOrElse { CompletableFuture.failedFuture(it) }
+        loading.whenCompleteSync(tasks) loaded@ { prepared, failure ->
             if (closed) return@loaded
-            if (failure != null) { preparing = false; return@loaded }
+            if (failure != null) { retry(selected.id, failure); return@loaded }
+            val capture = requireNotNull(prepared)
             val current = city(selected.id)
-            if (current == null || current.pendingDeletion != null || !civsVegetationProtectionMatches(selected, current)) {
-                preparing = false; return@loaded
+            if (current == null || !civsVegetationSweepReady(current) ||
+                !civsVegetationProtectionMatches(selected, current) || !capture.current()) {
+                retry(selected.id)
+                return@loaded
             }
             val world = plugin.server.getWorld(current.worldId)
-            val area = civsVillageVegetationArea(current)
-            if (world == null || area == null) { preparing = false; return@loaded }
+            if (world == null) { retry(current.id); return@loaded }
             // Copy existing chunks, never generate or synchronously load a surrounding forest.
             val chunks = runCatching { buildMap {
-                for (cx in (area.min.x shr 4)..(area.max.x shr 4)) for (cz in (area.min.z shr 4)..(area.max.z shr 4))
+                for (cx in chunkXs) for (cz in chunkZs)
                     if (world.isChunkLoaded(cx, cz)) put(cx to cz,
                         world.getChunkAt(cx, cz).getChunkSnapshot(true, false, false, false))
             } }.getOrElse { failure ->
-                preparing = false
-                CivsDiagnostics.event("vegetation_sweep_failed", "city" to current.id,
-                    "failure" to failure.javaClass.simpleName)
+                retry(current.id, failure)
                 return@loaded
             }
-            val (retained, currentAuthored) = requireNotNull(prepared)
-            val reserved = retained.filter { it.id == current.construction?.id }.flatMap {
-                (it.blocks + it.terrain?.blocks.orEmpty()).map { block -> block.position }
-            }.toHashSet()
+            if (chunks.isEmpty()) { retry(current.id); return@loaded }
+            val retained = capture.plans
+            val reserved = hashSetOf<CivPosition>()
             // The initial approach owner must publish its exact preimages before changing a SITE.
             // Its entrance can lie outside the building box, including a temporary leaf support.
             civsProtectedBuildings(current).filter { it.phase != BuildingPhase.ACTIVE }.forEach { building ->
@@ -169,55 +178,53 @@ internal class CivsVillageVegetation(
                 }
             }
             val frame = Frame(current, area, world.minHeight, world.maxHeight, chunks, retained,
-                logs, leaves, groves, reserved, currentAuthored)
+                logs, leaves, groves, reserved)
             val pending = try { CompletableFuture.supplyAsync({ capture(frame) }, executor) }
             catch (failure: RejectedExecutionException) {
-                preparing = false
-                nextSweep[current.id] = clock() + 1_000
-                CivsDiagnostics.event("vegetation_sweep_failed", "city" to current.id,
-                    "failure" to failure.javaClass.simpleName)
+                retry(current.id, failure)
                 return@loaded
             }
             pending.whenCompleteSync(tasks) captured@ { selection, error ->
                 preparing = false
                 if (closed || !tasks.isCurrent(epoch)) return@captured
-                if (error != null) {
-                    CivsDiagnostics.event("vegetation_sweep_failed", "city" to selected.id,
-                        "failure" to error.javaClass.simpleName)
-                } else sweep = Sweep(current, requireNotNull(selection), reserved)
+                if (error != null) retry(current.id, error)
+                else sweep = Sweep(current, requireNotNull(selection), reserved, capture.current)
             }
         }
+    }
+
+    private fun retry(cityId: UUID, failure: Throwable? = null) {
+        preparing = false
+        nextSweep[cityId] = clock() + RETRY_MILLIS
+        if (failure != null) CivsDiagnostics.event("vegetation_sweep_failed", "city" to cityId,
+            "failure" to failure.javaClass.simpleName)
     }
 
     private fun capture(frame: Frame): CivVegetationSelection {
         val logs = frame.logs.mapTo(hashSetOf()) { "minecraft:${it.name.lowercase()}" }
         val leaves = frame.leaves.mapTo(hashSetOf()) { "minecraft:${it.name.lowercase()}" }
-        val expected = frame.plans.associateBy { it.building.id }
-        val authored = frame.currentAuthored.flatMapTo(hashSetOf()) { it }
-        frame.plans.flatMap { p -> p.blocks.filter { cell ->
-            cell.after.substringBefore('[').let { it in logs || it in leaves || it == "minecraft:snow" }
-        }.map { it.position } }.toCollection(authored)
-        val previousNatural = frame.plans.flatMap { p -> (p.blocks + p.terrain?.blocks.orEmpty()).filter { cell ->
-            cell.after == "minecraft:air" && cell.before.substringBefore('[') in logs
-        }.map { it.position to it.before } }.toMap()
+        val previousNatural = buildMap {
+            for (plan in frame.plans) for (cell in plan.blocks.asSequence() + plan.terrain?.blocks.orEmpty().asSequence()) {
+                if (cell.after == "minecraft:air" && cell.before.substringBefore('[') in logs) put(cell.position, cell.before)
+            }
+        }
         val pending = frame.city.forestryJobs.orEmpty().values.flatMap { job -> job.cells.map(job::position) }.toHashSet()
-        val protectedBounds = civsProtectedBuildings(frame.city)
-            .filter { it.phase != BuildingPhase.ACTIVE || it.id !in expected }.map { it.bounds }.toList()
+        val protectedBounds = civsProtectedBuildings(frame.city).map { it.bounds }.toList()
         val found = linkedMapOf<CivPosition, CivVegetationCell>()
         val unsupportedSnow = mutableListOf<CivVegetationCell>()
         for (x in frame.area.min.x..frame.area.max.x) for (z in frame.area.min.z..frame.area.max.z) {
             if ((x to z) in frame.productiveGroves) continue
             val chunk = frame.chunks[(x shr 4) to (z shr 4)] ?: continue
-            val unknown = protectedBounds.filter { x in it.min.x..it.max.x && z in it.min.z..it.max.z }
+            val protectedColumn = protectedBounds.filter { x in it.min.x..it.max.x && z in it.min.z..it.max.z }
             val top = chunk.getHighestBlockYAt(x and 15, z and 15).coerceAtMost(frame.maximumY - 1)
             // Snow layers left by no-physics edits can be above the heightmap.
             for (y in minOf(frame.maximumY - 1, top + 12) downTo maxOf(frame.minimumY + 1, top - CivsForestry.MAX_HEIGHT)) {
                 val type = chunk.getBlockType(x and 15, y, z and 15)
                 if (type != Material.SNOW && type !in frame.logs && type !in frame.leaves) continue
                 val p = CivPosition(x, y, z)
-                if (p in authored || p in pending || p in frame.reserved) continue
+                if (p in pending || p in frame.reserved) continue
                 var covered = false
-                for (i in unknown.indices) if (y in unknown[i].min.y..unknown[i].max.y) {
+                for (bounds in protectedColumn) if (y in bounds.min.y..bounds.max.y) {
                     covered = true
                     break
                 }
@@ -275,13 +282,15 @@ internal class CivsVillageVegetation(
         val completed = frame.city.buildings.filter { it.phase == BuildingPhase.ACTIVE }
             .associate { CivsWarehouseRefit.retainedPlanId(it) to it.id }
         for (plan in frame.plans) {
-            if (completed[plan.id] != plan.building.id || plan.id == frame.city.construction?.id ||
-                plan.cityId != frame.city.id || plan.worldId != frame.city.worldId) continue
+            if (completed[plan.id] != plan.building.id || plan.cityId != frame.city.id || plan.worldId != frame.city.worldId) continue
             val cleared = hashMapOf<CivPosition, String>()
+            // Construction applies terrain first; the authored shape can cover a terrain cut.
             for (cell in plan.terrain?.blocks.orEmpty().asSequence() + plan.blocks.asSequence()) {
-                val material = cell.before.substringBefore('[')
                 if (cell.after != "minecraft:air") cleared.remove(cell.position)
-                else if (material.endsWith("_log") || material.endsWith("_leaves")) cleared.putIfAbsent(cell.position, cell.before)
+                else {
+                    val material = cell.before.substringBefore('[')
+                    if (material.endsWith("_log") || material.endsWith("_leaves")) cleared.putIfAbsent(cell.position, cell.before)
+                }
             }
             for ((p, state) in cleared) {
                 val timber = CivsForestry.material(state)
@@ -340,16 +349,20 @@ internal class CivsVillageVegetation(
 
     private fun apply(current: Sweep) {
         val settlement = city(current.city.id)
-        val world = plugin.server.getWorld(current.city.worldId)
-        if (settlement == null || world == null || settlement.pendingDeletion != null || settlement.worldId != current.city.worldId) {
-            sweep = null; return
+        if (settlement == null || !civsVegetationSweepReady(settlement) ||
+            !civsVegetationProtectionMatches(current.city, settlement) || !current.plansCurrent()) {
+            sweep = null
+            retry(current.city.id)
+            return
         }
-        if (!civsVegetationProtectionMatches(current.city, settlement)) {
-            nextSweep[settlement.id] = clock()
-            sweep = null; return
+        val world = plugin.server.getWorld(settlement.worldId) ?: run {
+            sweep = null
+            retry(settlement.id)
+            return
         }
         val deadline = nanoTime() + 1_000_000L
         val area = civsVillageVegetationArea(settlement) ?: run { sweep = null; return }
+        val protectedBounds = civsProtectedBuildings(settlement).map { it.bounds }.toList()
         val touched = mutableListOf<CivPosition>()
         val pending = settlement.forestryJobs.orEmpty().values.flatMap { job -> job.cells.map(job::position) }.toHashSet()
         val cells = current.selection.cells
@@ -368,8 +381,7 @@ internal class CivsVillageVegetation(
             if (p in current.deferred || !settlement.contains(p.x, p.z) || p.x !in area.min.x..area.max.x || p.z !in area.min.z..area.max.z ||
                 !world.isChunkLoaded(p.x shr 4, p.z shr 4) || p in pending || locked(world.uid, p) ||
                 occupied(world.uid, p) || occupied(world.uid, p.copy(y = p.y + 1)) ||
-                p in current.reserved || civsProtectedBuildings(settlement).any {
-                    (it.phase != BuildingPhase.ACTIVE || it !in current.city.buildings) && it.bounds.contains(p.x, p.y, p.z) } ||
+                p in current.reserved ||
                 world.getNearbyEntities(BoundingBox(p.x.toDouble(), p.y + 1.0, p.z.toDouble(),
                     p.x + 1.0, p.y + 2.8, p.z + 1.0)).any { it is LivingEntity }) { skip(cell); continue }
             val block = world.getBlockAt(p.x, p.y, p.z)
@@ -389,15 +401,21 @@ internal class CivsVillageVegetation(
                 val live = loaded(it.position)
                 live == null || !live.type.isAir && live.blockData.asString != it.before
             })) { skip(cell); continue }
+            if (protectedBounds.any { it.contains(p.x, p.y, p.z) }) { skip(cell); continue }
+            if (!current.plansCurrent()) {
+                sweep = null
+                retry(settlement.id)
+                break
+            }
             block.setType(Material.AIR, false)
             touched += p
             current.removed++
         }
         if (touched.isNotEmpty()) changed(world.uid, touched)
-        if (current.next == cells.size) {
+        if (sweep === current && current.next == cells.size) {
             CivsDiagnostics.event("vegetation_sweep", "city" to settlement.id, "candidates" to cells.size,
                 "removed" to current.removed, "skipped" to current.skipped)
-            if (current.removed > 0) nextSweep[settlement.id] = clock() + 1_000
+            nextSweep[settlement.id] = clock() + SWEEP_INTERVAL_MILLIS
             sweep = null
         }
     }
@@ -407,6 +425,8 @@ internal class CivsVillageVegetation(
     companion object {
         const val MAXIMUM_CELLS = 32_768
         private const val MAXIMUM_REMNANT_LOGS = 8
+        private const val SWEEP_INTERVAL_MILLIS = 6L * 60 * 60 * 1_000
+        private const val RETRY_MILLIS = 60_000L
     }
 }
 

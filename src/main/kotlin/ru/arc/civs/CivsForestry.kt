@@ -180,8 +180,20 @@ internal object CivsForestry {
     fun paths(city: Settlement, retained: Set<Pair<Int, Int>> = emptySet()): Set<Pair<Int, Int>> = buildSet {
         addAll(retained)
         civsProtectedBuildings(city).forEach { building ->
-            (CivsAutonomousGeometry.approach(building) + building.transit.orEmpty()).forEach { add(it.x to it.z) }
+            for (point in CivsAutonomousGeometry.approach(building)) add(point.x to point.z)
+            for (point in building.transit.orEmpty()) add(point.x to point.z)
         }
+    }
+
+    /** One active worksite city's protected approaches, transit columns and retained roads. */
+    class PathColumns(city: Settlement, retained: Set<Pair<Int, Int>>) {
+        private val buildings = city.buildings
+        private val plannedBuilding = city.construction?.plannedBuilding
+        private val retainedColumns = retained.toSet()
+        val columns = paths(city, retainedColumns)
+
+        fun matches(city: Settlement, retained: Set<Pair<Int, Int>>): Boolean =
+            buildings == city.buildings && plannedBuilding == city.construction?.plannedBuilding && retainedColumns == retained
     }
 
     fun blockedColumn(city: Settlement, x: Int, z: Int, paths: Set<Pair<Int, Int>>): Boolean =

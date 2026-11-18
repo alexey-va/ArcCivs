@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import org.bukkit.Material
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.whenCompleteSync
@@ -116,6 +117,19 @@ internal class CivsAutonomousDevelopment(
     private data class DeferredInitialPlan(val owner: UUID, val layoutKey: String)
     private val deferredInitialPlans = mutableMapOf<UUID, DeferredInitialPlan>()
     private val searchFailures = CivsAutonomousSearchFailures()
+    private data class OccupiedUpgrade(val owner: UUID, val worldId: UUID, val source: CivBuilding, val target: CivBuilding,
+        val cell: CivPlanBlock, val until: Long) {
+        fun stillBlocked(city: Settlement, world: CivsWorld): Boolean {
+            // A newly eligible storage transfer must go through ordinary proposal and custody checks.
+            if (civsStorageChangingCell(cell) && civsConstructionStorageOwns(city, source, target, cell.position)) return false
+            val native = world.scanWorld(worldId) ?: return false
+            val p = cell.position
+            if (p.y !in native.minHeight until native.maxHeight || !native.isChunkLoaded(p.x shr 4, p.z shr 4)) return false
+            val block = native.getBlockAt(p.x, p.y, p.z)
+            return block.type == Material.BARREL && block.blockData.asString == cell.before && civsContainerHasItems(block.state)
+        }
+    }
+    private val occupiedUpgrades = mutableMapOf<UUID, OccupiedUpgrade>()
     // One fresh infrastructure attempt may follow failed growth even after terrain invalidates its geometric refusal.
     private data class FailedGrowthYield(val owner: UUID, val world: UUID, val layout: String,
         val goal: CivAutonomyGoal, val until: Long) {
@@ -151,6 +165,7 @@ internal class CivsAutonomousDevelopment(
 
     fun paused(cityId: UUID) {
         searchFailures.remove(cityId)
+        occupiedUpgrades.remove(cityId)
         failedGrowthYields.remove(cityId)
         ordinaryTurnsOwed.remove(cityId)
         developmentFinished(cityId)
@@ -163,6 +178,7 @@ internal class CivsAutonomousDevelopment(
 
     fun reset() {
         searchFailures.clear()
+        occupiedUpgrades.clear()
         failedGrowthYields.clear()
         ordinaryTurnsOwed.clear()
         (autonomyRequests.keys + autonomyProgress.keys + autonomyRetryAt.keys).toSet().forEach(developmentFinished)
@@ -181,6 +197,7 @@ internal class CivsAutonomousDevelopment(
 
     fun cancel() {
         searchFailures.clear()
+        occupiedUpgrades.clear()
         failedGrowthYields.clear()
         ordinaryTurnsOwed.clear()
         (autonomyRequests.keys + autonomyProgress.keys + autonomyRetryAt.keys).toSet().forEach(developmentFinished)
@@ -247,6 +264,7 @@ internal class CivsAutonomousDevelopment(
         if (regular) {
             nextAutonomyAt = at + 5_000
             searchFailures.retain(cities.keys)
+            occupiedUpgrades.entries.removeIf { (id, refusal) -> id !in cities || at >= refusal.until }
             ordinaryTurnsOwed.keys.retainAll(cities.keys)
             failedGrowthYields.entries.removeIf { (cityId, evidence) ->
                 val latest = cities[cityId]
@@ -405,6 +423,15 @@ internal class CivsAutonomousDevelopment(
         if (!goal.ready) { developmentFinished(city.id); return }
         val recovery = ordinaryRecovery.takeUnless { infrastructure }
         if (searchFailures.blocked(city, goal, now(), recovery?.skipPrepared)) return
+        occupiedUpgrades[city.id]?.takeIf { it.target.id == goal.buildingId && it.target.level == goal.targetLevel }?.let {
+            if (at < it.until && city.owner == it.owner && city.worldId == it.worldId &&
+                civsSameBuildingGeometry(existing, it.source) && it.stillBlocked(city, world)) {
+                autonomyRetryAt[city.id] = at + 30_000
+                developmentFinished(city.id)
+                return
+            }
+            occupiedUpgrades.remove(city.id)
+        }
         if (recovery != null && now() < (autonomyPlanRetryAt[city.id] ?: 0L)) return
         if (!developmentAdmission(city)) {
             autonomyFailed(city.id, goal, CivsRejection("city-busy"))
@@ -516,8 +543,12 @@ internal class CivsAutonomousDevelopment(
             } }.onSuccess { committed -> committed.whenCompleteSync(tasks) { _, commitFailure ->
                 if (autonomyRequests[city.id] == request) {
                     autonomyRequests.remove(city.id)
-                    if (commitFailure != null) autonomyFailed(city.id, goal, commitFailure)
-                    else {
+                    if (commitFailure != null) {
+                        if (existing?.phase == BuildingPhase.ACTIVE && blueprint != null && goal.targetLevel == existing.level + 1) {
+                            rememberOccupiedUpgrade(city, existing, blueprint.blueprint.building, commitFailure)
+                        }
+                        autonomyFailed(city.id, goal, commitFailure)
+                    } else {
                         autonomyProgress[city.id] = CivsAutonomyView("queued", goal.type, goal.targetLevel)
                         autonomyRetryAt.remove(city.id)
                         autonomyWarnAt.remove(city.id)
@@ -529,6 +560,17 @@ internal class CivsAutonomousDevelopment(
             }
         }
         prepared.whenCompleteSync(tasks) { blueprint, failure -> completed(blueprint, failure) }
+    }
+
+    private fun rememberOccupiedUpgrade(city: Settlement, source: CivBuilding, target: CivBuilding, failure: Throwable) {
+        val refusal = CivsDiagnostics.rejection(failure)?.takeIf { it.reason == "container-not-empty" } ?: return
+        val values = refusal.values
+        if (values["block"] != "BARREL" || values["world"] != city.worldId.toString()) return
+        val position = CivPosition(values["x"]?.toIntOrNull() ?: return, values["y"]?.toIntOrNull() ?: return,
+            values["z"]?.toIntOrNull() ?: return)
+        val cell = CivPlanBlock(position, values["before"] ?: return, values["after"] ?: return)
+        // External edits to a legacy schematic are also reconsidered after one ordinary geometric retry window.
+        occupiedUpgrades[city.id] = OccupiedUpgrade(city.owner, city.worldId, source, target, cell, now() + 300_000)
     }
 
     private fun unpaidPlot(city: Settlement, plan: CivSettlementPlan, type: BuildingType): CivSettlementPlot? {

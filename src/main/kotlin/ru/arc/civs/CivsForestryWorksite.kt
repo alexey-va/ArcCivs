@@ -53,7 +53,7 @@ internal class CivsForestryWorksite(
                 val roots = work.forestry?.job?.roots ?: if (CivsForestry.care(work))
                     careRoots(city, building, world, requireNotNull(work.focus), timber)
                         ?: throw CivsRejection("stale-worksite") else CivsForestry.plantingRoots(work)
-                val paths = CivsForestry.paths(city, context.forestryPaths(city))
+                val paths = context.protectedForestryPaths(city)
                 val clear = if (work.forestry != null || CivsForestry.care(work)) CivsForestry.rootsClear(city, roots, paths)
                     else CivsForestry.plantingClear(city, roots, paths)
                 requireCivs(clear, "stale-worksite")
@@ -230,7 +230,7 @@ internal class CivsForestryWorksite(
         if (CivsProduction.options(BuildingType.FORESTER).all { context.forestrySurplus(city, it) })
             return blocked(worker, "storage-surplus", CivsProduction.material(building), reason = "timber-family-surplus")
         if (!takeDiscoveryTurn(city, worker, building)) return blocked(worker, "waiting")
-        val paths = CivsForestry.paths(city, context.forestryPaths(city))
+        val paths = context.protectedForestryPaths(city)
         val timber = requireNotNull(CivsProduction.material(building))
         val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
         val growConfiguredTimber = !context.forestrySurplus(city, timber)

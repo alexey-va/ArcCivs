@@ -148,6 +148,9 @@ headroom. A bounded 24-block downward tree scan separates soil height from crown
 height. Nonpersistent foliage and logs below that foliage may be cleared; bare
 log structures and persistent player foliage are refused. The exact journal keeps
 that leaf evidence for revalidation and restart replay without producing drops.
+Village vegetation cleanup surveys a loaded settlement once it is ready and
+then at six-hour intervals. It skips the entire volume of each building,
+including trees planted there later, and rechecks the bounds before removal.
 Route steps move one horizontal block and at most one vertical block;
 the starting support and standing space remain unchanged. Three-block shoulders
 are prepared where natural terrain permits. The existing navigation solver checks

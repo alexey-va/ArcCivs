@@ -243,6 +243,32 @@ class CivsCityPlansCacheTest : FunSpec({
         }
     }
 
+    test("a captured vegetation sweep loses plan authority after replacement deletion and reload") {
+        accessCacheFixture { h -> h.countReads {
+            val forester = h.plans[1]
+            val first = h.await(h.owner.loadVegetationPlans(h.city))
+            h.reads shouldBe 5
+            first.plans shouldBe h.plans
+            first.current() shouldBe true
+
+            val replacement = h.flattenedForesterPlan()
+            h.store.savePlan(replacement).join()
+            first.current() shouldBe false
+            val afterSave = h.await(h.owner.loadVegetationPlans(h.city))
+            afterSave.plans.single { it.id == forester.id } shouldBe replacement
+
+            h.store.deletePlan(forester.id).join() shouldBe true
+            afterSave.current() shouldBe false
+            val afterDelete = h.await(h.owner.loadVegetationPlans(h.city))
+            afterDelete.plans shouldBe h.plans - forester
+
+            h.write(forester)
+            h.store.load().join()
+            afterDelete.current() shouldBe false
+            h.await(h.owner.loadVegetationPlans(h.city)).plans shouldBe first.plans
+        } }
+    }
+
     test("five cities retain compact sources outside the four full-plan slots with bounded warm allocation") {
         accessCacheFixture { h ->
             val cities = (0 until 5).map { index ->

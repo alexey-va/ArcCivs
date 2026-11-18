@@ -222,12 +222,10 @@ class CivsService(
         blueprints::authoredVegetationRepair, world, storage, inventoryJournal, construction::isPlacing, citizens::growthBlocked)
 
     private val vegetation = CivsVillageVegetation(plugin, tasks, planningExecutor,
-        { city -> cityPlans.loadAutonomousPlans(city).thenCombine(
-            city.construction?.let { store.loadPlan(it.id) } ?: CompletableFuture.completedFuture(null)
-        ) { retained, accepted -> retained + listOfNotNull(accepted) } },
+        { city -> cityPlans.loadVegetationPlans(city) },
         { id -> cities[id]?.takeUnless { closed || id in unhealthy } },
         { city, block -> world.canModify(city.owner, block, Material.AIR) }, storage::isWorldLocked,
-        citizens::growthBlocked, citizens::terrainChanged, clock, loadAuthored = blueprints::authoredVegetation)
+        citizens::growthBlocked, citizens::terrainChanged, clock)
 
     private val storageRelocations = CivsStorageRelocations(
         tasks, store, storage, inventoryJournal, records, checkMain = ::checkMain, ready = ::ready,
@@ -449,7 +447,7 @@ class CivsService(
             if (ready()) supply.pulse()
             if (ready()) forestryLeafLoot.pulse()
             if (ready()) citizens.activateNavigating()
-            if (ready()) vegetation.pulse(cities.values.filter { it.id !in unhealthy })
+            if (ready()) vegetation.pulse(cities.values)
         }
         tasks.runTimer(5, 5) {
             if (ready()) {

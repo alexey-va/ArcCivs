@@ -16,6 +16,7 @@ import ru.arc.paper.api.ArcSchematicException
 import ru.arc.paper.api.ArcSchematicFailure
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 /** One localized renderer; names and host values are always literal components. */
 class CivsText private constructor(
@@ -24,6 +25,8 @@ class CivsText private constructor(
     private val useClientLocale: () -> Boolean,
     private val forcedLocale: () -> String?,
 ) {
+    // Each loaded catalog owns its immutable labels. Names and other substituted values never enter this cache.
+    private val labels = messages.mapValues { ConcurrentHashMap<String, Component>() }
     private val renderer = LocalizedMiniMessage(
         messages.mapValues { (_, values) -> object : LocaleCatalog {
             override fun scalar(path: String): String? = values[path]
@@ -44,6 +47,7 @@ class CivsText private constructor(
     private fun language(player: Player?): String {
         val requested = forcedLocale()?.takeIf(String::isNotBlank)
             ?: if (player != null && useClientLocale()) player.locale().toLanguageTag() else defaultLocale()
+        if (requested in messages) return requested
         val language = Locale.forLanguageTag(requested.replace('_', '-')).language
         return language.takeIf { it in messages }
             ?: Locale.forLanguageTag(defaultLocale().replace('_', '-')).language
@@ -51,9 +55,12 @@ class CivsText private constructor(
 
     fun render(key: String, locale: String? = null, vararg values: Pair<String, Any?>): Component {
         require(key in messages.getValue("ru")) { "Unknown ArcCivs locale key: $key" }
-        return renderer.render(key, locale, values.associate { (name, value) ->
+        val catalog = if (values.isEmpty()) labels[locale ?: defaultLocale()] else null
+        catalog?.get(key)?.let { return it }
+        val rendered = renderer.render(key, locale, values.associate { (name, value) ->
             name to if (value is Component) value else renderer.literal(value)
         }).colorIfAbsent(BODY).decoration(TextDecoration.ITALIC, false)
+        return catalog?.putIfAbsent(key, rendered) ?: rendered
     }
 
     fun literal(value: Any?): Component = renderer.literal(value).color(BODY).decoration(TextDecoration.ITALIC, false)

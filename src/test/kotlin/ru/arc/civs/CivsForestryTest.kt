@@ -1721,6 +1721,35 @@ class CivsForestryTest : FunSpec({
         CivsForestry.valid(forestryCity(), forestryCity().buildings.last().id.toString(), job.copy(states = job.states.take(1))) shouldBe false
     }
 
+    test("forestry reuses unchanged path columns and distinguishes old, planned and newly retained routes") {
+        val city = forestryCity()
+        val retained = mutableSetOf(4 to 0)
+        val original = CivsForestry.PathColumns(city, retained)
+        original.columns shouldBe CivsForestry.paths(city, retained)
+        original.matches(city.copy(stock = Stock(25), revision = city.revision + 1), retained) shouldBe true
+
+        val mill = city.buildings.last().copy(transit = listOf(CivPosition(7, 64, 0)))
+        val changed = city.copy(buildings = city.buildings.dropLast(1) + mill)
+        val next = CivsForestry.PathColumns(changed, retained)
+        original.matches(changed, retained) shouldBe false
+        next.matches(city, retained) shouldBe false
+        ((7 to 0) in next.columns) shouldBe true
+        ((7 to 0) in original.columns) shouldBe false
+
+        val planned = city.copy(construction = CivConstruction(UUID(0, 7), mill.id, mill.level + 1, 1, 0,
+            ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = mill))
+        original.matches(planned, retained) shouldBe false
+        ((7 to 0) in CivsForestry.PathColumns(planned, retained).columns) shouldBe true
+
+        retained.clear()
+        retained.add(9 to 0)
+        original.matches(city, retained) shouldBe false
+        ((4 to 0) in original.columns) shouldBe true
+        val replacement = CivsForestry.PathColumns(city, retained)
+        ((4 to 0) in replacement.columns) shouldBe false
+        ((9 to 0) in replacement.columns) shouldBe true
+    }
+
     test("planting keeps road clearance while leaves may grow above roofs and roads") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("forestry-growth-guard")

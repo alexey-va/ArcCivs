@@ -15,6 +15,8 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 
+private const val SIX_HOURS = 21_600_000L
+
 class CivsVillageVegetationTest : FunSpec({
     fun log(x: Int, y: Int, z: Int) = CivVegetationCell(CivPosition(x, y, z), "minecraft:oak_log[axis=y]", true, false)
     fun leaf(x: Int, y: Int, z: Int) = CivVegetationCell(CivPosition(x, y, z),
@@ -65,9 +67,14 @@ class CivsVillageVegetationTest : FunSpec({
             // This tree is absent from the immutable snapshot and must wait for a later sweep.
             val later = h.tree(CivPosition(5, 64, -5))
             h.finishCapture()
+            if (dense) {
+                h.owner.pulse(listOf(h.city))
+                h.notifications.size shouldBe 64
+                h.planLoads shouldBe 1
+            }
             h.drain()
 
-            val protectedRoots = setOf(authoredRoot, pendingRoot, siteRoot)
+            val protectedRoots = roots.filter { it.x in -2..2 && it.z in -2..2 }.toSet() + setOf(pendingRoot, siteRoot)
             val removed = trees.filterKeys { it !in protectedRoots }.values.flatten().toSet()
             h.notifications shouldBe removed
             removed.forEach { h.type(it) shouldBe Material.AIR }
@@ -79,54 +86,64 @@ class CivsVillageVegetationTest : FunSpec({
         }
     }
 
-    test("current level three authored tree survives a level one retained plan while an outside natural tree is cleared") {
+    for (oldPlan in listOf(false, true)) test("new interior trees survive in an active building oldPlan=$oldPlan") {
         VillageVegetationFixture().use { h ->
             val initial = h.city.buildings.single()
-            h.retained[initial.id] = CivPlacementPlan(initial.id, h.city.id, h.city.worldId, initial, emptyList())
-            h.city = h.city.copy(buildings = listOf(initial.copy(level = 3, schematicId = "test-level3")))
-            val root = CivPosition(0, 64, 0)
-            val authored = h.tree(root)
-            h.put(root.copy(y = 63), Material.COBBLESTONE)
-            h.authored[initial.id] = authored.toSet()
-            val natural = h.tree(CivPosition(5, 64, 5))
+            val expansion = CivPosition(3, 64, 0)
+            if (oldPlan) h.retained[initial.id] = CivPlacementPlan(initial.id, h.city.id, h.city.worldId, initial,
+                listOf(CivPlanBlock(initial.anchor, "minecraft:air", "minecraft:stone")))
+            h.city = h.city.copy(buildings = listOf(initial.copy(level = 3, schematicId = "test-level3",
+                bounds = initial.bounds.copy(max = initial.bounds.max.copy(x = expansion.x)))))
+            val inside = h.tree(expansion)
+            h.put(expansion.copy(y = 63), Material.DIRT)
+            val outside = h.tree(CivPosition(5, 64, 5))
 
             h.startCapture()
             h.finishCapture()
             h.drain()
 
-            authored.forEachIndexed { i, p ->
-                h.type(p) shouldBe if (i == authored.lastIndex) Material.OAK_LEAVES else Material.OAK_LOG
+            inside.forEachIndexed { i, p ->
+                h.type(p) shouldBe if (i == inside.lastIndex) Material.OAK_LEAVES else Material.OAK_LOG
             }
-            natural.forEach { h.type(it) shouldBe Material.AIR }
-            h.type(root.copy(y = 63)) shouldBe Material.COBBLESTONE
-            h.notifications shouldBe natural.toSet()
-            h.retained.getValue(initial.id).building.level shouldBe 1
+            outside.forEach { h.type(it) shouldBe Material.AIR }
+            h.notifications shouldBe outside.toSet()
         }
     }
 
-    test("failed current authored source prevents native clearing and a later source retry recovers") {
+    test("a footprint expansion between capture and apply protects newly covered vegetation") {
         VillageVegetationFixture().use { h ->
-            val initial = h.city.buildings.single()
-            h.retained[initial.id] = CivPlacementPlan(initial.id, h.city.id, h.city.worldId, initial, emptyList())
-            h.city = h.city.copy(buildings = listOf(initial.copy(level = 3, schematicId = "test-level3")))
-            val authored = h.tree(CivPosition(0, 64, 0))
-            h.authored[initial.id] = authored.toSet()
-            val natural = h.tree(CivPosition(5, 64, 5))
-            h.sourceFailures = 1
+            val hall = h.city.buildings.single()
+            val tree = h.tree(CivPosition(3, 64, 0))
+            h.startCapture()
+            h.finishCapture()
+            h.city = h.city.copy(buildings = listOf(hall.copy(bounds = hall.bounds.copy(max = hall.bounds.max.copy(x = 3)))))
+            h.drain()
 
+            tree.forEachIndexed { i, p -> h.type(p) shouldBe if (i == tree.lastIndex) Material.OAK_LEAVES else Material.OAK_LOG }
+            h.notifications shouldBe emptySet()
+        }
+    }
+
+    test("a changed retained plan fences an already captured sweep and a fresh capture can proceed") {
+        VillageVegetationFixture().use { h ->
+            val tree = h.tree(CivPosition(5, 64, 5))
+            h.startCapture()
+            h.finishCapture()
+            h.planGeneration++
+            h.owner.pulse(listOf(h.city))
+            h.notifications shouldBe emptySet()
+            tree.forEach { h.type(it).isAir shouldBe false }
+
+            h.now = 59_999
             h.startCapture()
             h.pending.size shouldBe 0
-            h.drain()
-            (authored + natural).forEach { h.type(it).isAir shouldBe false }
-            h.notifications shouldBe emptySet()
-
-            h.now = 120_001
+            h.planLoads shouldBe 1
+            h.now = 60_000
             h.startCapture()
             h.finishCapture()
             h.drain()
-            authored.forEach { h.type(it).isAir shouldBe false }
-            natural.forEach { h.type(it) shouldBe Material.AIR }
-            h.sourceAttempts shouldBe 2
+            h.notifications shouldBe tree.toSet()
+            tree.forEach { h.type(it) shouldBe Material.AIR }
         }
     }
 
@@ -168,7 +185,7 @@ class CivsVillageVegetationTest : FunSpec({
             branch.forEach { h.type(it) shouldBe Material.OAK_LOG }
             h.put(laterSupport, Material.AIR)
 
-            h.now = 120_001
+            h.now = SIX_HOURS
             h.startCapture()
             h.finishCapture()
             h.drain()
@@ -237,13 +254,62 @@ class CivsVillageVegetationTest : FunSpec({
         civsVillageVegetationColumn(city.copy(autonomy = city.autonomy?.copy(paused = true)), 24, 0) shouldBe true
     }
 
+    test("completed sweep keeps its next journal read six hours away even after removing trees") {
+        VillageVegetationFixture().use { h ->
+            val first = h.tree(CivPosition(-5, 64, -5))
+            h.startCapture()
+            h.finishCapture()
+            h.drain()
+            first.forEach { h.type(it) shouldBe Material.AIR }
+            h.planLoads shouldBe 1
+
+            val next = h.tree(CivPosition(5, 64, 5))
+            for (now in listOf(1_001L, 120_001L, SIX_HOURS - 1)) {
+                h.now = now
+                h.startCapture()
+                h.pending.size shouldBe 0
+                h.planLoads shouldBe 1
+                next.forEach { h.type(it).isAir shouldBe false }
+            }
+            h.now = SIX_HOURS
+            h.startCapture()
+            h.finishCapture()
+            h.drain()
+            h.planLoads shouldBe 2
+            next.forEach { h.type(it) shouldBe Material.AIR }
+        }
+    }
+
+    test("a sweep waits for loaded chunks before reading plans") {
+        VillageVegetationFixture().use { h ->
+            val tree = h.tree(CivPosition(-5, 64, -5))
+            h.unloadArea()
+            h.startCapture()
+            h.planLoads shouldBe 0
+            h.pending.size shouldBe 0
+            h.loadArea()
+            h.now = 59_999
+            h.startCapture()
+            h.planLoads shouldBe 0
+            h.now = 60_000
+            h.startCapture()
+            h.finishCapture()
+            h.drain()
+            h.planLoads shouldBe 1
+            tree.forEach { h.type(it) shouldBe Material.AIR }
+        }
+    }
+
     test("a rejected capture releases preparation and the next sweep can clear the tree") {
         VillageVegetationFixture().use { h ->
             val tree = h.tree(CivPosition(-5, 64, -5))
             h.rejectCaptures = 1
             h.startCapture()
             h.pending.size shouldBe 0
-            h.now = 1_000
+            h.now = 59_999
+            h.startCapture()
+            h.planLoads shouldBe 1
+            h.now = 60_000
             h.startCapture()
             h.finishCapture()
             h.drain()
@@ -288,6 +354,7 @@ class CivsVillageVegetationTest : FunSpec({
             h.finishCapture()
             h.owner.pulse(listOf(h.city)) // Discard the old protection frame before any native writes.
             h.notifications shouldBe emptySet()
+            h.now = 60_000
             h.startCapture()
             h.finishCapture()
             h.drain()
@@ -297,7 +364,7 @@ class CivsVillageVegetationTest : FunSpec({
         }
     }
 
-    test("one column protects inclusive construction and planned bounds across multiple heights") {
+    test("founding and paid work postpone sweeps while unqueued sites still protect their bounds") {
         VillageVegetationFixture().use { h ->
             val hall = h.city.buildings.single()
             val constructing = hall.copy(id = UUID(0, 10), phase = BuildingPhase.CONSTRUCTING,
@@ -310,8 +377,23 @@ class CivsVillageVegetationTest : FunSpec({
             val leaves = (-5..-4).flatMap { x -> (63..70).map { y -> CivPosition(x, y, -5) } }
             leaves.forEach { h.put(it, Material.OAK_LEAVES) }
             h.startCapture()
+            h.planLoads shouldBe 0
+            h.pending.size shouldBe 0
+            leaves.forEach { h.type(it) shouldBe Material.OAK_LEAVES }
+
+            val site = constructing.copy(phase = BuildingPhase.SITE)
+            h.city = h.city.copy(construction = null, buildings = listOf(hall.copy(phase = BuildingPhase.SITE), site))
+            h.startCapture()
+            h.planLoads shouldBe 0
+            h.city = h.city.copy(buildings = listOf(hall, site, planned), constructionQueue = listOf(site.id))
+            h.startCapture()
+            h.planLoads shouldBe 0
+
+            h.city = h.city.copy(constructionQueue = emptyList())
+            h.startCapture()
             h.finishCapture()
             h.drain()
+            h.planLoads shouldBe 1
             val protectedCells = leaves.filter { it.x == -5 && it.y in setOf(64, 65, 67, 68) }.toSet()
             leaves.forEach { h.type(it) shouldBe if (it in protectedCells) Material.OAK_LEAVES else Material.AIR }
             h.notifications shouldBe leaves.toSet() - protectedCells
@@ -333,7 +415,7 @@ class CivsVillageVegetationTest : FunSpec({
                 autonomy = CivAutonomy(layoutHalfWidth = 6))
             fun put(p: CivPosition, material: Material) { world.getBlockAt(p.x, p.y, p.z).type = material }
             val trunk = listOf(CivPosition(-3, 64, 0), CivPosition(-3, 65, 0))
-            val crown = CivPosition(-2, 66, 0)
+            val crown = CivPosition(-3, 66, 0)
             val authored = CivPosition(1, 64, 1)
             val placedLeaf = CivPosition(3, 66, 0)
             val denied = listOf(CivPosition(4, 64, 4), CivPosition(4, 65, 4), CivPosition(4, 66, 4))
@@ -364,10 +446,8 @@ class CivsVillageVegetationTest : FunSpec({
             val pending = ArrayDeque<Runnable>()
             val notifications = mutableSetOf<CivPosition>()
             CivsVillageVegetation(plugin, tasks, Executor { pending += it },
-                { CompletableFuture.completedFuture(listOf(retained)) }, { city },
-                { _, block -> block.x != 4 }, { _, _ -> false }, { _, _ -> false },
-                { _, positions -> notifications += positions }, clock = { 0L },
-                loadAuthored = { _, _ -> error("Matching retained geometry needs no current source") }).use { owner ->
+                { CompletableFuture.completedFuture(CivVegetationPlanCapture(listOf(retained)) { true }) }, { city }, { _, block -> block.x != 4 }, { _, _ -> false }, { _, _ -> false },
+                { _, positions -> notifications += positions }, clock = { 0L }).use { owner ->
                 owner.pulse(listOf(city))
                 paper.server.scheduler.performOneTick()
                 pending.size shouldBe 1
@@ -408,33 +488,33 @@ private class VillageVegetationFixture : AutoCloseable {
     var now = 0L
     var rejectCaptures = 0
     var captureAttempts = 0
-    var sourceFailures = 0
-    var sourceAttempts = 0
+    var planGeneration = 0
+    var planLoads = 0
+        private set
     val pending = ArrayDeque<Runnable>()
     val blocked = hashSetOf<CivPosition>()
     val notifications = hashSetOf<CivPosition>()
     val retained = hashMapOf<UUID, CivPlacementPlan>()
-    val authored = hashMapOf<UUID, Set<CivPosition>>()
     var owner = newOwner()
         private set
 
-    init { for (x in -1..0) for (z in -1..0) world.loadChunk(x, z) }
+    init { loadArea() }
+
+    fun loadArea() { for (x in -1..0) for (z in -1..0) world.loadChunk(x, z) }
+
+    fun unloadArea() { for (x in -1..0) for (z in -1..0) world.unloadChunk(x, z) }
 
     private fun newOwner() = CivsVillageVegetation(plugin, tasks, Executor {
         captureAttempts++
         if (rejectCaptures > 0) { rejectCaptures--; throw RejectedExecutionException("full fixture queue") }
         pending += it
-    }, { current -> CompletableFuture.completedFuture(current.buildings.map {
-        retained[it.id] ?: CivPlacementPlan(it.id, current.id, current.worldId, it, emptyList())
-    }) }, { city }, { _, _ -> true }, { _, p -> p in blocked }, { _, _ -> false },
-        { _, positions -> notifications += positions }, clock = { now }, nanoTime = { 0L },
-        loadAuthored = { building, _ ->
-            sourceAttempts++
-            if (sourceFailures > 0) {
-                sourceFailures--
-                CompletableFuture.failedFuture(IllegalStateException("source unavailable"))
-            } else CompletableFuture.completedFuture(authored[building.id].orEmpty())
-        })
+    }, { current ->
+        planLoads++
+        val generation = planGeneration
+        val plans = current.buildings.filter { it.phase == BuildingPhase.ACTIVE }.mapNotNull { retained[it.id] }
+        CompletableFuture.completedFuture(CivVegetationPlanCapture(plans) { planGeneration == generation })
+    }, { city }, { _, _ -> true }, { _, p -> p in blocked }, { _, _ -> false },
+        { _, positions -> notifications += positions }, clock = { now }, nanoTime = { 0L })
 
     fun tree(root: CivPosition): List<CivPosition> = ((0..3).map { root.copy(y = root.y + it) } +
         root.copy(y = root.y + 4)).also { cells -> cells.forEachIndexed { i, p ->

@@ -266,7 +266,7 @@ internal class CivsWorksiteApproaches(
         val roots = work.forestry?.job?.roots ?: if (CivsForestry.care(work))
             forestry().careRoots(city, building, world, focus, timber) ?: return changed()
             else CivsForestry.plantingRoots(work)
-        val paths = CivsForestry.paths(city, context.forestryPaths(city))
+        val paths = context.protectedForestryPaths(city)
         val clear = if (work.forestry != null || CivsForestry.care(work)) CivsForestry.rootsClear(city, roots, paths)
             else CivsForestry.plantingClear(city, roots, paths)
         if (!clear) return changed()

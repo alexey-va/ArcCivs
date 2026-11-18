@@ -4,6 +4,7 @@ import it.unimi.dsi.fastutil.HashCommon
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap
 import java.util.PriorityQueue
 import kotlin.math.abs
 
@@ -938,7 +939,7 @@ internal object CivsAutonomousTerraform {
         }
         val turnStreets = streets.filter { street ->
             listOf(from, building.entrance).none { abs(it.x - street.center.x) <= 3 && abs(it.z - street.center.z) <= 3 }
-        }
+        }.toTypedArray()
         fun offStreetCost(x: Int, z: Int): Int =
             if (streets.isEmpty() || streets.any { if (it.alongX) z == it.center.z else x == it.center.x }) 0 else 4
 
@@ -967,7 +968,9 @@ internal object CivsAutonomousTerraform {
             val distances = Long2IntOpenHashMap()
             if (columns.size > MAXIMUM_SURFACE_COLUMNS) return@getOrPut distances
             val floors = Long2IntOpenHashMap()
-            for (entry in columns.long2ObjectEntrySet()) {
+            val entries = columns.long2ObjectEntrySet().fastIterator()
+            while (entries.hasNext()) {
+                val entry = entries.next()
                 val key = entry.longKey
                 val native = entry.value
                 val x = (key shr 32).toInt(); val z = key.toInt()
@@ -1018,8 +1021,11 @@ internal object CivsAutonomousTerraform {
             val score = a.score.compareTo(b.score)
             if (score != 0) score else a.ordinal.compareTo(b.ordinal)
         }
-        val costs = hashMapOf(start to 0)
-        val closed = hashSetOf<Node>()
+        // Route costs are nonnegative; a settled entry also records that the state cannot reopen.
+        val settled = -1
+        val costs = Object2IntOpenHashMap<Node>()
+        costs.defaultReturnValue(Int.MAX_VALUE)
+        costs.put(start, 0)
         var ordinal = 0
         open += Open(start, 0, baseDistance(start), ordinal++)
         var expanded = 0
@@ -1043,7 +1049,8 @@ internal object CivsAutonomousTerraform {
         val ancestorColumns = LongOpenHashSet()
         while (open.isNotEmpty() && expanded < MAXIMUM_ROUTE_NODES) {
             val current = open.remove()
-            if (costs[current.node] != current.cost || !closed.add(current.node)) continue
+            if (costs.getInt(current.node) != current.cost) continue
+            costs.put(current.node, settled)
             // Stale queue entries are bookkeeping, not expanded spatial states.
             expanded++
             val n = current.node
@@ -1079,7 +1086,8 @@ internal object CivsAutonomousTerraform {
                 val x = n.x + dx; val y = n.y + rise; val z = n.z + dz
                 if (!allowed(x, y, z) || x == start.x && z == start.z) continue
                 val candidate = Node(x, y, z, direction, rise > 0, rise < 0)
-                if (candidate in closed) continue
+                val previousCost = costs.getInt(candidate)
+                if (previousCost == settled) continue
                 val native = requireNotNull(columns.get(civsTerrainKey(candidate.x, candidate.z)))
                 // A brief hummock or hollow should be cut/filled instead of adding two gratuitous climbs.
                 val column = civsTerrainKey(candidate.x, candidate.z)
@@ -1093,7 +1101,7 @@ internal object CivsAutonomousTerraform {
                 val flightStart = if (rise > 0 && !n.climbed || rise < 0 && !n.descended) ROAD_FLIGHT_START_COST else 0
                 val cost = current.cost + (if (shared) 6 else 10) + abs(rise) * ROAD_LEVEL_CHANGE_COST + flightStart +
                     (if (shared) 0 else abs(native.groundY - candidate.y) * 2) + offStreet + forecourtTurn + parallel
-                if (cost >= costs.getOrDefault(candidate, Int.MAX_VALUE)) continue
+                if (cost >= previousCost) continue
                 // A column has exactly one finished ground height. A cheap 3-D route can otherwise
                 // climb by zigzagging through the same two columns at successively higher levels.
                 // Closed ancestors cannot be reparented; refresh once per expansion, reusing only the allocation.
@@ -1107,7 +1115,7 @@ internal object CivsAutonomousTerraform {
                     ancestorsReady = true
                 }
                 if (ancestorColumns.contains(column)) continue
-                costs[candidate] = cost
+                costs.put(candidate, cost)
                 open += Open(candidate, cost, cost + distance(candidate), ordinal++, current)
                 peakQueue = maxOf(peakQueue, open.size)
             }
@@ -1116,7 +1124,7 @@ internal object CivsAutonomousTerraform {
     }
 
     private fun air(data: String) = data.substringBefore('[') in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
-    private val DIRECTIONS = listOf(0 to 1, 1 to 0, 0 to -1, -1 to 0)
+    private val DIRECTIONS = arrayOf(0 to 1, 1 to 0, 0 to -1, -1 to 0)
     private val PARALLEL_OFFSETS = intArrayOf(-2, -1, 1, 2)
     private val FALLING_GROUND = setOf("minecraft:sand", "minecraft:red_sand", "minecraft:gravel")
 }
