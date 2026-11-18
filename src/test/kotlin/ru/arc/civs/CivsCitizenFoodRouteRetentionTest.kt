@@ -14,6 +14,61 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsCitizenFoodRouteRetentionTest : FunSpec({
+    test("two residents share walked geometry and each reaches the same food barrel for pickup") {
+        residentRuntime(workerId = UUID(0, 20), server = CivsWorksiteServerFixture()) { h ->
+            for (x in -2..2) for (z in -2..2) h.world.loadChunk(x, z)
+            val second = UUID(0, 21)
+            val point = CivPosition(12, 64, 0)
+            val tavern = CivBuilding(UUID(0, 22), BuildingType.TAVERN, 1, point, 0, "tavern",
+                CivBox(point.copy(x = 11, z = -2), point.copy(x = 15, y = 68, z = 2)),
+                point.copy(x = 11), BuildingPhase.ACTIVE, control = point)
+            h.world.getBlockAt(point.x, point.y, point.z).type = Material.BARREL
+            h.city = h.city.copy(buildings = h.city.buildings + tavern, inventory = CivInventory(CivStorageMode.PHYSICAL),
+                workers = h.city.workers + CivWorker(second, "Neighbour", null, hunger = 20))
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            val origin = Location(h.world, 1.5, 64.0, .5)
+            val parked = Location(h.world, -8.5, 64.0, 6.5)
+            h.actor(second).npc.teleport(parked)
+            val food = CivResidentFoodSource(tavern.id, point, point.copy(x = 13))
+            h.physicalFoodSource = food
+            val pickups = mutableListOf<UUID>()
+            fun walk(worker: UUID): CitizenPacketRoute {
+                val actor = h.actor(worker)
+                actor.npc.teleport(origin)
+                h.city = h.city.copy(workers = h.city.workers.map { it.copy(hunger = if (it.id == worker) 12 else 20) })
+                h.physicalFoodPickup = { selected ->
+                    selected shouldBe food
+                    actor.supplyPickup?.buildingId shouldBe tavern.id
+                    civsCanReachContainer(requireNotNull(h.owner.residentCollectionFeet(worker)), selected.container) shouldBe true
+                    pickups += worker
+                    CompletableFuture.completedFuture(h.city)
+                }
+                h.navigationNow = requireNotNull(h.navigationNow) + 1_000
+                h.owner.pulse(requireNotNull(h.navigationNow))
+                val route = requireNotNull(actor.route)
+                route.authored shouldBe food.standing
+                for (tick in 1..400) {
+                    val previous = actor.npc.location
+                    h.navigate()
+                    (previous.distance(actor.npc.location) <= .215001) shouldBe true
+                    if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    if (worker in pickups) break
+                }
+                return route.motion
+            }
+            val cold = walk(h.workerId)
+            pickups shouldBe listOf(h.workerId)
+            (cold.nodeCount > 0 && cold.capturedBlocks > 0) shouldBe true
+            h.actor(h.workerId).npc.teleport(parked.clone().add(0.0, 0.0, 4.0))
+            val warm = walk(second)
+            pickups shouldBe listOf(h.workerId, second)
+            warm.nodeCount shouldBe 0
+            warm.capturedBlocks shouldBe 0
+            (h.owner.debugSharedRoutes(h.city.id)["totals"] as Map<*, *>)["exact_hits"] shouldBe 1L
+        }
+    }
+
     test("a failed food approach keeps its short retry wait before walking an untried side") {
         residentRuntime(workerId = UUID(0, 20)) { h ->
             for (x in -2..2) for (z in -2..2) h.world.loadChunk(x, z)

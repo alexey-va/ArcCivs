@@ -73,6 +73,8 @@ internal class CivsCitizenLogistics(
                 actor.cycle.deferWork(now)
                 if (civsCanReachContainer(actor.npc.location, candidate.container) && routes.arrivalBodyClear(actor)) {
                     actor.foodRouteFailure = null
+                    actor.route?.takeIf { !it.intermediate && it.authored == candidate.standing &&
+                        actor.foodSource == candidate.buildingId }?.motion?.observeAcceptedArrival(actor.npc.location.point())
                     routes.cancelRoute(actor)
                     beginSupplies(actor, candidate.buildingId, now, false)
                 } else {

@@ -220,6 +220,10 @@ internal class CivsCitizenRoutes(
         val corridor = actor.plan.courier?.takeIf { idleAnchor == null && it.carrying &&
             actor.cycle.phase == CitizenPhase.RETURNING && target == actor.plan.storage && waypoint == null }
             ?.let { hint?.corridor(city, it.cargo, from.point(), to.point()) }
+        val physicalFoodTrip = foodTarget != null && resolved == foodTarget.standing &&
+            foodTarget.servingFor == null && foodTarget.servingTicket == null && waypoint == null &&
+            actor.mineVisit == null && !actor.returningToWarehouse && actor.outputReturn == null &&
+            actor.plan.courier?.carrying != true && city.inventory?.mode != CivStorageMode.VIRTUAL
         val origin = from.point()
         val minimumY = world.minHeight
         val maximumY = world.maxHeight
@@ -243,7 +247,7 @@ internal class CivsCitizenRoutes(
             (entrance != null || minePassage == null || minePassage.allows(second)) },
             reuseKey = if (trip != null && idleAnchor == null && mine == null && waitingMine == null && corridor == null &&
                 !actor.sheltering && actor.attacker == null && actor.combatDestination == null &&
-                actor.foodSource == null && actor.mealVisit == null && actor.workDetour == null &&
+                (physicalFoodTrip || actor.foodSource == null && actor.workDetour == null) && actor.mealVisit == null &&
                 actor.collectionSeek == null && actor.collectionHome == null && actor.tavernService == null && actor.social.visit == null)
                 CitizenRouteReuseKey.of(routeCosts, allowed) else null, supportCost = supportCost, cityId = city.id,
             roadCorridor = if (idleAnchor == null && corridor == null && routeMine == null && waitingMine == null &&

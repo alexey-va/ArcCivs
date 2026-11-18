@@ -58,6 +58,13 @@ lifecycle facts. Each activity owns its private queues and cursors:
 - `CivsCitizenLogistics` and `Couriers` own observed transfers and their callbacks.
 - `CivsCitizenLeisure`, `Shelters` and `Combat` own their interruption and cleanup.
 
+`CivsResidentNavigation` shares up to 64 walked routes. Residents travelling
+between workplaces or to a physical food container can reuse a route to the
+same destination, including from a nearby point along it. Each trip checks
+current permissions, support and clearance. Block changes and chunk unloads
+invalidate affected routes. Food pickup still requires the resident to reach
+the selected container.
+
 `CivsRoadGraph` connects known road and trail positions for the navigation worker.
 When a resident needs a new route, this graph can narrow the first terrain search.
 The worker still checks clearance and permissions for every step and can widen
