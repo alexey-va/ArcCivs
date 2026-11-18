@@ -12,6 +12,9 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
+/** Live validation belongs to the navigation owner. The worker receives only the container coordinates. */
+internal class CitizenFoodRouteGoal(val container: CivPosition, val accepts: (CitizenPoint) -> Boolean)
+
 /**
  * Owns one route and its main-thread movement. The same detached A* serves async jobs and
  * deterministic direct callers; every accepted move checks fresh full-body native geometry.
@@ -27,6 +30,7 @@ internal class CitizenPacketRoute(
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
     private val corridor: CitizenSearchCorridor? = null,
     internal val snapshotPolicy: CitizenSnapshotPolicy? = null,
+    private val pickup: CitizenFoodRouteGoal? = null,
 ) {
     private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true,
                            val action: CitizenRouteAction = CitizenRouteAction.WALK,
@@ -64,6 +68,7 @@ internal class CitizenPacketRoute(
     private var asyncCancellation: (() -> Unit)? = null
     private var directSearch: CitizenNavigationSearch? = null
     private var directCapture: CitizenNavigationCapture? = null
+    private var directPickupAnswer: Boolean? = null
     private val directTerrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
     private var fallingSpeed = 0.0
     private var reuseObserver: ((List<CitizenPlannedStep>, Set<CivPosition>) -> Unit)? = null
@@ -104,6 +109,9 @@ internal class CitizenPacketRoute(
     val destination: Location? get() = path.firstOrNull()?.point?.let { Location(world, it.x, it.y, it.z) }
     val nodeCount: Int get() = visited
     val endpoint: CitizenPoint? get() = path.lastOrNull()?.point
+    internal var pickupEndpoint: CitizenPoint? = null
+    internal fun reservedDestination(authored: Location): Location? =
+        if (pickup == null) authored else pickupEndpoint?.let { Location(world, it.x, it.y, it.z) }
     val remainingNodes: Int get() = path.size
     /** The request received a hint; ordinary wider-search fallback may still be needed. */
     internal val hasCourierCorridorHint: Boolean get() = corridor != null
@@ -114,7 +122,14 @@ internal class CitizenPacketRoute(
         ?.takeIf { corridor == null && avoiding.isEmpty() }
         ?.let { CitizenRouteIdentity(worldId, it,
             CitizenSearchNode(floor(origin.x).toInt(), origin.y, floor(origin.z).toInt()),
-            CitizenPoint(target.x, target.y, target.z), settings) }
+            pickup?.container?.point() ?: target.point(), settings, pickup?.container) }
+
+    internal fun confirmPickup(point: CitizenPoint): Boolean {
+        if (pickup == null) return true
+        if (!pickup.accepts(point)) return false
+        pickupEndpoint = point
+        return true
+    }
 
     internal val reuseOrigin: CitizenPoint get() = origin
 
@@ -215,6 +230,7 @@ internal class CitizenPacketRoute(
     }
 
     fun cancel() {
+        pickupEndpoint = null
         reuseObserver = null
         reusableSteps = null
         proposedMove = null
@@ -230,7 +246,7 @@ internal class CitizenPacketRoute(
 
     fun replan(from: Location, bodies: List<BoundingBox>, destination: Location? = null): CitizenPacketRoute =
         CitizenPacketRoute(world, from, destination ?: target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings,
-            snapshotPolicy = snapshotPolicy)
+            snapshotPolicy = snapshotPolicy, pickup = pickup.takeIf { destination == null || destination.point() == target.point() })
 
     private fun permits(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to) &&
         (bodyContactAllowed || citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
@@ -251,9 +267,13 @@ internal class CitizenPacketRoute(
         try {
             val capture = directCapture
             if (capture != null && !capture.step()) return
-            val result = search.advance(capture?.result.orEmpty())
+            val result = search.advance(capture?.result.orEmpty(), directPickupAnswer)
+            directPickupAnswer = null
+            directCapture = null
             recordSearch(result)
-            if (result.probes.isNotEmpty()) {
+            if (result.pickupCandidate != null) {
+                directPickupAnswer = confirmPickup(result.pickupCandidate)
+            } else if (result.probes.isNotEmpty()) {
                 preparationPhase = "capturing"
                 directCapture = CitizenNavigationCapture(this, result.probes, directTerrain)
             } else acceptSearch(result)
@@ -262,11 +282,14 @@ internal class CitizenPacketRoute(
         }
     }
 
-    internal fun newWorkerSearch() = newSearch(snapshotPolicy?.roadCorridor?.takeIf { avoiding.isEmpty() })
+    internal fun newWorkerSearch(): CitizenNavigationSearch {
+        pickupEndpoint = null
+        return newSearch(snapshotPolicy?.roadCorridor?.takeIf { avoiding.isEmpty() })
+    }
 
-    internal fun newSearch(roadLookup: CitizenRoadLookup? = null) = CitizenNavigationSearch(origin, target.point(),
+    internal fun newSearch(roadLookup: CitizenRoadLookup? = null) = CitizenNavigationSearch(origin, pickup?.container?.point() ?: target.point(),
         minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) },
-        settings, corridor, roadLookup)
+        settings, corridor, roadLookup, pickup?.container)
 
     internal fun attachAsync(cancel: () -> Unit) {
         check(directSearch == null) { "A direct route cannot be submitted after search started" }
@@ -819,6 +842,7 @@ internal class CitizenPacketRoute(
     }
 
     private fun fail(reason: String) {
+        pickupEndpoint = null
         reuseObserver = null
         reusableSteps = null
         proposedMove = null

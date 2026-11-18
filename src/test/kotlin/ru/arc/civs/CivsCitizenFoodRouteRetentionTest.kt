@@ -65,7 +65,9 @@ class CivsCitizenFoodRouteRetentionTest : FunSpec({
             pickups shouldBe listOf(h.workerId, second)
             warm.nodeCount shouldBe 0
             warm.capturedBlocks shouldBe 0
-            (h.owner.debugSharedRoutes(h.city.id)["totals"] as Map<*, *>)["exact_hits"] shouldBe 1L
+            val reuse = h.owner.debugSharedRoutes(h.city.id)["totals"] as Map<*, *>
+            ((reuse["exact_hits"] as Long) + (reuse["suffix_hits"] as Long)) shouldBe 1L
+            reuse["rejected"] shouldBe 0L
         }
     }
 

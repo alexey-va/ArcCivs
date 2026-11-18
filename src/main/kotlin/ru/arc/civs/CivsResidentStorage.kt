@@ -224,7 +224,9 @@ internal class CivsResidentStorage(
             val target = if (!tavernService && civsWithinFoodPickupReach(feet, point)) {
                 if (!citizenChunkReady(world, point.x shr 4, point.z shr 4)) continue
                 CivPosition(feet.blockX, feet.blockY, feet.blockZ)
-            } else citizenCollectedHomeTarget(city, building, world, point) ?: continue
+            } else citizenCollectedHomeTarget(city, building, world, point)
+                ?: (if (tavernService) null else citizenNearbyFoodTarget(city, building, world, point))
+                ?: continue
             return CivResidentFoodSource(building.id, point, target, material)
         }
         return null

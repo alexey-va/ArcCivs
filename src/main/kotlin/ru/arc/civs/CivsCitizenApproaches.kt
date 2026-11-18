@@ -87,12 +87,38 @@ internal fun citizenCollectedHomeTarget(city: Settlement, home: CivBuilding, wor
             add(target.copy(x = target.x + dx, y = y, z = target.z + dz))
     }
     for (point in candidates) {
-        if (city.contains(point.x, point.z) && citizenControlClear(city, point) && citizenStandable(world, point) &&
-            city.buildings.none { it.id != home.id && it.bounds.contains(point.x, point.y, point.z) } &&
+        if (citizenContainerStandingAllowed(city, home, point) && citizenStandable(world, point) &&
             citizenCanReachBlock(world, point.location(world).add(0.0, 1.5, 0.0), target, 3.0) && safe(point)) return point
     }
     return null
 }
+
+internal fun citizenContainerStandingAllowed(city: Settlement, building: CivBuilding, point: CivPosition): Boolean =
+    city.contains(point.x, point.z) && citizenControlClear(city, point) &&
+        city.buildings.none { it.id != building.id && it.bounds.contains(point.x, point.y, point.z) }
+
+/** A fallback hint for a personal pickup when the usual adjacent approaches are unavailable. */
+internal fun citizenNearbyFoodTarget(city: Settlement, building: CivBuilding, world: World, holder: CivPosition,
+    free: (Location) -> Boolean = { true }): CivPosition? {
+    if (!citizenChunkReady(world, holder.x shr 4, holder.z shr 4)) return null
+    val reachSquared = CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH
+    // Native feet can be fractional within the cell. Check the closest possible feet or eye before reading blocks.
+    for (dy in FOOD_APPROACH_LEVELS) for (dx in -3..3) for (dz in -3..3) {
+        val feetGapY = maxOf(0.0, abs(dy.toDouble()) - .5)
+        val near = dx * dx + feetGapY * feetGapY + dz * dz <= reachSquared
+        val eyeGapX = maxOf(0.0, abs(dx) - .5)
+        val eyeGapY = maxOf(0.0, -(dy + 2.5), dy + .5)
+        val eyeGapZ = maxOf(0.0, abs(dz) - .5)
+        if (!near && eyeGapX * eyeGapX + eyeGapY * eyeGapY + eyeGapZ * eyeGapZ > reachSquared) continue
+        val point = CivPosition(holder.x + dx, holder.y + dy, holder.z + dz)
+        if (!citizenContainerStandingAllowed(city, building, point)) continue
+        val feet = citizenStorageFeet(world, point) ?: continue
+        if (civsCanReachContainer(feet, holder, nearbyFoodPickup = true) && free(feet)) return point
+    }
+    return null
+}
+
+private val FOOD_APPROACH_LEVELS = intArrayOf(0, -1, 1, -2, 2, -3, 3, -4, -5)
 
 internal fun citizenCollectedItemTarget(city: Settlement, world: World, item: Location): CivPosition? {
     for (dy in listOf(0, 1, -1)) for ((dx, dz) in listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1)) {

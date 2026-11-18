@@ -106,7 +106,7 @@ class CivsPhysicalFoodStanceContentionTest : FunSpec({
         }
     }
 
-    test("hungry residents avoid an occupied food side and each other's reserved arrival while retaining their chosen side") {
+    test("hungry residents with a shared hint reserve distinct food endpoints and each receives bread") {
         residentRuntime(server = CivsWorksiteServerFixture()) { h ->
             h.navigationNow = 2_000
             h.holdNavigation = true
@@ -135,12 +135,14 @@ class CivsPhysicalFoodStanceContentionTest : FunSpec({
             civsCanReachContainer(first.npc.location, container) shouldBe false
             civsCanReachContainer(second.npc.location, container) shouldBe false
             h.physicalFoodSource = source
-            var pickups = 0
+            val actors = listOf(first, second)
+            val pickups = mutableSetOf<UUID>()
+            val routes = foodStanceRoutes(h)
             h.physicalFoodPickup = { selected ->
-                val actor = listOf(first, second).single { it.foodPickupSource == selected }
+                val actor = actors.single { it.supplyPickup?.buildingId == selected.buildingId && it.workerId !in pickups }
                 selected shouldBe requireNotNull(actor.foodPickupSource)
-                foodStanceRoutes(h).arrivalBodyClear(actor) shouldBe true
-                civsCanReachContainer(actor.npc.location, container) shouldBe true
+                routes.arrivalBodyClear(actor) shouldBe true
+                civsCanReachContainer(actor.npc.location, container, nearbyFoodPickup = true) shouldBe true
                 val worker = h.city.workers.single { it.id == actor.workerId }
                 CivsEquipment.usableCount(worker, "BREAD") shouldBe 0
                 val before = requireNotNull(food.getItem(0)).amount
@@ -149,47 +151,43 @@ class CivsPhysicalFoodStanceContentionTest : FunSpec({
                 val supplied = CivsEquipment.collectSupplies(worker, mapOf("BREAD" to 4L))
                 h.city = h.city.copy(revision = h.city.revision + 1,
                     workers = h.city.workers.map { if (it.id == supplied.id) supplied else it })
-                pickups++
+                pickups += actor.workerId
                 CompletableFuture.completedFuture(h.city)
             }
             val logistics = foodStanceLogistics(h)
             fun pulseFood() {
                 val now = requireNotNull(h.navigationNow)
                 logistics.drainSupplies(now)
-                for (actor in listOf(first, second)) logistics.supplyFood(actor, h.city,
+                for (actor in actors) logistics.supplyFood(actor, h.city,
                     h.city.workers.single { it.id == actor.workerId }, h.world, now)
             }
             h.navigationNow = requireNotNull(h.navigationNow) + 1_000
             pulseFood()
-            val firstSource = withClue(h.owner.debug(h.city.id, h.workerId)) { requireNotNull(first.foodPickupSource) }
-            val secondSource = withClue(h.owner.debug(h.city.id, guestId)) { requireNotNull(second.foodPickupSource) }
-            setOf(firstSource.standing, secondSource.standing) shouldBe setOf(CivPosition(-1, 64, 0), CivPosition(0, 64, 1))
-            val firstRoute = requireNotNull(first.route)
-            val secondRoute = requireNotNull(second.route)
-            firstRoute.authored shouldBe first.foodPickupSource!!.standing
-            secondRoute.authored shouldBe second.foodPickupSource!!.standing
-            first.npc.location.blockX shouldBe 6 // The reservation, rather than a body at that side, excludes the second resident.
-            pickups shouldBe 0
+            val approaches = actors.map { requireNotNull(it.route) }
+            approaches.map { it.authored }.distinct().size shouldBe 1
+            approaches.forEach { it.motion.reservedDestination(it.target) shouldBe null }
+            pickups shouldBe emptySet()
             food.getItem(0) shouldBe ItemStack(Material.BREAD, 8)
-            // Releasing the old first side must not send both residents back to it.
-            blocker.npc.teleport(Location(h.world, 6.5, 64.0, 6.5))
-            h.navigationNow = requireNotNull(h.navigationNow) + 1_000
-            pulseFood()
-            (first.route === firstRoute) shouldBe true
-            (second.route === secondRoute) shouldBe true
-            first.foodPickupSource shouldBe firstSource
-            second.foodPickupSource shouldBe secondSource
             h.releaseNavigation()
+            for (tick in 1..400) {
+                h.navigate()
+                if (approaches.all { it.motion.pickupEndpoint != null }) break
+            }
+            val feet = approaches.map { approach ->
+                withClue(h.owner.debug(h.city.id, null)) { requireNotNull(approach.motion.reservedDestination(approach.target)) }
+            }
+            val occupied = citizenStandingBounds(blocker.npc.location, blocker.npc.scale)
+            val reserved = actors.zip(feet) { actor, at -> citizenStandingBounds(at, actor.npc.scale) }
+            reserved.any(occupied::overlaps) shouldBe false
+            reserved.first().overlaps(reserved.last()) shouldBe false
             for (tick in 1..1_000) {
                 h.navigate()
                 if (tick % 10 == 0) pulseFood()
-                if (pickups == 2) break
+                if (pickups.size == 2) break
             }
-            withClue(h.owner.debug(h.city.id, null)) { pickups shouldBe 2 }
+            withClue(h.owner.debug(h.city.id, null)) { pickups shouldBe setOf(h.workerId, guestId) }
             food.isEmpty shouldBe true
-            h.city.workers.filter { it.id in setOf(h.workerId, guestId) }.sumOf {
-                CivsEquipment.usableCount(it, "BREAD")
-            } shouldBe 8
+            h.city.workers.filter { it.id in pickups }.forEach { CivsEquipment.usableCount(it, "BREAD") shouldBe 4 }
             CivsEquipment.usableCount(h.city.workers.single { it.id == blockerId }, "BREAD") shouldBe 0
             h.city.stock shouldBe Stock()
             h.deliveries shouldBe 0
@@ -220,14 +218,15 @@ class CivsPhysicalFoodStanceContentionTest : FunSpec({
             blockers.zip(sides).forEach { (worker, side) -> foodStanceActor(h, worker.id).npc.teleport(side.location(h.world)) }
             val source = CivResidentFoodSource(hall.id, container, sides.first())
             h.physicalFoodSource = source
-            civsCanReachContainer(actor.npc.location, container) shouldBe alreadyInReach
-            foodStanceRoutes(h).foodStanding(actor, h.city, source) shouldBe null
+            civsCanReachContainer(actor.npc.location, container, nearbyFoodPickup = true) shouldBe alreadyInReach
+            val routes = foodStanceRoutes(h)
             var pickups = 0
             h.physicalFoodPickup = { selected ->
-                alreadyInReach shouldBe true
-                selected shouldBe source
-                foodStanceRoutes(h).arrivalBodyClear(actor) shouldBe true
-                civsCanReachContainer(actor.npc.location, container) shouldBe true
+                selected.copy(standing = source.standing) shouldBe source
+                routes.arrivalBodyClear(actor) shouldBe true
+                civsCanReachContainer(actor.npc.location, container, nearbyFoodPickup = true) shouldBe true
+                val feet = actor.npc.location
+                (CivPosition(feet.blockX, feet.blockY, feet.blockZ) in sides) shouldBe false
                 food.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
                 val worker = h.city.workers.single { it.id == h.workerId }
                 CivsEquipment.usableCount(worker, "BREAD") shouldBe 0
@@ -239,47 +238,39 @@ class CivsPhysicalFoodStanceContentionTest : FunSpec({
                 CompletableFuture.completedFuture(h.city)
             }
             val before = h.city
+            val origin = actor.npc.location.point()
             val logistics = foodStanceLogistics(h)
-            repeat(if (alreadyInReach) 1 else 3) {
-                h.navigationNow = requireNotNull(h.navigationNow) + 6_000
-                logistics.supplyFood(actor, h.city, h.city.workers.single { it.id == h.workerId },
-                    h.world, requireNotNull(h.navigationNow))
-                if (alreadyInReach) {
-                    actor.foodPickupSource shouldBe source
-                    actor.foodSource shouldBe hall.id
-                    withClue(mapOf("yield" to actor.residentYield, "phase" to actor.cycle.phase,
-                        "retryAt" to actor.supplyRetryAt, "now" to h.navigationNow,
-                        "nativeReach" to civsCanReachContainer(actor.npc.location, container),
-                        "arrivalBodyClear" to foodStanceRoutes(h).arrivalBodyClear(actor),
-                        "bodies" to h.owner.collisionActors().map { it.uniqueId to it.location.point() })) { pickups shouldBe 1 }
-                    (actor.supplyPickup != null) shouldBe true
-                    actor.route shouldBe null
-                    food.isEmpty shouldBe true
-                    CivsEquipment.usableCount(h.city.workers.single { it.id == h.workerId }, "BREAD") shouldBe 4
-                    h.city.stock shouldBe before.stock
-                } else {
-                    pickups shouldBe 0
-                    actor.supplyPickup shouldBe null
-                    actor.foodPickupSource shouldBe null
-                    actor.foodSource shouldBe null
-                    actor.route shouldBe null
-                    (actor.supplyRetryAt > requireNotNull(h.navigationNow)) shouldBe true
-                    food.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
-                    h.city shouldBe before
-                }
-                h.deliveries shouldBe 0
-                h.supplyRequests shouldBe 0
+            fun pulseFood() {
+                val now = requireNotNull(h.navigationNow)
+                logistics.drainSupplies(now)
+                logistics.supplyFood(actor, h.city, h.city.workers.single { it.id == h.workerId }, h.world, now)
             }
-            if (!alreadyInReach) {
-                foodStanceActor(h, blockers.first().id).npc.teleport(Location(h.world, 5.5, 64.0, -5.5))
-                h.navigationNow = requireNotNull(h.navigationNow) + 6_000
-                logistics.supplyFood(actor, h.city, h.city.workers.single { it.id == h.workerId },
-                    h.world, requireNotNull(h.navigationNow))
-                requireNotNull(actor.route).authored shouldBe source.standing
+            h.navigationNow = requireNotNull(h.navigationNow) + 1_000
+            val queuedBeforeFood = h.pendingNavigationWorkers
+            pulseFood()
+            if (alreadyInReach) {
+                actor.npc.location.point() shouldBe origin
+                h.pendingNavigationWorkers shouldBe queuedBeforeFood
+            } else {
+                requireNotNull(actor.route)
                 pickups shouldBe 0
                 food.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
                 h.city shouldBe before
+                h.releaseNavigation()
+                for (tick in 1..1_000) {
+                    h.navigate()
+                    if (tick % 10 == 0) pulseFood()
+                    if (pickups > 0) break
+                }
+                (actor.npc.location.point() != origin) shouldBe true
             }
+            withClue(h.owner.debug(h.city.id, h.workerId)) { pickups shouldBe 1 }
+            actor.route shouldBe null
+            food.isEmpty shouldBe true
+            CivsEquipment.usableCount(h.city.workers.single { it.id == h.workerId }, "BREAD") shouldBe 4
+            h.city.stock shouldBe before.stock
+            h.deliveries shouldBe 0
+            h.supplyRequests shouldBe 0
         }
     }
 })

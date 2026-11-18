@@ -350,15 +350,16 @@ safe feet. Retained closed-mode Auto receipts keep their accepted FOOD debit.
 The actor rechecks the exact visit on the durable write lane; unrelated city
 revisions do not cancel it, and duplicate callbacks cannot eat twice.
 Both the five-tick work pulse and the twenty-tick owner pulse advance the same
-resident observation clock before updating actors. Meal admission checks existing
-body occupancy and route reservations when choosing a supported hall barrel side;
-an unadmitted route cannot leave the actor claiming to travel to food.
+resident observation clock before updating actors.
 Residents collecting food for themselves can take it through a wall when their
 feet are within three blocks of the selected container's center. They can stop
 there on the way to the container. The transfer debits its actual inventory once.
-Outside that radius, residents can use ordinary eye reach or walk to a supported
-side. The route checks body occupancy and arrival reservations when selecting a
-side. An innkeeper collecting food for a guest still needs ordinary eye reach.
+Outside that radius, the route searches for a reachable place to collect the food.
+When it reaches a potential pickup position, the navigation owner checks the
+actual feet, container reach and other residents' reservations. If a position is
+blocked, the same search continues around the counter. Residents wait when
+there is no available approach. An innkeeper collecting food for a guest still
+needs ordinary eye reach.
 Living-worker pickup uses the same 0.13-block floor tolerance as packet movement.
 Corpse placement and resurrection use their existing 0.02-block tolerance.
 An interrupted work detour returns to its existing target without earning travel

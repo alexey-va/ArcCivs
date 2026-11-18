@@ -62,7 +62,8 @@ internal data class CitizenSearchCapture(val probe: CitizenSearchProbe,
 internal data class CitizenSearchResult(val probes: List<CitizenSearchProbe>, val nodes: Int,
     val path: List<CitizenPlannedStep>? = null, val failure: String? = null, val searchNanos: Long = 0,
     val continuation: Boolean = false, val blockedPositions: List<CivPosition> = emptyList(),
-    val continuationReason: String? = null, val roadRouting: CitizenRoadRouting? = null)
+    val continuationReason: String? = null, val roadRouting: CitizenRoadRouting? = null,
+    val pickupCandidate: CitizenPoint? = null)
 
 /**
  * One worker owns this A* state. A slice asks for a configured batch of small neighbourhoods; native capture
@@ -80,6 +81,7 @@ internal class CitizenNavigationSearch(
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
     private val preferredCorridor: CitizenSearchCorridor? = null,
     roadCorridor: CitizenRoadLookup? = null,
+    private val pickupContainer: CivPosition? = null,
 ) {
     private data class Entry(val node: CitizenSearchNode, val cost: Double, val score: Double, val order: Int)
     private data class Parent(val node: CitizenSearchNode, val action: CitizenRouteAction)
@@ -101,6 +103,8 @@ internal class CitizenNavigationSearch(
     private val geometry = CitizenSearchGeometry(minimumY, maximumY, avoiding)
     private var pending = emptyMap<CitizenSearchNode, Entry>()
     private var goal: Entry? = null
+    private var checkingPickup: Entry? = null
+    private val checkedPickupFeet = pickupContainer?.let { hashSetOf<CitizenPoint>() }
     private var serial = 0
     private var visited = 0
     private var unknownTerrain = false
@@ -112,7 +116,7 @@ internal class CitizenNavigationSearch(
     private val roadNodeLimit = minOf(256, settings.maximumNodes / 2, settings.maximumCapturedBlocks / (2 * 63))
     private var clipped = false
     private var isolatedGoalDistance: Double? = null
-    private var inspectEndpoint = origin.distanceSquared(target) <= settings.closeRouteDistance * settings.closeRouteDistance &&
+    private var inspectEndpoint = pickupContainer == null && origin.distanceSquared(target) <= settings.closeRouteDistance * settings.closeRouteDistance &&
         (abs(start.x - floor(target.x).toInt()) > 1 || abs(start.z - floor(target.z).toInt()) > 1) &&
         target.x == floor(target.x) + .5 && target.z == floor(target.z) + .5 && target.y == floor(target.y)
     private val cancelled = AtomicBoolean()
@@ -127,15 +131,24 @@ internal class CitizenNavigationSearch(
         if (probe.incoming || probe.node.initial) null
         else neighbourhoods[probe.node]?.takeIf { it.probe.from == probe.from }
 
-    fun advance(captures: List<CitizenSearchCapture>): CitizenSearchResult {
+    @JvmOverloads
+    fun advance(captures: List<CitizenSearchCapture>, pickupAccepted: Boolean? = null): CitizenSearchResult {
         val began = System.nanoTime()
         fun result(probes: List<CitizenSearchProbe> = emptyList(), path: List<CitizenPlannedStep>? = null,
                    failure: String? = null, continuation: Boolean = false,
-                   continuationReason: String? = null) = CitizenSearchResult(probes, visited, path, failure,
+                   continuationReason: String? = null, pickupCandidate: CitizenPoint? = null) = CitizenSearchResult(probes, visited, path, failure,
             System.nanoTime() - began, continuation,
             blockedPositions = if (failure == "no-path" || continuationReason == "no-path") blockedPositions.toList() else emptyList(),
-            continuationReason = continuationReason, roadRouting = roadRouting)
+            continuationReason = continuationReason, roadRouting = roadRouting, pickupCandidate = pickupCandidate)
         if (cancelled.get()) return result(failure = "cancelled")
+        checkingPickup?.let { entry ->
+            checkingPickup = null
+            if (checkNotNull(pickupAccepted)) {
+                val path = pathTo(entry.node) ?: return result(failure = "broken-path")
+                return result(path = path)
+            }
+            open += entry
+        }
         roadLookup?.let { lookup ->
             roadLookup = null
             corridor = lookup(origin, target)
@@ -191,9 +204,20 @@ internal class CitizenNavigationSearch(
                 open += entry
                 break
             }
-            if (++visited > settings.maximumNodes) return finishAtBudget("search-budget")
             val node = entry.node
-            if (atGoal(node)) {
+            if (pickupContainer != null) {
+                val feet = if (node.initial) origin else node.point()
+                if (pickupDistanceSquared(feet, pickupContainer) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH &&
+                    feet !in requireNotNull(checkedPickupFeet)) {
+                    // Settle the outstanding neighbourhoods before pausing this frontier for one live reach check.
+                    if (requested.isNotEmpty()) { open += entry; break }
+                    checkedPickupFeet += feet
+                    checkingPickup = entry
+                    return result(pickupCandidate = feet)
+                }
+            }
+            if (++visited > settings.maximumNodes) return finishAtBudget("search-budget")
+            if (pickupContainer == null && atGoal(node)) {
                 if (goal?.let { entry.cost < it.cost } != false) goal = entry
             } else {
                 val known = neighbourhoods[node]
@@ -254,6 +278,9 @@ internal class CitizenNavigationSearch(
         // A failed person detour must keep its caller's previous ready route available for waiting.
         val cause = if (unknownTerrain) "chunk-unloaded" else reason
         if (avoiding.isNotEmpty() && (reason == "no-path" || unknownTerrain)) return failed(cause)
+        // The complete component exposed no free pickup position. Walking its rejected endpoint
+        // would send a second resident to a counter already reserved by the first.
+        if (pickupContainer != null && cause == "no-path") return failed(cause)
         // An unavailable neighbour does not invalidate connected edges already checked
         // against loaded cells. Walk only that prefix, then replan at its real frontier.
         val closest = progressEndpoint(minimumGain) ?: return failed(cause)
@@ -264,13 +291,16 @@ internal class CitizenNavigationSearch(
     }
 
     private fun progressEndpoint(minimumGain: Double): CitizenSearchNode? {
-        val distance = sqrt(origin.distanceSquared(target))
+        val reach = if (pickupContainer == null) 0.0 else CITIZEN_BLOCK_REACH
+        val distance = max(0.0, sqrt(pickupContainer?.let { pickupDistanceSquared(origin, it) } ?: origin.distanceSquared(target)) - reach)
+        if (distance < minimumGain) return null
         return costs.keys.asSequence().filter { it != start && it in parents }
-            .filter { distance - sqrt(distanceToTargetSquared(it)) >= minimumGain }
+            .filter { distance - max(0.0, sqrt(distanceToTargetSquared(it)) - reach) >= minimumGain }
             .minWithOrNull(compareBy<CitizenSearchNode> { distanceToTargetSquared(it) }.thenBy { costs.getValue(it) })
     }
 
     private fun distanceToTargetSquared(node: CitizenSearchNode): Double {
+        pickupContainer?.let { return pickupDistanceSquared(node.point(), it) }
         val dx = node.x + .5 - target.x
         val dy = node.y - target.y
         val dz = node.z + .5 - target.z
@@ -290,7 +320,8 @@ internal class CitizenNavigationSearch(
             node = parent.node
         }
         if (reverse.isEmpty()) reverse += CitizenPlannedStep(
-            CitizenPoint(floor(target.x) + .5, target.y, floor(target.z) + .5), CitizenRouteAction.WALK)
+            if (pickupContainer != null) origin else CitizenPoint(floor(target.x) + .5, target.y, floor(target.z) + .5),
+            CitizenRouteAction.WALK)
         return reverse.toList()
     }
 
@@ -398,10 +429,24 @@ internal class CitizenNavigationSearch(
     }
 
     private fun heuristic(node: CitizenSearchNode): Double {
+        pickupContainer?.let {
+            return heuristicWeight * max(0.0, sqrt(pickupDistanceSquared(node.point(), it)) - CITIZEN_BLOCK_REACH)
+        }
         val dx = node.x + .5 - target.x
         val dz = node.z + .5 - target.z
         val dy = max(0.0, abs(node.y - target.y) - .5)
         return heuristicWeight * sqrt(dx * dx + dy * dy + dz * dz)
+    }
+
+    // Lower bound for the two live pickup rules: feet to block centre, or eye to a visible face.
+    private fun pickupDistanceSquared(feet: CitizenPoint, container: CivPosition): Double {
+        val dx = abs(feet.x - (container.x + .5))
+        val dy = feet.y - (container.y + .5)
+        val dz = abs(feet.z - (container.z + .5))
+        val xFace = max(0.0, dx - .5)
+        val yFace = max(0.0, abs(dy + 1.5) - .5)
+        val zFace = max(0.0, dz - .5)
+        return minOf(dx * dx + dy * dy + dz * dz, xFace * xFace + yFace * yFace + zFace * zFace)
     }
 
     companion object {

@@ -18,9 +18,10 @@ import java.util.UUID
 import kotlin.math.floor
 
 internal data class CitizenRouteIdentity(val world: UUID, val policy: CitizenRouteReuseKey,
-    val from: CitizenSearchNode, val to: CitizenPoint, val settings: CivsNavigationSettings) {
-    private val stableHash = 31 * (31 * (31 * (31 * world.hashCode() + policy.hashCode()) +
-        from.hashCode()) + to.hashCode()) + settings.hashCode()
+    val from: CitizenSearchNode, val to: CitizenPoint, val settings: CivsNavigationSettings,
+    val pickupContainer: CivPosition? = null) {
+    private val stableHash = 31 * (31 * (31 * (31 * (31 * world.hashCode() + policy.hashCode()) +
+        from.hashCode()) + to.hashCode()) + settings.hashCode()) + pickupContainer.hashCode()
     override fun hashCode(): Int = stableHash
 }
 
@@ -44,6 +45,7 @@ internal class CivsResidentNavigation(
         val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
         var searching: CompletableFuture<CitizenSearchResult>? = null
         var capturing: CompletableFuture<Unit>? = null
+        var pickupAnswer: Boolean? = null
         var capture: CitizenNavigationCapture? = null
         var snapshotTerrain = CitizenSnapshotTerrain()
         var snapshotCapture: CitizenSnapshotCapture? = null
@@ -89,6 +91,7 @@ internal class CivsResidentNavigation(
         var next = 0
         var previous = origin
         var valid = true
+        var endpointAvailable = true
         var cost = 0.0
     }
     private data class Suffix(val source: CitizenRouteIdentity, val cached: CachedRoute, val index: Int)
@@ -336,9 +339,9 @@ internal class CivsResidentNavigation(
 
     fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
                 stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean, travelCost: (Block) -> Double,
-                corridor: CitizenSearchCorridor?, snapshotPolicy: CitizenSnapshotPolicy): CitizenPacketRoute =
+                corridor: CitizenSearchCorridor?, snapshotPolicy: CitizenSnapshotPolicy, pickup: CitizenFoodRouteGoal? = null): CitizenPacketRoute =
         admit(CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost, settings = settings,
-            corridor = corridor, snapshotPolicy = snapshotPolicy))
+            corridor = corridor, snapshotPolicy = snapshotPolicy, pickup = pickup))
 
     fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList(),
         refreshSnapshots: Boolean = bodies.isEmpty(), destination: Location? = null): CitizenPacketRoute {
@@ -395,13 +398,16 @@ internal class CivsResidentNavigation(
                 job.reuse = attempt
                 route.phase("shared-route-validation")
                 job.capturing = work.submit({ !closed && tasks.isCurrent(epoch) && route.searching }) {
-                    val step = attempt.steps[attempt.next]
-                    replayChecks++
                     job.progressTick = Bukkit.getCurrentTick().toLong()
                     if (sharedRoutes[source] !== entry) {
                         attempt.valid = false
                         true
+                    } else if (attempt.next == attempt.steps.size) {
+                        attempt.endpointAvailable = route.confirmPickup(attempt.steps.last().point)
+                        true
                     } else {
+                        val step = attempt.steps[attempt.next]
+                        replayChecks++
                         val cost = route.validatedCachedStepCost(attempt.previous, step)
                         if (!cost.isFinite()) {
                             attempt.valid = false
@@ -412,7 +418,7 @@ internal class CivsResidentNavigation(
                         } else {
                             attempt.cost += cost
                             attempt.previous = step.point
-                            ++attempt.next == attempt.steps.size
+                            ++attempt.next == attempt.steps.size && key.pickupContainer == null
                         }
                     }
                 }
@@ -448,7 +454,7 @@ internal class CivsResidentNavigation(
             for (cz in ((z - MAXIMUM_JOIN_DISTANCE) shr 4)..((z + MAXIMUM_JOIN_DISTANCE) shr 4)) {
                 for (key in routeSections[RouteSection(request.world, cx, y, cz)].orEmpty()) {
                     nearby = true
-                    if (key.world != request.world || key.to != request.to) continue
+                    if (key.world != request.world || key.to != request.to || key.pickupContainer != request.pickupContainer) continue
                     matchingEndpoint = true
                     if (key.settings == request.settings &&
                         key.policy.geometry == request.policy.geometry &&
@@ -572,7 +578,7 @@ internal class CivsResidentNavigation(
                         job.reuse = null
                         validation.join()
                         val cityId = job.route.snapshotPolicy?.cityId
-                        if (reuse.valid && sharedRoutes[reuse.source] === reuse.cached) {
+                        if (reuse.valid && reuse.endpointAvailable && sharedRoutes[reuse.source] === reuse.cached) {
                             val hit = if (reuse.splice) SharedRouteCounter.SUFFIX_HITS else SharedRouteCounter.EXACT_HITS
                             countSharedRoute(hit, cityId)
                             lastReplayCost = reuse.cost
@@ -587,8 +593,9 @@ internal class CivsResidentNavigation(
                             job.route.acceptSearch(CitizenSearchResult(emptyList(), 0, path = reuse.steps))
                         } else {
                             // A bad C-to-join connector says nothing about the already validated A-to-B path.
-                            if (!reuse.splice || reuse.next > 0)
+                            if (reuse.endpointAvailable && (!reuse.splice || reuse.next > 0))
                                 removeShared(reuse.source, SharedRouteCounter.REMOVED_REPLAY_OR_ROUTE_FAILURE)
+                            job.route.pickupEndpoint = null
                             countSharedRoute(SharedRouteCounter.REJECTED, cityId)
                             dispatch(job, emptyList())
                         }
@@ -604,7 +611,13 @@ internal class CivsResidentNavigation(
                     job.publishedNodes += (result.nodes - job.lastNodes).coerceAtLeast(0)
                     job.lastNodes = result.nodes
                     recordDebug(job, result)
-                    if (result.probes.isEmpty()) {
+                    if (result.pickupCandidate != null) {
+                        val search = job.search
+                        job.capturing = work.submit({ !closed && tasks.isCurrent(epoch) && job.route.searching && job.search === search }) {
+                            job.pickupAnswer = job.route.confirmPickup(result.pickupCandidate)
+                            true
+                        }
+                    } else if (result.probes.isEmpty()) {
                         finishDebug(job, result)
                         job.route.acceptSearch(result)
                     } else {
@@ -628,11 +641,13 @@ internal class CivsResidentNavigation(
                 if (job.route.searching && capturing != null && capturing.isDone) {
                     job.capturing = null
                     capturing.join() // Completion/failure only, never an incomplete future.
-                    val captures = job.snapshotResult ?: requireNotNull(job.capture).result
+                    val answer = job.pickupAnswer
+                    val captures = if (answer != null) emptyList() else job.snapshotResult ?: requireNotNull(job.capture).result
                     job.capture = null
                     job.snapshotCapture = null
                     job.snapshotResult = null
-                    dispatch(job, captures)
+                    job.pickupAnswer = null
+                    dispatch(job, captures, answer)
                 }
             } catch (failure: RuntimeException) {
                 val reason = reason(failure)
@@ -660,12 +675,12 @@ internal class CivsResidentNavigation(
         retireCancelled()
     }
 
-    private fun dispatch(job: Job, captures: List<CitizenSearchCapture>) {
+    private fun dispatch(job: Job, captures: List<CitizenSearchCapture>, pickupAccepted: Boolean? = null) {
         job.debugTrace?.inputs = captures
         job.route.phase("searching")
         val search = job.search
         // The runnable captures these two detached values, not Job/route or the owner callbacks.
-        job.searching = try { CompletableFuture.supplyAsync({ search.advance(captures) }, executor) }
+        job.searching = try { CompletableFuture.supplyAsync({ search.advance(captures, pickupAccepted) }, executor) }
         catch (_: RejectedExecutionException) { CompletableFuture.failedFuture(RejectedExecutionException("Navigation worker is full")) }
     }
 
@@ -741,6 +756,7 @@ internal class CivsResidentNavigation(
         job.snapshotResult = null
         job.snapshotPending = null
         job.capturing = null
+        job.pickupAnswer = null
         job.snapshotTerrain = CitizenSnapshotTerrain()
         job.seededInitial = false
         job.publishedPayloads = emptyList()

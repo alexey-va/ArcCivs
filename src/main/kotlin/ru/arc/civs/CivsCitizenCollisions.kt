@@ -558,7 +558,8 @@ internal class CivsCitizenCollisions(
         val body = citizenStandingBounds(to, actor.npc.scale).expand(.15, 0.0, .15)
         if (shelterOccupied(actor, body).any(body::overlaps)) return false
         return runtime.actors.values.none { other -> other !== actor && other.worldId == actor.worldId && other.npc.isValid &&
-            (other.route?.target?.let { body.overlaps(citizenStandingBounds(it, other.npc.scale)) } == true ||
+            (other.route?.let { it.motion.reservedDestination(it.target) }
+                ?.let { body.overlaps(citizenStandingBounds(it, other.npc.scale)) } == true ||
                 other.mealVisit?.target?.location(other.npc.world)?.let {
                     body.overlaps(citizenStandingBounds(it, other.npc.scale))
                 } == true) }

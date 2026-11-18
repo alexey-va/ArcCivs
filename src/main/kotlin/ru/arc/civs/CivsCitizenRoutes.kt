@@ -183,9 +183,17 @@ internal class CivsCitizenRoutes(
                     target.takeIf { waypoint == null })
             return false
         }
+        val physicalFoodTrip = foodTarget != null && resolved == foodTarget.standing &&
+            foodTarget.servingFor == null && foodTarget.servingTicket == null && waypoint == null &&
+            actor.mineVisit == null && !actor.returningToWarehouse && actor.outputReturn == null &&
+            actor.plan.courier?.carrying != true && city.inventory?.mode != CivStorageMode.VIRTUAL
+        val pickupFoodTarget = foodTarget?.takeIf {
+            physicalFoodTrip && !actor.sheltering && actor.tavernService == null
+        }
         val outsideWaitingMine = waitingMine != null && outside(waitingMine, from.blockX, from.blockZ)
         val allowed = (citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
-            listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id }, visit?.key?.building?.id)).let {
+            listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id }, visit?.key?.building?.id,
+                pickupFoodTarget?.buildingId)).let {
                 if (outsideWaitingMine) it - requireNotNull(waitingMine).id else it
             }
         val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
@@ -220,10 +228,6 @@ internal class CivsCitizenRoutes(
         val corridor = actor.plan.courier?.takeIf { idleAnchor == null && it.carrying &&
             actor.cycle.phase == CitizenPhase.RETURNING && target == actor.plan.storage && waypoint == null }
             ?.let { hint?.corridor(city, it.cargo, from.point(), to.point()) }
-        val physicalFoodTrip = foodTarget != null && resolved == foodTarget.standing &&
-            foodTarget.servingFor == null && foodTarget.servingTicket == null && waypoint == null &&
-            actor.mineVisit == null && !actor.returningToWarehouse && actor.outputReturn == null &&
-            actor.plan.courier?.carrying != true && city.inventory?.mode != CivStorageMode.VIRTUAL
         val origin = from.point()
         val minimumY = world.minHeight
         val maximumY = world.maxHeight
@@ -252,10 +256,13 @@ internal class CivsCitizenRoutes(
                 CitizenRouteReuseKey.of(routeCosts, allowed) else null, supportCost = supportCost, cityId = city.id,
             roadCorridor = if (idleAnchor == null && corridor == null && routeMine == null && waitingMine == null &&
                 actor.attacker == null && actor.combatDestination == null) routeCosts.weights.roads::corridor else null)
+        val pickup = pickupFoodTarget?.let { source ->
+            CitizenFoodRouteGoal(source.container) { point -> foodPickupPointAllowed(actor, source, origin, allowed, point) }
+        }
         val motion = navigation.request(world, from, to, { point -> policy.allowed(point) { p ->
             if (p.y in minimumY until maximumY && world.isChunkLoaded(p.x shr 4, p.z shr 4)) world.getBlockAt(p.x, p.y, p.z).type
             else null
-        } }, policy.stepAllowed, { ground -> routeCosts.cost(ground, surfaceSpeed) }, corridor, policy)
+        } }, policy.stepAllowed, { ground -> routeCosts.cost(ground, surfaceSpeed) }, corridor, policy, pickup = pickup)
         if (navigation.debugSelected(actor.cityId, actor.workerId)) {
             navigationDebugIdentity(actor, target)?.let { identity ->
                 navigation.attachDebug(motion, identity,
@@ -499,18 +506,60 @@ internal class CivsCitizenRoutes(
                 storagePointClear(actor, city, world, point, feet) && collisions.idleDestinationFree(actor, feet)
             } == true
         }
+        val nearby = actor.outputReturn == null && CivsResidentFood.allowsNearbyPickup(city, source.servingFor, source.servingTicket)
+        val holder = source.container
+        val hint = source.standing
         val clock = recoveryClock()
-        val blocked = failedFoodApproach(actor, source, clock)
-        // Try every fresh approach before retrying a failed side of this same food holder.
-        if (blocked != null && actor.route == null) {
-            citizenCollectedHomeTarget(city, building, world, source.container, source.standing) {
-                blocked.untried(it) && safe(it)
-            }?.let { return it }
-            return citizenCollectedHomeTarget(city, building, world, source.container, source.standing) {
-                blocked.retryAllowed(it, clock) && safe(it)
+        val blocked = if (actor.route == null) failedFoodApproach(actor, source, clock) else null
+        var hasFreeCanonical = false
+        var retry: CivPosition? = null
+        val untried = citizenCollectedHomeTarget(city, building, world, holder, hint) { point ->
+            if (!safe(point)) false else {
+                hasFreeCanonical = true
+                if (blocked == null || blocked.untried(point)) true else {
+                    if (retry == null && blocked.retryAllowed(point, clock)) retry = point
+                    false
+                }
             }
         }
-        return citizenCollectedHomeTarget(city, building, world, source.container, source.standing, safe)
+        if (untried != null || hasFreeCanonical || !nearby) return untried ?: retry
+
+        val free: (Location) -> Boolean = { feet ->
+            collisions.residentMoveAllowed(actor, feet, feet) && collisions.idleDestinationFree(actor, feet)
+        }
+        val hintFeet = if (citizenContainerStandingAllowed(city, building, hint)) storageFeet(world, hint) else null
+        val fallback = if (hintFeet != null && civsCanReachContainer(hintFeet, holder, nearbyFoodPickup = true) && free(hintFeet))
+            hint else citizenNearbyFoodTarget(city, building, world, holder, free = free)
+        return fallback?.takeIf { blocked?.retryAllowed(it, clock) != false }
+    }
+
+    private fun foodPickupPointAllowed(actor: CitizenActor, source: CivResidentFoodSource, origin: CitizenPoint,
+        allowed: Set<UUID>, point: CitizenPoint): Boolean {
+        checkCitizenMainThread()
+        if (runtime.closed.get() || runtime.actors[actor.workerId] !== actor || !actor.npc.isValid ||
+            actor.foodSource != source.buildingId || actor.foodPickupSource != source || actor.supplyPickup != null ||
+            actor.sheltering || actor.attacker != null || actor.combatDestination != null || actor.tavernService != null ||
+            actor.mineVisit != null || actor.returningToWarehouse || actor.outputReturn != null) return false
+        val frame = workFrame(actor.cityId) ?: return false
+        val city = frame.city
+        val building = city.building(source.buildingId) ?: return false
+        val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
+        val world = actor.npc.world
+        if (world.uid != city.worldId || worker.cargo != null || !CivsResidentFood.eligible(city, worker, building) ||
+            !CivsResidentFood.allowsNearbyPickup(city, source.servingFor, source.servingTicket) ||
+            !citizenRouteWithinReach(origin, point, CivsLogistics.maximumTransferDistance(city))) return false
+        val holder = source.container
+        if (holder.y !in world.minHeight until world.maxHeight || !city.contains(holder.x, holder.z) ||
+            (holder != building.control && (building.phase != BuildingPhase.ACTIVE ||
+                !building.bounds.contains(holder.x, holder.y, holder.z))) ||
+            city.buildings.any { it.id != building.id && it.control == holder }) return false
+        val feet = Location(world, point.x, point.y, point.z)
+        val standing = CivPosition(feet.blockX, feet.blockY, feet.blockZ)
+        if (!frame.territory.allows(standing, allowed, null) || !citizenContainerStandingAllowed(city, building, standing) ||
+            !civsCanReachContainer(feet, holder, nearbyFoodPickup = true)) return false
+        val material = world.getBlockAt(holder.x, holder.y, holder.z).type
+        if (material.name !in CIVS_STORAGE_TYPES || holder == building.control && material != org.bukkit.Material.BARREL) return false
+        return collisions.residentMoveAllowed(actor, feet, feet) && collisions.idleDestinationFree(actor, feet)
     }
 
     /** Work retries may replace the route's timer, so a blocked food holder keeps its own short-lived witness. */

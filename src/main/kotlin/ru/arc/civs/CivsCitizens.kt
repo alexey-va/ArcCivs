@@ -149,7 +149,8 @@ class CivsCitizens(
             actor.npc.isValid && actor.worldId == worldId &&
                 (citizenStandingBounds(actor.npc.location, actor.npc.scale).overlaps(body) ||
                     actor.idleNap?.bounds?.overlaps(body) == true ||
-                    actor.route?.target?.let { citizenStandingBounds(it, actor.npc.scale).overlaps(body) } == true ||
+                    actor.route?.let { it.motion.reservedDestination(it.target) }
+                        ?.let { citizenStandingBounds(it, actor.npc.scale).overlaps(body) } == true ||
                     actor.sleepPose?.takeIf { actor.sleeping }?.bounds?.overlaps(body) == true ||
                     actor.shelterPose?.takeIf { actor.sheltering }?.bounds?.overlaps(body) == true)
         }
