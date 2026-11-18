@@ -54,6 +54,37 @@ class CivsCitizenWanderVarietyTest : FunSpec({
             }
         }
     }
+
+    test("an unassigned resident in the shared hall walks around furniture blocking the door direction") {
+        residentRuntime(workerId = UUID(0, 42)) { h ->
+            val hall = h.city.buildings.single().copy(entrance = CivPosition(2, 64, 3))
+            val entrance = CivPosition(0, 64, 14)
+            val home = hall.copy(id = UUID(0, 43), type = BuildingType.HOUSE, anchor = entrance, entrance = entrance,
+                bounds = CivBox(CivPosition(-2, 64, 15), CivPosition(2, 68, 18)))
+            h.city = h.city.copy(buildings = listOf(hall, home), workers = h.city.workers.map { it.copy(homeId = home.id) })
+            // East and south lead toward the hall door. The only clear cardinal step is west.
+            for ((x, z) in listOf(1 to 1, 0 to 2, 0 to 0)) for (y in 64..65)
+                h.world.getBlockAt(x, y, z).type = Material.BOOKSHELF
+
+            val npc = h.actor().npc
+            npc.teleport(Location(h.world, .5, 64.0, 1.5, 0f, 0f))
+            h.holdNavigation = true
+            val captures = h.world.chunkSnapshotCaptures
+            h.navigationNow = 3_000
+            h.owner.pulse(3_000)
+
+            val destination = CitizenPoint(-.5, 64.0, 1.5)
+            for (tick in 1..20) {
+                val before = npc.location
+                h.navigate()
+                (npc.location.distance(before) <= .118251) shouldBe true
+                if (npc.location.point() == destination) break
+            }
+            npc.location.point() shouldBe destination
+            h.pendingNavigationWorkers shouldBe 0
+            h.world.chunkSnapshotCaptures shouldBe captures
+        }
+    }
 })
 
 private fun startFlatWander(h: ResidentRuntime): CitizenActor {

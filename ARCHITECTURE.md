@@ -635,6 +635,7 @@ without work or travel. A cramped shelter does not start a sleeping pose.
 Unassigned residents already away from home wander within eight blocks of their
 starting position or departure doorway. They can join a public path within four
 blocks and follow its walkable neighbours. Without a path they take safe local steps.
+Residents already inside the shared town hall can move around furniture while idle.
 Workers waiting at a required post still return to their workplace entrance.
 Idle walks use 0.55 of base motion speed. Base motion is
 0.215 blocks per tick; productive journeys use 0.8 of that, or 3.44 blocks/second

@@ -307,7 +307,8 @@ internal class CivsCitizenRoutes(
         }
         val unassigned = actor.plan.idleReason == "unassigned" && !outsideHome
         val away = unassigned && !citizenWithinIdleArea(home.entrance, at.point())
-        val anchor = if (away) departure?.entrance ?: CivPosition(at.blockX, at.blockY, at.blockZ) else home.entrance
+        val anchor = if (away) departure?.takeUnless { it.type == BuildingType.TOWN_HALL }?.entrance
+            ?: CivPosition(at.blockX, at.blockY, at.blockZ) else home.entrance
         val street = if (unassigned && departure == null)
             citizenNearbyStreet(actor.npc.world, at, frame.roads, frame.territory) else null
         val walk = CitizenWanderWalk(home, outsideHome, frame.territory, actor.plan.token, now, actor.wander.legLimit(),
@@ -324,15 +325,17 @@ internal class CivsCitizenRoutes(
         val origin = from.point()
         if (!citizenPacketSupported(world, origin, allowClimbable = false)) return false
         val departure = CivPosition(from.blockX, from.blockY, from.blockZ)
-        val leaving = walk.departureBuilding?.takeIf { it.bounds.contains(departure.x, departure.y, departure.z) }
+        val room = walk.departureBuilding?.takeIf { it.bounds.contains(departure.x, departure.y, departure.z) }
+        // Someone already in the shared hall may walk around its furniture before reaching the door.
+        val leaving = room?.takeUnless { it.type == BuildingType.TOWN_HALL && actor.plan.idleReason == "unassigned" && !walk.outsideHome }
         val anchor = leaving?.entrance ?: walk.anchor
         val outside = walk.outsideHome && walk.outside(departure.x, departure.z)
         val destinations = when {
-            leaving != null -> setOf(leaving.id)
+            room != null -> setOf(room.id)
             outside -> emptySet()
             else -> setOf(walk.home.id)
         }
-        val allowed = if (leaving != null) destinations else citizenRouteBuildings(city, actor.plan, anchor, departure).let {
+        val allowed = if (room != null) destinations else citizenRouteBuildings(city, actor.plan, anchor, departure).let {
             if (outside) it - walk.home.id else it + walk.home.id
         }
         val territory = walk.territory
