@@ -93,10 +93,13 @@ internal object CivsWallApproachCleanup {
 
     internal fun claimsComplete(city: Settlement, retained: Set<UUID>): Boolean {
         val planned = CivsSettlementPlans.current(city)?.routes.orEmpty()
-        return city.buildings.none { it.phase == BuildingPhase.ACTIVE && !completed(city, it) &&
-            it.type != BuildingType.TOWN_HALL && it.id !in retained &&
-            planned[it.id.toString()]?.lastOrNull() != it.entrance }
+        return claimsComplete(city, retained) { planned[it.toString()] }
     }
+
+    internal fun claimsComplete(city: Settlement, retained: Set<UUID>, adoptedRoute: (UUID) -> List<CivPosition>?): Boolean =
+        city.buildings.none { it.phase == BuildingPhase.ACTIVE && !completed(city, it) &&
+            it.type != BuildingType.TOWN_HALL && it.id !in retained &&
+            adoptedRoute(it.id)?.lastOrNull() != it.entrance }
 
     fun captures(city: Settlement, plans: Map<UUID, CivRetainedPlanSource>, routes: Map<UUID, List<CivPosition>>): Map<UUID, CivWallApproachCapture> {
         val retired = retired(city, routes)

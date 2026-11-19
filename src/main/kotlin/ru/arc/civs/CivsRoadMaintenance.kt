@@ -1373,7 +1373,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
 
             val hall = access.hallApproach(city)
             val hallColumns = hall?.columns.orEmpty()
-            val forkTargets = if (restrictTo == null) CivsRoadFork.targets(city, access, routeProfiles,
+            val forkTargets = if (restrictTo == null) CivsRoadFork.targets(city, access, accessContext, routeProfiles,
                 hallColumns.keys + roadColumns + ambiguous + held, ::excluded) else emptyList()
             val forkColumns = forkTargets.mapTo(hashSetOf()) { civsTerrainKey(it.floor.x, it.floor.z) }
             for ((key, floor) in hallColumns) floors[key] = floor

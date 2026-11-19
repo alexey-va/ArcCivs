@@ -64,18 +64,16 @@ internal object CivsRoadFork {
     }
 
     /** Run only while rebuilding the detached paid network. Native selection uses the ordinary per-tick builder budget. */
-    fun targets(city: Settlement, access: CivAutonomousAccess, profiles: Map<UUID, Map<Long, CivPosition>>,
+    fun targets(city: Settlement, access: CivAutonomousAccess, context: CivAutonomousAccessContext, profiles: Map<UUID, Map<Long, CivPosition>>,
         occupied: Set<Long>, excluded: (CivPosition) -> Boolean): List<CivRoadUpkeep> {
-        if (city.construction != null || !city.constructionQueue.isNullOrEmpty() ||
-            !CivsWallApproachCleanup.claimsComplete(city, access.routes.keys)) return emptyList()
+        if (city.construction != null || !city.constructionQueue.isNullOrEmpty()) return emptyList()
         val roads = access.sharedRoadCaptures.values.filter { !it.source.type.isInfrastructure && it.source.id in access.routes }
-        if (roads.size < 2) return emptyList()
+        if (roads.size < 2 || !CivsWallApproachCleanup.claimsComplete(city, access.routes.keys, context::adoptedRoute)) return emptyList()
         val reserved = occupied.toMutableSet()
-        val adopted = CivsSettlementPlans.current(city)?.routes.orEmpty()
         for (building in city.buildings) {
             building.transit.orEmpty().forEach { reserved += civsTerrainKey(it.x, it.z) }
             if (!building.type.isInfrastructure) CivsAutonomousGeometry.approach(building).forEach { reserved += civsTerrainKey(it.x, it.z) }
-            if (building.id !in profiles) adopted[building.id.toString()]?.let { reserved += CivsAutonomousTerraform.roadProfile(it).keys }
+            if (building.id !in profiles) context.adoptedRoute(building.id)?.let { reserved += CivsAutonomousTerraform.roadProfile(it).keys }
         }
         val indices = roads.associate { it.source.id to indices(access.routes.getValue(it.source.id)) }
         val result = linkedMapOf<Long, CivRoadUpkeep>()

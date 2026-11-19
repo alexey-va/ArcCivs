@@ -57,6 +57,15 @@ class CivsMultipleProducerStaffingTest : FunSpec({
             city.buildings.first { it.type == BuildingType.BUILDER_HUT }.id
     }
 
+    test("a personal settlement fills a first assignment without waiting for Auto reassignment") {
+        val worker = staffingWorker(0)
+        val city = staffingCity().copy(workers = listOf(worker), autonomy = null)
+        val hut = city.buildings.first { it.type == BuildingType.BUILDER_HUT }
+
+        CivsRules.needsAutoAssignment(city) { false } shouldBe true
+        CivsRules.autoAssign(city, city.owner, 1_000) { false }.workers.single().assignment shouldBe hut.id
+    }
+
     test("open provisions can staff both stocked depots and additional funded scribes without moving assigned residents") {
         val city = staffedVillage()
         val (first, second) = city.buildings.filter { it.type == BuildingType.WAREHOUSE }

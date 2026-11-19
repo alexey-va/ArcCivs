@@ -483,8 +483,8 @@ object CivsRules {
 
     private fun automaticWorker(city: Settlement, worker: CivWorker, canReassign: (UUID) -> Boolean): Boolean =
         worker.assignment == null && !CivsResidents.isChild(worker) &&
-            (city.autonomy == null || worker.cargo == null && worker.pendingStock == null && worker.hasCollectedItems != true) &&
-            canReassign(worker.id)
+            (city.autonomy == null || worker.cargo == null && worker.pendingStock == null &&
+                worker.hasCollectedItems != true && canReassign(worker.id))
 
     private fun automaticVacancies(city: Settlement, provisionStaffing: Map<UUID, Int>): List<CivBuilding> {
         val autonomous = city.autonomy != null
