@@ -1,7 +1,10 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
+import java.util.UUID
+import java.util.concurrent.CompletionException
 import org.bukkit.Material
 import ru.arc.civs.scenarios.SettlementScenario
 
@@ -208,7 +211,7 @@ class CivsFarmExpansionScenarioTest : FunSpec({
         }
     }
 
-    test("expanded physical farmer preserves immature channel crops harvests them once and pays all 48 new plantings through the journal") {
+    test("expanded physical farmer harvests channel crops once, recovers a legacy harvest and pays for all 48 plantings") {
         SettlementScenario.run("expanded-farm-journal", CivPosition(0, 64, 0), setup = { world ->
             val f = farmExpansionFixture(world)
             val expanded = CivsRules.expandFarmField(f.city, f.farm.id)
@@ -250,30 +253,35 @@ class CivsFarmExpansionScenarioTest : FunSpec({
             val seedsBefore = CivsEquipment.plainCount(farmerBefore, "WHEAT_SEEDS")
             checkpoint()
 
-            val pending = observedCompletion(harvest)
-            val receipt = admittedInventoryIntent()
-            receipt.worldChanges shouldBe harvest.changes
-            CivsEquipment.plainCount(receipt.after.workers.single(), "WHEAT_SEEDS") shouldBe seedsBefore + 2
-            CivsEquipment.plainCount(receipt.after.workers.single(), "WHEAT") shouldBe CivsEquipment.plainCount(farmerBefore, "WHEAT") + 1
-            pending.isDone shouldBe false
+            val crop = requireNotNull(harvest.focus)
+            val completion = observedCompletion(harvest)
+            completion.isDone shouldBe true
+            val harvested = completion.join()
+            city shouldBe harvested
+            harvested.revision shouldBe before.revision + 1
+            val farmerAfter = harvested.workers.single()
+            farmerAfter.completedCycles shouldBe farmerBefore.completedCycles + 1
+            CivsEquipment.plainCount(farmerAfter, "WHEAT_SEEDS") shouldBe seedsBefore + 2
+            CivsEquipment.plainCount(farmerAfter, "WHEAT") shouldBe CivsEquipment.plainCount(farmerBefore, "WHEAT") + 1
+            state(crop) shouldBe "minecraft:air"
             receipts() shouldBe emptyList()
             savedCity() shouldBe before
-            val crop = requireNotNull(harvest.focus)
-            state(crop) shouldBe "minecraft:wheat[age=7]"
-            restart()
-            pending.isCompletedExceptionally shouldBe true
-            city shouldBe before
-            state(crop) shouldBe "minecraft:wheat[age=7]"
-            receipts() shouldBe emptyList()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> {
+                observedCompletion(harvest, farmerBefore.nextDeliveryAt).join()
+            })?.reason shouldBe "stale-delivery"
+            city shouldBe harvested
 
-            // Seed a separate pre-upgrade crash image on the same checkpointed before-city.
+            // Recreate a pre-upgrade crash with its saved intent and its original ripe block.
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, harvested, emptyList(),
+                worldChanges = harvest.changes)
+            put(crop, harvest.changes.single().before)
             seedLegacyInventoryReceipt(receipt)
+            receipts().single().validated() shouldBe receipt
             restart()
-            advanceUntil("legacy harvest publication") { city == receipt.after }
+            advanceUntil("legacy harvest publication") { city == harvested }
             state(crop) shouldBe "minecraft:air"
-            val recovered = city
             restart()
-            city shouldBe recovered
+            city shouldBe harvested
             receipts() shouldBe emptyList()
 
             val water = nextWork("Farmer")

@@ -332,8 +332,6 @@ class CivsConstructionSupplyServiceTest : FunSpec({
 class CivsBuilderBufferReserveServiceTest : FunSpec({
     for (condition in listOf("surplus", "reserved", "partial-reserve", "destination-room", "bag-room", "short-stack-grown"))
     test("ordinary hut recovery rechecks its whole slot proof with $condition") {
-        val commitDropoff = CompletableFuture<Settlement>()
-        val completedDropoffs = mutableListOf<CivInventoryTransaction>()
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
             CivsStorage(plugin) { emptyArray() }.also { storage ->
                 storage.persistCollectedNative = { _, _ -> error("Fresh courier transfer requested native persistence") }
@@ -381,15 +379,13 @@ class CivsBuilderBufferReserveServiceTest : FunSpec({
             val destinationSlots = destination.contents.map { it?.clone() }
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-            every { h.store.completeInventoryTransaction(any()) } answers {
+            val receipts = mutableListOf<CivInventoryTransaction>()
+            every { h.store.completeLocalInventory(any()) } answers {
                 val tx = firstArg<CivInventoryTransaction>()
-                if (tx.cargoDropoff == null) CompletableFuture.completedFuture(tx.after) else {
-                    completedDropoffs += tx
-                    commitDropoff
-                }
+                h.service.settlements().single().revision shouldBe tx.beforeRevision
+                receipts += tx
+                tx.after
             }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val dispatcher = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
                 .get(h.service) as CivsSupplyDispatcher
@@ -407,30 +403,49 @@ class CivsBuilderBufferReserveServiceTest : FunSpec({
                     source.contents.toList() shouldBe beforeSlots
                     destination.contents.toList() shouldBe destinationSlots
                     h.service.settlements().single() shouldBe city
-                    completedDropoffs shouldBe emptyList()
-                    verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+                    receipts shouldBe emptyList()
+                    verify(exactly = 0) { h.store.beginLocalInventory(any(), any()) }
                 } else {
-                    val picked = h.await(h.service.pickupCargo(city.id, courier.id, cargo))
+                    val pickup = h.service.pickupCargo(city.id, courier.id, cargo)
+                    pickup.isDone shouldBe true
+                    val picked = pickup.join()
                     source.getItem(0) shouldBe null
                     source.contents.drop(1) shouldBe beforeSlots.drop(1)
-                    val carried = requireNotNull(picked.workers.first { it.id == courier.id }.cargo)
+                    destination.contents.toList() shouldBe destinationSlots
+                    val loaded = picked.workers.first { it.id == courier.id }
+                    val carried = requireNotNull(loaded.cargo)
                     carried.amount shouldBe 64L
                     carried.inventoryBacked shouldBe true
-                    completedDropoffs shouldBe emptyList()
+                    CivsEquipment.plainCount(loaded, "DIRT") shouldBe 64
+                    receipts.single().after shouldBe picked
+
                     val unloading = h.service.dropoffCargo(city.id, courier.id, carried, warehouse.id)
-                    h.tickUntil("native cargo credit awaiting RAM commit") { completedDropoffs.isNotEmpty() }
-                    val dropoff = completedDropoffs.single()
-                    unloading.isDone shouldBe false
-                    h.service.settlements().single() shouldBe picked
-                    destination.contents.filterNotNull() shouldBe listOf(ItemStack(Material.DIRT, 64))
-                    source.contents.drop(1) shouldBe beforeSlots.drop(1)
-                    commitDropoff.complete(dropoff.after)
-                    val saved = h.await(unloading)
-                    destination.contents.filterNotNull() shouldBe listOf(ItemStack(Material.DIRT, 64))
-                    saved.workers.first { it.id == courier.id }.cargo shouldBe null
+                    unloading.isDone shouldBe true
+                    val saved = unloading.join()
+                    val dropoff = receipts.last()
+                    dropoff.beforeRevision shouldBe picked.revision
+                    dropoff.cargoDropoff?.workerBefore shouldBe loaded
+                    dropoff.cargoDropoff?.destination shouldBe warehouse
+                    dropoff.after shouldBe saved
+                    val unloaded = saved.workers.first { it.id == courier.id }
+                    unloaded.cargo shouldBe null
+                    CivsEquipment.plainCount(unloaded, "DIRT") shouldBe 0
                     saved.construction shouldBe order
+
+                    val replay = h.service.dropoffCargo(city.id, courier.id, carried, warehouse.id)
+                    replay.isCompletedExceptionally shouldBe true
+                    CivsDiagnostics.rejection(shouldThrow<CompletionException> { replay.join() })?.reason shouldBe "stale-delivery"
+                    destination.contents.filterNotNull() shouldBe listOf(ItemStack(Material.DIRT, 64))
+                    source.getItem(0) shouldBe null
                     source.contents.drop(1) shouldBe beforeSlots.drop(1)
-                    verify(exactly = 2) { h.store.saveInventoryTransaction(any()) }
+                    h.service.settlements().single() shouldBe saved
+                    receipts.size shouldBe 2
+                    verify(exactly = 2) { h.store.beginLocalInventory(any(), any()) }
+                }
+                verify(exactly = 0) {
+                    h.store.saveInventoryTransaction(any())
+                    h.store.completeInventoryTransaction(any())
+                    h.store.deleteInventoryTransaction(any())
                 }
             } finally { unmockkObject(dispatcher) }
         }

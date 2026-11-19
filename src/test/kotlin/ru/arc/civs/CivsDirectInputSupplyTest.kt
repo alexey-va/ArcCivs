@@ -125,23 +125,17 @@ class CivsDirectInputSupplyTest : FunSpec({
         allocateCivSupplies(input).plans shouldBe carried
     }
 
-    test("direct producer input uses the ordinary native pickup and dropoff journals exactly once") {
+    test("direct producer input moves from its barrel to the courier and into the destination exactly once") {
         directInputService { h, city, source, target, warehouse ->
-            val transactions = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                CompletableFuture<CivInventoryTransaction>().also { transactions += firstArg<CivInventoryTransaction>() to it }
-            }
+            val transactions = h.directInputReceipts()
             h.start()
             val courier = city.workers.first()
             val plan = h.supplyPlan(courier.id)
             plan.cargo.directInput shouldBe true
             plan.cargo.amount shouldBe 32L // This real quarry request keeps the source's own thirty-two inputs reserved.
-            val pickup = h.service.pickupCargo(city.id, courier.id, plan.cargo)
-            h.tickUntil("direct input pickup journal") { transactions.size == 1 }
             source.contents.filterNotNull().sumOf { it.amount } shouldBe 80
             h.service.settlements().single().workers.first().cargo shouldBe null
-            transactions.single().let { it.second.complete(it.first) }
-            val picked = h.await(pickup)
+            val picked = h.await(h.service.pickupCargo(city.id, courier.id, plan.cargo))
             source.contents.filterNotNull().sumOf { it.amount } shouldBe 48
             val carrying = picked.workers.first()
             carrying.cargo shouldBe plan.cargo.copy(inventoryBacked = true)
@@ -158,27 +152,21 @@ class CivsDirectInputSupplyTest : FunSpec({
             CivsRules.validate(restored).workers.first().cargo shouldBe carrying.cargo
             CivsLogistics.validCargo(picked, requireNotNull(carrying.cargo).copy(redistribution = true)) shouldBe false
             CivsLogistics.validCargo(picked.copy(inventory = CivInventory(CivStorageMode.VIRTUAL)), carrying.cargo) shouldBe false
-            val dropoff = h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId)
-            h.tickUntil("direct input dropoff journal") { transactions.size == 2 }
             target.isEmpty shouldBe true
-            transactions.last().let { it.second.complete(it.first) }
-            val saved = h.await(dropoff)
+            val saved = h.await(h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId))
             saved.workers.first().cargo shouldBe null
             CivsEquipment.plainCount(saved.workers.first(), "COBBLESTONE") shouldBe 0
             target.contents.filterNotNull().sumOf { it.amount } shouldBe 32
             source.contents.filterNotNull().sumOf { it.amount } + target.contents.filterNotNull().sumOf { it.amount } shouldBe 80
             warehouse.contents.filterNotNull().all { it.type == Material.STONE && it.amount == 64 } shouldBe true
             h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId).isCompletedExceptionally shouldBe true
-            transactions.size shouldBe 2
+            transactions.map { it.after } shouldBe listOf(picked, saved)
         }
     }
 
-    test("a selected road repair receives sixteen direct cobblestone through native journals without construction") {
+    test("a selected road repair receives sixteen direct cobblestone without construction") {
         directInputService(upkeep = true) { h, city, source, hut, warehouse ->
-            val transactions = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                CompletableFuture<CivInventoryTransaction>().also { transactions += firstArg<CivInventoryTransaction>() to it }
-            }
+            val transactions = h.directInputReceipts()
             startDirectInputUpkeep(h, city)
             city.construction shouldBe null
             val courier = city.workers.first()
@@ -190,22 +178,16 @@ class CivsDirectInputSupplyTest : FunSpec({
             plan.destinationBuildingId shouldBe builder.assignment
             CivsLogistics.directInputAllowed(city, plan.cargo) shouldBe true
             val depotBefore = warehouse.contents.map { it?.clone() }
-            val pickup = h.service.pickupCargo(city.id, courier.id, plan.cargo)
-            h.tickUntil("upkeep cargo pickup journal") { transactions.size == 1 }
             source.storageContents.filterNotNull().sumOf { it.amount } shouldBe 80
             h.service.settlements().single().workers.first().cargo shouldBe null
-            transactions.single().let { it.second.complete(it.first) }
-            val picked = h.await(pickup)
+            val picked = h.await(h.service.pickupCargo(city.id, courier.id, plan.cargo))
             source.storageContents.filterNotNull().sumOf { it.amount } shouldBe 64
             CivsEquipment.plainCount(picked.workers.first(), "COBBLESTONE") shouldBe 16
             picked.workers.first().cargo shouldBe plan.cargo.copy(inventoryBacked = true)
             h.await(h.service.pickupCargo(city.id, courier.id, plan.cargo)) shouldBe picked
             transactions.size shouldBe 1
-            val dropoff = h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId)
-            h.tickUntil("upkeep cargo dropoff journal") { transactions.size == 2 }
             hut.isEmpty shouldBe true
-            transactions.last().let { it.second.complete(it.first) }
-            val saved = h.await(dropoff)
+            val saved = h.await(h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId))
             saved.workers.first().cargo shouldBe null
             CivsEquipment.plainCount(saved.workers.first(), "COBBLESTONE") shouldBe 0
             hut.storageContents.filterNotNull().sumOf { it.amount } shouldBe 16
@@ -217,7 +199,7 @@ class CivsDirectInputSupplyTest : FunSpec({
             h.service.upkeepSupplyRequests(saved) { if (it == builder.assignment) mapOf("COBBLESTONE" to 16L) else emptyMap() } shouldBe emptyList()
             h.service.upkeepRequirements(saved) shouldBe mapOf(builder.id to mapOf("COBBLESTONE" to 1L))
             h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId).isCompletedExceptionally shouldBe true
-            transactions.size shouldBe 2
+            transactions.map { it.after } shouldBe listOf(picked, saved)
         }
     }
 
@@ -282,23 +264,17 @@ class CivsDirectInputSupplyTest : FunSpec({
         }
     }
 
-    test("construction direct cargo uses the same durable receipts and still unloads after its order disappears") {
+    test("construction direct cargo still unloads after its order disappears") {
         directInputService(construction = true) { h, city, source, hut, warehouse ->
-            val transactions = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                CompletableFuture<CivInventoryTransaction>().also { transactions += firstArg<CivInventoryTransaction>() to it }
-            }
+            val transactions = h.directInputReceipts()
             h.start()
             val courier = city.workers.first()
             val plan = h.supplyPlan(courier.id)
             plan.cargo.directInput shouldBe true
             plan.cargo.amount shouldBe 3L
-            val pickup = h.service.pickupCargo(city.id, courier.id, plan.cargo)
-            h.tickUntil("construction cargo pickup journal") { transactions.size == 1 }
             source.contents.filterNotNull().sumOf { it.amount } shouldBe 80
             h.service.settlements().single().workers.first().cargo shouldBe null
-            transactions.single().let { it.second.complete(it.first) }
-            val picked = h.await(pickup)
+            val picked = h.await(h.service.pickupCargo(city.id, courier.id, plan.cargo))
             source.contents.filterNotNull().sumOf { it.amount } shouldBe 77
             CivsEquipment.plainCount(picked.workers.first(), "COBBLESTONE") shouldBe 3
             h.await(h.service.pickupCargo(city.id, courier.id, plan.cargo)) shouldBe picked
@@ -308,29 +284,23 @@ class CivsDirectInputSupplyTest : FunSpec({
                 buildings = picked.buildings.filterNot { it.id == city.construction!!.buildingId })
             replaceDirectInputCity(h, retired)
             CivsLogistics.validCargo(retired, retired.workers.first().cargo) shouldBe true
-            val dropoff = h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId)
-            h.tickUntil("construction cargo dropoff journal") { transactions.size == 2 }
             hut.isEmpty shouldBe true
-            transactions.last().let { it.second.complete(it.first) }
-            val saved = h.await(dropoff)
+            val saved = h.await(h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId))
             saved.workers.first().cargo shouldBe null
             CivsEquipment.plainCount(saved.workers.first(), "COBBLESTONE") shouldBe 0
             hut.contents.filterNotNull().sumOf { it.amount } shouldBe 3
             source.contents.filterNotNull().sumOf { it.amount } + hut.contents.filterNotNull().sumOf { it.amount } shouldBe 80
             warehouse.contents.filterNotNull().all { it.type == Material.STONE && it.amount == 64 } shouldBe true
             h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId).isCompletedExceptionally shouldBe true
-            transactions.size shouldBe 2
+            transactions.map { it.after } shouldBe listOf(picked, saved)
         }
     }
 
     for ((type, material) in listOf(BuildingType.TOWN_HALL to "COBBLESTONE", BuildingType.QUARRY to "DIRT",
         BuildingType.QUARRY to "ANDESITE"))
-    test("native construction transfers existing $type $material items through the ordinary pickup and unload journal") {
+    test("native construction transfers existing $type $material from the producer to its builder hut") {
         directInputService(construction = true, material = material, sourceType = type) { h, city, source, hut, warehouse ->
-            val transactions = mutableListOf<CivInventoryTransaction>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                firstArg<CivInventoryTransaction>().let { transactions += it; CompletableFuture.completedFuture(it) }
-            }
+            val transactions = h.directInputReceipts()
             h.start()
             val courier = city.workers.first()
             val plan = h.supplyPlan(courier.id)
@@ -341,7 +311,7 @@ class CivsDirectInputSupplyTest : FunSpec({
             source.storageContents.filterNotNull().sumOf { it.amount } shouldBe 77
             CivsEquipment.plainCount(picked.workers.first(), material) shouldBe 3
             val saved = h.await(h.service.dropoffCargo(city.id, courier.id, plan.cargo, plan.destinationBuildingId))
-            transactions.size shouldBe 2
+            transactions.map { it.after } shouldBe listOf(picked, saved)
             saved.workers.first().cargo shouldBe null
             hut.storageContents.filterNotNull().sumOf { it.amount } shouldBe 3
             source.storageContents.filterNotNull().sumOf { it.amount } + hut.storageContents.filterNotNull().sumOf { it.amount } shouldBe 80
@@ -413,6 +383,22 @@ class CivsDirectInputSupplyTest : FunSpec({
         }
     }
 })
+
+private fun ServiceScenario.directInputReceipts(): List<CivInventoryTransaction> {
+    val receipts = mutableListOf<CivInventoryTransaction>()
+    every { store.saveInventoryTransaction(any()) } returns CompletableFuture()
+    every { store.beginLocalInventory(any(), capture(receipts)) } answers {
+        service.settlements().single() shouldBe firstArg<Settlement>()
+        val changes = secondArg<CivInventoryTransaction>().changes
+        changes.isNotEmpty() shouldBe true
+        for (change in changes) {
+            val point = change.container
+            val barrel = world.getBlockAt(point.x, point.y, point.z).state as Barrel
+            barrel.inventory.getItem(change.slot) shouldBe change.before?.let { ItemStack(Material.valueOf(it.material), it.amount) }
+        }
+    }
+    return receipts
+}
 
 private fun directInputFixture(construction: Boolean = false): CivSupplySnapshot {
     fun store(id: Long, type: BuildingType, stock: Map<String, Long> = emptyMap(), desired: Map<String, Long> = emptyMap(),

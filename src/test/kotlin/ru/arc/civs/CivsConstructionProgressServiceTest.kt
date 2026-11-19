@@ -59,22 +59,34 @@ class CivsConstructionProgressServiceTest : FunSpec({
             h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any(), any(), any()) }
             val barrel = (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory
-            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 1))
+            barrel.setItem(0, ItemStack(Material.STONE))
             val worker = h.service.city(h.player)!!.workers.first()
             val pickup = h.service.prepareResidentSupplies(placement.city.id, worker.id, worker.assignment!!)
-            h.tick(); h.commit(); pickup.join()
+            pickup.isDone shouldBe true
+            val supplied = pickup.join()
             barrel.getItem(0) shouldBe null
-            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "STONE") shouldBe 1
+            CivsEquipment.plainCount(supplied.workers.first(), "STONE") shouldBe 1
+            h.service.city(h.player) shouldBe supplied
+            verify(exactly = 1) {
+                h.store.beginLocalInventory(any(), any())
+                h.store.completeLocalInventory(any())
+            }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             h.time += 5_000; h.paper.performTicks(20)
             CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "STONE") shouldBe 1
-            receipt!!.after.construction!!.phase shouldBe ConstructionPhase.PLACING
-            receipt!!.after.construction!!.payment!!.reservedBatch shouldBe 0
-            durable.complete(receipt!!); h.tick()
+            val payment = requireNotNull(receipt)
+            payment.beforeRevision shouldBe supplied.revision
+            payment.changes shouldBe emptyList()
+            payment.after.construction!!.phase shouldBe ConstructionPhase.PLACING
+            payment.after.construction!!.payment!!.reservedBatch shouldBe 0
+            durable.complete(payment); h.tick()
             barrel.getItem(0) shouldBe null
+            h.service.city(h.player) shouldBe supplied
             verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             h.commit(); h.paper.performTicks(20)
             h.service.city(h.player)!!.construction!!.materials shouldBe mapOf("OAK_PLANKS" to 1L)
-            verify(exactly = 2) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 1) { h.store.completeInventoryTransaction(payment) }
             verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "STONE") shouldBe 0
             placement.pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick(); h.commit()
