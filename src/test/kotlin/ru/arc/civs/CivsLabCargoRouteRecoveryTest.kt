@@ -1,9 +1,15 @@
 package ru.arc.civs
 
+import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.every
+import io.mockk.mockk
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.block.Barrel
+import org.bukkit.inventory.ItemStack
 import org.bukkit.util.BoundingBox
 import org.bukkit.util.VoxelShape
 import org.mockbukkit.mockbukkit.block.BlockMock
@@ -174,11 +180,12 @@ class CivsLabCargoRouteRecoveryTest : FunSpec({
                     h.world.getBlockAt(x, 64, z).type = Material.ACACIA_STAIRS
                     h.world.getBlockAt(x, 65, z).type = Material.GLASS_PANE
                 }
-                val origin = standing.copy(x = 35).location(h.world)
+                // This suite exercises the legacy recovery for a courier still outside native handoff reach.
+                val origin = standing.copy(x = 37).location(h.world)
                 val landing = standing.location(h.world).add(0.0, if (carpeted) .0625 else 0.0, 0.0)
                 val approved = mutableSetOf<CivPosition>()
                 val floor = standing.copy(y = 63)
-                val originHead = CivPosition(35, 65, -1)
+                val originHead = CivPosition(origin.blockX, 65, -1)
                 h.labCourierRecoveryAllowed = { points ->
                     approved.addAll(points)
                     !outcome.startsWith("outside-lab") && (outcome != "protected-floor" || floor !in points) &&
@@ -280,9 +287,137 @@ class CivsLabCargoRouteRecoveryTest : FunSpec({
             }
         }
     }
+    for (alreadyNear in listOf(true, false)) {
+        test("paid bread reaches the real tavern barrel through the counter, already in reach=$alreadyNear") {
+            residentRuntime(worldFactory = { CargoRecoveryCarpetWorld(true) }, server = CivsWorksiteServerFixture()) { h ->
+                h.navigationNow = 2_000
+                h.world.time = 0
+                val depot = h.assignFarm().copy(type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null)
+                val control = CivPosition(34, 64, -3)
+                val tavern = CivBuilding(UUID(79, 4), BuildingType.TAVERN, 1, control, 0, "tavern1",
+                    CivBox(CivPosition(31, 64, -7), CivPosition(38, 68, 0)), control.copy(z = 1), BuildingPhase.ACTIVE, control)
+                val cargo = CivCargo(UUID(79, 5), depot.id, depot.id, tavern.id, depot.entrance, "BREAD", 20, inventoryBacked = true)
+                val carrier = CivsEquipment.collectSupplies(h.city.workers.single().copy(cargo = cargo, hunger = 20),
+                    mapOf("BREAD" to 20L))
+                h.city = CivsRules.validate(h.city.copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
+                    buildings = listOf(h.city.buildings.first(), depot, tavern), workers = listOf(carrier.copy(cargo = null))))
+                h.owner.courierControlAllowed = { _, point -> !alreadyNear && point == control }
+                for (x in -1..3) for (z in -2..1) h.world.loadChunk(x, z)
+                val block = h.world.getBlockAt(control.x, control.y, control.z)
+                block.type = Material.BARREL
+                for (x in 29..40) for (y in 64..67) h.world.getBlockAt(x, y, -2).type = Material.STONE
+                for (x in 29..40) for (y in 64..67) h.world.getBlockAt(x, y, -8).type = Material.STONE
+                for (z in -8..-2) for (y in 64..67) for (x in listOf(29, 40)) h.world.getBlockAt(x, y, z).type = Material.STONE
+                h.owner.pulse(2_000)
+                val actor = h.actor()
+                val near = Location(h.world, 33.5, 64.0625, -.5)
+                val outside = Location(h.world, 33.5, 64.0, 4.5)
+                val edge = control.location(h.world).add(3.0, .5, 0.0)
+                civsWithinContainerReach(edge, control) shouldBe true
+                civsWithinContainerReach(edge.add(.001, 0.0, 0.0), control) shouldBe false
+                actor.npc.teleport(if (alreadyNear) near else outside)
+                h.city = h.city.copy(workers = listOf(carrier))
+                h.courier = CivCourierPlan(cargo, tavern.id, tavern.entrance, true)
+                h.dropoffProvider = { city, worker, accepted, destination ->
+                    withClue("handoff feet=${actor.npc.location} origin=${if (alreadyNear) near else outside}") {
+                        h.owner.requireCargoDropoffArrival(city, worker, destination, accepted) shouldBe true
+                    }
+                    h.pendingUnload
+                }
+                citizenAtStorage(h.world, near.point(), control) shouldBe false
+                kotlin.math.sqrt(near.distanceSquared(control.location(h.world).add(0.0, .5, 0.0))) shouldBe
+                    kotlin.math.sqrt(5.19140625)
+                h.owner.pulse(3_000)
+                h.unloads shouldBe 0
+                h.owner.courierControlAllowed = { city, point -> city.id == h.city.id && point == control }
+                h.owner.pulse(4_000)
+                if (!alreadyNear) {
+                    h.unloads shouldBe 0
+                    withClue("before walking feet=${h.actor().npc.location} route=${h.actor().route?.target} phase=${h.actor().cycle.phase}") {
+                        h.actor() shouldBe actor
+                        actor.npc.location.point() shouldBe outside.point()
+                        actor.route?.motion?.hasContainerGoal shouldBe true
+                    }
+                    for (tick in 1..500) {
+                        if (actor.route?.completion != null) break
+                        h.navigate()
+                    }
+                    actor.route?.completion shouldBe CitizenNavigationCompletion(null)
+                    actor.cycle.phase shouldBe CitizenPhase.RETURNING
+                    civsWithinContainerReach(actor.npc.location, control) shouldBe true
+                    // Fill after native movement accepts these feet and before the work pulse starts the receipt.
+                    val barrel = (block.state as Barrel).inventory
+                    for (slot in 0 until barrel.size) barrel.setItem(slot, ItemStack(Material.STONE, 64))
+                }
+                for (tick in 1..500) {
+                    if (h.unloads > 0) break
+                    h.navigate()
+                    if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
+                }
+                val feet = actor.npc.location
+                withClue(h.owner.debug(h.city.id, h.workerId)) {
+                    h.unloads shouldBe 1
+                    h.phase(h.workerId) shouldBe CitizenPhase.DELIVERING
+                    actor.nextRecoveryAt shouldBe null
+                    (feet.z > -1.0) shouldBe true
+                    civsWithinContainerReach(feet, control) shouldBe true
+                    if (alreadyNear) feet.point() shouldBe near.point()
+                }
+                fun admit() = h.owner.requireCargoDropoffArrival(h.city.id, h.workerId, tavern.id, cargo)
+                actor.npc.teleport(outside)
+                shouldThrow<CivsRejection> { admit() }.reason shouldBe "route-unreachable"
+                actor.npc.teleport(feet)
+                shouldThrow<CivsRejection> { h.owner.requireStorageArrival(h.city.id, h.workerId, tavern.id) }
+                    .reason shouldBe "route-unreachable"
+                shouldThrow<CivsRejection> { h.owner.requireCargoDropoffArrival(h.city.id, h.workerId, depot.id, cargo) }
+                block.type = Material.CHEST
+                shouldThrow<CivsRejection> { admit() }.reason shouldBe "route-unreachable"
+                block.type = Material.BARREL
+                val bin = (block.state as Barrel).inventory
+                val other = h.world.getBlockAt(control.x + 2, control.y, control.z)
+                other.type = Material.BARREL
+                for (slot in 0 until bin.size) bin.setItem(slot, ItemStack(Material.STONE, 64))
+                // Room changed after the courier entered DELIVERING. Its feet still prove the same handoff.
+                admit() shouldBe true
+                (other.state as Barrel).inventory.isEmpty shouldBe true
+                val before = h.city
+                val id = UUID.randomUUID()
+                CivsStorage(h.paper.createSimplePlugin("TavernCounterCargo")) { emptyArray() }.use { storage ->
+                    storage.replaceCities(listOf(before))
+                    storage.indexPlace(mockk { every { blockPlaced } returns other })
+                    (storage.cargoRoom(before, tavern.id, "BREAD") >= cargo.amount) shouldBe true
+                    storage.reserve(before, id)
+                    fun prepare(building: UUID = tavern.id) = storage.prepareCarriedCargoDropoff(
+                        before, h.workerId, cargo, building, 50_000, ::admit)
+                    storage.foodCanModify = { _, _ -> false }
+                    shouldThrow<CivsRejection> { prepare() }.reason shouldBe "lands-denied"
+                    storage.foodCanModify = { _, _ -> true }
+                    shouldThrow<CivsRejection> { prepare(depot.id) }.reason shouldBe "stale-delivery"
+                    shouldThrow<CivsRejection> { prepare() }.reason shouldBe "storage-full"
+                    bin.clear()
+                    bin.isEmpty shouldBe true
+                    val plan = prepare()
+                    plan.changes.map(CivInventorySlotChange::container).toSet() shouldBe setOf(control)
+                    val after = CivsLogistics.unload(before, h.workerId, cargo.id, 50_000).copy(inventory = plan.inventoryAfter)
+                    val tx = CivInventoryTransaction(id, before.id, before.revision, after, plan.changes, cargoDropoff = plan.cargoDropoff)
+                    storage.seal(tx)
+                    repeat(2) { storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied }
+                    bin.getItem(0) shouldBe ItemStack(Material.BREAD, 20)
+                    (other.state as Barrel).inventory.isEmpty shouldBe true
+                    after.workers.single().cargo shouldBe null
+                    CivsEquipment.plainCount(after.workers.single(), "BREAD") shouldBe 0
+                    storage.unlock(id)
+                }
+            }
+        }
+    }
 })
 
 private class CargoRecoveryCarpetWorld(private val carpeted: Boolean) : ResidentRuntimeWorld() {
+    init {
+        // Detached chunk snapshots and live native-shape reads must describe the same carpet.
+        if (carpeted) super.getBlockAt(33, 64, -1).type = Material.BLACK_CARPET
+    }
     private val carpet by lazy {
         val shape = BoundingBox(0.0, 0.0, 0.0, 1.0, .0625, 1.0)
         object : BlockMock(Material.BLACK_CARPET, Location(this, 33.0, 64.0, -1.0)) {

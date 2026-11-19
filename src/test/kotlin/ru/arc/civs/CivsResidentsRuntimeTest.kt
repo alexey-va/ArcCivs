@@ -3945,7 +3945,7 @@ class CivsResidentsRuntimeTest : FunSpec({
 
     for (tavern in listOf(false, true)) {
         val example = if (tavern) "Auto4 tavern" else "Auto2 house"
-        test("a local idle step follows the authored exit from the $example and refuses an inward step") {
+        test("a local idle walk in the $example avoids a sealed edge and can use the reopened lowered floor") {
             residentRuntime(workerId = UUID(0, 42)) { h ->
                 val hall = h.city.buildings.single()
                 val origin = Location(h.world, 20.5, 64.0, 5.5)
@@ -3979,17 +3979,27 @@ class CivsResidentsRuntimeTest : FunSpec({
                 h.holdNavigation = true
                 h.navigationNow = 2_000
                 h.owner.pulse(2_000)
-                repeat(20) { h.navigate() }
-                h.owner.pulse(3_000)
-                h.routeIdentity() shouldBe null
-                actor.location.point() shouldBe origin.point()
+                repeat(20) {
+                    h.navigate()
+                    (actor.location.blockX == target.x && actor.location.blockZ == target.z) shouldBe false
+                }
 
+                // Return to the same native start; isolate the reopened edge from other legitimate walk targets.
+                h.city = h.city.copy(workers = h.city.workers.map { it.copy(nextDeliveryAt = it.nextDeliveryAt + 1) })
+                actor.teleport(origin)
+                for ((dx, dz) in listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)) {
+                    val x = origin.blockX + dx
+                    val z = origin.blockZ + dz
+                    if (x != target.x || z != target.z) for (y in 64..65) h.world.getBlockAt(x, y, z).type = Material.STONE
+                }
                 body.type = Material.AIR
                 h.world.getBlockAt(target.x, 65, target.z).type = Material.AIR
                 h.world.getBlockAt(target.x, target.y, target.z).type = if (tavern) Material.CYAN_CARPET else Material.DIRT_PATH
                 val feet = CitizenPoint(target.x + .5, if (tavern) 63.0625 else 63.9375, target.z + .5)
                 h.navigationNow = 7_000
                 h.owner.pulse(7_000)
+                h.navigationNow = 7_500
+                h.owner.pulse(7_500)
                 h.routeTarget()?.point() shouldBe feet
                 val local = requireNotNull(h.routeMotion(h.workerId))
                 local.preparationPhase shouldBe "local"
@@ -4024,16 +4034,20 @@ class CivsResidentsRuntimeTest : FunSpec({
             actor.teleport(origin)
             h.navigationNow = 2_000
             h.owner.pulse(2_000)
-            repeat(20) { h.navigate() }
-            h.owner.pulse(3_000)
-            h.routeIdentity() shouldBe null
-            actor.location.point() shouldBe origin.point()
+            repeat(20) {
+                h.navigate()
+                (actor.location.blockX == exit.x && actor.location.blockZ == exit.z) shouldBe false
+            }
 
-            h.city = h.city.copy(buildings = h.city.buildings.filter { it.id != privateNeighbour.id })
-            for ((x, z) in listOf(2 to 0, 3 to -1, 3 to 1)) for (y in 64..65)
+            h.city = h.city.copy(buildings = h.city.buildings.filter { it.id != privateNeighbour.id },
+                workers = h.city.workers.map { it.copy(nextDeliveryAt = it.nextDeliveryAt + 1) })
+            actor.teleport(origin)
+            for ((x, z) in listOf(2 to 0, 3 to -1, 3 to 1, 5 to 0, 4 to -1, 4 to 1)) for (y in 64..65)
                 h.world.getBlockAt(x, y, z).type = Material.STONE
             h.navigationNow = 7_000
             h.owner.pulse(7_000)
+            h.navigationNow = 7_500
+            h.owner.pulse(7_500)
             h.routeTarget()?.point() shouldBe exit.point()
             repeat(40) { h.navigate() }
             actor.location.point() shouldBe exit.point()
@@ -4142,12 +4156,11 @@ class CivsResidentsRuntimeTest : FunSpec({
     test("an unreachable optional wander keeps safe actual feet then tries another destination without recovery teleport") {
         residentRuntime { h ->
             for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
-            for (x in -8..8) for (z in -8..8) h.world.getBlockAt(x, 65, z).type = Material.STONE
-            for (x in -1..1) for (z in -1..1) if (x != 0 || z != 0)
-                for (y in 66..67) h.world.getBlockAt(x, y, z).type = Material.STONE
+            h.world.getBlockAt(0, 65, 0).type = Material.STONE
             val actor = h.owner.collisionActors().single()
             val origin = Location(h.world, .5, 66.0, .5)
             actor.teleport(origin)
+            citizenSafeIdlePosition(h.world, CivPosition(0, 64, 0), origin.point(), h.city.buildings) shouldBe true
             // A new token cancels the pre-fixture idle route without moving the resident.
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(nextDeliveryAt = 2) })
             val city = h.city
@@ -4163,9 +4176,8 @@ class CivsResidentsRuntimeTest : FunSpec({
             actor.location.toVector() shouldBe origin.toVector()
             h.teleports shouldBe teleports
 
-            // Reopen the neighbouring cells. The bounded local failure delay still applies.
-            for (x in -1..1) for (z in -1..1) if (x != 0 || z != 0)
-                for (y in 66..67) h.world.getBlockAt(x, y, z).type = Material.AIR
+            // Extend the isolated ledge onto level ground. The bounded local failure delay still applies.
+            for (x in -8..8) for (z in -8..8) h.world.getBlockAt(x, 65, z).type = Material.STONE
             var walked = false
             for (tick in 1..120) {
                 val before = actor.location
@@ -4815,10 +4827,11 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.pulse(62_250)
             h.phase() shouldBe CitizenPhase.RETURNING
             h.actor().plan.idleReason shouldBe "storage-full"
+            h.navigationNow = 62_750
+            h.owner.pulse(62_750)
             requireNotNull(h.actor().route?.wanderWalk)
             h.owner.status(h.workerId) shouldBe "workers.status.wandering"
             // The conserved capacity pause remains while its visible leisure route advances or rests.
-            h.navigationNow = 62_250
             for (reason in listOf("searching-work", "waiting-growth")) {
                 h.idleReason = reason
                 repeat(21) { h.navigate() }
@@ -5869,9 +5882,16 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
         return owner.collisionActors().toList().also { it.size shouldBe 2 }
     }
     fun awaitConversation() {
+        var metOnStreet = false
         for (tick in 1..2_400) {
             navigate()
             if (tick % 20 == 0) {
+                // Two city-wide walks need not cross by chance during this test. Stage one real encounter.
+                val pair = owner.collisionActors()
+                if (!metOnStreet && pair.size == 2 && pair.all { actor(it.uniqueId).social.meetingAvailable(Bukkit.getCurrentTick()) }) {
+                    pair.forEachIndexed { i, npc -> npc.teleport(Location(world, 4.5 + 2 * i, 64.0, .5)) }
+                    metOnStreet = true
+                }
                 owner.pulse(requireNotNull(navigationNow))
                 clearRecordedCalls()
                 val actors = owner.collisionActors()

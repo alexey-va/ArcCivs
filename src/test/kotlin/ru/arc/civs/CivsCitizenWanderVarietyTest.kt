@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Location
@@ -92,6 +93,61 @@ class CivsCitizenWanderVarietyTest : FunSpec({
         }
     }
 
+    test("an idle university worker chains local walks across the settlement beyond the workplace") {
+        residentRuntime(workerId = UUID(0, 42)) { h ->
+            val hall = h.city.buildings.single()
+            val post = CivPosition(4, 64, 11)
+            val university = hall.copy(id = UUID(0, 43), type = BuildingType.UNIVERSITY, anchor = post, entrance = post,
+                control = null, bounds = CivBox(CivPosition(0, 63, 12), CivPosition(7, 70, 15)))
+            h.city = h.city.copy(buildings = listOf(hall, university), workers = h.city.workers.map { it.copy(assignment = university.id) })
+            h.workIdleProvider = { _, _ -> "no-research" }
+            for (x in -3..3) for (z in -1..1) h.world.loadChunk(x, z)
+            for (x in 5..42) h.world.getBlockAt(x, 63, 10).type = Material.DIRT_PATH
+            val a = h.actor()
+            a.npc.teleport(Location(h.world, 4.5, 64.0, 10.5, -90f, 0f))
+            val routes = mutableSetOf<CitizenWanderWalk>()
+            val visited = mutableSetOf<Int>()
+            h.holdNavigation = true
+            h.navigationNow = 2_000
+            val before = h.world.chunkSnapshotCaptures
+            for (tick in 0..700) {
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                a.route?.wanderWalk?.let(routes::add)
+                h.navigate()
+                val at = a.npc.location
+                visited += at.blockX
+                if (at.blockX >= 22) break
+            }
+            withClue("visited=$visited episodes=${routes.size}") {
+                a.plan.idleReason shouldBe "no-research"
+                (4..22).all(visited::contains) shouldBe true
+                (routes.size >= 3) shouldBe true
+                h.pendingNavigationWorkers shouldBe 0
+                h.world.chunkSnapshotCaptures shouldBe before
+                h.deliveries shouldBe 0
+            }
+        }
+    }
+
+    test("a road crossing the settlement edge offers only its reachable city cells") {
+        residentRuntime(workerId = UUID(0, 42)) { h ->
+            h.city = h.city.copy(radius = 12)
+            for (x in 4..17) h.world.getBlockAt(x, 63, 6).type = Material.DIRT_PATH
+            val actor = h.actor()
+            actor.npc.teleport(Location(h.world, 11.5, 63.9375, 6.5, -90f, 0f))
+            h.navigationNow = 2_000
+            val visited = mutableSetOf<Int>()
+            repeat(220) { tick ->
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                h.navigate()
+                val at = actor.npc.location
+                h.city.contains(at.blockX, at.blockZ) shouldBe true
+                visited += at.blockX
+            }
+            (visited.size >= 4) shouldBe true
+        }
+    }
+
     test("an unassigned resident in the shared hall walks around furniture blocking the door direction") {
         residentRuntime(workerId = UUID(0, 42)) { h ->
             val hall = h.city.buildings.single().copy(entrance = CivPosition(2, 64, 3))
@@ -111,7 +167,8 @@ class CivsCitizenWanderVarietyTest : FunSpec({
             h.owner.pulse(3_000)
 
             val destination = CitizenPoint(-.5, 64.0, 1.5)
-            for (tick in 1..20) {
+            for (tick in 1..30) {
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
                 val before = npc.location
                 h.navigate()
                 (npc.location.distance(before) <= .118251) shouldBe true

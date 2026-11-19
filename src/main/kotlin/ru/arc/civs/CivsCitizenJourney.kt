@@ -176,7 +176,8 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         }
         if (retryStatus == null) {
             pause(if (reason == "storage-full") "storage-full" else "delivery-failed", now, true)
-            resumePhase = readyPhase
+            resumePhase = if (readyPhase == CitizenPhase.READY && hasCargo && reason in setOf("route-unreachable", "lands-denied"))
+                CitizenPhase.RETURNING else readyPhase
             return
         }
         // A completed observed trip remains valid while supplies or another durable commit are pending.
@@ -469,6 +470,9 @@ internal class CitizenRoute(val from: CitizenPoint, val target: Location, val ch
     val wanderWalk: CitizenWanderWalk? = null) {
     val demandChunks: CitizenChunks? get() = chunks.takeIf { wanderWalk == null }
     var completion: CitizenNavigationCompletion? = null
+    var reachedCargoControl: CivPosition? = null
+    var gate: UUID? = null
+    var triedGates: Set<UUID> = emptySet()
     var planningReported = false
     var mineFailureReported = false
     var storageReason: String? = null

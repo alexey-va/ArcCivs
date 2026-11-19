@@ -63,7 +63,8 @@ internal data class CitizenSearchResult(val probes: List<CitizenSearchProbe>, va
     val path: List<CitizenPlannedStep>? = null, val failure: String? = null, val searchNanos: Long = 0,
     val continuation: Boolean = false, val blockedPositions: List<CivPosition> = emptyList(),
     val continuationReason: String? = null, val roadRouting: CitizenRoadRouting? = null,
-    val pickupCandidate: CitizenPoint? = null)
+    val pickupCandidate: CitizenPoint? = null, val searchStop: String? = null,
+    val firstUnavailableBlock: CivPosition? = null)
 
 /**
  * One worker owns this A* state. A slice asks for a configured batch of small neighbourhoods; native capture
@@ -107,7 +108,8 @@ internal class CitizenNavigationSearch(
     private val checkedPickupFeet = pickupContainer?.let { hashSetOf<CitizenPoint>() }
     private var serial = 0
     private var visited = 0
-    private var unknownTerrain = false
+    private var firstUnavailableBlock: CivPosition? = null
+    private val unknownTerrain get() = firstUnavailableBlock != null
     private var widerSearch = false
     private var roadLookup = roadCorridor.takeIf { preferredCorridor == null }
     private var corridor = preferredCorridor
@@ -139,7 +141,8 @@ internal class CitizenNavigationSearch(
                    continuationReason: String? = null, pickupCandidate: CitizenPoint? = null) = CitizenSearchResult(probes, visited, path, failure,
             System.nanoTime() - began, continuation,
             blockedPositions = if (failure == "no-path" || continuationReason == "no-path") blockedPositions.toList() else emptyList(),
-            continuationReason = continuationReason, roadRouting = roadRouting, pickupCandidate = pickupCandidate)
+            continuationReason = continuationReason, roadRouting = roadRouting, pickupCandidate = pickupCandidate,
+            searchStop = failure ?: continuationReason, firstUnavailableBlock = firstUnavailableBlock)
         if (cancelled.get()) return result(failure = "cancelled")
         checkingPickup?.let { entry ->
             checkingPickup = null
@@ -170,7 +173,7 @@ internal class CitizenNavigationSearch(
             expand(previous, capture)?.let { return result(failure = it) }
         }
         pending = emptyMap()
-        if (reachedIsolatedFrontier()) return partial("no-path", MINIMUM_PARTIAL_GAIN)
+        if (reachedIsolatedFrontier()) return partial("no-path", MINIMUM_PARTIAL_GAIN, "isolated-endpoint")
         val requested = linkedMapOf<CitizenSearchNode, Entry>()
         var firstRequestedScore = Double.POSITIVE_INFINITY
         while (requested.size < settings.searchNodesPerBatch) {
@@ -216,7 +219,7 @@ internal class CitizenNavigationSearch(
                     return result(pickupCandidate = feet)
                 }
             }
-            if (++visited > settings.maximumNodes) return finishAtBudget("search-budget")
+            if (++visited > settings.maximumNodes) return finishAtBudget("search-budget", "node-budget")
             if (pickupContainer == null && atGoal(node)) {
                 if (goal?.let { entry.cost < it.cost } != false) goal = entry
             } else {
@@ -226,7 +229,7 @@ internal class CitizenNavigationSearch(
                     requested[node] = entry
                 } else expand(entry, known)?.let { return result(failure = it) }
             }
-            if (reachedIsolatedFrontier()) return partial("no-path", MINIMUM_PARTIAL_GAIN)
+            if (reachedIsolatedFrontier()) return partial("no-path", MINIMUM_PARTIAL_GAIN, "isolated-endpoint")
             // Only the initial hinted return may leave on useful native progress before the hard budget.
             // Its caller walks this segment, then starts an ordinary search to the unchanged depot.
             if (preferredCorridor != null && goal == null && !unknownTerrain && visited % HINTED_PROGRESS_INTERVAL == 0) {
@@ -249,9 +252,9 @@ internal class CitizenNavigationSearch(
             }
         })
         val found = goal ?: return when {
-            unknownTerrain -> partial("chunk-unloaded", MINIMUM_PARTIAL_GAIN)
-            clipped && isolatedGoalDistance == null -> finishAtBudget("search-budget")
-            else -> partial("no-path", MINIMUM_PARTIAL_GAIN)
+            unknownTerrain -> partial("chunk-unloaded", MINIMUM_PARTIAL_GAIN, "frontier-exhausted")
+            clipped && isolatedGoalDistance == null -> finishAtBudget("search-budget", "search-boundary")
+            else -> partial("no-path", MINIMUM_PARTIAL_GAIN, "frontier-exhausted")
         }
         val path = pathTo(found.node) ?: return result(failure = if (cancelled.get()) "cancelled" else "broken-path")
         return result(path = path)
@@ -259,8 +262,10 @@ internal class CitizenNavigationSearch(
 
     /** Keep useful, already validated progress when a finite search fills its memory allowance.
      * The caller must walk this segment and continue to the original goal; it is not an arrival. */
-    fun finishAtBudget(reason: String): CitizenSearchResult = partial(if (isolatedGoalDistance != null) "no-path" else reason,
-        if (sqrt(origin.distanceSquared(target)) <= settings.closeRouteDistance) MINIMUM_PARTIAL_GAIN else 2.0)
+    @JvmOverloads
+    fun finishAtBudget(reason: String, searchStop: String = reason): CitizenSearchResult =
+        partial(if (isolatedGoalDistance != null) "no-path" else reason,
+            if (sqrt(origin.distanceSquared(target)) <= settings.closeRouteDistance) MINIMUM_PARTIAL_GAIN else 2.0, searchStop)
 
     /** Isolation proves failure, not that the first discovered step is the closest reachable point.
      * Stop early only after native progress reaches the endpoint probe's geometric lower bound. */
@@ -271,9 +276,10 @@ internal class CitizenNavigationSearch(
     }
 
     /** An unreachable goal may still have a useful native prefix; its endpoint is never an arrival. */
-    private fun partial(reason: String, minimumGain: Double): CitizenSearchResult {
+    private fun partial(reason: String, minimumGain: Double, searchStop: String): CitizenSearchResult {
         fun failed(cause: String) = CitizenSearchResult(emptyList(), visited, failure = cause,
-            blockedPositions = if (cause == "no-path") blockedPositions.toList() else emptyList(), roadRouting = roadRouting)
+            blockedPositions = if (cause == "no-path") blockedPositions.toList() else emptyList(), roadRouting = roadRouting,
+            searchStop = searchStop, firstUnavailableBlock = firstUnavailableBlock)
         if (cancelled.get()) return failed("cancelled")
         // A failed person detour must keep its caller's previous ready route available for waiting.
         val cause = if (unknownTerrain) "chunk-unloaded" else reason
@@ -287,7 +293,7 @@ internal class CitizenNavigationSearch(
         val path = pathTo(closest) ?: return failed(if (cancelled.get()) "cancelled" else "broken-path")
         return CitizenSearchResult(emptyList(), visited, path = path, continuation = true,
             blockedPositions = if (cause == "no-path") blockedPositions.toList() else emptyList(), continuationReason = cause,
-            roadRouting = roadRouting)
+            roadRouting = roadRouting, searchStop = searchStop, firstUnavailableBlock = firstUnavailableBlock)
     }
 
     private fun progressEndpoint(minimumGain: Double): CitizenSearchNode? {
@@ -327,8 +333,11 @@ internal class CitizenNavigationSearch(
 
     /** Reuse exact captured geometry and directed policy decisions without another native handoff. */
     private fun expand(previous: Entry, capture: CitizenSearchCapture): String? {
-        if (capture.blocks.any { (point, block) -> point.y in minimumY until maximumY && !block.loaded })
-            unknownTerrain = true
+        if (firstUnavailableBlock == null) {
+            firstUnavailableBlock = capture.blocks.entries.firstOrNull { (point, block) ->
+                point.y in minimumY until maximumY && !block.loaded
+            }?.key
+        }
         val terrain = geometry.also { it.blocks = capture.blocks }
         val from = capture.probe.from
         if (!terrain.loaded(previous.node.x, floor(previous.node.y).toInt(), previous.node.z))

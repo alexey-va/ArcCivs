@@ -524,6 +524,11 @@ private fun mineExitStorageFixture(h: ResidentRuntime, surface: Material): Stora
         if (x == control.x && z in control.z - 1..control.z) continue
         for (y in 62..66) h.world.getBlockAt(x, y, z).type = Material.STONE
     }
+    // Spillover into another depot holder still requires the ordinary supported aisle.
+    h.owner.courierControlAllowed = { _, _ -> true }
+    val primary = (h.world.getBlockAt(control.x, control.y, control.z).state as Barrel).inventory
+    for (slot in 0 until primary.size) primary.setItem(slot, ItemStack(Material.STONE, 64))
+    h.world.getBlockAt(control.x + 1, control.y, control.z).type = Material.BARREL
     h.navigationNow = 2_000
     h.owner.pulse(2_000)
     val actor = storageActors(h).getValue(h.workerId)

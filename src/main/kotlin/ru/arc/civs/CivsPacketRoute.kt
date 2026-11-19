@@ -13,7 +13,7 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /** Live validation belongs to the navigation owner. The worker receives only the container coordinates. */
-internal class CitizenFoodRouteGoal(val container: CivPosition, val accepts: (CitizenPoint) -> Boolean)
+internal class CitizenContainerRouteGoal(val container: CivPosition, val accepts: (CitizenPoint) -> Boolean)
 
 /**
  * Owns one route and its main-thread movement. The same detached A* serves async jobs and
@@ -30,7 +30,7 @@ internal class CitizenPacketRoute(
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
     private val corridor: CitizenSearchCorridor? = null,
     internal val snapshotPolicy: CitizenSnapshotPolicy? = null,
-    private val pickup: CitizenFoodRouteGoal? = null,
+    private val pickup: CitizenContainerRouteGoal? = null,
 ) {
     private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true,
                            val action: CitizenRouteAction = CitizenRouteAction.WALK,
@@ -95,6 +95,10 @@ internal class CitizenPacketRoute(
         private set
     var continuationReason: String? = null
         private set
+    internal var searchStop: String? = null
+        private set
+    internal var firstUnavailableBlock: CivPosition? = null
+        private set
     internal var blockedPositions: List<CivPosition> = emptyList()
         private set
     var waitingForCollision = false
@@ -110,6 +114,7 @@ internal class CitizenPacketRoute(
     val nodeCount: Int get() = visited
     val endpoint: CitizenPoint? get() = path.lastOrNull()?.point
     internal var pickupEndpoint: CitizenPoint? = null
+    internal val hasContainerGoal: Boolean get() = pickup != null
     internal fun reservedDestination(authored: Location): Location? =
         if (pickup == null) authored else pickupEndpoint?.let { Location(world, it.x, it.y, it.z) }
     val remainingNodes: Int get() = path.size
@@ -409,6 +414,8 @@ internal class CitizenPacketRoute(
         if (!searching) return
         roadRouting = result.roadRouting
         blockedPositions = result.blockedPositions
+        searchStop = result.searchStop
+        firstUnavailableBlock = result.firstUnavailableBlock
         result.failure?.let { fail(it); return }
         val steps = result.path?.toMutableList() ?: return
         // A nudge must not introduce a needless centre-and-reverse segment. The shortcut is

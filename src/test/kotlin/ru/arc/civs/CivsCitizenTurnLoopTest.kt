@@ -47,7 +47,8 @@ class CivsCitizenTurnLoopTest : FunSpec({
 })
 
 private fun narrowIdleWalker(h: ResidentRuntime): CitizenActor {
-    for ((x, z) in listOf(3 to 0, 4 to -1, 4 to 1, 5 to -1, 5 to 1, 6 to 0))
+    // East is the only first step. The southern bend then provides a distinct second cell.
+    for ((x, z) in listOf(3 to 0, 4 to -1, 4 to 1, 5 to -1, 6 to 0))
         for (y in 64..65) h.world.getBlockAt(x, y, z).type = Material.STONE
     val actor = h.actor()
     actor.npc.teleport(Location(h.world, 4.5, 64.0, .5, 90f, 0f))

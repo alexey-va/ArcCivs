@@ -186,8 +186,10 @@ internal class CivsCitizenCollisions(
     }
 
     /** Admission is read-only: a player must never be pushed by a resident's yielding probe. */
-    private fun yieldPlayerClear(actor: CitizenActor, from: Location, to: Location, terminal: BoundingBox? = null): Boolean {
-        if (!runtime.entityCollisions) return residentMoveAllowed(actor, from, to)
+    private fun yieldPlayerClear(actor: CitizenActor, from: Location, to: Location, terminal: BoundingBox? = null): Boolean =
+        if (runtime.entityCollisions) playerBodiesClear(actor, from, to, terminal) else residentMoveAllowed(actor, from, to)
+
+    private fun playerBodiesClear(actor: CitizenActor, from: Location, to: Location, terminal: BoundingBox? = null): Boolean {
         val sweep = citizenStandingBounds(from, actor.npc.scale).union(citizenStandingBounds(to, actor.npc.scale))
         val players = actor.npc.world.getNearbyPlayers(Location(actor.npc.world, sweep.centerX, sweep.centerY, sweep.centerZ),
             sweep.widthX / 2, sweep.height / 2, sweep.widthZ / 2)
@@ -353,6 +355,97 @@ internal class CivsCitizenCollisions(
             "injury_pending" to (actor.workerId in runtime.pendingHarm), "at" to now)
         return true
     }
+
+    /** Admitted only after an idle walk or a real route has failed. */
+    fun recoverDryPit(actor: CitizenActor, city: Settlement, now: Long): Boolean {
+        val npc = actor.npc
+        val clock = recoveryClock()
+        if (runtime.recoveryBudget <= 0 || runtime.closed.get() || actor.nextRecoveryAt?.let { clock < it } == true ||
+            city.id != actor.cityId || city.pendingDeletion != null || npc.world.uid != city.worldId ||
+            actor.worldId != city.worldId || !npc.isValid || npc.isSeated || actor.sleeping || actor.sheltering ||
+            actor.attacker != null || actor.mineVisit != null || actor.mineAccess != null ||
+            actor.terrainObstructedAt != null || routes.navigationHeld(actor)) return false
+        val route = actor.route
+        if (actor.collisionResident != null || actor.bodyContact?.token == actor.plan.token || actor.residentYield != null ||
+            route?.bodyBlockedSince != null || route?.motion?.waitingForCollision == true ||
+            (route?.nativeCollisionTicks ?: 0) > 0 || city.workers.none { it.id == actor.workerId }) return false
+
+        val world = npc.world
+        val from = npc.location
+        val origin = CivPosition(from.blockX, from.blockY, from.blockZ)
+        if (!city.contains(origin.x, origin.z) || abs(from.y - origin.y) > .005 ||
+            origin.y <= world.minHeight || origin.y + 3 >= world.maxHeight ||
+            !citizenChunkReady(world, origin.x shr 4, origin.z shr 4)) return false
+        val columns = PIT_NEIGHBOURS.map { (dx, dz) -> origin.copy(x = origin.x + dx, z = origin.z + dz) }
+        if (columns.any { !citizenChunkReady(world, it.x shr 4, it.z shr 4) }) return false
+        fun sealedRow(y: Int): Boolean = columns.all { column ->
+            val block = world.getBlockAt(column.x, y, column.z)
+            block.type.isOccluding && block.collisionShape.boundingBoxes.any {
+                it.minX <= 0 && it.minY <= 0 && it.minZ <= 0 && it.maxX >= 1 && it.maxY >= 1 && it.maxZ >= 1
+            }
+        }
+        // A full two-block ring already eliminates all ordinary steps and diagonals.
+        if (!world.getBlockAt(origin.x, origin.y, origin.z).type.isAir ||
+            !sealedRow(origin.y) || !sealedRow(origin.y + 1)) return false
+        runtime.recoveryBudget--
+        val maximumRimY = minOf(origin.y + MAX_DRY_PIT_DEPTH, world.maxHeight - 2)
+        val rimY = (origin.y + 2..maximumRimY).firstOrNull { !sealedRow(it) } ?: return false
+        if ((origin.y + 1..rimY + 1).any { !world.getBlockAt(origin.x, it, origin.z).type.isAir } ||
+            !citizenPacketSupported(world, from.point(), allowClimbable = false) ||
+            !citizenIdleTerrain(world, origin, city.buildings) ||
+            !citizenSleepClear(world, citizenStandingBounds(from, npc.scale))) return false
+
+        citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+        if (!pitPositionFree(actor, from)) return false
+        val allowed = route?.allowedBuildings ?: citizenRouteBuildings(city, actor.plan, actor.plan.storage, origin)
+        var connectedRim = false
+        val point = columns.map { it.copy(y = rimY) }.sortedBy { it.point().distanceSquared(from.point()) }.firstOrNull {
+            val feet = it.location(world)
+            if (!world.worldBorder.isInside(feet) || !citizenIdleTerrain(world, it, city.buildings) ||
+                !pitHasExit(actor, city, origin, feet)) return@firstOrNull false
+            connectedRim = true
+            recoveryPointSafe(actor, city, it, allowed) && pitPositionFree(actor, feet)
+        }
+        if (point == null) {
+            // A freestanding wall leaves the usual route recovery eligible.
+            if (connectedRim) actor.nextRecoveryAt = clock + 5_000L
+            return false
+        }
+        val destination = point.location(world).also { it.yaw = from.yaw; it.pitch = from.pitch }
+        routes.cancelRoute(actor)
+        npc.teleport(destination)
+        actor.cycle.deferWork(now)
+        workRuntime.rememberWorkDetour(actor)
+        actor.arrivalWait = null
+        actor.observedYaw = destination.yaw
+        actor.navigationEpisodeProgress = 0.0
+        actor.nextRecoveryAt = clock + 60_000L
+        actor.mineRouteEpisode.teleported()
+        CivsDiagnostics.event("citizen_terrain_escape", "city" to city.id, "worker" to actor.workerId,
+            "outcome" to "teleported", "reason" to "dry-pit", "from" to from.point().coordinates(),
+            "actual" to destination.point().coordinates(), "destination" to point)
+        return true
+    }
+
+    /** Prove one ordinary cardinal step past the rim before admitting its landing. */
+    private fun pitHasExit(actor: CitizenActor, city: Settlement, origin: CivPosition, feet: Location): Boolean {
+        val world = actor.npc.world
+        val start = feet.point()
+        return PIT_CARDINALS.any { (dx, dz) ->
+            val x = feet.blockX + dx
+            val z = feet.blockZ + dz
+            if (abs(x - origin.x) <= 1 && abs(z - origin.z) <= 1) return@any false
+            val end = citizenWanderFeet(world, x, z, start.y) ?: return@any false
+            val to = Location(world, end.x, end.y, end.z)
+            world.worldBorder.isInside(to) && citizenIdleTerrain(world, CivPosition(x, to.blockY, z), city.buildings) &&
+                residentRouteStepAllowed(actor, city, feet, to) && citizenPacketStepClear(world, start, end, false) &&
+                (start.y != end.y || citizenFlatSupportClear(start, end) { citizenPacketSupported(world, it, false) })
+        }
+    }
+
+    private fun pitPositionFree(actor: CitizenActor, feet: Location): Boolean =
+        occupiedBodies(actor, citizenStandingBounds(feet, actor.npc.scale)).isEmpty() &&
+            playerBodiesClear(actor, feet, feet)
 
     fun recoveryPointSafe(actor: CitizenActor, city: Settlement, point: CivPosition, allowed: Set<UUID>,
                                   mine: CivBuilding? = null, feet: Location? = null): Boolean {
@@ -618,6 +711,12 @@ internal class CivsCitizenCollisions(
             if (other === actor || other.worldId != actor.worldId || !other.npc.isValid) continue
             appendResidentOccupied(other, this, bounds)
         }
+    }
+
+    private companion object {
+        const val MAX_DRY_PIT_DEPTH = 5
+        val PIT_CARDINALS = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
+        val PIT_NEIGHBOURS = PIT_CARDINALS + listOf(1 to 1, -1 to 1, 1 to -1, -1 to -1)
     }
 }
 

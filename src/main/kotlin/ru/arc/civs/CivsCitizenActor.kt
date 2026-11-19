@@ -53,6 +53,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var route: CitizenRoute? = null
     /** A requested endpoint owns chunk demand before a native-ready route can be admitted. */
     var pendingChunkTarget: CivPosition? = null
+    var pendingGateRetry: CitizenGateRetry? = null
     var courierReturnHint: CitizenCourierReturnHint? = null
     var courierInboundPrefix: CitizenCourierInboundPrefix? = null
     var collisionResident: UUID? = null

@@ -117,23 +117,8 @@ internal class CivsCitizenMotion(
             val city = runtime.cityById(actor.cityId) ?: continue
             val walk = route.wanderWalk
             if (walk != null) {
-                if (actor.plan.token != walk.token || npc.world.uid != city.worldId || city.pendingDeletion != null ||
-                    !walk.territory.matches(city) || npc.world.time in 12_000L..23_000L && actor.plan.type != BuildingType.GUARD_TOWER) {
-                    routes.cancelRoute(actor)
-                    continue
-                }
-                if (!walk.routingToExit) {
-                    if (advanceWander(actor, city, route, walk, now, wanderHandoffs > 0)) wanderHandoffs--
-                    continue
-                }
-                val failure = route.motion.failure ?: route.completion?.cancelReason
-                    ?: if (!route.motion.finished && route.timedOut(now)) "timed-out" else null
-                if (failure != null || route.motion.finished && !route.motion.continuation) {
-                    val arrived = failure == null && npc.location.point().distanceSquared(route.target.point()) <= .000001 &&
-                        routes.arrivalBodyClear(actor)
-                    routes.finishWander(actor, city, walk, now, if (arrived) null else failure ?: "exit-not-reached")
-                    continue
-                }
+                if (advanceWander(actor, city, route, walk, now, wanderHandoffs > 0)) wanderHandoffs--
+                continue
             }
             routes.observeArrivalWait(actor, route)
             if (route.trip?.validFor(city) == false) {
@@ -187,6 +172,7 @@ internal class CivsCitizenMotion(
                 (actor.returningToWarehouse || actor.plan.idleReason in listOf(null, "placing")) &&
                 (physicalFood?.let { routes.arrivalBodyClear(actor) && actor.canReachSelectedFood(city, it) }
                     ?: routes.arrivedAt(actor, city, npc.world, travelTarget))) {
+                if (motion.hasContainerGoal && actor.plan.courier?.carrying == true) route.reachedCargoControl = travelTarget
                 motion.observeAcceptedArrival(npc.location.point())
                 motion.cancel()
                 route.trip?.let { paths.complete(city, it) }
@@ -220,6 +206,8 @@ internal class CivsCitizenMotion(
                 }
             }
             if (route.path == null) motion.endpoint?.let { route.path = CitizenPathSnapshot(motion.nodeCount, it, false) }
+            // The first terminal no-path can keep its current intent and start from the rim.
+            if (route.completion == null && motion.failure == "no-path" && collisions.recoverDryPit(actor, city, now)) continue
             if ((motion.failure != null || route.completion != null || route.timedOut(now)) &&
                 routes.recoverNavigation(actor, route.target, now, timedOnly = true)) continue
             if (motion.failure != null) {
@@ -231,7 +219,7 @@ internal class CivsCitizenMotion(
             if (motion.finished) {
                 if (route.intermediate || motion.continuation) {
                     routes.cancelForContinuation(actor, city, route)
-                    routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor, exitWalk = walk)
+                    routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor, triedGates = route.triedGates)
                     continue
                 }
                 if (waitForArrivalBody(actor, route)) continue
@@ -319,7 +307,7 @@ internal class CivsCitizenMotion(
             else if (motion.finished) {
                 if (route.intermediate || motion.continuation) {
                     routes.cancelForContinuation(actor, city, route)
-                    routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor, exitWalk = walk)
+                    routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor, triedGates = route.triedGates)
                     continue
                 }
                 if (waitForArrivalBody(actor, route)) continue
@@ -354,6 +342,12 @@ internal class CivsCitizenMotion(
                               now: Long, canContinue: Boolean): Boolean {
         val npc = actor.npc
         val motion = route.motion
+        if (actor.plan.token != walk.token || npc.world.uid != city.worldId ||
+            city.pendingDeletion != null || !walk.territory.matches(city) ||
+            npc.world.time in 12_000L..23_000L && actor.plan.type != BuildingType.GUARD_TOWER) {
+            routes.cancelRoute(actor)
+            return false
+        }
         actor.footsteps.reset()
         if (!route.planningReported) {
             route.planningReported = true

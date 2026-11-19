@@ -213,7 +213,7 @@ internal class CivsResidentStorage(
                 residentFoods().mayPickUp(city, worker, it) && CivsEquipment.supplyRoom(worker, Material.valueOf(it)) > 0
             } ?: continue
             if (!foodCanModify(city, point)) continue
-            val target = if (!tavernService && civsWithinFoodPickupReach(feet, point)) {
+            val target = if (!tavernService && civsWithinContainerReach(feet, point)) {
                 if (!citizenChunkReady(world, point.x shr 4, point.z shr 4)) continue
                 CivPosition(feet.blockX, feet.blockY, feet.blockZ)
             } else citizenCollectedHomeTarget(city, building, world, point)

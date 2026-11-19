@@ -346,8 +346,8 @@ internal class CivsStoragePlanner(
         if (city.inventory?.mode == CivStorageMode.VIRTUAL) return warehouseSpace(city, buildingId).coerceAtMost(CivsLogistics.MAX_CARGO)
         val maximum = requireNotNull(stack(material, 1)).maxStackSize
         var room = 0L
-        for (source in containers.localSources(city, buildingId).filter { it.acceptsInsert && permitted(it.position) }) for (current in source.inventory.storageContents) {
-            room += if (isEmpty(current)) maximum else plain(current)?.takeIf { it.material == material }?.let { maximum - it.amount } ?: 0
+        for (source in containers.localSources(city, buildingId).filter { it.acceptsInsert && permitted(it.position) }) {
+            room += CivsStorageItems.cargoRoom(source.inventory, material, maximum, CivsLogistics.MAX_CARGO - room)
             if (room >= CivsLogistics.MAX_CARGO) return CivsLogistics.MAX_CARGO
         }
         return room

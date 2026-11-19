@@ -14,6 +14,76 @@ import kotlin.math.floor
 import kotlin.random.Random
 
 class CivsNavigationSearchTest : FunSpec({
+    test("a nearby barrel behind a finished perimeter is reached through a distant public gate") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("gate-detour").also(paper.server::addWorld)
+            for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
+            val start = CivPosition(0, 64, -1)
+            val barrel = CivPosition(0, 64, 7)
+            world.getBlockAt(barrel.x, barrel.y, barrel.z).type = Material.BARREL
+            fun piece(x0: Int, z0: Int, x1: Int, z1: Int, gate: Boolean = false): CivBuilding {
+                val point = CivPosition(x0, 64, z0)
+                val bounds = CivBox(point, CivPosition(x1, 67, z1))
+                if (!gate) for (x in x0..x1) for (z in z0..z1)
+                    for (y in 64..67) world.getBlockAt(x, y, z).type = Material.STONE
+                return CivBuilding(UUID.randomUUID(), if (gate) BuildingType.GATE else BuildingType.WALL,
+                    1, point, 0, "perimeter", bounds, point, BuildingPhase.ACTIVE,
+                    transit = if (gate) listOf(point) else null)
+            }
+            val west = piece(-21, 36, -21, 36, gate = true)
+            val east = piece(21, 34, 21, 34, gate = true)
+            val north = piece(-21, 0, 21, 0)
+            val ring = listOf(north, west, east, piece(-21, 46, 21, 46), piece(-21, 1, -21, 35),
+                piece(-21, 37, -21, 45), piece(21, 1, 21, 33), piece(21, 35, 21, 45))
+            val city = controlSearchCity(barrel).copy(buildings = ring, construction = null, radius = 80)
+            val territory = CivRouteTerritory(city)
+            // An opening in the actual ring or a holder within reach across the wall must keep its direct approaches.
+            CivRouteTerritory(city.copy(buildings = ring - north)).gateExits(start.point(), barrel, 3.0) shouldBe emptyList()
+            territory.gateExits(start.point(), barrel.copy(z = 2), 3.0) shouldBe emptyList()
+
+            fun walk(from: CivPosition, target: CivPosition, food: Boolean): Pair<Boolean, Set<CivPosition>> {
+                var at = from.location(world)
+                val crossed = mutableSetOf<CivPosition>()
+                val tried = mutableSetOf<UUID>()
+                val allowed: (CivPosition) -> Boolean = { territory.allows(it, emptySet(), null) }
+                repeat(16) {
+                    val leg = citizenGateLeg(world, territory, at.point(), target, if (food) 3.0 else 0.0, 96, tried)
+                    val pickup = if (food && leg == null) CitizenContainerRouteGoal(target) { p ->
+                        civsCanReachContainer(Location(world, p.x, p.y, p.z), target, nearbyFoodPickup = true)
+                    } else null
+                    val route = CitizenPacketRoute(world, at, (leg?.approach ?: target).location(world), allowed,
+                        { _, _ -> true }, { CivsPaths.ORDINARY_COST }, pickup = pickup)
+                    route.prepareSnapshot()
+                    if (route.failure != null) {
+                        if (leg == null) return false to crossed
+                        tried += leg.gate
+                    } else {
+                        var ticks = 0
+                        while (!route.finished && route.failure == null && ticks++ < 2_000) {
+                            route.move(at, 1.0) { true }?.let { next ->
+                                at = next
+                                for (gate in listOf(west, east))
+                                    if (at.blockX == gate.entrance.x && at.blockZ == gate.entrance.z) crossed += gate.entrance
+                            }
+                        }
+                        route.finished shouldBe true
+                        if (leg == null && !route.continuation)
+                            return (pickup?.accepts(at.point()) ?: (at.point() == target.point())) to crossed
+                    }
+                }
+                error("Perimeter travel did not terminate at ${at.point()}")
+            }
+            // The closer eastern gate is physically sealed. Residents use the other crossing in either direction.
+            for (y in 64..67) world.getBlockAt(east.entrance.x, y, east.entrance.z).type = Material.STONE
+            walk(start, barrel, true) shouldBe (true to setOf(west.entrance))
+            walk(start, barrel.copy(x = 3), false) shouldBe (true to setOf(west.entrance))
+            walk(barrel.copy(x = 3), start, false) shouldBe (true to setOf(west.entrance))
+            for (y in 64..67) world.getBlockAt(west.entrance.x, y, west.entrance.z).type = Material.STONE
+            walk(start, barrel, true) shouldBe (false to emptySet())
+
+        }
+    }
+
     test("control broad phase preserves the original ray predicate at corners boundaries and occupied starts") {
         val random = Random(190)
         for (control in listOf(CivPosition(0, 64, 0), CivPosition(-1814, 65, -2762), CivPosition(1226, 73, -3993))) {

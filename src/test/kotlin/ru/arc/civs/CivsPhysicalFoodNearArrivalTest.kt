@@ -79,7 +79,7 @@ class CivsPhysicalFoodNearArrivalTest : FunSpec({
             val start = Location(h.world, 6.5, 64.0, .5)
             val actor = h.actor()
             actor.npc.teleport(start)
-            civsWithinFoodPickupReach(start, container) shouldBe false
+            civsWithinContainerReach(start, container) shouldBe false
             civsCanReachContainer(start, container) shouldBe false
 
             CivsStorage(h.paper.createSimplePlugin("DistantFoodReceipt")) { emptyArray() }.use { storage ->

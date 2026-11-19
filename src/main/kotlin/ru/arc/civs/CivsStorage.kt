@@ -691,18 +691,22 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     internal fun prepareCarriedCargoDropoff(city: Settlement, workerId: UUID, cargo: CivCargo,
-        destinationId: UUID, at: Long, requireArrival: () -> Unit): CivStoragePlan {
+        destinationId: UUID, at: Long, requireArrival: () -> Boolean): CivStoragePlan {
         checkClaim(city)
         reject(city.inventory?.mode != CivStorageMode.PHYSICAL || !cargo.inventoryBacked || cargo.stockResource != null ||
             city.workers.firstOrNull { it.id == workerId }?.cargo != cargo ||
             CivsLogistics.destination(city, cargo)?.id != destinationId, "stale-delivery")
-        requireArrival()
-        val prepared = planner.prepareCargoDropoff(city, cargo, destinationId) { foodCanModify(city, it) }
+        val onlyControl = requireArrival()
+        val control = city.building(destinationId)?.control ?: throw CivsRejection("control-missing")
+        if (onlyControl) reject(!foodCanModify(city, control), "lands-denied")
+        val prepared = planner.prepareCargoDropoff(city, cargo, destinationId) {
+            (!onlyControl || it == control) && foodCanModify(city, it)
+        }
         val nativeWorld = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
         val states = prepared.changes.map(CivInventorySlotChange::container).distinct().map { point ->
             CivCargoContainerState(point, nativeWorld.getBlockAt(point.x, point.y, point.z).blockData.asString)
         }
-        requireArrival()
+        reject(requireArrival() && !onlyControl, "route-unreachable")
         val receipt = CivCargoDropoffReceipt(city.workers.single { it.id == workerId },
             requireNotNull(city.building(destinationId)), at, states).detached()
         return prepared.copy(cargoDropoff = receipt)

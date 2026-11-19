@@ -72,7 +72,7 @@ internal fun civsCollectionHome(city: Settlement, worker: CivWorker): CivBuildin
     worker.homeId?.let(city::building)?.takeIf { it.type.isResidence || it.type == BuildingType.TOWN_HALL }
         ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }
 
-internal fun civsWithinFoodPickupReach(feet: Location, point: CivPosition): Boolean {
+internal fun civsWithinContainerReach(feet: Location, point: CivPosition): Boolean {
     val dx = feet.x - (point.x + .5)
     val dy = feet.y - (point.y + .5)
     val dz = feet.z - (point.z + .5)
@@ -81,7 +81,7 @@ internal fun civsWithinFoodPickupReach(feet: Location, point: CivPosition): Bool
 
 internal fun civsCanReachContainer(feet: Location, point: CivPosition, nearbyFoodPickup: Boolean = false): Boolean {
     val world = feet.world ?: return false
-    val nearby = nearbyFoodPickup && civsWithinFoodPickupReach(feet, point)
+    val nearby = nearbyFoodPickup && civsWithinContainerReach(feet, point)
     val eyeY = feet.y + 1.5
     if (!nearby) {
         // Every native aim point lies inside this block, including its visible faces.

@@ -119,7 +119,9 @@ private fun ResidentRuntime.readyLocalWalk(actor: CitizenActor, x: Double, z: Do
     val target = from.clone().add(0.0, 0.0, 1.0)
     val home = city.buildings.single()
     navigationNow = 2_000
-    val walk = CitizenWanderWalk(home, true, CivRouteTerritory(city), actor.plan.token, 2_000, legLimit, null)
+    val walk = CitizenWanderWalk(home, true, CivRouteTerritory(city), actor.plan.token, 2_000, legLimit,
+        null, CivPosition(from.blockX, from.blockY, from.blockZ), CivsPaths.RetainedRoads.EMPTY)
+    for (leg in 2..legLimit) walk.remaining += CitizenPoint(x, from.y, z + leg)
     val motion = CitizenPacketRoute(world, from, target, { true }, { _, _ -> true }, { 1.0 })
     motion.readyWanderStep()
     actor.route = CitizenRoute(from.point(), target,

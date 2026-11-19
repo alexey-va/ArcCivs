@@ -135,6 +135,9 @@ class CivsCitizens(
     internal var residentConversations: CitizenConversationDeck?
         get() = leisure.conversations
         set(value) { leisure.conversations = value }
+    internal var courierControlAllowed: (Settlement, CivPosition) -> Boolean
+        get() = routes.courierControlAllowed
+        set(value) { routes.courierControlAllowed = value }
     internal var showIdleNap: ((Location, Float, Double) -> CivsIdleNapVisual)?
         get() = leisure.nap.show
         set(value) { leisure.nap.show = value }
@@ -840,18 +843,30 @@ class CivsCitizens(
 
     /** Rechecked by the item receipt owner after waiting for another city commit. */
     internal fun requireStorageArrival(cityId: UUID, workerId: UUID, buildingId: UUID) {
+        storageArrival(cityId, workerId, buildingId, null)
+    }
+
+    /** A nearby arrival binds the native credit to this building's control barrel. */
+    internal fun requireCargoDropoffArrival(cityId: UUID, workerId: UUID, buildingId: UUID, cargo: CivCargo): Boolean =
+        storageArrival(cityId, workerId, buildingId, cargo)
+
+    private fun storageArrival(cityId: UUID, workerId: UUID, buildingId: UUID, dropoff: CivCargo?): Boolean {
         checkCitizenMainThread()
         val actor = actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid }
             ?: throw CivsRejection("storage-unavailable")
-        val city = cityProvider().firstOrNull { it.id == cityId } ?: throw CivsRejection("no-city")
+        val city = runtime.cityById(cityId) ?: throw CivsRejection("no-city")
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         val control = building.control ?: throw CivsRejection("control-missing")
         val entity = actor.npc
         if (entity.world.uid != city.worldId || actor.workerId in pendingHarm ||
             actor.supplyPickup?.buildingId != buildingId &&
-                actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) ||
-            !citizenAtStorage(entity.world, entity.location.point(), control) ||
-            !citizenCanReachBlock(entity, control)) throw CivsRejection("route-unreachable")
+                actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) throw CivsRejection("route-unreachable")
+        if (dropoff != null && (actor.cycle.phase != CitizenPhase.DELIVERING ||
+            actor.plan.courier?.let { it.carrying && it.cargo == dropoff && it.destinationBuildingId == buildingId } != true))
+            throw CivsRejection("stale-delivery")
+        if (citizenAtStorage(entity.world, entity.location.point(), control) && citizenCanReachBlock(entity, control)) return false
+        if (dropoff != null && routes.canDropoffAtControl(actor, city, building, entity.location)) return true
+        throw CivsRejection("route-unreachable")
     }
 
     /** Abstract production uses the prepared entrances; item receipts still require their real barrel. */

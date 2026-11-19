@@ -350,7 +350,9 @@ internal class CivsCargoRequests(
                 val city = records.cities[cityId] ?: throw CivsRejection("no-city")
                 val cargo = city.workers.firstOrNull { it.id == workerId }?.cargo ?: throw CivsRejection("stale-delivery")
                 rejectIf(cargo.id != requested.id || CivsLogistics.destination(city, cargo)?.id != destinationId, "stale-delivery")
-                citizens.requireStorageArrival(cityId, workerId, destinationId)
+                val physical = city.inventory?.mode == CivStorageMode.PHYSICAL && cargo.inventoryBacked && cargo.stockResource == null
+                val nearby = physical && citizens.requireCargoDropoffArrival(cityId, workerId, destinationId, cargo)
+                if (!physical) citizens.requireStorageArrival(cityId, workerId, destinationId)
                 cargo.stockResource?.let { resource ->
                     return@afterCityAvailable authority.mutate(cityId) { current ->
                         citizens.requireStorageArrival(cityId, workerId, destinationId)
@@ -367,7 +369,6 @@ internal class CivsCargoRequests(
                         saved
                     }
                 }
-                val physical = city.inventory?.mode == CivStorageMode.PHYSICAL && cargo.inventoryBacked
                 if (physical && availableCargoRoom(city, destinationId, cargo.material) < cargo.amount)
                     return@afterCityAvailable fullCargoDropoff(city, workerId, cargo, destinationId)
                 val carriedBefore = CivsEquipment.plainCount(city.workers.first { it.id == workerId }, cargo.material)
@@ -376,16 +377,24 @@ internal class CivsCargoRequests(
                     authority.inventoryMutation(cityId, { current ->
                         rejectIf(current.workers.firstOrNull { it.id == workerId }?.cargo != cargo ||
                             CivsLogistics.destination(current, cargo)?.id != destinationId, "stale-delivery")
-                        citizens.requireStorageArrival(cityId, workerId, destinationId)
-                        if (physical) storage.prepareCarriedCargoDropoff(current, workerId, cargo, destinationId, at) {
+                        if (physical) {
+                            storage.prepareCarriedCargoDropoff(current, workerId, cargo, destinationId, at) {
+                                citizens.requireCargoDropoffArrival(cityId, workerId, destinationId, cargo)
+                            }
+                        } else {
                             citizens.requireStorageArrival(cityId, workerId, destinationId)
-                        } else storage.prepareCargoDropoff(current, cargo, destinationId)
+                            storage.prepareCargoDropoff(current, cargo, destinationId)
+                        }
                     }, keepViewersOpen = true) { before, inventory ->
                         CivsLogistics.unload(before, workerId, cargo.id, at).copy(inventory = inventory)
                     }
                 } catch (failure: CivsRejection) {
-                    if (physical && failure.reason == "storage-full")
+                    if (physical && failure.reason == "storage-full") {
+                        // Only the control filled during the trip. Reach the ordinary aisle for this building's other holders.
+                        if (nearby && availableCargoRoom(city, destinationId, cargo.material) >= cargo.amount)
+                            throw CivsRejection("route-unreachable")
                         return@afterCityAvailable fullCargoDropoff(city, workerId, cargo, destinationId)
+                    }
                     throw failure
                 }
                 delivery.whenComplete { saved, failure ->

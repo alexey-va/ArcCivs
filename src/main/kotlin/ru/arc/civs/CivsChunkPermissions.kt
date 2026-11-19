@@ -17,8 +17,7 @@ internal class CivsChunkPermissions(
     private val permission: String = CIVS_CHUNK_PERMISSION,
 ) : AutoCloseable {
     constructor(plugin: Plugin, clock: () -> Long = System::currentTimeMillis, permission: String = CIVS_CHUNK_PERMISSION) : this(
-        { plugin.server.pluginManager.isPluginEnabled("LuckPerms") && civsChunkPermissionApiPresent(plugin) &&
-            CivsLuckPermsChunkPermission.available(plugin) },
+        civsChunkPermissionAvailability(plugin),
         { owner, world -> checkCivsChunkPermission(plugin, owner, world, permission) }, clock, permission)
 
     private data class Subject(val owner: UUID, val world: String)
@@ -92,6 +91,16 @@ internal class CivsChunkPermissions(
 
     fun reset() { states.clear() }
     override fun close() { closed = true; states.clear(); replies.clear() }
+}
+
+private fun civsChunkPermissionAvailability(plugin: Plugin): () -> Boolean {
+    var apiPresent = false
+    return {
+        // Only class resolution is stable. Plugin enablement and service registration stay live checks.
+        plugin.server.pluginManager.isPluginEnabled("LuckPerms") &&
+            (apiPresent || civsChunkPermissionApiPresent(plugin).also { apiPresent = it }) &&
+            CivsLuckPermsChunkPermission.available(plugin)
+    }
 }
 
 private fun checkCivsChunkPermission(plugin: Plugin, owner: UUID, world: String, permission: String): CompletableFuture<Boolean> {

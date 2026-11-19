@@ -417,6 +417,7 @@ class CivsService(
                 ?.getBlockAt(position.x, position.y, position.z)?.let { world.canModify(city.owner, it, Material.WATER) } == true
         }
         worksites.productionOrder = ::productionOrder
+        citizens.courierControlAllowed = { city, point -> storage.foodCanModify(city, point) }
         citizens.productionOrder = ::productionOrder
         worksites.mutationBlocked = citizens::growthBlocked
         worksites.residentFeet = citizens::residentFeet

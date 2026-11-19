@@ -413,7 +413,11 @@ internal class CargoRedirectionFixture : AutoCloseable {
     }
     fun fill(id: UUID) { repeat(27) { inventory(id).setItem(it, ItemStack(Material.STONE, 64)) } }
     fun redirect() { city = CivsLogistics.redirect(city, workerId, cargo, alternative.id) }
-    fun requireArrival() { arrivals++; if (!arrived) throw CivsRejection("route-unreachable") }
+    fun requireArrival(): Boolean {
+        arrivals++
+        if (!arrived) throw CivsRejection("route-unreachable")
+        return false
+    }
     fun prepare(): CivInventoryTransaction {
         val id = UUID.randomUUID()
         storage.reserve(city, id)

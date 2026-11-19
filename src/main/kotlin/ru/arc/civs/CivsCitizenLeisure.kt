@@ -318,19 +318,18 @@ internal class CivsCitizenLeisure(
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
         val home = citizenIdleBuilding(city, worker) ?: return
         val at = actor.npc.location
-        val withinArea = citizenWithinIdleArea(home.entrance, at.point())
         val minePost = outsideHome && !inside(home, home.entrance.x, home.entrance.z)
         val workPost = !outsideHome && worker.assignment == home.id &&
             actor.plan.idleReason in setOf("waiting-tool", "storage-surplus")
         if ((minePost || workPost) && travelToPost(actor, city, world, home, now,
-                !withinArea || minePost && inside(home, at.blockX, at.blockZ))) return
+                !citizenWithinIdleArea(home.entrance, at.point()) || minePost && inside(home, at.blockX, at.blockZ))) return
         val active = actor.route
         if (active != null) {
             val walk = active.wanderWalk ?: return
             if (walk.home == home && walk.outsideHome == outsideHome) return
             routes.cancelRoute(actor)
         }
-        if (runtime.wanderBudget <= 0 || !actor.wander.ready(now, returning = !withinArea)) return
+        if (runtime.wanderBudget <= 0 || !actor.wander.ready(now)) return
         runtime.wanderBudget--
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
         routes.startWander(actor, city, home, outsideHome, now)

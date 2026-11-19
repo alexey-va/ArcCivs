@@ -339,7 +339,7 @@ internal class CivsResidentNavigation(
 
     fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
                 stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean, travelCost: (Block) -> Double,
-                corridor: CitizenSearchCorridor?, snapshotPolicy: CitizenSnapshotPolicy, pickup: CitizenFoodRouteGoal? = null): CitizenPacketRoute =
+                corridor: CitizenSearchCorridor?, snapshotPolicy: CitizenSnapshotPolicy, pickup: CitizenContainerRouteGoal? = null): CitizenPacketRoute =
         admit(CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost, settings = settings,
             corridor = corridor, snapshotPolicy = snapshotPolicy, pickup = pickup))
 

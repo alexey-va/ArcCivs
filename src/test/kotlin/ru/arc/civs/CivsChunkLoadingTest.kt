@@ -349,7 +349,7 @@ class CivsChunkLoadingTest : FunSpec({
         area.maxZ shouldBe 10
     }
 
-    test("moving the required boundary preserves all common native leases and waits for only the new chunks") {
+    test("moving the required boundary preserves common leases even when a different set has the same size") {
         chunkRuntime { h ->
             val city = chunkCity(h.world.uid, radius = 160)
             h.cities = listOf(city)
@@ -368,10 +368,21 @@ class CivsChunkLoadingTest : FunSpec({
             val expanded = CivsChunkArea.developed(city).union(requireNotNull(CivsChunkArea.around(city.worldId, listOf(actor)))).keys()
             h.added.toSet() shouldBe expanded
             h.added.groupingBy { it }.eachCount().values.all { it == 1 } shouldBe true
+            val opposite = actor.copy(x = -64)
+            val shifted = CivsChunkArea.developed(city).union(requireNotNull(CivsChunkArea.around(city.worldId, listOf(opposite)))).keys()
+            shifted.size shouldBe expanded.size
+            h.extraPositions = mapOf(city.id to listOf(opposite))
+            h.pulse()
+            h.runtime.active(city.id) shouldBe false
+            h.removed.toSet() shouldBe expanded - shifted
+            repeat(30) { h.completeLoads(evictUnticketed = true); h.pulse() }
+            h.runtime.active(city.id) shouldBe true
+            h.added.toSet() shouldBe expanded + shifted
+            h.added.groupingBy { it }.eachCount().values.all { it == 1 } shouldBe true
             h.extraPositions = emptyMap()
             h.pulse()
             h.runtime.active(city.id) shouldBe true
-            h.removed.toSet() shouldBe expanded - initial
+            h.removed.toSet() shouldBe (expanded + shifted) - initial
             h.runtime.retainedChunks shouldBe initial.size
         }
     }

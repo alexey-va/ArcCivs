@@ -12,6 +12,130 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentRecoveryRuntimeTest : FunSpec({
+    test("an unassigned resident escapes the pit when no idle step is available") {
+        residentRuntime { h ->
+            val origin = dryPit(h)
+            val npc = h.actor().npc
+            advancePitFixture(h) { npc.location.y > origin.y }
+            npc.location.shouldBePitRim(origin)
+        }
+    }
+
+    test("a failed work route escapes the pit and resumes observed work before delivery") {
+        residentRuntime { h ->
+            val work = h.assignRoadUpkeep()
+            val origin = dryPit(h)
+            val npc = h.actor().npc
+            var attempted: CitizenPacketRoute? = null
+            advancePitFixture(h) {
+                attempted = h.routeMotion(h.workerId) ?: attempted
+                npc.location.y > origin.y
+            }
+            requireNotNull(attempted).failure shouldBe "no-path"
+            npc.location.shouldBePitRim(origin)
+            h.observedWork() shouldBe 0L
+            h.deliveries shouldBe 0
+
+            advancePitFixture(h) { h.deliveries > 0 }
+            (h.observedWork() >= work.durationMillis) shouldBe true
+            h.deliveries shouldBe 1
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+        }
+    }
+
+    test("a carrying courier unloads the original cargo only after walking from the pit rim") {
+        residentRuntime { h ->
+            val warehouse = h.assignFarm().copy(type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null)
+            val hall = h.city.buildings.first()
+            val cargo = CivCargo(UUID(0, 106), warehouse.id, hall.id, warehouse.id, hall.entrance, "OAK_LOG", 8,
+                inventoryBacked = true)
+            val loaded = CivsEquipment.collectSupplies(h.city.workers.single(), mapOf(cargo.material to cargo.amount)).copy(cargo = cargo)
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(hall, warehouse), workers = listOf(loaded)))
+            val trip = CivCourierPlan(cargo, warehouse.id, warehouse.entrance, true)
+            h.courier = trip
+            val origin = dryPit(h)
+            val npc = h.actor().npc
+
+            advancePitFixture(h) { npc.location.y > origin.y }
+            npc.location.shouldBePitRim(origin)
+            h.actor().plan.courier shouldBe trip
+            h.unloads shouldBe 0
+
+            advancePitFixture(h) { h.unloads > 0 }
+            citizenCanReachBlock(npc, requireNotNull(warehouse.control)) shouldBe true
+            h.unloads shouldBe 1
+            h.city.workers.single() shouldBe loaded
+        }
+    }
+
+    test("a hungry worker reaches the same bread barrel on foot after leaving the pit") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
+            h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            h.city = h.city.copy(buildings = listOf(hall, farm), workers = h.city.workers.map { it.copy(hunger = 10) })
+            val work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(22, 64, 0),
+                listOf(CivPlanBlock(CivPosition(23, 63, 0), "minecraft:stone", "minecraft:air")),
+                durationMillis = 120_000, status = "working-field", focus = CivPosition(23, 63, 0))
+            h.work = work
+            val npc = h.actor().npc
+            npc.teleport(work.standing.location(h.world))
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            h.phase() shouldBe CitizenPhase.WORKING
+            val origin = dryPit(h)
+            h.navigationNow = 3_000
+            val source = CivResidentFoodSource(hall.id, requireNotNull(hall.control), CivPosition(1, 64, 0))
+            h.physicalFoodSource = source
+            val pickups = mutableListOf<CivResidentFoodSource>()
+            h.physicalFoodPickup = {
+                civsCanReachContainer(npc.location, it.container, true) shouldBe true
+                pickups += it
+                h.pendingSupplies
+            }
+
+            advancePitFixture(h) { npc.location.y > origin.y }
+            npc.location.shouldBePitRim(origin)
+            h.actor().foodPickupSource?.container shouldBe source.container
+            h.actor().workDetour shouldBe h.actor().plan.token
+            pickups shouldBe emptyList()
+
+            advancePitFixture(h) { pickups.isNotEmpty() }
+            pickups.single().copy(standing = source.standing) shouldBe source
+            CivsResidents.hunger(h.city.workers.single()) shouldBe 10
+        }
+    }
+
+    for (condition in listOf("ladder", "walking-step", "unloaded", "occupied-rim"))
+    test("dry pit recovery leaves $condition to ordinary movement") {
+        residentRuntime { h ->
+            val origin = dryPit(h, x = if (condition == "unloaded") 15 else 6)
+            when (condition) {
+                "ladder" -> for (y in 61..64) h.world.getBlockAt(origin.blockX, y, origin.blockZ).type = Material.LADDER
+                "walking-step" -> for (step in 1..2) for (y in 61 + step..63)
+                    h.world.getBlockAt(origin.blockX + step, y, origin.blockZ).type = Material.AIR
+                "unloaded" -> h.world.unloadChunk(1, 0)
+                "occupied-rim" -> {
+                    // Only the occupied eastern lip is safe ground.
+                    for (dx in -1..1) for (dz in -1..1) if (dz != 0 || dx == -1)
+                        h.world.getBlockAt(origin.blockX + dx, 63, origin.blockZ + dz).type = Material.MAGMA_BLOCK
+                    h.playerAt(origin.clone().add(1.0, 3.0, 0.0))
+                }
+            }
+            val npc = h.actor().npc
+            var previousY = origin.y
+            advancePitFixture(h) {
+                val y = npc.location.y
+                (y - previousY < 2.0) shouldBe true
+                previousY = y
+                false
+            }
+            if (condition == "unloaded") h.world.isChunkLoaded(1, 0) shouldBe false
+            if (condition == "unloaded" || condition == "occupied-rim")
+                npc.location.toVector() shouldBe origin.toVector()
+        }
+    }
+
     test("a builder enclosed by a placed wall corner recovers without granting construction or meal credit") {
         residentRuntime(workerId = UUID(0, 104)) { h ->
             val order = enclosedWallBuilder(h)
@@ -416,6 +540,38 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
         }
     }
 })
+
+private fun dryPit(h: ResidentRuntime, x: Int = 6): Location {
+    h.navigationNow = 2_000
+    h.world.time = 1_000
+    h.owner.residentLifeEnabled = false
+    val feet = Location(h.world, x + .5, 61.0, 4.5)
+    for (y in 61..63) h.world.getBlockAt(x, y, 4).type = Material.AIR
+    val npc = h.owner.collisionActors().single()
+    npc.teleport(feet)
+    citizenPacketSupported(h.world, feet.point(), allowClimbable = false) shouldBe true
+    citizenResidentEscapeStep(npc) { true } shouldBe null
+    return feet
+}
+
+private fun Location.shouldBePitRim(origin: Location) {
+    y shouldBe origin.y + 3.0
+    (distanceSquared(origin) <= 11.0) shouldBe true
+    citizenPacketSupported(requireNotNull(world), point(), allowClimbable = false) shouldBe true
+}
+
+private fun advancePitFixture(h: ResidentRuntime, done: () -> Boolean) {
+    h.owner.pulse(requireNotNull(h.navigationNow))
+    for (tick in 1..240) {
+        if (done()) return
+        h.navigate()
+        if (tick % 20 == 0) {
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            h.clearRecordedCalls()
+        }
+    }
+    done()
+}
 
 private fun startRecoveryRoute(h: ResidentRuntime, target: CivPosition, anchor: CivPosition) {
     val actors = h.owner.javaClass.getDeclaredField("actors").run { isAccessible = true; get(h.owner) as Map<*, *> }

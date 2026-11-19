@@ -964,9 +964,9 @@ internal object CivsAutonomousTerraform {
         // Relax only height/history constraints: static footprints and retained road costs still bound every valid route.
         // The reverse edge charges its forward destination. This leaves the actual grading and safety checks unchanged.
         val horizontalDistances by lazy { prepared.distances.getOrPut(to) {
-            val distances = Long2IntOpenHashMap()
-            if (columns.size > MAXIMUM_SURFACE_COLUMNS) return@getOrPut distances
-            val floors = Long2IntOpenHashMap()
+            if (columns.size > MAXIMUM_SURFACE_COLUMNS) return@getOrPut Long2IntOpenHashMap()
+            prepared.horizontalAllowed.ensureCapacity(columns.size)
+            val floors = Long2IntOpenHashMap(columns.size)
             val entries = columns.long2ObjectEntrySet().fastIterator()
             while (entries.hasNext()) {
                 val entry = entries.next()
@@ -980,6 +980,7 @@ internal object CivsAutonomousTerraform {
                 }
                 if (allowed(x, y, z)) floors.put(key, y)
             }
+            val distances = Long2IntOpenHashMap(floors.size)
             val pending = PriorityQueue<HorizontalOpen> { a, b ->
                 val distance = a.distance.compareTo(b.distance)
                 if (distance != 0) distance else a.key.compareTo(b.key)
@@ -1008,6 +1009,8 @@ internal object CivsAutonomousTerraform {
                     }
                 }
             }
+            // A sealed-off goal can reach only a few of the captured floors.
+            distances.trim()
             distances
         } }
         fun distance(n: Node): Int {

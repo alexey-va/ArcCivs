@@ -118,6 +118,16 @@ internal object CivsStorageItems {
 
     fun matches(item: ItemStack?, expected: CivPlainItem?): Boolean = if (expected == null) isEmpty(item) else plain(item) == expected
     fun isEmpty(item: ItemStack?): Boolean = item == null || item.type.isAir || item.amount <= 0
+
+    fun cargoRoom(inventory: Inventory, material: String, stackSize: Int, limit: Long): Long {
+        var room = 0L
+        for (item in inventory.storageContents) {
+            room += if (isEmpty(item)) stackSize else plain(item)?.takeIf { it.material == material }?.let { stackSize - it.amount } ?: 0
+            if (room >= limit) return limit
+        }
+        return room
+    }
+
     fun stack(material: String, count: Int): ItemStack? {
         if (count == 0) return null
         val type = Material.getMaterial(material)?.takeIf { it.isItem && !it.isAir }

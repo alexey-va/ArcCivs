@@ -54,6 +54,28 @@ private fun citizenControlBlocksStep(p: CivPosition, from: CitizenPoint, to: Cit
     return distance > 0 && obstacle.rayTrace(Vector(from.x, from.y, from.z), delta.normalize(), distance) != null
 }
 
+internal data class CitizenGateLeg(val gate: UUID, val approach: CivPosition, val feet: CitizenPoint?)
+internal data class CitizenGateRetry(val token: CitizenToken, val target: CivPosition, val attempted: Set<UUID>)
+
+/** Choose a loaded public exit if possible. An unobserved exit asks the chunk owner for its approach. */
+internal fun citizenGateLeg(world: World, territory: CivRouteTerritory, from: CitizenPoint, target: CivPosition,
+                           reach: Double, range: Int, tried: Set<UUID>): CitizenGateLeg? {
+    var waiting: CitizenGateLeg? = null
+    for (exit in territory.gateExits(from, target, reach)) {
+        if (exit.gate in tried || !citizenRouteWithinReach(from, exit.approach.point(), range) ||
+            !citizenRouteWithinReach(exit.approach.point(), target.point(), range)) continue
+        if (!citizenChunkReady(world, exit.transit.x shr 4, exit.transit.z shr 4) ||
+            !citizenChunkReady(world, exit.approach.x shr 4, exit.approach.z shr 4)) {
+            if (waiting == null) waiting = CitizenGateLeg(exit.gate, exit.approach, null)
+            continue
+        }
+        val transit = CivsControlRouteProof.standing(world, exit.transit, allowDoors = true) ?: continue
+        val feet = CivsControlRouteProof.standing(world, exit.approach, allowDoors = true, previous = transit) ?: continue
+        return CitizenGateLeg(exit.gate, exit.approach, feet)
+    }
+    return waiting
+}
+
 /** One real barrel, at most twenty-four supported adjacent cells; never its top or another building's interior. */
 internal fun citizenStorageTarget(city: Settlement, own: CivBuilding, world: World,
     safe: (CivPosition) -> Boolean = { citizenStandable(world, it) }): CivPosition? {

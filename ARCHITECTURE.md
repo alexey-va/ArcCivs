@@ -395,6 +395,10 @@ limits. These are aggregate budgets between indivisible native calls,
 not a promise that copying collision geometry is free. Each route admits at
 most 4096 search nodes and 32768 captured cells. Missing chunks are unavailable;
 search never loads them, and an unknown frontier cannot prove that no path exists.
+A trip across a completed town wall can use the far side of a public gate as
+an intermediate destination. The ordinary pathfinder finds the crossing and
+then continues to the original destination. Passing the gate grants no arrival
+credit. The movement controller checks each crossing against the actual blocks.
 A per-job heuristic weight preserves ordinary cost ordering for trips up to
 32 blocks, then rises linearly to two at 64 blocks. This retains local road
 preferences and follows MineColonies' bounded search approach for longer trips;
@@ -409,9 +413,11 @@ sections with per-city LRU membership. Overlapping cities share section payloads
 `navigation.snapshot-sections-maximum` defaults to 8,192 across all cities and worlds.
 `navigation.terrain-cache-blocks` bounds the legacy native-cell fallback.
 
-Startup warming covers a sparse band near the city center and developed building,
-worksite and mining footprints inside the loaded area. `navigation.snapshot-warm-radius`
-defaults to 48 blocks and zero disables warming. One warm item shares the existing
+Startup warming prioritizes developed buildings, worksites, mines and the area
+near the city center. It then reads the terrain height map inside the developed
+footprint to warm the surface between these places. The map and section reads
+share the native work budget. `navigation.snapshot-warm-radius` defaults to 48
+blocks around the center and zero disables warming. One warm item shares the existing
 native queue and worker and uses spare cache capacity. The Paper API supplies a
 temporary full-column snapshot. A warm batch decodes at most four requested sections,
 releases that native snapshot and resolves shared static collision shapes. Searches
@@ -444,11 +450,18 @@ Preparation and replanning never consume the walking timeout or stall clock.
 Capacity, capture and search-budget failures back off and retry without safe
 teleport recovery. Work checks the actual position independently of planner
 completion. A physically failed or stuck route may recover to a validated loaded
-safe endpoint, resetting footsteps.
+safe endpoint, resetting footsteps. A resident trapped at the bottom of a dry
+one-block-wide pit can move to a clear, supported edge after a failed walk.
+Their trip resumes there, with no work or delivery credited for the move.
 Admitted physical cargo recovery in the isolated lab uses the ordinary native
 storage feet height for both repeated unloaded-chunk and capture-budget failures.
 A thin carpet changes the supported height, while cargo ownership, protection,
 body clearance, retry timing and native unload checks remain authoritative.
+A courier carrying physical items can unload from supported feet within three
+blocks of the destination control barrel, including across a counter. This
+approach permits insertion only into that barrel. Other containers in the
+same building require the ordinary storage approach. A successful unload
+still commits the exact shipment through the native inventory receipt.
 The same arrival, work and cycle-token checks still apply. Resident movement
 does not count toward trail wear. The optional Trails integration reads surface
 speed multipliers and registers accepted road surfaces. Trails processes player
@@ -650,10 +663,11 @@ on waking. Support and standing headroom are rechecked during sleep. If the head
 is blocked, the shared recovery budget can select a clear spot in the same home
 through a clear swept sleeping envelope; without room the low pose is retained
 without work or travel. A cramped shelter does not start a sleeping pose.
-Unassigned residents, builders without a project and workers waiting for orders
-can wander within eight blocks of their starting position or departure doorway
-when away from work. They can join a public path within four
-blocks and follow its walkable neighbours. Without a path they take safe local steps.
+Idle residents walk through their settlement in short trips. Each trip starts
+at the resident's current feet. A bounded local search picks a reachable
+destination, favours public paths and supplies the steps for the trip. A new
+trip can continue along the street or take another direction. A resident inside
+a building can use its exit and continue outdoors.
 Residents already inside the shared town hall can move around furniture while idle.
 Workers waiting at a required post still return to their workplace entrance.
 An idle resident can set up a temporary chair on a free spot. Entrance cells
@@ -668,8 +682,8 @@ city and worker before planning or applying equipment. Shared budgets limit walk
 and social searches across the entire interval.
 Unassigned adults share a bounded five-tick handoff (four actors, existing eight-target
 budget per coarse pulse) instead of waiting for the coarse city timer. Successful
-unassigned leisure legs have no artificial rest; unreachable optional routes retain a 2.5–4s
-backoff. Pure target geometry favours useful forward legs before one native admission.
+unassigned leisure trips can start immediately after arrival. If no local step is
+available, the resident retries after 2.5–4s.
 The walking label requires a ready unblocked route; other unassigned actors use a
 neutral label. Leisure still grants no work cycle or resource.
 Assigned producers retain their 2–6.5s successful rest so asynchronous courier
@@ -937,8 +951,10 @@ ENTITY_TICKING plugin tickets, the same physical simulation runs without viewers
 there is no elapsed-time catch-up or synthetic crop growth. LuckPerms lookup uses
 static/server plus settlement-world context, supports offline owners, defaults
 to deny, refreshes every 15 seconds and expires positive answers after 30 seconds.
-Chunk admission covers the settlement square plus one chunk margin, generates no
-new terrain, admits whole cities within a global configurable 2048-chunk budget,
+Chunk admission covers developed buildings, roads, worksites and current resident
+travel positions with a one-chunk margin. Surveys can temporarily request terrain
+in the city's expansion area. The loader uses existing terrain, admits each
+requested footprint in full within a configurable global budget of 2048 chunks,
 limits pending loads to four and acquisitions to two per tick, and releases leases
 on permission loss, city removal, reload, world unload and shutdown. Core owns
 reference-counted native ticket leases. Nearby viewers retain NPC admission priority.
@@ -1041,8 +1057,6 @@ Auto control barrels permit nearby ordinary inspection but all inventory mutatio
 paths require admin; receipt locks still override admin writes. PHYSICAL Auto settlements expose the same indexed control and interior containers
 as ordinary physical settlements. Retained closed-mode snapshots keep their
 accepted stock semantics until their journalled physical migration completes.
-Autonomous idle residents use the prepared building entrance as their roaming
-anchor, including a SITE whose authored control is not reachable yet.
 Full destinations keep cargo and retry, and ordinary open containers remain open.
 
 An active tavern has one innkeeper in both ordinary and Auto villages. The innkeeper

@@ -6,6 +6,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeSameInstanceAs
 import org.bukkit.ChunkSnapshot
+import org.bukkit.HeightMap
 import org.bukkit.Location
 import org.bukkit.Material
 import ru.arc.core.BudgetedTaskQueue
@@ -191,6 +192,116 @@ class CivsNavigationSectionCacheTest : FunSpec({
         }
     }
 
+    test("warming covers streets between distant buildings and follows the loaded surface height") {
+        SectionHarness().use { h ->
+            val far = CivBuilding(UUID(0, 20), BuildingType.HOUSE, 1, CivPosition(144, 64, 8), 0, "test",
+                CivBox(CivPosition(144, 64, 8), CivPosition(152, 70, 16)), CivPosition(144, 64, 8), BuildingPhase.ACTIVE)
+            val city = h.city.copy(buildings = listOf(far))
+            val area = CivsChunkArea.developed(city)
+            for (x in area.minX..area.maxX) for (z in area.minZ..area.maxZ) h.world.loadChunk(x, z)
+            h.world.getBlockAt(64, 95, 8).type = Material.STONE
+            h.surfaceHeights[64 to 8] = 95
+            h.warm(listOf(city))
+            val keys = h.cache.retainedPayloads().mapTo(hashSetOf()) { it.key }
+            keys.containsAll(listOf(CitizenSnapshotSectionKey(4, 5, 0), CitizenSnapshotSectionKey(4, 6, 0),
+                CitizenSnapshotSectionKey(5, 3, 0), CitizenSnapshotSectionKey(5, 4, 0))) shouldBe true
+            h.heightReads shouldBe area.size * 256
+            h.heightChunks shouldBe area.keys().mapTo(hashSetOf()) { it.x to it.z }
+            val copies = h.cache.debug()["chunk_captures"]
+            val requests = h.owner.debug()["snapshot_main_requests"]
+            h.finish(h.route(from = 80.5, to = 88.5))
+            h.cache.debug()["chunk_captures"] shouldBe copies
+            h.owner.debug()["snapshot_main_requests"] shouldBe requests
+            noRawSnapshot(h.cache.retainedPayloads())
+        }
+    }
+
+    test("authored floors precede optional centre and street warming when the city quota is tight") {
+        SectionHarness(cityMaximum = 8).use { h ->
+            val lower = CivBuilding(UUID(0, 20), BuildingType.HOUSE, 1, CivPosition(88, 20, 8), 0, "test",
+                CivBox(CivPosition(88, 20, 8), CivPosition(96, 26, 16)), CivPosition(88, 21, 8), BuildingPhase.ACTIVE)
+            h.warm(listOf(h.city.copy(buildings = listOf(lower))))
+            h.cache.retainedPayloads().any { it.key == CitizenSnapshotSectionKey(5, 1, 0) } shouldBe true
+            (h.cache.debug()["sections"] as Int <= 8) shouldBe true
+            h.cityStats(h.city.id)["evictions"] shouldBe 0L
+        }
+    }
+
+    test("footprint updates keep valid warmed surfaces and revisit a changed height outside the old band") {
+        SectionHarness().use { h ->
+            h.warm(listOf(h.city))
+            val reads = h.heightReads
+            val inside = CivBuilding(UUID(0, 20), BuildingType.HOUSE, 1, CivPosition(2, 64, 2), 0, "test",
+                CivBox(CivPosition(2, 64, 2), CivPosition(6, 70, 6)), CivPosition(2, 64, 2), BuildingPhase.ACTIVE)
+            val city = h.city.copy(buildings = listOf(inside))
+            h.warm(listOf(city))
+            h.heightReads shouldBe reads
+            val raised = CivPosition(24, 95, 8)
+            h.world.getBlockAt(raised.x, raised.y, raised.z).type = Material.STONE
+            h.surfaceHeights[raised.x to raised.z] = raised.y
+            h.cache.changed(h.world.uid, raised)
+            h.paper.performTicks(3)
+            val updated = city.copy(buildings = listOf(inside.copy(control = CivPosition(3, 65, 3))))
+            h.warm(listOf(updated))
+            h.heightReads - reads shouldBe 256L
+            h.cache.retainedPayloads().any { it.key == CitizenSnapshotSectionKey(1, 6, 0) } shouldBe true
+            val beforeUnload = h.heightReads
+            h.owner.prepareNavigation(listOf(updated)) { false }
+            h.world.unloadChunk(1, 0)
+            h.cache.removeChunk(h.world.uid, 1, 0)
+            h.world.loadChunk(1, 0)
+            h.warm(listOf(updated))
+            h.heightReads - beforeUnload shouldBe 6 * 256L // Native unload invalidates this chunk and its retained neighbours.
+        }
+    }
+
+    test("unavailable warm batches stay idle and recover when their city becomes ready again") {
+        SectionHarness().use { h ->
+            h.world.unloadChunk(-1, -1)
+            h.warm(listOf(h.city))
+            h.cache.retainedPayloads().any { it.key.x == -1 && it.key.z == -1 } shouldBe false
+            val copies = h.cache.debug()["chunk_captures"]
+            val reads = h.heightReads
+            repeat(40) { h.owner.prepareNavigation(listOf(h.city)) { true }; h.tick() }
+            h.cache.debug()["chunk_captures"] shouldBe copies
+            h.heightReads shouldBe reads
+            h.owner.prepareNavigation(listOf(h.city)) { false }
+            h.world.loadChunk(-1, -1)
+            h.warm(listOf(h.city))
+            h.cache.retainedPayloads().mapTo(hashSetOf()) { it.key }.containsAll(listOf(
+                CitizenSnapshotSectionKey(-1, 3, -1), CitizenSnapshotSectionKey(-1, 4, -1))) shouldBe true
+            val completedReads = h.heightReads
+            repeat(40) { h.owner.prepareNavigation(listOf(h.city)) { true }; h.tick() }
+            h.heightReads shouldBe completedReads
+        }
+    }
+
+    test("surface height reads share the native step budget and resume after a queued reactivation") {
+        SectionHarness(nativeSteps = 1).use { h ->
+            var ticks = 0
+            while (h.heightReads == 0L && ticks++ < 100) {
+                h.owner.prepareNavigation(listOf(h.city)) { true }; h.tick()
+            }
+            h.heightReads shouldBe 16L
+            repeat(4) {
+                val before = h.heightReads
+                h.owner.prepareNavigation(listOf(h.city)) { true }; h.tick()
+                h.heightReads - before shouldBe 16L
+            }
+            val before = h.heightReads
+            h.owner.prepareNavigation(listOf(h.city)) { false }
+            h.tick() // The queue cancels; its terminal Main continuation is still waiting.
+            h.owner.prepareNavigation(listOf(h.city)) { true }
+            ticks = 0
+            while (h.heightReads == before && ticks++ < 100) {
+                val reads = h.heightReads
+                h.owner.prepareNavigation(listOf(h.city)) { true }; h.tick()
+                (h.heightReads - reads in 0L..16L) shouldBe true
+            }
+            (h.heightReads > before) shouldBe true
+        }
+    }
+
     test("warm ownership survives queued Main continuations without admitting a second pipeline") {
         SectionHarness().use { h ->
             h.owner.prepareNavigation(listOf(h.city)) { true }
@@ -255,10 +366,22 @@ class CivsNavigationSectionCacheTest : FunSpec({
     }
 })
 
-private class SectionHarness(cityMaximum: Int = 1024, globalMaximum: Int = 8192, refreshTicks: Int = 6000) : AutoCloseable {
+private class SectionHarness(cityMaximum: Int = 1024, globalMaximum: Int = 8192, refreshTicks: Int = 6000,
+    nativeSteps: Int = 10000) : AutoCloseable {
     val paper = MockBukkitTestRuntime.open(CivsWorksiteServerFixture())
     private val ownerThread = Thread.currentThread()
+    val surfaceHeights = hashMapOf<Pair<Int, Int>, Int>()
+    val heightChunks = hashSetOf<Pair<Int, Int>>()
+    var heightReads = 0L
     val world = object : CivsWorksiteWorldFixture("section-cache") {
+        override fun getHighestBlockYAt(x: Int, z: Int, heightMap: HeightMap): Int {
+            check(Thread.currentThread() === ownerThread) { "Worker read native height map" }
+            check(isChunkLoaded(x shr 4, z shr 4)) { "Height map loaded an unavailable chunk" }
+            heightMap shouldBe HeightMap.MOTION_BLOCKING_NO_LEAVES
+            heightReads++
+            heightChunks += (x shr 4) to (z shr 4)
+            return surfaceHeights[x to z] ?: 63
+        }
         override fun getBlockAt(x: Int, y: Int, z: Int): org.mockbukkit.mockbukkit.block.BlockMock {
             check(Thread.currentThread() === ownerThread) { "Worker read native world" }
             return super.getBlockAt(x, y, z)
@@ -267,7 +390,7 @@ private class SectionHarness(cityMaximum: Int = 1024, globalMaximum: Int = 8192,
     val city = Settlement(UUID(0, 1), UUID(0, 10), "Sections", world.uid, CivPosition(8, 64, 8), 96,
         "fixture", Stock(), emptyList(), emptyList())
     private val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SectionCache")))
-    val work = BudgetedTaskQueue(tasks, 10000, nanoTime = { 0L })
+    val work = BudgetedTaskQueue(tasks, nativeSteps, nanoTime = { 0L })
     val workers = ArrayDeque<Runnable>()
     val cache = CivsNavigationSnapshots(131072, refreshTicks, tasks, contextFree = { true },
         maximumSectionsPerCity = cityMaximum, maximumSections = globalMaximum)
@@ -290,7 +413,8 @@ private class SectionHarness(cityMaximum: Int = 1024, globalMaximum: Int = 8192,
             owner.prepareNavigation(cities) { true }; tick()
             val debug = owner.debug()["snapshot_warmup"] as Map<*, *>
             if (debug["pending"] == false && (debug["entries"] as List<*>).all {
-                (it as Map<*, *>)["remaining_batches"] == 0 }) return
+                val row = it as Map<*, *>
+                row["remaining_batches"] == (row["deferred_batches"] ?: 0) }) return
         }
         error("Warm pass did not finish: ${owner.debug()}")
     }

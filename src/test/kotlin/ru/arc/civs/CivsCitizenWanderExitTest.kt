@@ -8,8 +8,41 @@ import org.bukkit.Material
 import java.util.UUID
 
 class CivsCitizenWanderExitTest : FunSpec({
+    test("an unassigned resident can move away from the entrance of her own Auto3 house") {
+        residentRuntime(workerId = UUID.fromString("eb3bb491-61ac-46de-8992-94dd5e7486e3")) { h ->
+            val hall = h.city.buildings.single()
+            val entrance = CivPosition(27, 64, 13)
+            val home = hall.copy(id = UUID(0, 41), type = BuildingType.HOUSE, anchor = entrance, entrance = entrance,
+                bounds = CivBox(CivPosition(11, 62, 6), CivPosition(26, 75, 19)), control = null)
+            h.city = h.city.copy(buildings = listOf(hall, home), workers = h.city.workers.map { it.copy(homeId = home.id) })
+            for (x in 0..2) for (z in -1..1) h.world.loadChunk(x, z)
+            // The east and south edges are obstructed. North and west are both beyond eight blocks from the door.
+            for ((x, z) in listOf(21 to 10, 20 to 11)) for (y in 64..66) h.world.getBlockAt(x, y, z).type = Material.STONE
+            val actor = h.actor()
+            val origin = Location(h.world, 20.5, 64.0, 10.5)
+            actor.npc.teleport(origin)
+            val before = h.world.chunkSnapshotCaptures
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            val walked = mutableSetOf<Pair<Int, Int>>()
+            for (tick in 1..120) {
+                h.navigate()
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                val at = actor.npc.location
+                walked += at.blockX to at.blockZ
+                if (origin.distance(at) > 2) break
+            }
+            withClue("walked=$walked") {
+                walked.any { (x, z) -> x < 20 || z < 10 } shouldBe true
+                (actor.npc.location.distance(origin) > 2) shouldBe true
+                h.world.chunkSnapshotCaptures shouldBe before
+                h.pendingNavigationWorkers shouldBe 0
+            }
+        }
+    }
+
     for (blocked in listOf(false, true)) {
-        val scenario = if (blocked) "backs off when a private neighbour seals the detour"
+        val scenario = if (blocked) "can walk locally while a private neighbour seals the detour"
             else "walks away from the exit first and resumes on the public road"
         test("an idle resident inside the Auto3 house $scenario") {
             residentRuntime(workerId = UUID(0, 42)) { h ->
@@ -48,36 +81,31 @@ class CivsCitizenWanderExitTest : FunSpec({
                 h.idleReason = "waiting-orders"
                 h.navigationNow = 3_000
                 h.owner.pulse(3_000)
+                h.navigationNow = 3_500
+                h.owner.pulse(3_500)
                 actor.plan.idleReason shouldBe "waiting-orders"
                 val exit = requireNotNull(actor.route)
-                exit.authored shouldBe door
+                exit.motion.preparationPhase shouldBe "local"
                 exit.allowedBuildings shouldBe setOf(house.id)
 
                 val visited = mutableSetOf<Pair<Int, Int>>()
-                for (tick in 1..1_200) {
+                for (tick in 1..1_000) {
+                    if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
                     h.navigate()
                     val at = actor.npc.location
                     visited += at.blockX to at.blockZ
-                    if (actor.route == null || (25 to 10) in visited) break
+                    if ((25 to 10) in visited) break
                 }
                 withClue("visited=$visited ${h.navigationState()}") {
+                    visited.all { it in floor } shouldBe true
                     if (blocked) {
-                        actor.route shouldBe null
-                        actor.npc.location.point() shouldBe origin.point()
-                        val now = requireNotNull(h.navigationNow)
-                        h.owner.pulse(now + 500)
-                        actor.route shouldBe null
-                        h.owner.pulse(now + 5_000)
-                        actor.route?.authored shouldBe door
+                        (19 to 10 in visited) shouldBe true
+                        (14 to 8 in visited) shouldBe false
+                        (25 to 10 in visited) shouldBe false
                     } else {
-                        visited.containsAll(listOf(19 to 10, 14 to 7, 24 to 10)) shouldBe true
-                        visited.all { it in floor } shouldBe true
-                        h.owner.pulse(requireNotNull(h.navigationNow) + 500)
-                        actor.route?.motion?.preparationPhase shouldBe "local"
-                        actor.route?.authored shouldBe CivPosition(25, 63, 10)
-                        repeat(30) { if (actor.npc.location.blockX < 25) h.navigate() }
-                        actor.npc.location.blockX shouldBe 25
+                        visited.containsAll(listOf(19 to 10, 14 to 7, 25 to 10)) shouldBe true
                     }
+                    h.pendingNavigationWorkers shouldBe 0
                     h.deliveries shouldBe 0
                 }
             }

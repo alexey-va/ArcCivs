@@ -124,6 +124,9 @@ internal class CivsChunkLoading(
     private var recoveryKeys = emptySet<PaperChunkKey>()
     private val temporary = linkedSetOf<CivsChunkDemand>()
     private val leases = linkedMapOf<PaperChunkKey, PaperChunkTicketLease>()
+    private var retainedOrder: List<PaperChunkKey>? = null
+    // True only after exact key equality, until either demand or lease membership changes.
+    private var wantedMatchesLeases = false
     private val ready = hashSetOf<PaperChunkKey>()
     private val observedLevels = mutableMapOf<PaperChunkKey, Pair<Long, Chunk.LoadLevel?>>()
     private val pending = mutableMapOf<PaperChunkKey, Long>()
@@ -168,6 +171,7 @@ internal class CivsChunkLoading(
         return CivsChunkDemand(owner, worldId, keys.toSet(), generation, ::demandReady).also { demand ->
             temporary += demand
             demand.keys.forEach { key -> wanted[key] = (wanted[key] ?: 0) + 1 }
+            wantedMatchesLeases = false
         }
     }
 
@@ -272,8 +276,10 @@ internal class CivsChunkLoading(
         if (wantedNeedsRebuild || closedDemands || recoveryChunks.isNotEmpty() || recoveryKeys.isNotEmpty()) {
             rebuildWanted(recoveryChunks)
         }
-        ready.retainAll(wanted.keys)
-        observedLevels.keys.retainAll(wanted.keys)
+        if (!wantedMatchesLeases) {
+            ready.retainAll(wanted.keys)
+            observedLevels.keys.retainAll(wanted.keys)
+        }
         for ((id, state) in cities) {
             val city = byId.getValue(id).first
             if (!sameFootprint(state.snapshot, city)) state.base = CivsChunkArea.developed(city)
@@ -293,6 +299,7 @@ internal class CivsChunkLoading(
             for (key in chunks - state.chunks) wanted[key] = (wanted[key] ?: 0) + 1
             state.area = area; state.chunks = chunks; state.ready = false
             wantedNeedsRebuild = true
+            wantedMatchesLeases = false
             status(id, "loading")
         }
         val candidates = available.filter { (city, name) -> city.id !in cities && permissions.allowed(city.owner, name) }
@@ -309,14 +316,21 @@ internal class CivsChunkLoading(
                     chunks.forEach { wanted[it] = (wanted[it] ?: 0) + 1 }
                     // On the next pulse, admitted cities precede temporary and recovery demand.
                     wantedNeedsRebuild = true
+                    wantedMatchesLeases = false
                     status(city.id, "loading")
                 }
             }
         }
         val deadline = nanoTime() + 1_000_000L
-        for (key in leases.keys.toList().filter { it !in wanted }.take(32)) {
-            if (nanoTime() >= deadline) break
-            release(key)
+        if (!wantedMatchesLeases) wantedMatchesLeases = wanted.keys == leases.keys
+        if (!wantedMatchesLeases) {
+            var released = 0
+            for (key in retainedKeys()) {
+                if (key in wanted) continue
+                if (nanoTime() >= deadline) break
+                release(key)
+                if (++released == 32) break
+            }
         }
         var acquisitions = 0
         while (true) {
@@ -340,7 +354,7 @@ internal class CivsChunkLoading(
         retryAt.keys.retainAll(wanted.keys)
         // Leave one slot for each outstanding callback that can still pin in this tick.
         val pendingAtAdmission = pending.size
-        for (key in wanted.keys) {
+        if (!wantedMatchesLeases) for (key in wanted.keys) {
             if (acquisitions + pendingAtAdmission >= 2 || nanoTime() >= deadline) break
             if (key in leases || key in pending || clock() < (retryAt[key] ?: 0)) continue
             val world = plugin.server.getWorld(key.worldId) ?: continue
@@ -355,7 +369,7 @@ internal class CivsChunkLoading(
                     .whenComplete { chunk, error -> loaded(key, epoch, chunk, error) }
             }
         }
-        val retained = leases.keys.toList()
+        val retained = retainedKeys()
         repeat(minOf(32, retained.size)) {
             if (nanoTime() >= deadline) return@repeat
             val key = retained[Math.floorMod(readinessCursor++, retained.size)]
@@ -392,6 +406,7 @@ internal class CivsChunkLoading(
         }
         wanted = nextWanted
         wantedNeedsRebuild = false
+        wantedMatchesLeases = false
     }
 
     private fun sameFootprint(first: Settlement, second: Settlement): Boolean = first.center == second.center &&
@@ -430,7 +445,11 @@ internal class CivsChunkLoading(
             return false
         }
         return when (val result = registry.acquire(key)) {
-            is PaperChunkTicketAcquireResult.Acquired -> { leases[key] = result.lease; true }
+            is PaperChunkTicketAcquireResult.Acquired -> {
+                leases[key] = result.lease
+                leaseKeysChanged()
+                true
+            }
             else -> {
                 retryAt[key] = clock() + 30_000
                 cities.filterValues { key in it.chunks }.keys.forEach { status(it, "chunk-unavailable") }
@@ -448,12 +467,22 @@ internal class CivsChunkLoading(
             if (count == 0) { wanted.remove(key); ready -= key; observedLevels.remove(key) } else wanted[key] = count
         }
         wantedNeedsRebuild = true
+        wantedMatchesLeases = false
         status(id, "released")
+    }
+
+    private fun retainedKeys() = retainedOrder ?: leases.keys.toList().also { retainedOrder = it }
+
+    private fun leaseKeysChanged() {
+        retainedOrder = null
+        wantedMatchesLeases = false
     }
 
     private fun release(key: PaperChunkKey) {
         if (key in releaseFailures) return
-        try { leases.remove(key)?.close(); ready -= key; observedLevels.remove(key) }
+        val lease = leases.remove(key)
+        if (lease != null) leaseKeysChanged()
+        try { lease?.close(); ready -= key; observedLevels.remove(key) }
         catch (failure: Exception) {
             releaseFailures += key
             plugin.logger.log(Level.SEVERE, "ArcCivs settlement chunk release failed for $key; /civs reload retries cleanup", failure)
@@ -467,6 +496,7 @@ internal class CivsChunkLoading(
         permissions.reset()
         cities.clear(); wanted.clear(); ready.clear(); observedLevels.clear(); retryAt.clear(); statuses.clear()
         wantedNeedsRebuild = false
+        leaseKeysChanged()
         recoveryKeys = emptySet()
         temporary.forEach(CivsChunkDemand::close); temporary.clear()
         failed = runCatching { registry.close() }.onFailure {
@@ -516,5 +546,6 @@ internal class CivsChunkLoading(
         temporary.forEach(CivsChunkDemand::close); temporary.clear()
         registry.close()
         leases.clear()
+        leaseKeysChanged()
     }
 }

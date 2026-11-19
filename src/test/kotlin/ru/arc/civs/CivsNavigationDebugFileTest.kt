@@ -118,6 +118,8 @@ class CivsNavigationDebugFileTest : FunSpec({
             h.world.unloadChunk(-1, 0) shouldBe true
             val baseline = h.request(); h.finish(baseline)
             baseline.failure shouldBe "chunk-unloaded"
+            baseline.searchStop shouldBe "capture-budget"
+            baseline.firstUnavailableBlock shouldBe CivPosition(-1, 61, 0)
             val file = CivsNavigationDebugFile(h.root, h.io)
             var captured: CitizenNavigationDebugFrame? = null
             val arm = h.arm { frame -> captured = frame; file.save(frame) }

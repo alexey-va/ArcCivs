@@ -32,10 +32,11 @@ class CivsCargoRedirectionArrivalTest : FunSpec({
                 CivsLogistics.destination(city, carried)?.let { target -> CivCourierPlan(carried, target.id, target.entrance, true) }
             } }
             var full = true
+            h.owner.courierControlAllowed = { _, _ -> true }
             h.dropoffProvider = { cityId, workerId, carried, destination ->
                 carried shouldBe accepted
                 destination shouldBe alternative.id
-                h.owner.requireStorageArrival(cityId, workerId, destination)
+                h.owner.requireCargoDropoffArrival(cityId, workerId, destination, carried)
                 if (full) {
                     // Capacity can change before the already-completed rejection reaches the actor drain.
                     h.phase(workerId) shouldBe CitizenPhase.DELIVERING
@@ -65,7 +66,7 @@ class CivsCargoRedirectionArrivalTest : FunSpec({
                 h.phase(courierId) shouldBe CitizenPhase.PAUSED
             }
             val feet = courier.location
-            citizenAtStorage(h.world, feet.point(), point) shouldBe true
+            civsWithinContainerReach(feet, point) shouldBe true
             // A capacity notification may wake only its own shipment, even during its longer cooldown.
             h.owner.retryCargoDelivery(h.city.id, courierId, UUID.randomUUID())
             h.phase(courierId) shouldBe CitizenPhase.PAUSED
@@ -83,14 +84,14 @@ class CivsCargoRedirectionArrivalTest : FunSpec({
                 storage.reserve(before, id)
                 courier.teleport(Location(h.world, 11.5, 64.0, .5)) // Negative case: moved away after the earlier arrival.
                 shouldThrow<CivsRejection> { storage.prepareCarriedCargoDropoff(before, courierId, accepted, alternative.id, 50_000) {
-                    h.owner.requireStorageArrival(before.id, courierId, alternative.id)
+                    h.owner.requireCargoDropoffArrival(before.id, courierId, alternative.id, accepted)
                 } }.reason shouldBe "route-unreachable"
                 val bin = (h.world.getBlockAt(point.x, point.y, point.z).state as Barrel).inventory
                 bin.isEmpty shouldBe true
                 CivsEquipment.plainCount(before.workers.single(), "TORCH") shouldBe 1
                 courier.teleport(feet)
                 val plan = storage.prepareCarriedCargoDropoff(before, courierId, accepted, alternative.id, 50_000) {
-                    h.owner.requireStorageArrival(before.id, courierId, alternative.id)
+                    h.owner.requireCargoDropoffArrival(before.id, courierId, alternative.id, accepted)
                 }
                 val after = CivsLogistics.unload(before, courierId, accepted.id, 50_000).copy(inventory = plan.inventoryAfter)
                 val tx = CivInventoryTransaction(id, before.id, before.revision, after, plan.changes, cargoDropoff = plan.cargoDropoff)
