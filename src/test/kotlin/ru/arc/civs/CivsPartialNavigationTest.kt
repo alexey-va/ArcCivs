@@ -9,6 +9,26 @@ import java.util.UUID
 import kotlin.math.sqrt
 
 class CivsPartialNavigationTest : FunSpec({
+    for (accepted in listOf(false, true)) test("a pickup neighbour reaching its capture budget keeps the visible stance, accepted=$accepted") {
+        val holder = CivPosition(8, 65, 0)
+        val target = holder.point()
+        val visible = CitizenPoint(5.5, 64.0, .5)
+        val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), target, 0, 256, emptyList(),
+            CivsNavigationSettings(searchNodesPerBatch = 1), pickupContainer = holder)
+        var result = search.advance(emptyList())
+        while (result.probes.single().from != visible)
+            result = search.advance(result.probes.map { partialCapture(it, target, wall = null) })
+        search.finishAtBudget("capture-budget").pickupCandidate shouldBe visible
+        result = search.advance(emptyList(), accepted)
+        if (accepted) {
+            result.path?.last()?.point shouldBe visible
+            result.continuation shouldBe false
+        } else {
+            (result.failure ?: result.continuationReason) shouldBe "capture-budget"
+            (result.path?.lastOrNull()?.point == visible) shouldBe false
+        }
+    }
+
     for (distance in listOf(2, 16, 48))
     test("an unreachable $distance-block goal walks only its validated prefix and stops retrying at the frontier") {
         val origin = CitizenPoint(.5, 64.0, .5)

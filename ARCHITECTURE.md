@@ -371,6 +371,9 @@ Residents collecting food for themselves can take it through a wall when their
 feet are within three blocks of the selected container's center. They can stop
 there on the way to the container. The transfer debits its actual inventory once.
 Outside that radius, the route searches for a reachable place to collect the food.
+Before asking the owner to check a sightline, the search can offer an adjacent,
+already reachable stance inside the pickup radius. If that stance is occupied
+or invalid, the original sightline candidate stays available for checking.
 When it reaches a potential pickup position, the navigation owner checks the
 actual feet, container reach and other residents' reservations. If a position is
 blocked, the same search continues around the counter. Residents wait when
@@ -431,10 +434,12 @@ sections use the normal bounded capture path. Dynamic shapes and native caller c
 keep their live checks.
 
 When the worker can build the next set of neighbours entirely from sections
-already used by the search, it can advance A* immediately. It yields after a
-bounded number of batches or time spent, and returns to the owner for missing
-world data, a new walking segment, or a pickup decision. A requested diagnostic
-recording keeps each batch boundary for deterministic replay.
+already supplied to the search, it can advance A* immediately. At the end
+of a work slice it queues further computation behind other residents on the
+same worker. Missing world data, a new walking segment, or a pickup decision
+returns to the owner. Before accepting a result the owner checks for unloaded
+sections consumed by the worker. A requested diagnostic recording keeps each
+batch boundary for deterministic replay.
 
 Terrain changes invalidate affected sections for future reads. An active search
 keeps the immutable sections it has already used, so a nearby block edit does

@@ -85,6 +85,90 @@ class CivsFoodApproachAdmissionTest : FunSpec({
         foodApproachAdmission(roofed = false)
     }
 
+    test("residents can claim different food barrels in the same store concurrently") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            val second = UUID(0, 28)
+            val firstBarrel = CivPosition(8, 64, 0)
+            val secondBarrel = CivPosition(8, 64, 8)
+            val building = CivBuilding(UUID(0, 29), BuildingType.TAVERN, 1, firstBarrel, 0, "tavern1",
+                CivBox(CivPosition(7, 63, -2), CivPosition(13, 68, 10)), firstBarrel.copy(x = 9), BuildingPhase.ACTIVE, firstBarrel)
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + building,
+                workers = listOf(h.city.workers.single().copy(hunger = 0), CivWorker(second, "Second", null, hunger = 20))))
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            h.actor().npc.teleport(Location(h.world, 15.5, 64.0, .5))
+            h.actor(second).npc.teleport(Location(h.world, 15.5, 64.0, 8.5))
+            for (point in listOf(firstBarrel, secondBarrel)) h.world.getBlockAt(point.x, point.y, point.z).type = Material.BARREL
+            h.holdNavigation = true
+            h.physicalFoodSource = CivResidentFoodSource(building.id, firstBarrel, firstBarrel.copy(x = 9))
+            h.navigationNow = 3_000
+            h.owner.pulse(3_000)
+            h.city = h.city.copy(workers = h.city.workers.map { if (it.id == second) it.copy(hunger = 0) else it })
+            h.physicalFoodSource = CivResidentFoodSource(building.id, secondBarrel, secondBarrel.copy(x = 9))
+            h.navigationNow = 4_000
+            h.owner.pulse(4_000)
+            val routes = listOf(h.actor() to firstBarrel, h.actor(second) to secondBarrel).map { (actor, holder) ->
+                actor.foodPickupSource?.container shouldBe holder
+                requireNotNull(actor.route).also { it.motion.reservedDestination(it.target) shouldBe null } to holder
+            }
+            h.releaseNavigation()
+            for (tick in 1..400) {
+                h.navigate()
+                if (routes.none { it.first.motion.searching }) break
+            }
+            for ((route, holder) in routes) {
+                val reserved = requireNotNull(route.motion.reservedDestination(route.target))
+                civsCanReachContainer(reserved, holder, true) shouldBe true
+                civsCanReachContainer(reserved, if (holder == firstBarrel) secondBarrel else firstBarrel, true) shouldBe false
+            }
+        }
+    }
+
+    test("a withdrawn pickup reservation cannot complete an old route to the same feet") {
+        residentRuntime { h ->
+            val holder = CivPosition(3, 64, 0)
+            val feet = CitizenPoint(1.5, 64.0, .5)
+            val route = CitizenPacketRoute(h.world, Location(h.world, .5, 64.0, .5), holder.location(h.world),
+                { true }, { _, _ -> true }, { 1.0 }, pickup = CitizenContainerRouteGoal(holder) { true })
+            route.confirmPickup(feet) shouldBe true
+            route.newWorkerSearch()
+            route.acceptSearch(CitizenSearchResult(emptyList(), 2, path = listOf(CitizenPlannedStep(feet, CitizenRouteAction.WALK))))
+            route.failure shouldBe "path-changed"
+            route.reservedDestination(holder.location(h.world)) shouldBe null
+        }
+    }
+
+    for (lostSupport in listOf(false, true)) test("food checks the adjacent close stance and retains the visible fallback, lostSupport=$lostSupport") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            val holder = CivPosition(8, 65, 0)
+            h.world.getBlockAt(holder.x, holder.y, holder.z).type = Material.BARREL
+            val close = CitizenPoint(6.5, 64.0, .5)
+            val visible = CitizenPoint(5.5, 64.0, .5)
+            val checked = mutableListOf<CitizenPoint>()
+            var at = Location(h.world, .5, 64.0, .5)
+            val route = CitizenPacketRoute(h.world, at, holder.location(h.world),
+                { it.x in 0..6 && it.z == 0 && it.y == 64 }, { _, _ -> true }, { 1.0 },
+                pickup = CitizenContainerRouteGoal(holder) { point ->
+                    checked += point
+                    if (lostSupport && point == close) h.world.getBlockAt(6, 63, 0).type = Material.AIR
+                    val feet = Location(h.world, point.x, point.y, point.z)
+                    civsCanReachContainer(feet, holder, nearbyFoodPickup = true)
+                })
+            for (operation in 1..2_000) {
+                if (!route.searching) break
+                route.expand()
+            }
+            route.searching shouldBe false
+            route.failure shouldBe null
+            checked shouldBe if (lostSupport) listOf(close, visible) else listOf(close)
+            val expected = if (lostSupport) visible else close
+            route.pickupEndpoint shouldBe expected
+            repeat(100) { route.move(at, 1.0) { true }?.let { at = it } }
+            at.point() shouldBe expected
+            route.finished shouldBe true
+        }
+    }
+
     test("a rejected pickup with no other progress keeps the unloaded frontier failure") {
         residentRuntime(server = CivsWorksiteServerFixture()) { h ->
             val holder = CivPosition(27, 64, 0)

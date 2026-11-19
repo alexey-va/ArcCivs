@@ -49,7 +49,7 @@ internal class CivsResidentNavigation(
         var capture: CitizenNavigationCapture? = null
         var snapshotTerrain = CitizenSnapshotTerrain()
         var snapshotCapture: CitizenSnapshotCapture? = null
-        var snapshotWorker: CompletableFuture<CitizenSnapshotRequest>? = null
+        var snapshotWorker: CitizenSnapshotSearchBatch? = null
         var snapshotResult: List<CitizenSearchCapture>? = null
         var snapshotPending: CitizenSnapshotRequest? = null
         var seededInitial = false
@@ -253,7 +253,7 @@ internal class CivsResidentNavigation(
         val cachedPayloads = snapshots.retainedPayloads().toSet()
         return mapOf("closed" to closed, "jobs" to jobs.size, "maximum_jobs" to settings.maximumJobs,
             "native_pending" to jobs.values.count { it.capturing?.isDone == false && it.snapshotCapture == null },
-            "worker_pending" to jobs.values.count { it.searching?.isDone == false || it.snapshotWorker?.isDone == false },
+            "worker_pending" to jobs.values.count { it.searching?.isDone == false || it.snapshotWorker?.completion?.isDone == false },
             "bulk_jobs" to jobs.values.count { it.route.snapshotPolicy != null },
             "captured_blocks" to jobs.values.sumOf { it.route.capturedBlocks }, "terrain_cache" to terrain.debug(),
             "snapshot_cache" to snapshots.debug(cityId), "snapshot_warmup" to warmup.debug(cityId), "snapshot_main_requests" to snapshotMainRequests,
@@ -558,7 +558,7 @@ internal class CivsResidentNavigation(
                     captureSnapshotMain(job, requireNotNull(job.snapshotCapture), pending)
                 }
             }
-            val nativeProgress = job.capture?.progress ?: 0L
+            val nativeProgress = job.capture?.progress ?: job.snapshotWorker?.completedYields ?: 0L
             if (nativeProgress > job.nativeProgress || job.searching?.isDone == true || job.capturing?.isDone == true) {
                 job.progressTick = tick
                 job.nativeProgress = nativeProgress
@@ -699,18 +699,31 @@ internal class CivsResidentNavigation(
         job.snapshotInput = input
         // An armed trace records every exact search/capture boundary for deterministic replay.
         val batch = CitizenSnapshotSearchBatch(cursor, job.search, combine = job.debugTrace == null)
-        val future = try { CompletableFuture.supplyAsync({ batch.advance(input) }, executor) }
-        catch (failure: RejectedExecutionException) {
-            input.chunks.values.forEach(CitizenSnapshotChunk::releaseSource)
-            CompletableFuture.failedFuture(failure)
-        }
-        job.snapshotWorker = future
-        future.whenCompleteSync(tasks) { request, failure ->
+        job.nativeProgress = 0
+        job.snapshotWorker = batch
+        batch.submit(executor, input)
+        batch.completion.whenCompleteSync(tasks) { request, failure ->
             if (closed || !tasks.isCurrent(epoch) || !job.route.searching || job.snapshotCapture !== cursor) return@whenCompleteSync
             job.snapshotWorker = null
             job.snapshotInput = null
             job.progressTick = Bukkit.getCurrentTick().toLong()
             job.snapshotCapture = batch.cursor
+            val used = batch.sections
+            val unloaded = job.unloadedSeeds
+            if (unloaded != null && used.any { (section, revision) ->
+                    CitizenSnapshotKey(section.x, section.z) in unloaded &&
+                        !snapshots.currentSections(job.route.worldId, mapOf(section to revision))
+                }) {
+                job.capturing?.completeExceptionally(CitizenSnapshotUnavailable())
+                return@whenCompleteSync
+            }
+            // A budget verdict can use earlier completed captures. Fence all their first uses on failure as well.
+            job.snapshotRevisions.putAll(used)
+            if (request != null) {
+                snapshots.publish(job.route.worldId, request.decoded.values, job.route.snapshotPolicy?.cityId)
+                job.publishedPayloads = request.payloads
+            }
+            snapshots.touched(job.route.worldId, used, job.route.snapshotPolicy?.cityId)
             val progress = batch.progress
             if (progress != null && !batch.searchReady) recordSearch(job, progress)
             batch.capturedBlocks?.let { count ->
@@ -720,18 +733,6 @@ internal class CivsResidentNavigation(
             }
             if (failure != null) { job.capturing?.completeExceptionally(failure); return@whenCompleteSync }
             val prepared = requireNotNull(request)
-            snapshots.publish(job.route.worldId, prepared.decoded.values, job.route.snapshotPolicy?.cityId)
-            job.publishedPayloads = prepared.payloads
-            job.snapshotRevisions.putAll(prepared.sections)
-            snapshots.touched(job.route.worldId, prepared.sections, job.route.snapshotPolicy?.cityId)
-            val unloaded = job.unloadedSeeds
-            if (unloaded != null && prepared.sections.any { (section, revision) ->
-                    CitizenSnapshotKey(section.x, section.z) in unloaded &&
-                        !snapshots.currentSections(job.route.worldId, mapOf(section to revision))
-                }) {
-                job.capturing?.completeExceptionally(CitizenSnapshotUnavailable())
-                return@whenCompleteSync
-            }
             val captures = prepared.captures
             if (batch.searchReady) {
                 job.snapshotCapture = null

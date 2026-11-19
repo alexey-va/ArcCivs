@@ -113,6 +113,7 @@ internal class CitizenNavigationSearch(
 ) {
     private data class Entry(val node: CitizenSearchNode, val cost: Double, val score: Double, val order: Int,
                              val special: Boolean = false)
+    private class PickupApproach(val visible: Entry, var close: Entry? = null, var stop: Pair<String, String>? = null)
     private data class Parent(val node: CitizenSearchNode, val action: CitizenRouteAction)
     private val initialBounds = CitizenSearchBounds.between(origin, target, settings.initialHorizontalMargin, settings.initialVerticalMargin)
     private val start = CitizenSearchNode(floor(origin.x).toInt(), origin.y, floor(origin.z).toInt(), initial = true)
@@ -139,6 +140,8 @@ internal class CitizenNavigationSearch(
     private var pending = emptyMap<CitizenSearchNode, Entry>()
     private var goal: Entry? = null
     private var checkingPickup: Entry? = null
+    private var pickupApproach: PickupApproach? = null
+    private val pickupCentre = pickupContainer?.let { CitizenPoint(it.x + .5, it.y + .5, it.z + .5) }
     private var originInspected = !specialTraversal
     private val checkedPickupFeet = pickupContainer?.let { hashSetOf<CitizenPoint>() }
     private var serial = 0
@@ -182,6 +185,8 @@ internal class CitizenNavigationSearch(
         if (cancelled.get()) return result(failure = "cancelled")
         checkingPickup?.let { entry ->
             checkingPickup = null
+            val approach = pickupApproach
+            pickupApproach = null
             if (checkNotNull(pickupAccepted)) {
                 if (!openCheaperWalks(entry)) {
                     val path = pathTo(entry.node) ?: return result(failure = "broken-path")
@@ -189,7 +194,10 @@ internal class CitizenNavigationSearch(
                 }
                 // The native owner has reserved these feet. A budget cannot discard this proven handoff.
                 goal = entry
-            } else open += entry
+            } else if (approach != null && entry !== approach.visible) {
+                return result(pickupCandidate = checkPickup(approach.visible))
+            }
+            approach?.stop?.let { (reason, stop) -> return finishAtBudget(reason, stop) }
         }
         roadLookup?.let { lookup ->
             roadLookup = null
@@ -229,6 +237,11 @@ internal class CitizenNavigationSearch(
         var firstRequestedScore = Double.POSITIVE_INFINITY
         while (requested.size < settings.searchNodesPerBatch) {
             if (cancelled.get()) return result(failure = "cancelled")
+            // A normal path to the very same owner-confirmed feet has won over the special crossing.
+            goal?.takeIf { pickupContainer != null && !it.special }?.let {
+                return result(path = pathTo(it.node) ?: return result(failure = "broken-path"))
+            }
+            pickupApproach?.let { return result(pickupCandidate = checkPickup(it.close ?: it.visible)) }
             if (goal == null && roadRouting == CitizenRoadRouting.ROAD && visited >= roadNodeLimit) {
                 if (requested.isNotEmpty()) break
                 beginOrdinarySearch()
@@ -269,9 +282,12 @@ internal class CitizenNavigationSearch(
                     feet !in requireNotNull(checkedPickupFeet)) {
                     // Settle the outstanding neighbourhoods before pausing this frontier for one live reach check.
                     if (requested.isNotEmpty()) { open += entry; break }
-                    checkedPickupFeet += feet
-                    checkingPickup = entry
-                    return result(pickupCandidate = feet)
+                    if (node.initial || nearbyPickup(feet) || visited + 1 >= settings.maximumNodes) {
+                        open += entry // The original frontier can cross a rejected stance.
+                        return result(pickupCandidate = checkPickup(entry))
+                    }
+                    // Keep this sight-only stance while expanding just its own normal neighbourhood.
+                    pickupApproach = PickupApproach(entry)
                 }
             }
             if (++visited > settings.maximumNodes) return finishAtBudget("search-budget", "node-budget")
@@ -282,6 +298,7 @@ internal class CitizenNavigationSearch(
                 if (known == null || known.deferredGrapple) {
                     if (requested.isEmpty()) firstRequestedScore = entry.score
                     requested[node] = entry
+                    if (entry === pickupApproach?.visible) break
                 } else expand(entry, known)?.let { return result(failure = it) }
             }
             if (reachedIsolatedFrontier()) return partial("no-path", MINIMUM_PARTIAL_GAIN, "isolated-endpoint")
@@ -315,6 +332,16 @@ internal class CitizenNavigationSearch(
         }
         val path = pathTo(found.node) ?: return result(failure = if (cancelled.get()) "cancelled" else "broken-path")
         return result(path = path)
+    }
+
+    private fun nearbyPickup(feet: CitizenPoint): Boolean =
+        feet.distanceSquared(requireNotNull(pickupCentre)) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH
+
+    private fun checkPickup(entry: Entry): CitizenPoint {
+        checkingPickup = entry
+        val point = if (entry.node.initial) origin else entry.node.point()
+        requireNotNull(checkedPickupFeet) += point
+        return point
     }
 
     private fun extendEarlyWalk(frontier: Map<CitizenSearchNode, Entry>): CitizenEarlyWalk? {
@@ -362,6 +389,11 @@ internal class CitizenNavigationSearch(
      * The caller must walk this segment and continue to the original goal; it is not an arrival. */
     @JvmOverloads
     fun finishAtBudget(reason: String, searchStop: String = reason): CitizenSearchResult {
+        // Even if the optional neighbour capture runs out of cells, keep the sight-only stance.
+        pickupApproach?.takeUnless { cancelled.get() }?.let {
+            it.stop = reason to searchStop
+            return CitizenSearchResult(emptyList(), visited, pickupCandidate = checkPickup(it.visible), roadRouting = roadRouting)
+        }
         if (specialTraversal && !cancelled.get()) {
             // A complete checked crossing remains usable when a cheaper detour consumes the remaining budget.
             val reached = goal?.node ?: if (pickupContainer == null)
@@ -452,6 +484,7 @@ internal class CitizenNavigationSearch(
             return if (roadRouting == CitizenRoadRouting.ROAD) null else "chunk-unloaded"
         val startPoint = start.point()
         val prone = specialTraversal && (previous.node in proneOnly || previous.node.initial && !terrain.bodyClear(from))
+        val approach = pickupApproach?.takeIf { it.visible === previous }
         for (edge in capture.edges) {
             if (cancelled.get()) return "cancelled"
             val next = edge.node
@@ -491,8 +524,12 @@ internal class CitizenNavigationSearch(
             val special = previous.special || action.isSpecialTraversal
             val entry = Entry(next, cost, cost + heuristic(next), serial++, special)
             // A checked wall top belongs to the same horizontal corridor even above its normal walking envelope.
-            if (widerSearch || inCorridor(point) || special && corridor == null && initialBounds.containsColumn(point)) open += entry
-            else deferred += entry
+            if (widerSearch || inCorridor(point) || special && corridor == null && initialBounds.containsColumn(point)) {
+                open += entry
+                if (!special && pickupContainer != null && goal?.node == next) goal = entry
+                if (approach != null && action.isGroundStep && nearbyPickup(point) && point !in requireNotNull(checkedPickupFeet) &&
+                    cost < (approach.close?.cost ?: Double.POSITIVE_INFINITY)) approach.close = entry
+            } else deferred += entry
         }
         return null
     }

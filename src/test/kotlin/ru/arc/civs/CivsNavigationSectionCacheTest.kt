@@ -19,6 +19,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class CivsNavigationSectionCacheTest : FunSpec({
     test("two city quotas share physical payload once and retirement releases only the retired membership") {
@@ -182,6 +183,42 @@ class CivsNavigationSectionCacheTest : FunSpec({
             route.endpoint shouldBe CitizenPoint(8.5, 64.0, .5)
             h.cache.debug()["chunk_captures"] shouldBe copies
             h.owner.debug()["snapshot_main_requests"] shouldBe 0L
+        }
+    }
+
+    test("unloading a newly used warm section fences completion early steps and capture-budget progress before publication") {
+        for ((limit, early) in listOf(512 to false, 32768 to false, 32768 to true)) {
+            SectionHarness(searchBatch = 1, maximumCells = limit).use { h ->
+                for (x in 0..3) for (z in -1..0) h.extract(CitizenSnapshotKey(x, z), setOf(3, 4))
+                for (y in 63..64) h.cache.state(h.world, h.world.getBlockAt(2, y, 2).blockData, CivPosition(2, y, 2))
+                val far = AtomicBoolean()
+                val policy = CitizenSnapshotPolicy({ p, _ ->
+                    if (p.x >= 16 && p.y == 64) far.set(true)
+                    p.y == 64 && p.z == 0 && p.x in 12..48
+                }, { _, _ -> true }, supportCost = { _, _ -> 1.0 }, cityId = h.city.id, earlyMovement = early)
+                fun route() = h.route(from = 12.5, to = 48.5, policy = policy)
+                val control = route()
+                h.finish(control)
+                control.continuationReason shouldBe if (limit == 512) "capture-budget" else null
+                far.set(false)
+                val pending = route()
+                repeat(100) {
+                    if (!far.get()) {
+                        h.runWorkers()
+                        if (!far.get()) { h.paper.performTicks(1); h.owner.pulse() }
+                    }
+                }
+                far.get() shouldBe true
+                pending.earlyStartPending shouldBe false
+                // The worker is done. Paper has not accepted its first use of chunk (1,0) yet.
+                h.world.unloadChunk(1, 0)
+                h.owner.removeChunk(h.world.uid, 1, 0)
+                pending.searching shouldBe true
+                repeat(20) { if (pending.searching) h.tick() }
+                pending.failure shouldBe "chunk-unloaded"
+                pending.endpoint shouldBe null
+                pending.forwardProgress shouldBe 0.0
+            }
         }
     }
 
@@ -406,7 +443,7 @@ class CivsNavigationSectionCacheTest : FunSpec({
 })
 
 private class SectionHarness(cityMaximum: Int = 1024, globalMaximum: Int = 8192, refreshTicks: Int = 6000,
-    nativeSteps: Int = 10000) : AutoCloseable {
+    nativeSteps: Int = 10000, searchBatch: Int = 256, maximumCells: Int = 32768) : AutoCloseable {
     val paper = MockBukkitTestRuntime.open(CivsWorksiteServerFixture())
     private val ownerThread = Thread.currentThread()
     val surfaceHeights = hashMapOf<Pair<Int, Int>, Int>()
@@ -435,7 +472,7 @@ private class SectionHarness(cityMaximum: Int = 1024, globalMaximum: Int = 8192,
         maximumSectionsPerCity = cityMaximum, maximumSections = globalMaximum)
     val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) },
         settings = CivsNavigationSettings(snapshotSectionsPerCity = cityMaximum, snapshotSectionsMaximum = globalMaximum,
-            snapshotWarmRadius = 16), snapshotCache = cache)
+            snapshotWarmRadius = 16, searchNodesPerBatch = searchBatch, maximumCapturedBlocks = maximumCells), snapshotCache = cache)
     init { for (x in -3..6) for (z in -3..3) world.loadChunk(x, z) }
 
     fun extract(key: CitizenSnapshotKey, ys: Set<Int>, cityId: UUID = city.id, tick: Long = 0): CitizenSnapshotChunk {

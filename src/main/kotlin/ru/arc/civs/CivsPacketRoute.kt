@@ -280,22 +280,22 @@ internal class CitizenPacketRoute(
     fun expand() {
         if (!searching || asyncCancellation != null) return
         val search = directSearch ?: newSearch().also { directSearch = it }
-        try {
+        val result = try {
             val capture = directCapture
             if (capture != null && !capture.step()) return
-            val result = search.advance(capture?.result.orEmpty(), directPickupAnswer)
-            directPickupAnswer = null
-            directCapture = null
-            recordSearch(result)
-            if (result.pickupCandidate != null) {
-                directPickupAnswer = confirmPickup(result.pickupCandidate)
-            } else if (result.probes.isNotEmpty()) {
-                preparationPhase = "capturing"
-                directCapture = CitizenNavigationCapture(this, result.probes, directTerrain)
-            } else acceptSearch(result)
+            search.advance(capture?.result.orEmpty(), directPickupAnswer)
         } catch (_: CitizenNavigationCaptureLimit) {
-            acceptSearch(search.finishAtBudget("capture-budget"))
+            search.finishAtBudget("capture-budget")
         }
+        directPickupAnswer = null
+        directCapture = null
+        recordSearch(result)
+        if (result.pickupCandidate != null) {
+            directPickupAnswer = confirmPickup(result.pickupCandidate)
+        } else if (result.probes.isNotEmpty()) {
+            preparationPhase = "capturing"
+            directCapture = CitizenNavigationCapture(this, result.probes, directTerrain)
+        } else acceptSearch(result)
     }
 
     internal fun newWorkerSearch(): CitizenNavigationSearch {
@@ -481,6 +481,8 @@ internal class CitizenPacketRoute(
         firstUnavailableBlock = result.firstUnavailableBlock
         result.failure?.let { fail(it); return }
         val steps = result.path?.toMutableList() ?: return
+        if (pickup != null && !result.continuation && (steps.isEmpty() || steps.last().point != pickupEndpoint))
+            return fail("path-changed")
         prepareOriginSteps(steps)
         val walked = earlySteps?.takeIf { forwardProgress > .000001 }
         earlySteps = null

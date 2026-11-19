@@ -8,6 +8,9 @@ import java.util.AbstractMap.SimpleImmutableEntry
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.CancellationException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.floor
 
@@ -460,23 +463,64 @@ internal class CitizenSnapshotCapture @JvmOverloads constructor(
     private fun checkCancelled() { if (cancelled.get()) throw CancellationException("Navigation snapshot retired") }
 }
 
-/** One worker turn on a single job. Return on the first owner decision or newly consumed section. */
+/** Serial FIFO turns for one detached search. Main owns native reads, section publication and actor decisions. */
 internal class CitizenSnapshotSearchBatch(var cursor: CitizenSnapshotCapture, private val search: CitizenNavigationSearch,
     private val combine: Boolean) {
+    val completion = CompletableFuture<CitizenSnapshotRequest>()
+    @Volatile var completedYields = 0L
+        private set
     private var latest: CitizenSearchResult? = null
     private var searchNanos = 0L
+    private var yieldToWorker = false
+    private var usedSections: MutableMap<CitizenSnapshotSectionKey, Long>? = null
+    val sections: Map<CitizenSnapshotSectionKey, Long> get() = usedSections.orEmpty()
     var searchReady = false
         private set
     var capturedBlocks: Int? = null
         private set
     val progress: CitizenSearchResult? get() = latest?.copy(searchNanos = searchNanos)
 
-    fun advance(first: CitizenSnapshotInput): CitizenSnapshotRequest {
+    fun submit(executor: Executor, first: CitizenSnapshotInput) {
+        fun enqueue(input: CitizenSnapshotInput, previous: CitizenSnapshotRequest?) {
+            val caller = Thread.currentThread()
+            var returned = false
+            try {
+                executor.execute {
+                    try {
+                        // Some injected executors run a task inside execute(). Give that caller a bounded turn.
+                        val queued = Thread.currentThread() !== caller || returned
+                        if (previous != null) cursor = cursor.following(requireNotNull(latest).probes)
+                        val request = advance(input)
+                        if (yieldToWorker && queued) {
+                            completedYields++
+                            enqueue(CitizenSnapshotInput(), request)
+                        } else completion.complete(request)
+                    } catch (failure: Throwable) { completion.completeExceptionally(failure) }
+                }
+            } catch (failure: RejectedExecutionException) {
+                // With a full queue the completed search can still return through its ordinary owner handoff.
+                if (previous != null) completion.complete(previous)
+                else {
+                    input.chunks.values.forEach(CitizenSnapshotChunk::releaseSource)
+                    completion.completeExceptionally(failure)
+                }
+            } finally { returned = true }
+        }
+        enqueue(first, null)
+    }
+
+    private fun advance(first: CitizenSnapshotInput): CitizenSnapshotRequest {
+        yieldToWorker = false
+        searchReady = false
         val started = System.nanoTime()
         var input = first
         var rounds = 0
         while (true) {
             val request = cursor.advance(input, search::captured)
+            if (request.sections.isNotEmpty()) {
+                val used = usedSections ?: hashMapOf<CitizenSnapshotSectionKey, Long>().also { usedSections = it }
+                used.putAll(request.sections)
+            }
             capturedBlocks = request.capturedBlocks
             val captures = request.captures
             if (!combine || captures == null) return request
@@ -485,9 +529,10 @@ internal class CitizenSnapshotSearchBatch(var cursor: CitizenSnapshotCapture, pr
             searchNanos += result.searchNanos
             // A single capture/advance pair is indivisible. Between pairs, bound worker occupancy
             // and give other queued residents their turn, even on a completely warm graph.
-            if (result.probes.isEmpty() || result.earlyWalk != null || result.pickupCandidate != null ||
-                request.sections.isNotEmpty() || request.decoded.isNotEmpty() || ++rounds >= 16 ||
-                System.nanoTime() - started >= 4_000_000L) {
+            val needsOwner = result.probes.isEmpty() || result.earlyWalk != null || result.pickupCandidate != null ||
+                request.decoded.isNotEmpty()
+            if (needsOwner || ++rounds >= 16 || System.nanoTime() - started >= 4_000_000L) {
+                yieldToWorker = !needsOwner
                 searchReady = true
                 return request
             }

@@ -932,17 +932,57 @@ class CivsNavigationSnapshotsTest : FunSpec({
             h.allowedZ = 0..8
             val detour = h.request(reuseKey = null, surfaceSpeed = h.footTraffic,
                 allowedPoint = { it.x != 4 || it.z == 8 })
-            h.prepareUntil { detour.searching && detour.nodeCount > 0 }
-            val nearby = h.request(target = CitizenPoint(2.5, 64.0, .5), reuseKey = null, surfaceSpeed = h.footTraffic)
-            h.finish(nearby)
-            nearby.endpoint shouldBe CitizenPoint(2.5, 64.0, .5)
+            var nearbySampled = false
+            val nearby = h.request(target = CitizenPoint(2.5, 64.0, .5), reuseKey = null, surfaceSpeed = h.footTraffic,
+                allowedPoint = { nearbySampled = true; true })
+            repeat(40) { if (!nearbySampled) h.stepWorker() }
+            nearbySampled shouldBe true
             detour.searching shouldBe true
             val published = detour.nodeCount
             detour.cancel()
+            h.finish(nearby)
+            nearby.endpoint shouldBe CitizenPoint(2.5, 64.0, .5)
             h.prepareUntil { h.owner.debug()["jobs"] == 0 }
             detour.nodeCount shouldBe published
             detour.endpoint shouldBe null
             detour.preparationPhase shouldBe "cancelled"
+        }
+    }
+
+    test("an inline executor and a full continuation queue return a resumable bounded worker turn") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+            for (inline in listOf(true, false)) {
+                val terrain = flatSnapshotTerrain(0, 0)
+                terrain.chunks.values.forEach { it.drainExtracted(); it.releaseSource() }
+                val policy = CitizenSnapshotPolicy({ p, _ ->
+                    p.y == 64 && p.x in 2..13 && p.z in 2..13 && (p.x != 7 || p.z == 11)
+                }, { _, _ -> true }, supportCost = { _, _ -> 1.0 })
+                val target = CitizenPoint(13.5, 64.0, 2.5)
+                val search = CitizenNavigationSearch(CitizenPoint(2.5, 64.0, 2.5), target, -64, 320, emptyList(),
+                    CivsNavigationSettings(searchNodesPerBatch = 1))
+                val initial = search.advance(emptyList())
+                val cursor = CitizenSnapshotCapture(initial.probes, terrain, policy, -64, 320, 32768, 1, false)
+                val batch = CitizenSnapshotSearchBatch(cursor, search, combine = true)
+                val queued = ArrayDeque<Runnable>()
+                var calls = 0
+                batch.submit(Executor { task ->
+                    calls++
+                    if (inline) task.run()
+                    else if (calls == 1) queued.addLast(task)
+                    else throw java.util.concurrent.RejectedExecutionException()
+                }, CitizenSnapshotInput())
+                queued.removeFirstOrNull()?.run()
+                batch.completion.join()
+                batch.searchReady shouldBe true
+                calls shouldBe if (inline) 1 else 2
+                var result = requireNotNull(batch.progress)
+                result.probes.isNotEmpty() shouldBe true
+                while (result.probes.isNotEmpty()) {
+                    val next = cursor.following(result.probes).advance(CitizenSnapshotInput(), search::captured)
+                    result = search.advance(requireNotNull(next.captures))
+                }
+                requireNotNull(result.path).last().point shouldBe target
+            }
         }
     }
 
@@ -1585,6 +1625,11 @@ internal class SharedRouteRuntime(private val paper: MockBukkitTestRuntime, sett
     }
 
     fun runNextWorker() = workers.removeFirst().run()
+
+    fun stepWorker() {
+        workers.removeFirstOrNull()?.run()
+        paper.performTicks(1); owner.pulse()
+    }
 
     fun finish(route: CitizenPacketRoute) {
         prepareUntil { !route.searching }
