@@ -351,7 +351,7 @@ internal class CivsCitizenMotion(
             route.motionReady(runtime.navigationTick, now)
         }
         val failure = motion.failure ?: if (runtime.entityCollisions && motion.waitingForCollision) "body-blocked"
-            else if (route.timedOut(now)) "timed-out" else null
+            else if (!motion.finished && route.timedOut(now)) "timed-out" else null
         if (failure != null) {
             routes.finishWander(actor, city, walk, now, failure)
             return false

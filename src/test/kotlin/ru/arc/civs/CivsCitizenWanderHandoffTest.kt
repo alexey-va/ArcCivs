@@ -57,7 +57,7 @@ class CivsCitizenWanderHandoffTest : FunSpec({
         }
     }
 
-    test("simultaneous local arrivals retain the shared two handoff budget and admit the waiting resident next tick") {
+    fun verifySharedHandoffAfter(handoffDelay: Long) {
         residentRuntime(workerId = UUID(0, 42)) { h ->
             val neighbours = listOf(UUID(0, 43), UUID(0, 44))
             h.city = h.city.copy(workers = h.city.workers + neighbours.map { CivWorker(it, "Neighbour", null) })
@@ -80,14 +80,30 @@ class CivsCitizenWanderHandoffTest : FunSpec({
             }
             val waiting = actors.indices.single { actors[it].route === originalRoutes[it] }
             val atEndpoint = actors[waiting].npc.location.point()
-            h.navigate()
+            h.navigate(handoffDelay)
             actors.indices.count { actors[it].route !== originalRoutes[it] } shouldBe 3
+            actors[waiting].route?.wanderWalk shouldBe walks[waiting]
             actors[waiting].npc.location.point() shouldBe atEndpoint
             h.navigate()
             (actors[waiting].npc.location.point().distanceSquared(atEndpoint) in .000001.. .014) shouldBe true
-            walks[waiting].maxHandoffMillis shouldBe 100L
+            walks[waiting].maxHandoffMillis shouldBe handoffDelay + 50L
+
+            // The newly started leg still has to make progress before its own movement deadline.
+            val inTransit = actors[waiting].npc.location.point()
+            h.navigate(3_100)
+            actors[waiting].route shouldBe null
+            actors[waiting].npc.location.point() shouldBe inTransit
+            walks[waiting].legs shouldBe 1
             h.requireNoWanderCredit()
         }
+    }
+
+    test("simultaneous local arrivals retain the shared two handoff budget and admit the waiting resident next tick") {
+        verifySharedHandoffAfter(50L)
+    }
+
+    test("a completed local leg may wait beyond its movement timeout for the next shared handoff") {
+        verifySharedHandoffAfter(3_100L)
     }
 })
 
