@@ -351,7 +351,7 @@ internal class CivsCitizenShelters(
         if (!npc.isValid) return true
         npc.sleepingBed = null
         if (destination != null) npc.teleport(destination)
-        npc.pose = PacketNpcPose.STANDING
+        if (actor.traversal != CitizenRouteAction.CRAWL) npc.pose = PacketNpcPose.STANDING
         if (wasSleeping) CivsDiagnostics.event("citizen_sleep", "city" to actor.cityId, "worker" to actor.workerId, "action" to "wake")
         return true
     }

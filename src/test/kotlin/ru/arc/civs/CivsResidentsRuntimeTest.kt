@@ -5589,11 +5589,13 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
                 every { height } answers { when (npcPose) {
                     PacketNpcPose.STANDING -> 1.8 * npcScale
                     PacketNpcPose.CROUCHING -> 1.5 * npcScale
+                    PacketNpcPose.SWIMMING -> .6 * npcScale
                     PacketNpcPose.SLEEPING -> .2
                 } }
                 every { eyeHeight } answers { when (npcPose) {
                     PacketNpcPose.STANDING -> 1.62 * npcScale
                     PacketNpcPose.CROUCHING -> 1.27 * npcScale
+                    PacketNpcPose.SWIMMING -> .4 * npcScale
                     PacketNpcPose.SLEEPING -> .2
                 } }
                 every { scale } answers { npcScale }

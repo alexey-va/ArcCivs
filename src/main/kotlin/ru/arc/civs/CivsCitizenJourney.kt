@@ -465,13 +465,16 @@ internal fun citizenArrived(from: Location, to: Location): Boolean {
 }
 
 internal class CitizenRoute(val from: CitizenPoint, val target: Location, val chunks: CitizenChunks, val startedAt: Long,
-    val timeoutMillis: Long, val allowedBuildings: Set<UUID>, var motion: CitizenPacketRoute, val trip: CivsPaths.Trip?,
+    timeoutMillis: Long, val allowedBuildings: Set<UUID>, var motion: CitizenPacketRoute, val trip: CivsPaths.Trip?,
     val authored: CivPosition, val intermediate: Boolean = false, val idleAnchor: CivPosition? = null,
     val wanderWalk: CitizenWanderWalk? = null) {
     val demandChunks: CitizenChunks? get() = chunks.takeIf { wanderWalk == null }
     var completion: CitizenNavigationCompletion? = null
     var reachedCargoControl: CivPosition? = null
+    var crawlExitOnly = false
+    var traversalTerritory: CivRouteTerritory? = null
     var gate: UUID? = null
+    var deferredGate: CivPosition? = null
     var triedGates: Set<UUID> = emptySet()
     var planningReported = false
     var mineFailureReported = false
@@ -487,6 +490,8 @@ internal class CitizenRoute(val from: CitizenPoint, val target: Location, val ch
     var progressSinceReplan = 0.0
     var progressTick = 0L
     val timing = CitizenRouteTiming(startedAt, timeoutMillis)
+    private val walkTimeoutMillis = timeoutMillis
+    val timeoutMillis: Long get() = walkTimeoutMillis + motion.traversalMillis
     var preparationReportAfter = startedAt + 2_000
     var preparationRetryAt: Long? = null
     var blockedWaypoint: CitizenPoint? = null
@@ -504,7 +509,7 @@ internal class CitizenRoute(val from: CitizenPoint, val target: Location, val ch
         progressTick = tick
     }
 
-    fun timedOut(now: Long): Boolean = timing.timedOut(now, motion.searching)
+    fun timedOut(now: Long): Boolean = timing.timedOut(now, motion.searching, motion.traversalMillis)
 }
 internal enum class CitizenLabCourierFailureCause { CHUNK_UNLOADED, CAPTURE_BUDGET }
 

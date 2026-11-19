@@ -64,7 +64,9 @@ internal class CitizenRouteTiming(private val startedAt: Long, private val timeo
         return observedElapsed
     }
     fun preparationElapsed(now: Long): Long = if (walkingSince == null) (now - preparingSince).coerceAtLeast(0) else 0L
-    fun timedOut(now: Long, searching: Boolean): Boolean = !searching && walkingSince != null && elapsed(now) > timeoutMillis
+    fun timedOut(now: Long, searching: Boolean): Boolean = timedOut(now, searching, 0)
+    fun timedOut(now: Long, searching: Boolean, extraMillis: Long): Boolean =
+        !searching && walkingSince != null && elapsed(now) > timeoutMillis + extraMillis
 }
 
 internal enum class CitizenNavigationOutcome { PENDING, ARRIVED, CANCELLED, COMPLETED_OUTSIDE_ARRIVAL, TIMED_OUT, STOPPED }

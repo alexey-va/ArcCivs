@@ -7,6 +7,7 @@ import org.bukkit.util.BoundingBox
 import java.util.ArrayDeque
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -71,6 +72,11 @@ internal class CitizenPacketRoute(
     private var directPickupAnswer: Boolean? = null
     private val directTerrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
     private var fallingSpeed = 0.0
+    internal var grapple: CitizenWallGrapple? = null
+        private set
+    internal val nextTraversal: CitizenRouteAction? get() = path.peekFirst()?.action?.takeIf { it.isSpecialTraversal }
+    internal var traversalMillis = 0L
+        private set
     private var reuseObserver: ((List<CitizenPlannedStep>, Set<CivPosition>) -> Unit)? = null
     private var reuseFailure: (() -> Unit)? = null
     private var reusableSteps: List<CitizenPlannedStep>? = null
@@ -235,6 +241,7 @@ internal class CitizenPacketRoute(
     }
 
     fun cancel() {
+        grapple = null
         pickupEndpoint = null
         reuseObserver = null
         reusableSteps = null
@@ -253,9 +260,9 @@ internal class CitizenPacketRoute(
         CitizenPacketRoute(world, from, destination ?: target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings,
             snapshotPolicy = snapshotPolicy, pickup = pickup.takeIf { destination == null || destination.point() == target.point() })
 
-    private fun permits(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to) &&
+    private fun permits(from: CitizenPoint, to: CitizenPoint, height: Double = 1.8): Boolean = stepAllowed(from, to) &&
         (bodyContactAllowed || citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
-            .299, 1.798, .299, avoiding) == null)
+            .299, height - .002, .299, avoiding) == null)
 
     /** One already inspected native walking edge. No request, capture or detached search. */
     internal fun readyWanderStep() {
@@ -294,7 +301,8 @@ internal class CitizenPacketRoute(
 
     internal fun newSearch(roadLookup: CitizenRoadLookup? = null) = CitizenNavigationSearch(origin, pickup?.container?.point() ?: target.point(),
         minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) },
-        settings, corridor, roadLookup, pickup?.container)
+        settings, corridor, roadLookup, pickup?.container, specialTraversal = snapshotPolicy?.specialTraversal == true,
+        traversalAllowed = snapshotPolicy?.traversalAllowed ?: { true })
 
     internal fun attachAsync(cancel: () -> Unit) {
         check(directSearch == null) { "A direct route cannot be submitted after search started" }
@@ -420,7 +428,7 @@ internal class CitizenPacketRoute(
         val steps = result.path?.toMutableList() ?: return
         // A nudge must not introduce a needless centre-and-reverse segment. The shortcut is
         // checked against current native geometry on this owner thread before accepting it.
-        if (steps.size > 1 && steps.first().point.let {
+        if (steps.size > 1 && !steps[0].action.isSpecialTraversal && !steps[1].action.isSpecialTraversal && steps.first().point.let {
                 floor(it.x) == floor(origin.x) && floor(it.z) == floor(origin.z) && it.y == origin.y
             }) {
             val next = steps[1].point
@@ -447,11 +455,19 @@ internal class CitizenPacketRoute(
         var previous = origin
         for (step in steps) {
             path.addLast(Waypoint(previous, step.point, action = step.action))
+            // These actions use fixed travel speeds irrespective of the surface below the packet body.
+            if (step.action == CitizenRouteAction.CRAWL)
+                traversalMillis += 50L * ceil(sqrt(previous.distanceSquared(step.point)) / CITIZEN_CRAWL_STRIDE).toLong()
+            if (step.action == CitizenRouteAction.GRAPPLE)
+                traversalMillis += 50L * (CITIZEN_GRAPPLE_CAST_TICKS +
+                    ceil(abs(previous.y - step.point.y) / CITIZEN_GRAPPLE_STRIDE).toLong() + ceil(1.0 / CITIZEN_GRAPPLE_STRIDE).toLong() +
+                    2 * ceil((180.0 - 65.0) / CITIZEN_TURN_PER_TICK).toLong() + 4)
             previous = step.point
         }
         reusableSteps = steps.takeIf { reuseObserver != null && !result.continuation &&
             it.size in 1..CivsPaths.MAX_TRIP_CELLS &&
             it.all { step -> step.action.isGroundStep } }?.toList()
+        if (traversalMillis != 0L) reuseObserver = null
         searching = false
         continuation = result.continuation
         continuationReason = result.continuationReason
@@ -472,6 +488,7 @@ internal class CitizenPacketRoute(
         if (searching || failure != null || finished) return null
         val observed = CitizenPoint(from.x, from.y, from.z)
         path.firstOrNull()?.observe(observed)
+        if (nextTraversal != null) return moveTraversal(from, path.first, movementAllowed)
         straightenCorridor(observed)
         roundCorner(observed)
         // A large handoff turns in place first. Translating backwards while the body
@@ -514,6 +531,7 @@ internal class CitizenPacketRoute(
             if (segment > 0) straightenCorridor(CitizenPoint(point.x, point.y, point.z))
             var entry = path.firstOrNull()
             if (entry == null) { finishSegment(); break }
+            if (entry.action.isSpecialTraversal) break
             if (entry.action == CitizenRouteAction.STEP && !entry.profileChecked && entry.profileTerrain == null) {
                 entry.profileChecked = true
                 prepareStepProfile(entry, point)
@@ -644,6 +662,95 @@ internal class CitizenPacketRoute(
         return citizenFlatSupportClear(from, to, endpointSupport) { citizenWalkingSupported(world, it) }
     }
 
+    internal fun releaseGrapple() {
+        if (grapple != null) fail("path-changed")
+    }
+
+    internal fun standingExitObstructed() { if (navigating && !searching) fail("path-changed") }
+
+    /** Keep each cast, turn and physical leg in its own packet; never cut the corner through the wall. */
+    private fun moveTraversal(from: Location, entry: Waypoint, movementAllowed: (Location, Location) -> Boolean): Location? {
+        val policy = snapshotPolicy?.takeIf { it.specialTraversal }
+        fun changed(): Location? { fail("path-changed"); return null }
+        if (policy == null) return changed()
+        val at = from.point()
+        val end = entry.point
+        val crawling = entry.action == CitizenRouteAction.CRAWL
+        val height = if (crawling) CITIZEN_CRAWL_HEIGHT else 1.8
+        fun safeFeet(point: CitizenPoint): Boolean {
+            val x = floor(point.x).toInt()
+            val z = floor(point.z).toInt()
+            val y = citizenSupportY(point.y)
+            return y in minimumY until maximumY && citizenChunkReady(world, x shr 4, z shr 4) &&
+                policy.traversalAllowed(CivPosition(x, y, z)) && citizenPacketSupported(world, point, allowClimbable = false) &&
+                travelCost(world.getBlockAt(x, y, z)).isFinite()
+        }
+        fun allowedSweep(a: CitizenPoint, b: CitizenPoint): Boolean {
+            val minFeet = floor(min(a.y, b.y) + .001).toInt()
+            val maxFeet = floor(max(a.y, b.y) + .001).toInt()
+            for (x in floor(min(a.x, b.x) - .299).toInt()..floor(max(a.x, b.x) + .299).toInt())
+                for (z in floor(min(a.z, b.z) - .299).toInt()..floor(max(a.z, b.z) + .299).toInt()) {
+                    if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
+                    for (y in minFeet - 1..floor(max(a.y, b.y) + height - .001).toInt()) {
+                        val cell = CivPosition(x, y, z)
+                        if (y !in minimumY until maximumY || !policy.traversalAllowed(cell) ||
+                            y in minFeet..maxFeet && !allowed(cell) || citizenRouteOpenable(world.getBlockAt(x, y, z).blockData) != null) return false
+                    }
+                }
+            return permits(a, b, height)
+        }
+        val hook = if (crawling) null else grapple ?: CitizenWallGrapple(entry.start, end).also { grapple = it }
+        if (hook != null) {
+            if (at.distanceSquared(hook.feet) > .000001 || !hook.wallClear(world, at, policy.traversalAllowed)) return changed()
+            if (hook.castTicks == 0 && (!safeFeet(at) || !safeFeet(end) || !allowedSweep(at, at) || !allowedSweep(end, end) ||
+                    !citizenPacketBodyClear(world, at, false) || !citizenPacketBodyClear(world, end, false))) return changed()
+        } else if (at.y != end.y || entry.start.y != end.y || abs(floor(entry.start.x) - floor(end.x)) +
+            abs(floor(entry.start.z) - floor(end.z)) > 1 || !safeFeet(at)) return changed()
+        val goal = if (hook != null && !hook.cornerReached) hook.corner else end
+        val dx = goal.x - at.x
+        val dz = goal.z - at.z
+        val overLip = hook != null && hook.descending && !hook.cornerReached
+        val facingX = if (hook == null) dx else (hook.anchor.x - hook.low.x) * (if (overLip) -1 else 1)
+        val facingZ = if (hook == null) dz else (hook.anchor.z - hook.low.z) * (if (overLip) -1 else 1)
+        val yaw = if (abs(facingX) + abs(facingZ) > .00001)
+            Math.toDegrees(atan2(-facingX, facingZ)).toFloat() else from.yaw
+        val pose = from.clone().also {
+            it.yaw = citizenTurn(from.yaw, yaw, CITIZEN_TURN_PER_TICK)
+            val pitch = if (hook == null) 0f else {
+                val eyeToHook = hook.anchor.y - at.y - 1.62
+                val reach = kotlin.math.hypot(hook.anchor.x - at.x, hook.anchor.z - at.z)
+                -Math.toDegrees(atan2(eyeToHook, reach)).toFloat().coerceIn(-62f, 62f)
+            }
+            it.pitch += (pitch - it.pitch).coerceIn(-CITIZEN_TURN_PER_TICK, CITIZEN_TURN_PER_TICK)
+        }
+        if (abs(citizenAngleChange(from.yaw, yaw)) > 65f) { turning = true; return pose }
+        if (hook != null && hook.castTicks < CITIZEN_GRAPPLE_CAST_TICKS) { hook.castTicks++; return pose }
+        val distance = sqrt(at.distanceSquared(goal))
+        val stride = hook?.stride ?: CITIZEN_CRAWL_STRIDE
+        if (stride == 0.0 && hook != null) { hook.pullTicks++; return pose }
+        val b = if (distance <= stride) goal else CitizenPoint(at.x + dx * stride / distance,
+            at.y + (goal.y - at.y) * stride / distance, at.z + dz * stride / distance)
+        if (!allowedSweep(at, b) || !citizenPacketSegmentClear(world, at, b, false, at, height, null) ||
+            crawling && !citizenFlatSupportClear(at, b, supported = ::safeFeet)) return changed()
+        if (b == end && (!safeFeet(b) || (!crawling || path.elementAtOrNull(1)?.action != CitizenRouteAction.CRAWL) &&
+                !citizenPacketBodyClear(world, b, false))) return changed()
+        val next = Location(world, b.x, b.y, b.z, pose.yaw, pose.pitch)
+        if (!movementAllowed(from, next)) { waitingForCollision = true; return null }
+        // A grapple follows two perpendicular legs; projecting its mantle on a tall diagonal loses real progress.
+        forwardProgress += if (hook == null) entry.walked(at, b) else sqrt(at.distanceSquared(b))
+        if (hook != null) {
+            hook.pullTicks++
+            hook.feet = b
+            if (b == hook.corner) hook.cornerReached = true
+        }
+        if (b == end) {
+            path.removeFirst()
+            grapple = null
+            if (path.isEmpty()) finished = true
+        }
+        return next
+    }
+
     private fun gravityStep(entry: Waypoint, y: Double): Boolean = entry.profileTerrain == null && entry.point.y < y - .0001 &&
         entry.action.isGroundStep &&
         (floor(entry.start.x) != floor(entry.point.x) || floor(entry.start.z) != floor(entry.point.z))
@@ -772,10 +879,10 @@ internal class CitizenPacketRoute(
      * body clearance and surface cost. Stairs, ladders and tight corners keep their nodes.
      */
     private fun roundCorner(from: CitizenPoint) {
-        val first = path.firstOrNull()?.takeIf { it.corner } ?: return
+        val first = path.firstOrNull()?.takeIf { it.corner && !it.action.isSpecialTraversal } ?: return
         if (first.behindHighWater(from)) return
         val corner = first.point
-        val next = path.elementAtOrNull(1)?.point ?: return
+        val next = path.elementAtOrNull(1)?.takeUnless { it.action.isSpecialTraversal }?.point ?: return
         if (abs(from.y - corner.y) > .0001 || abs(next.y - corner.y) > .0001) return
         val incoming = org.bukkit.util.Vector(corner.x - from.x, 0.0, corner.z - from.z)
         val outgoing = org.bukkit.util.Vector(next.x - corner.x, 0.0, next.z - corner.z)
@@ -849,6 +956,7 @@ internal class CitizenPacketRoute(
     }
 
     private fun fail(reason: String) {
+        grapple = null
         pickupEndpoint = null
         reuseObserver = null
         reusableSteps = null

@@ -51,7 +51,7 @@ internal class CivsCitizenLife(
             routes.cancelRoute(actor)
             actor.mealVisit = null
             actor.equipmentItems = null
-            actor.npc.setEquipment(EquipmentSlot.HAND, visit.handBefore)
+            actor.equip(EquipmentSlot.HAND, visit.handBefore)
             runtime.cityProvider().firstOrNull { it.id == actor.cityId }?.workers?.firstOrNull { it.id == actor.workerId }
                 ?.let { equipment.syncResident(actor.npc, it, actor.plan) }
         }
@@ -209,14 +209,14 @@ internal class CivsCitizenLife(
             .filter { tavernServingPointUnavailable(keeper, visit, it) == null }
             .minByOrNull { keeper.npc.location.distanceSquared(it.location(world)) }
             ?.also { service.target = it } ?: return failed("no-serving-position")
-        keeper.npc.setEquipment(EquipmentSlot.HAND, ItemStack(Material.valueOf(visit.plan.material)))
+        keeper.equip(EquipmentSlot.HAND, ItemStack(Material.valueOf(visit.plan.material)))
         if (!citizenArrived(keeper.npc.location, target.location(world))) {
             if (keeper.route?.let { it.completion != null || it.timedOut(now) } == true ||
                 keeper.route == null && !routes.startRoute(keeper, world, target, now)) return failed("serving-route-unavailable")
             return true
         }
         routes.cancelRoute(keeper)
-        keeper.npc.setEquipment(EquipmentSlot.HAND, ItemStack(Material.valueOf(visit.plan.material)))
+        keeper.equip(EquipmentSlot.HAND, ItemStack(Material.valueOf(visit.plan.material)))
         if (!threats.visible(keeper.npc.location.add(0.0, keeper.npc.eyeHeight, 0.0), seat.feet.clone().add(0.0, 1.4, 0.0))) return failed("guest-not-visible")
         if (service.arrivedAt == null || now - service.observedAt > 2_000) service.arrivedAt = now
         service.observedAt = now
@@ -406,7 +406,7 @@ internal class CivsCitizenLife(
         if (session.foodSource != null && session.servedAt == null) {
             session.observedAt = now
             runtime.statuses[worker.id] = "waiting"
-            actor.npc.setEquipment(EquipmentSlot.HAND, session.handBefore)
+            actor.equip(EquipmentSlot.HAND, session.handBefore)
             actor.npc.isUsingMainHand = false
             if (session.seatedAt?.let { now - it > 45_000 } == true) {
                 actor.mealVenueRetryAt = now + 30_000
@@ -420,7 +420,7 @@ internal class CivsCitizenLife(
         }
         session.observedAt = now
         runtime.statuses[worker.id] = "eating"
-        actor.npc.setEquipment(EquipmentSlot.HAND, ItemStack(Material.valueOf(session.plan.material)))
+        actor.equip(EquipmentSlot.HAND, ItemStack(Material.valueOf(session.plan.material)))
         actor.npc.isUsingMainHand = true
         if (now >= session.gestureAt) {
             world.playSound(actor.npc.location, Sound.ENTITY_GENERIC_EAT, org.bukkit.SoundCategory.NEUTRAL, .35f, 1f)

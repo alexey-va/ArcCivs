@@ -439,6 +439,13 @@ height limit. Detached standing candidates require the same centre support row
 as packet movement. A tall shape below a carpet cannot offer a waypoint which
 the native mover will immediately reject. Ladder entry, climb and exit are explicit actions: the controller
 centres the actor before climbing. Door opening remains owner-thread movement.
+On public journeys a resident can crawl through a dry one-block-high passage
+with continuous footing, or use a grappling hook at a solid wall. Both actions
+cost more travel time than walking. A reachable open gate remains the usual
+crossing. The hook needs a continuous face and a clear supported landing and
+can cover up to ten blocks of height. The resident casts before pulling up.
+A crawling resident uses a low body and stands up where the ceiling clears.
+Nearby viewers see the hook and rope and the resident's crawling pose.
 Movement revalidates live collision and support before accepting a step and
 spends a tick's remaining distance across clear waypoints, without
 banking time behind an obstruction or cutting through a step or corner.

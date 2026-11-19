@@ -3,6 +3,8 @@ package ru.arc.civs
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.entity.Monster
+import org.bukkit.inventory.EquipmentSlot
+import org.bukkit.inventory.ItemStack
 import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 
@@ -51,6 +53,9 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     val animation = CitizenWorkAnimation()
     val footsteps = CitizenFootsteps()
     var route: CitizenRoute? = null
+    /** Stays with the actual body through route replacement until it can stand on the ground. */
+    var traversal: CitizenRouteAction? = null
+    var crawlEntrance: CivPosition? = null
     /** A requested endpoint owns chunk demand before a native-ready route can be admitted. */
     var pendingChunkTarget: CivPosition? = null
     var pendingGateRetry: CitizenGateRetry? = null
@@ -92,6 +97,25 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var equipmentItems: List<CivResidentItem?>? = null
     var equipmentType: BuildingType? = null
     var careItem: Material? = null
+    var grappleVisual: CitizenGrappleVisual? = null
+    private var mainHand: ItemStack? = null
+    private var offHand: ItemStack? = null
+
+    /** Work and meals may change the equipped item while both hands are on the rope. */
+    fun equip(slot: EquipmentSlot, item: ItemStack) {
+        when (slot) {
+            EquipmentSlot.HAND -> mainHand = item
+            EquipmentSlot.OFF_HAND -> offHand = item
+            else -> { npc.setEquipment(slot, item); return }
+        }
+        if (grappleVisual == null) npc.setEquipment(slot, item)
+    }
+
+    fun restoreHands() {
+        npc.setEquipment(EquipmentSlot.HAND, mainHand ?: ItemStack(citizenTool(plan) ?: Material.AIR))
+        npc.setEquipment(EquipmentSlot.OFF_HAND, offHand ?: ItemStack(Material.AIR))
+    }
+
     var sheltering = false
     var returningToWarehouse = false
     val social = CitizenCampRoutine(workerId)
@@ -151,5 +175,9 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var courierRetryAfter = 0L
 
     fun occupiedBody() = idleNap?.bounds ?: mealVisit?.seat?.takeIf { npc.isSeated }?.bounds
-        ?: sleepPose?.takeIf { sleeping }?.bounds ?: citizenStandingBounds(npc.location, npc.scale)
+        ?: sleepPose?.takeIf { sleeping }?.bounds ?: if (traversal == CitizenRouteAction.CRAWL) {
+            val at = npc.location
+            val half = .3 * npc.scale
+            org.bukkit.util.BoundingBox(at.x - half, at.y, at.z - half, at.x + half, at.y + CITIZEN_CRAWL_HEIGHT * npc.scale, at.z + half)
+        } else citizenStandingBounds(npc.location, npc.scale)
 }

@@ -86,7 +86,7 @@ internal class CivsCitizenPlanning(
             actor.returningToWarehouse = false
             actor.wander = CitizenWander(actor.workerId)
             actor.equipmentItems = null
-            equipment.setEquipment(actor.npc, nextPlan)
+            equipment.setEquipment(actor, nextPlan)
         } else actor.plan = nextPlan
         workRuntime.reconcileMineVisit(actor, city)
         return true

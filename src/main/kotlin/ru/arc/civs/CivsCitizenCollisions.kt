@@ -38,6 +38,7 @@ internal class CivsCitizenCollisions(
         if (!runtime.entityCollisions) return false
         if (runtime.closed.get() || !npc.isValid || npc.isSeated || npc.pose == PacketNpcPose.SLEEPING) return false
         val actor = runtime.actors.values.firstOrNull { it.npc === npc } ?: return false
+        if (actor.traversal != null) return false
         val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
         val from = npc.location
         val to = from.clone().add(impulse)
@@ -72,6 +73,20 @@ internal class CivsCitizenCollisions(
             napSeatStepClear(actor, from, to)
         return citizenResidentStepClear(actor.npc, from, to, shelterOccupied(actor, citizenResidentSweep(actor.npc, from, to))) &&
             residentStepAllowed(actor.npc, from, to)
+    }
+
+    fun canStandAfterCrawl(actor: CitizenActor): Boolean {
+        val feet = actor.npc.location
+        val body = citizenStandingBounds(feet, actor.npc.scale)
+        if (!runtime.entityCollisions) return napSeats.none { (other, bounds) ->
+            other !== actor && other.worldId == actor.worldId && body.overlaps(bounds)
+        }
+        if (shelterOccupied(actor, body).isNotEmpty()) return false
+        return actor.npc.world.getNearbyPlayers(Location(actor.npc.world, body.centerX, body.centerY, body.centerZ),
+            body.widthX / 2, body.height / 2, body.widthZ / 2).none {
+            it.isOnline && it.isValid && !it.isDead && it.gameMode != GameMode.SPECTATOR &&
+                !it.isInsideVehicle && !it.isSleeping && it.isCollidable && body.overlaps(it.boundingBox)
+        }
     }
 
     fun routeMoveAllowed(actor: CitizenActor, from: Location, to: Location): Boolean {
@@ -172,7 +187,7 @@ internal class CivsCitizenCollisions(
     } == true && (actor.sheltering || actor.cycle.phase in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED,
         CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING))
 
-    private fun canYield(actor: CitizenActor): Boolean = travelling(actor) && actor.npc.isValid && !actor.npc.isSeated && !actor.sleeping &&
+    private fun canYield(actor: CitizenActor): Boolean = actor.traversal == null && travelling(actor) && actor.npc.isValid && !actor.npc.isSeated && !actor.sleeping &&
         actor.route?.let { it.completion != null || it.motion.finished || it.motion.failure != null } != true &&
         actor.attacker == null && actor.supplyPickup == null && !logistics.collectedPending(actor) &&
         actor.workerId !in runtime.pendingHarm &&
@@ -320,7 +335,7 @@ internal class CivsCitizenCollisions(
 
     /** An enclosed body may relocate, but its injury, cargo and observed-work receipts stay untouched. */
     private fun recoverTerrainOverlap(actor: CitizenActor, city: Settlement, now: Long): Boolean {
-        if (actor.mineVisit != null) return false
+        if (actor.traversal != null || actor.mineVisit != null) return false
         val clock = recoveryClock()
         if (runtime.recoveryBudget == 0 || actor.nextRecoveryAt?.let { clock < it } == true ||
             life.residentLifePending(actor) || actor.supplyPickup != null || logistics.collectedPending(actor) ||
@@ -360,7 +375,7 @@ internal class CivsCitizenCollisions(
     fun recoverDryPit(actor: CitizenActor, city: Settlement, now: Long): Boolean {
         val npc = actor.npc
         val clock = recoveryClock()
-        if (runtime.recoveryBudget <= 0 || runtime.closed.get() || actor.nextRecoveryAt?.let { clock < it } == true ||
+        if (actor.traversal != null || runtime.recoveryBudget <= 0 || runtime.closed.get() || actor.nextRecoveryAt?.let { clock < it } == true ||
             city.id != actor.cityId || city.pendingDeletion != null || npc.world.uid != city.worldId ||
             actor.worldId != city.worldId || !npc.isValid || npc.isSeated || actor.sleeping || actor.sheltering ||
             actor.attacker != null || actor.mineVisit != null || actor.mineAccess != null ||
@@ -689,7 +704,9 @@ internal class CivsCitizenCollisions(
         val meal = actor.mealVisit
         val posedBody = actor.idleNap?.bounds ?: meal?.seat?.takeIf { actor.npc.isSeated }?.bounds
             ?: actor.sleepPose?.takeIf { actor.sleeping }?.bounds
-        if (posedBody != null) include(posedBody) else includeStanding(actor.npc.location)
+        if (posedBody != null) include(posedBody)
+        else if (actor.traversal == CitizenRouteAction.CRAWL) include(actor.occupiedBody())
+        else includeStanding(actor.npc.location)
         meal?.seat?.let { seat ->
             include(seat.bounds)
             include(diningStandingBounds(meal.seatedFrom ?: seat.approach.location(actor.npc.world), actor.npc.scale))

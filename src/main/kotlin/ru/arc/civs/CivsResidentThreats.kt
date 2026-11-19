@@ -233,7 +233,8 @@ internal class CivsResidentThreats(private val plugin: Plugin,
                 org.bukkit.util.Vector(0.0, -1.0, 0.0), fall.speed + .05, FluidCollisionMode.NEVER, true)
             val destination = at.clone().also { it.y = trace?.hitPosition?.y ?: at.y - fall.speed }
             if (citizenPacketBodyClear(npc.world, CitizenPoint(destination.x, destination.y, destination.z),
-                    false, allowLiquids = true, allowBelowWorld = true))
+                    false, allowLiquids = true, allowBelowWorld = true,
+                    height = if (npc.pose == ru.arc.paper.npc.PacketNpcPose.SWIMMING) CITIZEN_CRAWL_HEIGHT else 1.8))
                 npc.teleport(destination)
         }
     }

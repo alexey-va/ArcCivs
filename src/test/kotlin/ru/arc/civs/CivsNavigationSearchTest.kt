@@ -37,22 +37,35 @@ class CivsNavigationSearchTest : FunSpec({
                 piece(-21, 37, -21, 45), piece(21, 1, 21, 33), piece(21, 35, 21, 45))
             val city = controlSearchCity(barrel).copy(buildings = ring, construction = null, radius = 80)
             val territory = CivRouteTerritory(city)
+            val crest = start.copy(y = 68, z = 0)
+            territory.allows(crest, emptySet(), null) shouldBe false
+            territory.allows(crest, emptySet(), null, wallCrossing = true) shouldBe true
+            val privatePlot = north.copy(id = UUID.randomUUID(), type = BuildingType.TOWN_HALL)
+            CivRouteTerritory(city.copy(buildings = ring + privatePlot))
+                .allows(crest, emptySet(), null, wallCrossing = true) shouldBe false
+            val unfinished = north.copy(phase = BuildingPhase.CONSTRUCTING)
+            CivRouteTerritory(city.copy(buildings = ring - north + unfinished))
+                .allows(crest, emptySet(), null, wallCrossing = true) shouldBe false
             // An opening in the actual ring or a holder within reach across the wall must keep its direct approaches.
             CivRouteTerritory(city.copy(buildings = ring - north)).gateExits(start.point(), barrel, 3.0) shouldBe emptyList()
             territory.gateExits(start.point(), barrel.copy(z = 2), 3.0) shouldBe emptyList()
 
-            fun walk(from: CivPosition, target: CivPosition, food: Boolean): Pair<Boolean, Set<CivPosition>> {
+            fun walk(from: CivPosition, target: CivPosition, food: Boolean, resident: Boolean = false): Pair<Boolean, Set<CivPosition>> {
                 var at = from.location(world)
                 val crossed = mutableSetOf<CivPosition>()
                 val tried = mutableSetOf<UUID>()
-                val allowed: (CivPosition) -> Boolean = { territory.allows(it, emptySet(), null) }
                 repeat(16) {
                     val leg = citizenGateLeg(world, territory, at.point(), target, if (food) 3.0 else 0.0, 96, tried)
+                    val special = resident && leg == null
+                    val allowed: (CivPosition) -> Boolean = { territory.allows(it, emptySet(), null, wallCrossing = special) &&
+                        territory.controls.clear(it) }
                     val pickup = if (food && leg == null) CitizenContainerRouteGoal(target) { p ->
                         civsCanReachContainer(Location(world, p.x, p.y, p.z), target, nearbyFoodPickup = true)
                     } else null
                     val route = CitizenPacketRoute(world, at, (leg?.approach ?: target).location(world), allowed,
-                        { _, _ -> true }, { CivsPaths.ORDINARY_COST }, pickup = pickup)
+                        territory.controls::stepClear, { CivsPaths.ORDINARY_COST }, snapshotPolicy = CitizenSnapshotPolicy(
+                            { p, _ -> allowed(p) }, territory.controls::stepClear, specialTraversal = special, traversalAllowed = allowed),
+                        pickup = pickup)
                     route.prepareSnapshot()
                     if (route.failure != null) {
                         if (leg == null) return false to crossed
@@ -75,11 +88,12 @@ class CivsNavigationSearchTest : FunSpec({
             }
             // The closer eastern gate is physically sealed. Residents use the other crossing in either direction.
             for (y in 64..67) world.getBlockAt(east.entrance.x, y, east.entrance.z).type = Material.STONE
-            walk(start, barrel, true) shouldBe (true to setOf(west.entrance))
+            walk(start, barrel, true, resident = true) shouldBe (true to setOf(west.entrance))
             walk(start, barrel.copy(x = 3), false) shouldBe (true to setOf(west.entrance))
             walk(barrel.copy(x = 3), start, false) shouldBe (true to setOf(west.entrance))
             for (y in 64..67) world.getBlockAt(west.entrance.x, y, west.entrance.z).type = Material.STONE
             walk(start, barrel, true) shouldBe (false to emptySet())
+            walk(start, barrel, true, resident = true) shouldBe (true to emptySet())
 
         }
     }

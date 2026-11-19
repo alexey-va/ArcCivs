@@ -73,6 +73,10 @@ internal class CivsCitizenWork(
 
     fun update(actor: CitizenActor, city: Settlement, world: World, now: Long) {
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
+        if (actor.traversal != null && (actor.route?.motion?.navigating == true || actor.traversal == CitizenRouteAction.GRAPPLE)) {
+            actor.cycle.deferWork(now)
+            return
+        }
         if (!routes.canResetNightShelter(actor)) actor.nightHomeProgress.clear()
         actor.mealVisit?.let { visit ->
             if (visit.arrivedAt != null && (!life.lifeActorReady(actor) || visit.seat == null &&
@@ -309,6 +313,7 @@ internal class CivsCitizenWork(
     }
 
     fun arriveForWork(actor: CitizenActor, city: Settlement, worker: CivWorker, now: Long) {
+        if (actor.traversal != null) return
         actor.arrivalWait = null
         actor.route?.takeIf { it.motion.forwardProgress > 0.0 }?.let { route ->
             val actual = actor.npc.location.point()
@@ -484,7 +489,7 @@ internal class CivsCitizenWork(
         if (!actor.npc.isValid) return
         val hand = material?.let(::ItemStack) ?: actor.equipmentItems?.getOrNull(4)?.stack()
             ?: ItemStack(citizenTool(actor.plan) ?: Material.AIR)
-        actor.npc.setEquipment(EquipmentSlot.HAND, hand)
+        actor.equip(EquipmentSlot.HAND, hand)
     }
 
     /** One small contact cue after the durable receipt; no looping particles or world mutation. */
@@ -530,7 +535,7 @@ internal class CivsCitizenWork(
         if (material.isAir) return
         for (actor in runtime.actors.values.sortedBy { it.workerId }) {
             val player = constructionBuilder(actor, city, orderId) ?: continue
-            actor.npc.setEquipment(EquipmentSlot.HAND, ItemStack(citizenPlacementItem(material) ?: Material.AIR))
+            actor.equip(EquipmentSlot.HAND, ItemStack(citizenPlacementItem(material) ?: Material.AIR))
             lookAtBlock(player, position)
             player.swingMainHand()
             leisure.speak(actor, CitizenVoiceEvent.WORK)

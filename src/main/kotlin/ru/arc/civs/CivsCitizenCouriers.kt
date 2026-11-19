@@ -102,7 +102,7 @@ internal class CivsCitizenCouriers(
     }
 
     private fun sourceReady(actor: CitizenActor, city: Settlement, worker: CivWorker): Boolean {
-        if (actor.cityId != city.id || worker.id != actor.workerId || worker.cargo != null || CivsResidents.isChild(worker) ||
+        if (actor.traversal != null || actor.cityId != city.id || worker.id != actor.workerId || worker.cargo != null || CivsResidents.isChild(worker) ||
             actor.plan.pendingStockDelivery != null ||
             !actor.npc.isValid || actor.npc.world.uid != city.worldId || actor.sleeping || actor.sheltering ||
             actor.attacker != null || actor.workerId in runtime.pendingHarm || actor.supplyPickup != null || actor.foodSource != null ||
@@ -134,7 +134,7 @@ internal class CivsCitizenCouriers(
     }
 
     fun courierMeetsSource(courier: CitizenActor, source: CitizenActor): Boolean {
-        if (courier.npc.world.uid != source.npc.world.uid ||
+        if (courier.traversal != null || source.traversal != null || courier.npc.world.uid != source.npc.world.uid ||
             courier.npc.location.distanceSquared(source.npc.location) > 2.5 * 2.5 ||
             !citizenPacketBodyClear(courier.npc.world, courier.npc.location.point(), false)) return false
         return courierInteractionClear(courier.npc.location.clone().add(0.0, courier.npc.eyeHeight, 0.0), source)

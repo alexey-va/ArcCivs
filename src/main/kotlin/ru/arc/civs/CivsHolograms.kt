@@ -67,7 +67,9 @@ class CivsHolograms internal constructor(
 
     internal constructor(plugin: Plugin, tasks: LifecycleTaskScope, text: CivsText, citizens: CivsCitizens, work: BudgetedTaskQueue) :
         this(plugin, tasks, text, citizens::visibleHologramSnapshots, PaperPacketDisplays(plugin, "civs-residents", work),
-            work, citizens::visibleWorkplaceSnapshots)
+            work, citizens::visibleWorkplaceSnapshots) {
+        citizens.traversal.displays = displays
+    }
 
     private data class Desired(val snapshot: CivsNpcHologramSnapshot, val text: Component, val vitals: Component,
         private val textInputs: List<String> = snapshot.statusInputs.toList()) {

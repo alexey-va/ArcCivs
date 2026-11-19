@@ -33,19 +33,41 @@ internal data class CitizenTerrainBlock(
 }
 
 internal enum class CitizenRouteAction {
-    WALK, STEP, LADDER_ENTER, CLIMB, LADDER_EXIT;
+    WALK, STEP, LADDER_ENTER, CLIMB, LADDER_EXIT, GRAPPLE, CRAWL;
 
     val isGroundStep: Boolean get() = this == WALK || this == STEP
+    val isSpecialTraversal: Boolean get() = this == CRAWL || this == GRAPPLE
     val alignsToLadder: Boolean get() = this == LADDER_ENTER || this == CLIMB
 }
+
+internal const val CITIZEN_CRAWL_HEIGHT = .6
+internal const val CITIZEN_CRAWL_STRIDE = .065
+internal const val CITIZEN_GRAPPLE_STRIDE = .035
+internal const val CITIZEN_GRAPPLE_CAST_TICKS = 12
+internal const val CITIZEN_GRAPPLE_MAX_RISE = 10
+// Native working travel spends .215 × .8 blocks per tick before the surface multiplier.
+private const val CITIZEN_WORK_WALK_STRIDE = .215 * .8
+
+/** A broad solid face reaches the exact near edge of the cap and supports the centre of the landing. */
+internal fun citizenHookFace(minX: Double, minY: Double, minZ: Double, maxX: Double, maxY: Double, maxZ: Double,
+                             dx: Int, dz: Int): Boolean =
+    minY <= .001 && maxY >= .5 && minX <= .5 && maxX >= .5 && minZ <= .5 && maxZ >= .5 &&
+        when {
+            dx != 0 && dz == 0 -> minZ <= .3 && maxZ >= .7 && (if (dx > 0) minX <= .001 else maxX >= .999)
+            dz != 0 && dx == 0 -> minX <= .3 && maxX >= .7 && (if (dz > 0) minZ <= .001 else maxZ >= .999)
+            else -> false
+        }
+
+internal fun citizenGrappleAnchor(low: CitizenPoint, high: CitizenPoint) = CitizenPoint(
+    (low.x + high.x) / 2, high.y - .12, (low.z + high.z) / 2)
 internal data class CitizenSearchNode(val x: Int, val y: Double, val z: Int,
     val climbing: Boolean = false, val initial: Boolean = false) {
     @Transient private var position: CitizenPoint? = null
     fun point() = position ?: CitizenPoint(x + .5, y, z + .5).also { position = it }
 }
 internal class CitizenSearchBounds private constructor(private val minimum: CitizenPoint, private val maximum: CitizenPoint) {
-    fun contains(point: CitizenPoint): Boolean = point.x in minimum.x..maximum.x &&
-        point.y in minimum.y..maximum.y && point.z in minimum.z..maximum.z
+    fun containsColumn(point: CitizenPoint): Boolean = point.x in minimum.x..maximum.x && point.z in minimum.z..maximum.z
+    fun contains(point: CitizenPoint): Boolean = containsColumn(point) && point.y in minimum.y..maximum.y
 
     companion object {
         fun between(from: CitizenPoint, to: CitizenPoint, horizontalMargin: Int, verticalMargin: Int) = CitizenSearchBounds(
@@ -54,11 +76,12 @@ internal class CitizenSearchBounds private constructor(private val minimum: Citi
     }
 }
 internal data class CitizenSearchProbe(val node: CitizenSearchNode, val from: CitizenPoint, val incoming: Boolean = false,
-    val corridor: CitizenSearchCorridor? = null, val bounds: CitizenSearchBounds? = null)
+    val corridor: CitizenSearchCorridor? = null, val bounds: CitizenSearchBounds? = null,
+    val specialTraversal: Boolean = false, val refiningGrapple: Boolean = false)
 internal data class CitizenSearchEdge(val node: CitizenSearchNode, val action: CitizenRouteAction, val permitted: Boolean)
 internal data class CitizenPlannedStep(val point: CitizenPoint, val action: CitizenRouteAction)
 internal data class CitizenSearchCapture(val probe: CitizenSearchProbe,
-    val blocks: Map<CivPosition, CitizenTerrainBlock>, val edges: List<CitizenSearchEdge>)
+    val blocks: Map<CivPosition, CitizenTerrainBlock>, val edges: List<CitizenSearchEdge>, val deferredGrapple: Boolean = false)
 internal data class CitizenSearchResult(val probes: List<CitizenSearchProbe>, val nodes: Int,
     val path: List<CitizenPlannedStep>? = null, val failure: String? = null, val searchNanos: Long = 0,
     val continuation: Boolean = false, val blockedPositions: List<CivPosition> = emptyList(),
@@ -83,8 +106,11 @@ internal class CitizenNavigationSearch(
     private val preferredCorridor: CitizenSearchCorridor? = null,
     roadCorridor: CitizenRoadLookup? = null,
     private val pickupContainer: CivPosition? = null,
+    private val specialTraversal: Boolean = false,
+    private val traversalAllowed: (CivPosition) -> Boolean = { true },
 ) {
-    private data class Entry(val node: CitizenSearchNode, val cost: Double, val score: Double, val order: Int)
+    private data class Entry(val node: CitizenSearchNode, val cost: Double, val score: Double, val order: Int,
+                             val special: Boolean = false)
     private data class Parent(val node: CitizenSearchNode, val action: CitizenRouteAction)
     private val initialBounds = CitizenSearchBounds.between(origin, target, settings.initialHorizontalMargin, settings.initialVerticalMargin)
     private val start = CitizenSearchNode(floor(origin.x).toInt(), origin.y, floor(origin.z).toInt(), initial = true)
@@ -99,12 +125,14 @@ internal class CitizenNavigationSearch(
     private val deferred = mutableListOf<Entry>()
     private val costs = hashMapOf(start to 0.0)
     private val parents = hashMapOf<CitizenSearchNode, Parent>()
+    private val proneOnly = hashSetOf<CitizenSearchNode>()
     private var closestDistanceSquared = origin.distanceSquared(target)
     private val neighbourhoods = hashMapOf<CitizenSearchNode, CitizenSearchCapture>()
     private val geometry = CitizenSearchGeometry(minimumY, maximumY, avoiding)
     private var pending = emptyMap<CitizenSearchNode, Entry>()
     private var goal: Entry? = null
     private var checkingPickup: Entry? = null
+    private var originInspected = !specialTraversal
     private val checkedPickupFeet = pickupContainer?.let { hashSetOf<CitizenPoint>() }
     private var serial = 0
     private var visited = 0
@@ -131,7 +159,7 @@ internal class CitizenNavigationSearch(
     /** Read only between search slices on the same worker. Initial and incoming probes are directional. */
     fun captured(probe: CitizenSearchProbe): CitizenSearchCapture? =
         if (probe.incoming || probe.node.initial) null
-        else neighbourhoods[probe.node]?.takeIf { it.probe.from == probe.from }
+        else neighbourhoods[probe.node]?.takeIf { !it.deferredGrapple && it.probe.from == probe.from }
 
     @JvmOverloads
     fun advance(captures: List<CitizenSearchCapture>, pickupAccepted: Boolean? = null): CitizenSearchResult {
@@ -147,10 +175,13 @@ internal class CitizenNavigationSearch(
         checkingPickup?.let { entry ->
             checkingPickup = null
             if (checkNotNull(pickupAccepted)) {
-                val path = pathTo(entry.node) ?: return result(failure = "broken-path")
-                return result(path = path)
-            }
-            open += entry
+                if (!openCheaperWalks(entry)) {
+                    val path = pathTo(entry.node) ?: return result(failure = "broken-path")
+                    return result(path = path)
+                }
+                // The native owner has reserved these feet. A budget cannot discard this proven handoff.
+                goal = entry
+            } else open += entry
         }
         roadLookup?.let { lookup ->
             roadLookup = null
@@ -165,11 +196,23 @@ internal class CitizenNavigationSearch(
                 }
                 continue
             }
-            neighbourhoods[capture.probe.node] = capture
+            if (!capture.deferredGrapple || neighbourhoods[capture.probe.node]?.deferredGrapple != false)
+                neighbourhoods[capture.probe.node] = capture
         }
         for (previous in pending.values) {
             if (costs[previous.node] != previous.cost) continue
             val capture = neighbourhoods[previous.node] ?: continue
+            if (previous.node.initial && !originInspected) {
+                originInspected = true
+                val terrain = geometry.also { it.blocks = capture.blocks }
+                if (!terrain.bodyClear(origin)) proneOnly += start
+                else if (terrain.supported(origin, true) && (pickupContainer?.let {
+                        pickupDistanceSquared(origin, it) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH
+                    } ?: (atGoal(start) && terrain.bodyClear(target) && terrain.stepClear(origin, target, CitizenRouteAction.WALK)))) {
+                    open += previous
+                    continue
+                }
+            }
             expand(previous, capture)?.let { return result(failure = it) }
         }
         pending = emptyMap()
@@ -184,6 +227,10 @@ internal class CitizenNavigationSearch(
             }
             var entry = open.poll()
             while (entry != null && costs[entry.node] != entry.cost) entry = open.poll()
+            if (goal?.let(::openCheaperWalks) == true) {
+                if (entry != null) open += entry
+                continue
+            }
             if (entry == null) {
                 if (requested.isEmpty() && goal == null && roadRouting == CitizenRoadRouting.ROAD) {
                     beginOrdinarySearch()
@@ -208,7 +255,7 @@ internal class CitizenNavigationSearch(
                 break
             }
             val node = entry.node
-            if (pickupContainer != null) {
+            if (pickupContainer != null && node !in proneOnly && (!node.initial || originInspected)) {
                 val feet = if (node.initial) origin else node.point()
                 if (pickupDistanceSquared(feet, pickupContainer) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH &&
                     feet !in requireNotNull(checkedPickupFeet)) {
@@ -220,11 +267,11 @@ internal class CitizenNavigationSearch(
                 }
             }
             if (++visited > settings.maximumNodes) return finishAtBudget("search-budget", "node-budget")
-            if (pickupContainer == null && atGoal(node)) {
+            if (pickupContainer == null && (!node.initial || originInspected) && atGoal(node)) {
                 if (goal?.let { entry.cost < it.cost } != false) goal = entry
             } else {
                 val known = neighbourhoods[node]
-                if (known == null) {
+                if (known == null || known.deferredGrapple) {
                     if (requested.isEmpty()) firstRequestedScore = entry.score
                     requested[node] = entry
                 } else expand(entry, known)?.let { return result(failure = it) }
@@ -245,10 +292,12 @@ internal class CitizenNavigationSearch(
         if (requested.isNotEmpty()) return result(buildList {
             addAll(requested.keys.map { CitizenSearchProbe(it, if (it == start) origin else it.point(),
                 corridor = corridor.takeUnless { widerSearch },
-                bounds = initialBounds.takeIf { corridor == null && !widerSearch }) })
+                bounds = initialBounds.takeIf { corridor == null && !widerSearch }, specialTraversal = specialTraversal,
+                refiningGrapple = neighbourhoods[it]?.deferredGrapple == true) })
             if (inspectEndpoint) {
                 inspectEndpoint = false
-                add(CitizenSearchProbe(CitizenSearchNode(floor(target.x).toInt(), target.y, floor(target.z).toInt()), target, incoming = true))
+                add(CitizenSearchProbe(CitizenSearchNode(floor(target.x).toInt(), target.y, floor(target.z).toInt()), target,
+                    incoming = true, specialTraversal = specialTraversal))
             }
         })
         val found = goal ?: return when {
@@ -263,9 +312,17 @@ internal class CitizenNavigationSearch(
     /** Keep useful, already validated progress when a finite search fills its memory allowance.
      * The caller must walk this segment and continue to the original goal; it is not an arrival. */
     @JvmOverloads
-    fun finishAtBudget(reason: String, searchStop: String = reason): CitizenSearchResult =
-        partial(if (isolatedGoalDistance != null) "no-path" else reason,
+    fun finishAtBudget(reason: String, searchStop: String = reason): CitizenSearchResult {
+        if (specialTraversal && !cancelled.get()) {
+            // A complete checked crossing remains usable when a cheaper detour consumes the remaining budget.
+            val reached = goal?.node ?: if (pickupContainer == null)
+                parents.keys.asSequence().filter(::atGoal).minByOrNull { costs.getValue(it) } else null
+            reached?.let { pathTo(it) }?.let { return CitizenSearchResult(emptyList(), visited, path = it, roadRouting = roadRouting,
+                searchStop = searchStop, firstUnavailableBlock = firstUnavailableBlock) }
+        }
+        return partial(if (isolatedGoalDistance != null) "no-path" else reason,
             if (sqrt(origin.distanceSquared(target)) <= settings.closeRouteDistance) MINIMUM_PARTIAL_GAIN else 2.0, searchStop)
+    }
 
     /** Isolation proves failure, not that the first discovered step is the closest reachable point.
      * Stop early only after native progress reaches the endpoint probe's geometric lower bound. */
@@ -300,7 +357,7 @@ internal class CitizenNavigationSearch(
         val reach = if (pickupContainer == null) 0.0 else CITIZEN_BLOCK_REACH
         val distance = max(0.0, sqrt(pickupContainer?.let { pickupDistanceSquared(origin, it) } ?: origin.distanceSquared(target)) - reach)
         if (distance < minimumGain) return null
-        return costs.keys.asSequence().filter { it != start && it in parents }
+        return costs.keys.asSequence().filter { it != start && it in parents && it !in proneOnly }
             .filter { distance - max(0.0, sqrt(distanceToTargetSquared(it)) - reach) >= minimumGain }
             .minWithOrNull(compareBy<CitizenSearchNode> { distanceToTargetSquared(it) }.thenBy { costs.getValue(it) })
     }
@@ -313,7 +370,7 @@ internal class CitizenNavigationSearch(
         return dx * dx + dy * dy + dz * dz
     }
 
-    private fun atGoal(node: CitizenSearchNode): Boolean = node.x == floor(target.x).toInt() &&
+    private fun atGoal(node: CitizenSearchNode): Boolean = node !in proneOnly && node.x == floor(target.x).toInt() &&
         node.z == floor(target.z).toInt() && abs(node.y - target.y) <= .5
 
     private fun pathTo(endpoint: CitizenSearchNode): List<CitizenPlannedStep>? {
@@ -343,12 +400,22 @@ internal class CitizenNavigationSearch(
         if (!terrain.loaded(previous.node.x, floor(previous.node.y).toInt(), previous.node.z))
             return if (roadRouting == CitizenRoadRouting.ROAD) null else "chunk-unloaded"
         val startPoint = start.point()
+        val prone = specialTraversal && (previous.node in proneOnly || previous.node.initial && !terrain.bodyClear(from))
         for (edge in capture.edges) {
             if (cancelled.get()) return "cancelled"
             val next = edge.node
             if (!edge.permitted || next == previous.node) continue
             val point = next.point()
-            if (!terrain.bodyClear(point) || !terrain.stepClear(from, point, edge.action)) {
+            val standing = terrain.bodyClear(point)
+            val action = when {
+                edge.action == CitizenRouteAction.GRAPPLE -> edge.action.takeIf { specialTraversal && !prone && standing &&
+                    terrain.grappleClear(from, point, traversalAllowed) }
+                !prone && standing && terrain.stepClear(from, point, edge.action) -> edge.action
+                specialTraversal && edge.action == CitizenRouteAction.WALK &&
+                    terrain.crawlClear(from, point, traversalAllowed) -> CitizenRouteAction.CRAWL
+                else -> null
+            }
+            if (action == null) {
                 rememberObstacles(capture.blocks, from.y, next.y)
                 continue
             }
@@ -356,14 +423,25 @@ internal class CitizenNavigationSearch(
                 abs(point.y - start.y) > 96) { clipped = true; continue }
             val weight = capture.blocks[next.x, citizenSupportY(next.y), next.z]?.cost
                 ?: Double.POSITIVE_INFINITY
-            if (!weight.isFinite()) continue
-            val cost = previous.cost + sqrt(from.distanceSquared(point)) * weight.coerceIn(1.0, CivsPaths.ORDINARY_COST)
+            if (!weight.isFinite() || action.isSpecialTraversal &&
+                capture.blocks[previous.node.x, citizenSupportY(from.y), previous.node.z]?.cost?.isFinite() != true) continue
+            val distance = when (action) {
+                CitizenRouteAction.GRAPPLE -> CITIZEN_WORK_WALK_STRIDE * (CITIZEN_GRAPPLE_CAST_TICKS +
+                    (abs(point.y - from.y) + 1) / CITIZEN_GRAPPLE_STRIDE)
+                CitizenRouteAction.CRAWL -> sqrt(from.distanceSquared(point)) * (CITIZEN_WORK_WALK_STRIDE / CITIZEN_CRAWL_STRIDE)
+                else -> sqrt(from.distanceSquared(point))
+            }
+            val cost = previous.cost + distance * weight.coerceIn(1.0, CivsPaths.ORDINARY_COST)
             if (cost >= (costs[next] ?: Double.POSITIVE_INFINITY)) continue
             costs[next] = cost
-            parents[next] = Parent(previous.node, edge.action)
-            if (next != start) closestDistanceSquared = minOf(closestDistanceSquared, point.distanceSquared(target))
-            val entry = Entry(next, cost, cost + heuristic(next), serial++)
-            if (widerSearch || inCorridor(point)) open += entry else deferred += entry
+            parents[next] = Parent(previous.node, action)
+            if (!standing) proneOnly += next
+            if (standing && next != start) closestDistanceSquared = minOf(closestDistanceSquared, point.distanceSquared(target))
+            val special = previous.special || action.isSpecialTraversal
+            val entry = Entry(next, cost, cost + heuristic(next), serial++, special)
+            // A checked wall top belongs to the same horizontal corridor even above its normal walking envelope.
+            if (widerSearch || inCorridor(point) || special && corridor == null && initialBounds.containsColumn(point)) open += entry
+            else deferred += entry
         }
         return null
     }
@@ -381,6 +459,16 @@ internal class CitizenNavigationSearch(
 
     private fun inCorridor(point: CitizenPoint): Boolean =
         corridor?.contains(point) ?: initialBounds.contains(point)
+
+    private fun openCheaperWalks(found: Entry): Boolean {
+        if (!found.special || widerSearch || deferred.none {
+                !it.special && it.score < found.cost && costs[it.node] == it.cost }) return false
+        widerSearch = true
+        if (roadRouting == CitizenRoadRouting.ROAD) roadRouting = CitizenRoadRouting.FALLBACK
+        open.addAll(deferred)
+        deferred.clear()
+        return true
+    }
 
     /** Keep native captures and every boundary edge; a stale road gets the usual bounded search, not another hint. */
     private fun beginOrdinarySearch() {
@@ -414,7 +502,9 @@ internal class CitizenNavigationSearch(
         val isolated = blocks.getValue(feet).allowed.not() || !terrain.bodyClear(target) || capture.edges.none { edge ->
             if (!edge.permitted) false else {
                 val point = edge.node.point()
-                terrain.bodyClear(point) && terrain.stepClear(point, target, edge.action)
+                if (edge.action == CitizenRouteAction.GRAPPLE) specialTraversal && terrain.grappleClear(point, target, traversalAllowed)
+                else terrain.bodyClear(point) && terrain.stepClear(point, target, edge.action) ||
+                    specialTraversal && edge.action == CitizenRouteAction.WALK && terrain.crawlClear(point, target, traversalAllowed)
             }
         }
         if (!isolated) return null
@@ -531,7 +621,135 @@ internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivP
         if (next.loaded && next.climbable && next.allowed && citizenStepHeightAllowed(node.y, (base + dy).toDouble()))
             add(node.x, (base + dy).toDouble(), node.z, true, 0)
     }
+    if (probe.specialTraversal && !onLadder && probe.from == node.point() && blocks.grappleStandingRoom(node)) {
+        for ((dx, dz) in grappleDirections) {
+            val x = node.x + dx
+            val z = node.z + dz
+            val up = blocks.mayGrappleUp(node, dx, dz)
+            val down = blocks.mayGrappleDown(node, dx, dz)
+            if (!up && !down) continue
+            val lowest = if (down) base - CITIZEN_GRAPPLE_MAX_RISE - 1 else base
+            val highest = if (up) base + CITIZEN_GRAPPLE_MAX_RISE else base - 1
+            for (by in maxOf(minimumY, lowest)..minOf(maximumY - 2, highest)) {
+                val floor = blocks[x, by, z] ?: continue
+                if (!floor.loaded || floor.liquid || floor.door || floor.hot) continue
+                for (box in floor.boxes) {
+                    if (.5 !in box.minX..box.maxX || .5 !in box.minZ..box.maxZ || box.maxY <= 0) continue
+                    val height = by + box.maxY
+                    val rise = height - node.y
+                    if (citizenStepHeightAllowed(height, node.y) || abs(rise) > CITIZEN_GRAPPLE_MAX_RISE ||
+                        rise > 0 && !up || rise < 0 && !down) continue
+                    val feet = blocks[x, kotlin.math.floor(height + .001).toInt(), z] ?: continue
+                    if (!feet.loaded || !feet.allowed || feet.liquid || feet.door || feet.boxes.any {
+                            it.minY <= .001 && .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ && kotlin.math.floor(height + .001) + it.maxY > height + .001
+                        }) continue
+                    val candidate = blocks.searchCandidateNode(x, height, z, false)
+                    val other = candidate.point()
+                    val low = if (rise > 0) probe.from else other
+                    val high = if (rise > 0) other else probe.from
+                    if (!blocks.grappleFace(low, high)) continue
+                    val action = CitizenRouteAction.GRAPPLE
+                    if (result.none { it.node == candidate && it.action == action })
+                        result += CitizenSearchEdge(candidate, action, stepAllowed == null ||
+                            citizenSearchEdgePermitted(probe, other, action, stepAllowed))
+                }
+            }
+        }
+    }
     return result
+}
+
+private val grappleDirections = arrayOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
+
+private fun CitizenTerrainBox.hookFace(dx: Int, dz: Int) =
+    citizenHookFace(minX, minY, minZ, maxX, maxY, maxZ, dx, dz)
+
+private fun CitizenTerrainBlock?.wallFace(dx: Int, dz: Int): Boolean =
+    this != null && loaded && !door && !liquid && !hot && boxes.any { it.hookFace(dx, dz) }
+
+/** Prefetch also proposes supports buried inside floors. A hook can only start from standing feet. */
+private fun Map<CivPosition, CitizenTerrainBlock>.grappleStandingRoom(node: CitizenSearchNode): Boolean {
+    val y = floor(node.y + .001).toInt()
+    if (this[node.x, y, node.z]?.allowed != true) return false
+    for (row in y - 1..floor(node.y + 1.799).toInt()) {
+        val b = this[node.x, row, node.z] ?: return false
+        if (!b.loaded || b.liquid && row + 1 > node.y + .001 ||
+            b.boxes.any { it.maxX > .201 && it.minX < .799 && it.maxZ > .201 && it.minZ < .799 &&
+                row + it.maxY > node.y + .001 && row + it.minY < node.y + 1.799 }) return false
+    }
+    return true
+}
+
+private fun Map<CivPosition, CitizenTerrainBlock>.mayGrappleUp(node: CitizenSearchNode, dx: Int, dz: Int): Boolean {
+    val y = floor(node.y + .001).toInt()
+    return this[node.x + dx, y + 1, node.z + dz].wallFace(dx, dz) &&
+        this[node.x + dx, y, node.z + dz].wallFace(dx, dz)
+}
+
+private fun Map<CivPosition, CitizenTerrainBlock>.mayGrappleDown(node: CitizenSearchNode, dx: Int, dz: Int): Boolean {
+    val y = citizenSupportY(node.y)
+    val shaft = this[node.x + dx, y, node.z + dz] ?: return false
+    if (!shaft.loaded || !shaft.allowed || shaft.liquid || shaft.door ||
+        shaft.boxes.any { .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ }) return false
+    val below = this[node.x + dx, y - 1, node.z + dz] ?: return false
+    return below.loaded && !below.liquid && !below.door && below.boxes.none {
+        .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ && citizenStepHeightAllowed(node.y, y - 1 + it.maxY)
+    } && this[node.x, y, node.z].wallFace(-dx, -dz)
+}
+
+/** Ordinary neighbourhoods stay 3×3×7. Only a real adjacent face/drop needs the taller local capture. */
+internal fun citizenGrappleRows(probe: CitizenSearchProbe, blocks: Map<CivPosition, CitizenTerrainBlock>,
+                                allowed: (CivPosition) -> Boolean): IntRange? {
+    if (!probe.specialTraversal || probe.from != probe.node.point() || probe.node.climbing ||
+        !blocks.grappleStandingRoom(probe.node)) return null
+    val node = probe.node
+    val y = floor(node.y).toInt()
+    var first = y - 3
+    var last = y + 3
+    for ((dx, dz) in grappleDirections) {
+        val x = node.x + dx
+        val z = node.z + dz
+        if (blocks.mayGrappleUp(node, dx, dz) && blocks[x, y + 2, z].wallFace(dx, dz) &&
+            allowed(CivPosition(x, y + 1, z))) {
+            val above = if (blocks[x, y + 3, z].wallFace(dx, dz)) {
+                if (blocks[x, y + 5, z].wallFace(dx, dz)) CITIZEN_GRAPPLE_MAX_RISE + 2 else 6
+            } else 5
+            last = maxOf(last, y + above)
+        }
+        if (blocks.mayGrappleDown(node, dx, dz) && allowed(CivPosition(node.x, citizenSupportY(node.y), node.z)) &&
+            blocks[x, y - 3, z]?.let { it.loaded && !it.liquid && !it.door &&
+                it.boxes.none { box -> .5 in box.minX..box.maxX && .5 in box.minZ..box.maxZ } } == true)
+            first = minOf(first, y - if (blocks[x, y - 5, z]?.let { it.loaded && !it.liquid &&
+                it.boxes.none { box -> .5 in box.minX..box.maxX && .5 in box.minZ..box.maxZ } } == true &&
+                blocks[x, y - 4, z]?.boxes?.none { box -> .5 in box.minX..box.maxX && .5 in box.minZ..box.maxZ } == true)
+                CITIZEN_GRAPPLE_MAX_RISE + 2 else 5)
+    }
+    return if (first == y - 3 && last == y + 3) null else first..last
+}
+
+private fun Map<CivPosition, CitizenTerrainBlock>.grappleFace(low: CitizenPoint, high: CitizenPoint): Boolean {
+    val x = floor(high.x).toInt()
+    val z = floor(high.z).toInt()
+    val dx = (high.x - low.x).toInt()
+    val dz = (high.z - low.z).toInt()
+    val cap = citizenSupportY(high.y)
+    for (y in floor(low.y + .001).toInt()..cap) {
+        val wall = this[x, y, z] ?: return false
+        if (!wall.loaded || wall.liquid || wall.door || wall.hot || wall.boxes.none {
+                it.hookFace(dx, dz) && if (y == cap) abs(y + it.maxY - high.y) < .001 else it.maxY >= .999
+            }) return false
+    }
+    return true
+}
+
+/** Check the actual bent path in its travel direction, including reverse endpoint inspection. */
+internal fun citizenSearchEdgePermitted(probe: CitizenSearchProbe, other: CitizenPoint, action: CitizenRouteAction,
+                                       allowed: (CitizenPoint, CitizenPoint) -> Boolean): Boolean {
+    val from = if (probe.incoming) other else probe.from
+    val to = if (probe.incoming) probe.from else other
+    if (action != CitizenRouteAction.GRAPPLE) return allowed(from, to)
+    val crest = if (from.y < to.y) from.copy(y = to.y) else to.copy(y = from.y)
+    return allowed(from, crest) && allowed(crest, to)
 }
 
 private class CitizenSearchGeometry(
@@ -550,9 +768,9 @@ private class CitizenSearchGeometry(
 
     fun bodyClear(point: CitizenPoint): Boolean = bodyClear(point.x, point.y, point.z)
 
-    private fun bodyClear(px: Double, py: Double, pz: Double): Boolean {
+    private fun bodyClear(px: Double, py: Double, pz: Double, height: Double = 1.8): Boolean {
         val body = bodyScratch.resize(px - .299, py + .001, pz - .299,
-            px + .299, py + 1.799, pz + .299)
+            px + .299, py + height - .001, pz + .299)
         val feetRow = floor(body.minY).toInt()
         if (feetRow < minimumY) return false
         for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
@@ -590,7 +808,48 @@ private class CitizenSearchGeometry(
         return segmentClear(from, to, from)
     }
 
-    private fun supported(point: CitizenPoint, allowClimbable: Boolean): Boolean {
+    fun crawlClear(from: CitizenPoint, to: CitizenPoint, allowed: (CivPosition) -> Boolean): Boolean {
+        if (from.y != to.y) return false
+        val dx = abs(floor(from.x).toInt() - floor(to.x).toInt())
+        val dz = abs(floor(from.z).toInt() - floor(to.z).toInt())
+        if (dx + dz > 1 || !supported(from, false) || !supported(to, false) ||
+            !citizenFlatSupportClear(from, to) { citizenWalkingSupported(it, ::supported) }) return false
+        return specialSegmentClear(from, to, CITIZEN_CRAWL_HEIGHT, allowed)
+    }
+
+    fun grappleClear(from: CitizenPoint, to: CitizenPoint, allowed: (CivPosition) -> Boolean): Boolean {
+        val low = if (from.y < to.y) from else to
+        val high = if (from.y < to.y) to else from
+        if (abs(low.x - high.x) + abs(low.z - high.z) != 1.0 ||
+            citizenStepHeightAllowed(low.y, high.y) || high.y - low.y > CITIZEN_GRAPPLE_MAX_RISE ||
+            !supported(low, false) || !supported(high, false) || !bodyClear(low) || !bodyClear(high) ||
+            !blocks.grappleFace(low, high)) return false
+        for (y in floor(low.y + .001).toInt()..citizenSupportY(high.y))
+            if (!allowed(CivPosition(floor(high.x).toInt(), y, floor(high.z).toInt()))) return false
+        val crest = low.copy(y = high.y)
+        return specialSegmentClear(from, crest, 1.8, allowed) && specialSegmentClear(crest, to, 1.8, allowed)
+    }
+
+    private fun specialSegmentClear(from: CitizenPoint, to: CitizenPoint, height: Double,
+                                    allowed: (CivPosition) -> Boolean): Boolean {
+        val minFeet = floor(min(from.y, to.y) + .001).toInt()
+        val maxFeet = floor(max(from.y, to.y) + .001).toInt()
+        for (x in floor(min(from.x, to.x) - .299).toInt()..floor(max(from.x, to.x) + .299).toInt())
+            for (z in floor(min(from.z, to.z) - .299).toInt()..floor(max(from.z, to.z) + .299).toInt())
+                for (y in minFeet - 1..floor(max(from.y, to.y) + 1.799).toInt()) {
+                    val block = blocks[x, y, z] ?: return false
+                    // Unknown headroom is never classified as a low opening. Check territory for the
+                    // occupied posture, its support and the entire shaft, including the mantle corner.
+                    if (!block.loaded || y in minFeet..maxFeet && !block.allowed) return false
+                    if (y <= floor(max(from.y, to.y) + height - .001).toInt() &&
+                        (block.door || !allowed(CivPosition(x, y, z)))) return false
+                }
+        if (bodies.isNotEmpty() && citizenSlideBody(Vector(from.x, from.y, from.z), Vector(to.x, to.y, to.z),
+                .299, height - .002, .299, bodies) != null) return false
+        return bodyClear(from.x, from.y, from.z, height) && segmentClear(from, to, from, height)
+    }
+
+    fun supported(point: CitizenPoint, allowClimbable: Boolean): Boolean {
         val x = floor(point.x).toInt()
         val z = floor(point.z).toInt()
         val y = floor(point.y + .001).toInt()
@@ -604,13 +863,13 @@ private class CitizenSearchGeometry(
         }
     }
 
-    private fun segmentClear(from: CitizenPoint, to: CitizenPoint, occupied: CitizenPoint): Boolean {
+    private fun segmentClear(from: CitizenPoint, to: CitizenPoint, occupied: CitizenPoint, height: Double = 1.8): Boolean {
         var obstacleCount = 0
         val feetRow = floor(min(from.y, to.y) + .001).toInt()
         if (feetRow < minimumY) return false
         for (x in floor(min(from.x, to.x) - .299).toInt()..floor(max(from.x, to.x) + .299).toInt())
             for (z in floor(min(from.z, to.z) - .299).toInt()..floor(max(from.z, to.z) + .299).toInt())
-                for (y in max(minimumY, feetRow - 1)..floor(max(from.y, to.y) + 1.799).toInt()) {
+                for (y in max(minimumY, feetRow - 1)..floor(max(from.y, to.y) + height - .001).toInt()) {
                     val block = blocks[x, y, z] ?: return false
                     if (y !in minimumY until maximumY || !block.loaded) return false
                     if (block.liquid) {
@@ -622,19 +881,19 @@ private class CitizenSearchGeometry(
                     }
                 }
         if (citizenSlideBody(Vector(from.x, from.y + .001, from.z), Vector(to.x, to.y + .001, to.z),
-                .299, 1.798, .299, segmentObstacles.subList(0, obstacleCount)) != null) return false
+                .299, height - .002, .299, segmentObstacles.subList(0, obstacleCount)) != null) return false
         val samples = ceil(sqrt(from.distanceSquared(to)) / .15).toInt().coerceIn(1, 16)
         val occupiedBody = occupiedScratch.resize(occupied.x - .299, occupied.y - .001, occupied.z - .299,
-            occupied.x + .299, occupied.y + 1.799, occupied.z + .299)
+            occupied.x + .299, occupied.y + height - .001, occupied.z + .299)
         for (index in 1..samples) {
             val t = index.toDouble() / samples
             val px = from.x + (to.x - from.x) * t
             val py = from.y + (to.y - from.y) * t
             val pz = from.z + (to.z - from.z) * t
-            if (!bodyClear(px, py, pz)) return false
+            if (!bodyClear(px, py, pz, height)) return false
             for (x in floor(px - .299).toInt()..floor(px + .299).toInt())
                 for (z in floor(pz - .299).toInt()..floor(pz + .299).toInt())
-                    for (y in floor(py - .001).toInt()..floor(py + 1.799).toInt()) {
+                    for (y in floor(py - .001).toInt()..floor(py + height - .001).toInt()) {
                         val block = blocks[x, y, z] ?: return false
                         if (!block.loaded) return false
                         if (block.hot && !occupiedBody.overlaps(obstacleScratch.resize(x.toDouble(), y.toDouble(), z.toDouble(),

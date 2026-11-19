@@ -129,6 +129,7 @@ class CivsCitizens(
     private val collisions: CivsCitizenCollisions
     private val routes: CivsCitizenRoutes
     private val motion: CivsCitizenMotion
+    internal val traversal get() = runtime.traversal
     private val shelter: CivsCitizenShelters
     private val couriers: CivsCitizenCouriers
     private val leisure: CivsCitizenLeisure
@@ -197,6 +198,7 @@ class CivsCitizens(
             actor.combatDestination?.let { points += it }
             actor.pendingChunkTarget?.let { points += it }
             actor.route?.let { route ->
+                route.deferredGate?.let { points += it }
                 points += CivPosition(kotlin.math.floor(route.from.x).toInt(), kotlin.math.floor(route.from.y).toInt(),
                     kotlin.math.floor(route.from.z).toInt())
                 points += CivPosition(route.target.blockX, route.target.blockY, route.target.blockZ)
@@ -232,7 +234,7 @@ class CivsCitizens(
     internal fun residentCollectionFeet(workerId: UUID, allowNight: Boolean = false): Location? {
         checkCitizenMainThread()
         val actor = actors[workerId]?.takeIf { it.npc.isValid } ?: return null
-        if (actor.npc.isSeated || actor.sleeping || !allowNight && actor.sheltering || actor.attacker != null || workerId in pendingHarm ||
+        if (actor.traversal != null || actor.npc.isSeated || actor.sleeping || !allowNight && actor.sheltering || actor.attacker != null || workerId in pendingHarm ||
             !allowNight && actor.npc.world.time in 12_000L..23_000L) return null
         return actor.npc.location.clone()
     }
@@ -547,8 +549,8 @@ class CivsCitizens(
                 npc = packets.spawnPlayer(point, PacketNpcProfile(workerId, "civ_" + workerId.toString().replace("-", "").take(12),
                     skin.texture, skin.signature))
                 npc.viewRange = viewerRange.toDouble()
-                equipment.setEquipment(npc, plan)
                 val actor = CitizenActor(city.id, workerId, city.worldId, npc, plan)
+                equipment.setEquipment(actor, plan)
                 actors[workerId] = actor
                 registerUpdate(actor, workerIndex)
                 equipment.syncResident(npc, worker, plan)
@@ -668,6 +670,9 @@ class CivsCitizens(
         try {
             equipment.syncResident(actor.npc, worker, requireNotNull(plan))
             workRuntime.update(actor, city, requireNotNull(world), nowMillis)
+            // Reassignment can leave a resident with no next trip. Walk out to the known tunnel mouth before idling.
+            if (actor.traversal == CitizenRouteAction.CRAWL && actor.route == null && !routes.navigationHeld(actor) &&
+                routes.startRoute(actor, world, actor.crawlEntrance ?: actor.plan.storage, nowMillis)) actor.route?.crawlExitOnly = true
         } catch (error: Exception) {
             routes.pause(actor, "route-unreachable", nowMillis)
             runtime.logFailure(actor, "navigation", error)
@@ -858,7 +863,7 @@ class CivsCitizens(
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         val control = building.control ?: throw CivsRejection("control-missing")
         val entity = actor.npc
-        if (entity.world.uid != city.worldId || actor.workerId in pendingHarm ||
+        if (actor.traversal != null || entity.world.uid != city.worldId || actor.workerId in pendingHarm ||
             actor.supplyPickup?.buildingId != buildingId &&
                 actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) throw CivsRejection("route-unreachable")
         if (dropoff != null && (actor.cycle.phase != CitizenPhase.DELIVERING ||
@@ -1119,6 +1124,7 @@ class CivsCitizens(
     }
 
     private fun remove(actor: CitizenActor, reason: String) {
+        runtime.traversal.clear(actor)
         actor.pendingChunkTarget = null
         leisure.nap.stop(actor, restoreStanding = false)
         couriers.releaseCourierSource(actor, runtime.residentObservedAt)
@@ -1151,6 +1157,7 @@ class CivsCitizens(
         HandlerList.unregisterAll(this)
         packets.onInteract = null
         for (actor in actors.values) {
+            runtime.traversal.clear(actor)
             leisure.nap.stop(actor, restoreStanding = false)
             runCatching { life.stopMeal(actor) }.onFailure { runtime.logFailure(actor, "stop-meal", it) }
             actor.cycle.close(); actor.route?.motion?.cancel(); actor.route?.previousMotion?.cancel()

@@ -24,6 +24,8 @@ internal data class CitizenSnapshotPolicy(
     val cityId: UUID? = null,
     /** Detached sparse lookup, evaluated by the worker only after shared-route reuse misses. */
     val roadCorridor: CitizenRoadLookup? = null,
+    val specialTraversal: Boolean = false,
+    val traversalAllowed: (CivPosition) -> Boolean = { true },
 )
 
 /** Explicit trip cost identity; arbitrary caller closures never become cache keys. */

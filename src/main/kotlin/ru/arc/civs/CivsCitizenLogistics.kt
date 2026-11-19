@@ -8,6 +8,7 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentLinkedQueue
 
 internal fun CitizenActor.canReachSelectedFood(city: Settlement, source: CivResidentFoodSource): Boolean {
+    if (traversal != null) return false
     val nearbyFoodPickup = outputReturn != source.buildingId &&
         CivsResidentFood.allowsNearbyPickup(city, source.servingFor, source.servingTicket)
     return civsCanReachContainer(npc.location, source.container, nearbyFoodPickup)

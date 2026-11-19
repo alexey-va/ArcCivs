@@ -148,6 +148,7 @@ private class CitizenSnapshotBlocks(
     private val cells: Array<CitizenSnapshotCell>,
 ) : AbstractMap<CivPosition, CitizenTerrainBlock>() {
     private val origin = cells.firstOrNull()?.key
+    private val rows = cells.size / 9
     override val size: Int get() = cells.size
 
     override fun get(key: CivPosition): CitizenTerrainBlock? = get(key.x, key.y, key.z)
@@ -172,8 +173,8 @@ private class CitizenSnapshotBlocks(
         val x = worldX.toLong() - first.x
         val y = worldY.toLong() - first.y
         val z = worldZ.toLong() - first.z
-        if (x !in 0L..2L || y !in 0L..6L || z !in 0L..2L) return -1
-        return (x.toInt() * 3 + z.toInt()) * 7 + y.toInt()
+        if (x !in 0L..2L || y < 0 || y >= rows || z !in 0L..2L) return -1
+        return (x.toInt() * 3 + z.toInt()) * rows + y.toInt()
     }
 
     override fun containsKey(key: CivPosition): Boolean = get(key) != null
@@ -217,7 +218,7 @@ internal class CitizenSnapshotCapture(
     private val connectedPrefetch: Boolean,
 ) {
     private data class CapturedProbe(val probe: CitizenSearchProbe, val blocks: CitizenSnapshotBlocks,
-        val edges: List<CitizenSearchEdge>, val published: CitizenSearchCapture? = null)
+        val edges: List<CitizenSearchEdge>, val published: CitizenSearchCapture? = null, val deferredGrapple: Boolean = false)
     private val probes = probes.toMutableList()
     private val requestedCount = probes.size
     private val prefetch = probes.none { it.incoming || it.node.initial }
@@ -225,8 +226,9 @@ internal class CitizenSnapshotCapture(
     private val completed = mutableListOf<CapturedProbe>()
     private val requiredCosts = hashSetOf<CivPosition>()
     private val newSections = linkedMapOf<CitizenSnapshotSectionKey, Long>()
-    private val probeStates = arrayOfNulls<CitizenSnapshotState>(3 * 3 * 7)
-    private val probePositions = arrayOfNulls<CivPosition>(3 * 3 * 7)
+    private var probeStates = arrayOfNulls<CitizenSnapshotState>(3 * 3 * 7)
+    private var probePositions = arrayOfNulls<CivPosition>(3 * 3 * 7)
+    private var grappleRows: IntRange? = null
     private val cancelled = AtomicBoolean()
     private val materialAt: (CivPosition) -> Material? = ::material
     private var next = 0
@@ -246,7 +248,8 @@ internal class CitizenSnapshotCapture(
                 // A direct test fixture can supply an undecoded handoff; production inputs name their sections.
                 if (chunk.retainsNativeSnapshot && chunk.payloads().isEmpty()) probes.getOrNull(next)?.let { probe ->
                     val y = floor(probe.node.y).toInt()
-                    if (y - 3 < maximumY && y + 3 >= minimumY) chunk.states(y - 3, y + 3)
+                    val rows = grappleRows ?: (y - 3..y + 3)
+                    if (rows.first < maximumY && rows.last >= minimumY) chunk.states(rows.first, rows.last)
                 }
                 extracted.putAll(chunk.drainExtracted())
                 terrain.merge(key, chunk)
@@ -286,17 +289,17 @@ internal class CitizenSnapshotCapture(
             val y = floor(probe.node.y).toInt()
             val xs = probe.node.x - 1..probe.node.x + 1
             val zs = probe.node.z - 1..probe.node.z + 1
-            val ys = y - 3..y + 3
+            val ys = grappleRows ?: (y - 3..y + 3)
             val chunkKeys = if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) emptyList() else buildList(4) {
                 for (cx in (xs.first shr 4)..(xs.last shr 4))
                     for (cz in (zs.first shr 4)..(zs.last shr 4)) add(CitizenSnapshotKey(cx, cz))
             }
             var missing: MutableSet<CitizenSnapshotSectionKey>? = null
             var firstUse: MutableList<CitizenSnapshotSectionKey>? = null
-            if (minimumY < maximumY && y - 3 < maximumY && y + 3 >= minimumY) {
+            if (minimumY < maximumY && ys.first < maximumY && ys.last >= minimumY) {
                 for (key in chunkKeys) {
                     if (key in terrain.unavailable) continue
-                    for (sy in (maxOf(y - 3, minimumY) shr 4)..(minOf(y + 3, maximumY - 1) shr 4)) {
+                    for (sy in (maxOf(ys.first, minimumY) shr 4)..(minOf(ys.last, maximumY - 1) shr 4)) {
                         val section = CitizenSnapshotSectionKey(key.x, sy, key.z)
                         if (section in terrain.sections) continue
                         terrain.activate(section, minimumY, maximumY)
@@ -319,7 +322,12 @@ internal class CitizenSnapshotCapture(
                 terrain.chunks[key]?.states(ys.first, ys.last)?.let { missingStates = terrain.collectMissingStates(it, missingStates) }
             }
             missingStates?.let { return request(states = it) }
-            val cells = arrayOfNulls<CitizenSnapshotCell>(if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) 0 else probeStates.size)
+            val count = if (xs.isEmpty() || zs.isEmpty() || ys.isEmpty()) 0 else 9 * (ys.last - ys.first + 1)
+            if (count > probeStates.size) {
+                probeStates = arrayOfNulls(count)
+                probePositions = arrayOfNulls(count)
+            }
+            val cells = arrayOfNulls<CitizenSnapshotCell>(count)
             var dynamic: MutableMap<CivPosition, BlockData>? = null
             var positionIndex = 0
             for (x in xs) for (z in zs) {
@@ -363,9 +371,22 @@ internal class CitizenSnapshotCapture(
                 cells[index] = terrain.blocks.add(point, block)
             }
             val blocks = CitizenSnapshotBlocks(cells.requireNoNulls())
+            var deferredGrapple = false
+            if (probe.specialTraversal) {
+                val rows = citizenGrappleRows(probe, blocks) { point ->
+                    policy.traversalAllowed(point) && policy.supportCost?.let { cost ->
+                        blockData(point)?.let { cost(point, it).isFinite() }
+                    } != false
+                }
+                if (rows != null && rows != grappleRows) {
+                    if (next < requestedCount || rows.last - rows.first < 10) { grappleRows = rows; continue }
+                    deferredGrapple = true
+                }
+            }
+            grappleRows = null
             val edges = citizenSearchCandidates(probe, blocks, minimumY, maximumY, policy.stepAllowed)
             edges.forEach { edge -> requiredCosts += blocks.key(edge.node.x, citizenSupportY(edge.node.y), edge.node.z) }
-            completed += CapturedProbe(probe, blocks, edges)
+            completed += CapturedProbe(probe, blocks, edges, deferredGrapple = deferredGrapple)
             prefetch(probe, edges)
             next++
         }
@@ -373,12 +394,13 @@ internal class CitizenSnapshotCapture(
     }
 
     private fun prefetch(probe: CitizenSearchProbe, edges: List<CitizenSearchEdge>) {
-        if (prefetch && (next < requestedCount || connectedPrefetch)) for (edge in edges) {
+        if (prefetch && !probe.refiningGrapple && (next < requestedCount || connectedPrefetch)) for (edge in edges) {
             if (probes.size >= maximumProbes) break
             if (!edge.permitted) continue
             val point = edge.node.point()
             if (probe.corridor?.contains(point) != false && probe.bounds?.contains(point) != false && seen.add(edge.node))
-                probes += CitizenSearchProbe(edge.node, point, corridor = probe.corridor, bounds = probe.bounds)
+                probes += CitizenSearchProbe(edge.node, point, corridor = probe.corridor, bounds = probe.bounds,
+                    specialTraversal = probe.specialTraversal)
         }
     }
 
@@ -401,7 +423,7 @@ internal class CitizenSnapshotCapture(
                 if (cost == null || cost.toBits() == block.cost.toBits()) cell
                 else resolved.getOrPut(point) { CitizenSnapshotCell(point, block.copy(cost = cost)) }
             }
-            CitizenSearchCapture(capture.probe, blocks, capture.edges)
+            CitizenSearchCapture(capture.probe, blocks, capture.edges, capture.deferredGrapple)
         })
     }
 

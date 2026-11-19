@@ -42,9 +42,11 @@ internal class CivRouteTerritory(city: Settlement, previous: CivRouteTerritory?)
         fun covers(x: Int, z: Int): Boolean = bounds.coversColumn(x, z) ||
             field?.coversColumn(x, z) == true && CivsWorksiteLayouts.isField(building, x, z)
 
-        fun blocks(point: CivPosition, allowed: Set<UUID>, mineBottom: Int?): Boolean =
+        fun blocks(point: CivPosition, allowed: Set<UUID>, mineBottom: Int?, wallCrossing: Boolean): Boolean =
             building.id !in allowed && covers(point.x, point.z) &&
                 (!public || !civsPublicTransit(building, point.x, point.z)) &&
+                !(wallCrossing && building.type == BuildingType.WALL && building.phase == BuildingPhase.ACTIVE &&
+                    point.y.toLong() in bounds.min.y.toLong()..(bounds.max.y.toLong() + 2)) &&
                 (mineBottom == null || point.y >= mineBottom || !CivsMinePlan.belowFoundation(building, point.y, headroom = 1))
     }
 
@@ -86,10 +88,10 @@ internal class CivRouteTerritory(city: Settlement, previous: CivRouteTerritory?)
         chunks[columnKey(point.x shr 4, point.z shr 4)]?.any { it.covers(point.x, point.z) } == true ||
             large.any { it.covers(point.x, point.z) }
 
-    fun allows(point: CivPosition, allowed: Set<UUID>, mineBottom: Int?): Boolean =
+    fun allows(point: CivPosition, allowed: Set<UUID>, mineBottom: Int?, wallCrossing: Boolean = false): Boolean =
         kotlin.math.abs(point.x.toLong() - center.x) <= radius && kotlin.math.abs(point.z.toLong() - center.z) <= radius &&
-            chunks[columnKey(point.x shr 4, point.z shr 4)]?.none { it.blocks(point, allowed, mineBottom) } != false &&
-            large.none { it.blocks(point, allowed, mineBottom) }
+            chunks[columnKey(point.x shr 4, point.z shr 4)]?.none { it.blocks(point, allowed, mineBottom, wallCrossing) } != false &&
+            large.none { it.blocks(point, allowed, mineBottom, wallCrossing) }
 
     /** A crossing ends one cell beyond authored public transit, on the same side as the actual destination. */
     fun gateExits(from: CitizenPoint, target: CivPosition, reach: Double): List<GateExit> {

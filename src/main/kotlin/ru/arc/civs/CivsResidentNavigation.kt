@@ -902,6 +902,8 @@ internal class CitizenNavigationCapture(
     private var probeIndex = 0
     private var positions = emptyList<CivPosition>()
     private var positionIndex = 0
+    private var grappleRows: IntRange? = null
+    private var deferredGrapple = false
     private var blocks = emptyMap<CivPosition, CitizenTerrainBlock>()
     private var candidates: List<CitizenSearchEdge>? = null
     private var candidateIndex = 0
@@ -937,27 +939,46 @@ internal class CitizenNavigationCapture(
         }
         if (candidates == null) {
             blocks = positions.associateWith { cached.getValue(it) }
+            if (probe.specialTraversal) {
+                val rows = citizenGrappleRows(probe, blocks) { point ->
+                    blocks[point]?.cost?.isFinite() == true && route.snapshotPolicy?.traversalAllowed?.invoke(point) != false
+                }
+                if (rows != null && rows != grappleRows && (probeIndex < requestedCount || rows.last - rows.first < 10)) {
+                    val n = probe.node
+                    val original = floor(n.y).toInt()
+                    val previous = grappleRows ?: (original - 3..original + 3)
+                    grappleRows = rows
+                    positions = positions + buildList {
+                        for (x in n.x - 1..n.x + 1) for (z in n.z - 1..n.z + 1) for (y in rows)
+                            if (y !in previous) add(CivPosition(x, y, z))
+                    }
+                    return false
+                }
+                deferredGrapple = rows != null && rows != grappleRows && probeIndex >= requestedCount
+            }
             candidates = citizenSearchCandidates(probe, blocks, bounds.first, bounds.second)
         }
         val edges = requireNotNull(candidates)
         if (candidateIndex < edges.size) {
             val edge = edges[candidateIndex++]
-            admitted += edge.copy(permitted = if (probe.incoming) route.capturePermission(edge.node.point(), probe.from)
-                else route.capturePermission(probe.from, edge.node.point()))
+            admitted += edge.copy(permitted = citizenSearchEdgePermitted(probe, edge.node.point(), edge.action, route::capturePermission))
             return false
         }
-        completed += CitizenSearchCapture(probe, blocks, admitted.toList())
-        if (prefetch && (probeIndex < requestedCount || route.prefetchConnectedFrontier())) for (edge in admitted) {
+        completed += CitizenSearchCapture(probe, blocks, admitted.toList(), deferredGrapple)
+        if (prefetch && !probe.refiningGrapple && (probeIndex < requestedCount || route.prefetchConnectedFrontier())) for (edge in admitted) {
             if (probes.size >= maximumProbes) break
             // Clip only speculative centres; complete edges remain reusable when the worker widens its search.
             if (edge.permitted && probe.corridor?.contains(edge.node.point()) != false &&
                 probe.bounds?.contains(edge.node.point()) != false && seen.add(edge.node))
-                probes += CitizenSearchProbe(edge.node, edge.node.point(), corridor = probe.corridor, bounds = probe.bounds)
+                probes += CitizenSearchProbe(edge.node, edge.node.point(), corridor = probe.corridor, bounds = probe.bounds,
+                    specialTraversal = probe.specialTraversal)
         }
         admitted.clear()
         probeIndex++
         positions = emptyList()
         positionIndex = 0
+        grappleRows = null
+        deferredGrapple = false
         blocks = emptyMap()
         candidates = null
         candidateIndex = 0

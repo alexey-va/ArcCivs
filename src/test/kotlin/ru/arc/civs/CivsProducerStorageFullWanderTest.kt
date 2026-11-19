@@ -56,6 +56,7 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             actor.outputReturn shouldBe null
             actor.supplyFailure shouldBe (workplace.id to "storage-full")
             val pause = requireNotNull(actor.outputFullPause)
+            pause.buildingId shouldBe workplace.id
             val retryAt = pause.retryAt
             actor.supplyRetryAt shouldBe 0L
             val remark = requireNotNull(h.owner.hologramSnapshots().single().speech)
@@ -65,6 +66,7 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             h.paper.performTicks(1)
             h.owner.hologramSnapshots().single().speech shouldBe null
             val pausedAt = npc.location
+            val walkStart = CivPosition(pausedAt.blockX, pausedAt.blockY, pausedAt.blockZ)
             val roadSteps = h.steps.size
             var walked = 0.0
             for (tick in 1..80) {
@@ -74,20 +76,21 @@ class CivsProducerStorageFullWanderTest : FunSpec({
                 val distance = before.distance(npc.location)
                 (distance <= .118251) shouldBe true
                 walked += distance
-                citizenWithinIdleArea(workplace.entrance, npc.location.point()) shouldBe true
                 (producerWanderActor(h) === actor) shouldBe true
                 (actor.cycle === acceptedCycle) shouldBe true
                 actor.plan shouldBe acceptedPlan
+                actor.outputFullPause shouldBe pause
                 h.observedWork() shouldBe 500L
                 h.city shouldBe fullCity
                 h.deliveries shouldBe 0
                 attempts shouldBe 1
-                if (npc.location.distance(pausedAt) >= 1.0 && actor.route?.idleAnchor != null) break
+                if (npc.location.distance(pausedAt) >= 1.0 && actor.route?.wanderWalk != null) break
             }
             withClue("walked=$walked at=${npc.location} ${h.navigationState()}") {
                 (walked >= 1.0) shouldBe true
                 (npc.location.distance(pausedAt) >= 1.0) shouldBe true
-                actor.route?.idleAnchor shouldBe workplace.entrance
+                actor.route?.wanderWalk?.home?.id shouldBe workplace.id
+                actor.route?.idleAnchor shouldBe walkStart
             }
             h.steps.size shouldBe roadSteps
             val leisureRoute = actor.route
@@ -107,7 +110,6 @@ class CivsProducerStorageFullWanderTest : FunSpec({
                 h.navigationNow = retryAt
                 h.owner.pulse(retryAt)
                 (actor.route === leisureRoute) shouldBe true
-                actor.route?.idleAnchor shouldBe workplace.entrance
                 actor.outputFullPause shouldBe pause
                 // The next local leg is ready at the preceding leg's arrival.
                 requireNotNull(actor.route).motion.finished shouldBe false
@@ -214,7 +216,8 @@ class CivsProducerStorageFullWanderTest : FunSpec({
                 inputs = mapOf("LADDER" to 1L), status = "digging-mine", miningStep = 4, miningPlanVersion = 7)
             val searches = h.workPlans
             // A real food/supply completion clears the shared supply failure, but owns no output receipt.
-            npc.teleport(Location(h.world, 19.5, 64.0, .5))
+            val waitingAt = CivPosition(19, 64, 0)
+            npc.teleport(waitingAt.location(h.world))
             h.foodSource = quarry.id
             h.owner.pulse(4_000)
             h.supplyRequests shouldBe 1
@@ -228,12 +231,13 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             actor.supplyFailure shouldBe null
             actor.outputFullPause shouldBe pause
             for (pulse in 1..8) {
-                if (actor.route?.idleAnchor != null) break
+                if (actor.route?.wanderWalk != null) break
                 h.navigationNow = 4_500L + pulse * 250
                 h.owner.pulse(requireNotNull(h.navigationNow))
             }
             val localWalk = requireNotNull(actor.route)
-            localWalk.idleAnchor shouldBe quarry.entrance
+            localWalk.wanderWalk?.home?.id shouldBe quarry.id
+            localWalk.idleAnchor shouldBe waitingAt
             h.navigationNow = pause.retryAt + 250
             h.owner.pulse(requireNotNull(h.navigationNow))
             (actor.route === localWalk) shouldBe true
@@ -248,7 +252,6 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             for (tick in 1..100) {
                 h.navigate()
                 if (tick % 5 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                citizenWithinIdleArea(quarry.entrance, npc.location.point()) shouldBe true
                 if (npc.location.distance(from) >= .5) break
             }
             withClue(h.navigationState()) { (npc.location.distance(from) >= .5) shouldBe true }
@@ -290,7 +293,8 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             actor.cycle = actor.plan.cycle()
             val cycle = actor.cycle
             val plan = actor.plan
-            actor.npc.teleport(Location(h.world, 19.5, 64.0, .5))
+            val waitingAt = CivPosition(19, 64, 0)
+            actor.npc.teleport(waitingAt.location(h.world))
             actor.outputReturn = quarry.id
             h.owner.returnResidentOutputs = { city, worker, source ->
                 h.owner.requireStorageArrival(city, worker, source)
@@ -304,7 +308,7 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             h.navigationNow = 3_000
             h.owner.pulse(3_000)
             for (pulse in 1..8) {
-                if (actor.route?.idleAnchor != null) break
+                if (actor.route?.wanderWalk != null) break
                 h.navigationNow = 3_000L + pulse * 250
                 h.owner.pulse(requireNotNull(h.navigationNow))
             }
@@ -313,7 +317,8 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             (actor.cycle === cycle) shouldBe true
             actor.plan shouldBe plan
             h.workPlans shouldBe 0
-            actor.route?.idleAnchor shouldBe quarry.entrance
+            actor.route?.wanderWalk?.home?.id shouldBe quarry.id
+            actor.route?.idleAnchor shouldBe waitingAt
             h.observedWork() shouldBe 0L
             h.deliveries shouldBe 0
             h.city.workers.single().items?.filterNotNull()?.sumOf { it.amount } shouldBe 96

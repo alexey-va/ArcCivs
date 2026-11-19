@@ -49,16 +49,40 @@ internal class CivsCitizenMotion(
             when { it.residentYield != null -> 0; it.route?.bodyBlockedSince != null -> 1; else -> 2 }
         }) {
             val npc = actor.npc
+            val motionAtStart = actor.route?.motion
+            if (actor.traversal != null && npc.isValid) {
+                if (routes.transferPending(actor)) {
+                    runtime.traversal.clear(actor)
+                    continue
+                }
+                if (actor.traversal == CitizenRouteAction.GRAPPLE && motionAtStart?.grapple != null &&
+                    (routes.navigationHeld(actor) || !audience.activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers) ||
+                        actor.route?.demandChunks?.ready(npc.world) == false)) motionAtStart.releaseGrapple()
+                if (motionAtStart?.nextTraversal != actor.traversal) {
+                    runtime.traversal.clear(actor)
+                    if (!leaveTraversal(actor)) {
+                        if (actor.traversal == CitizenRouteAction.GRAPPLE) {
+                            leaveUnsupportedLip(actor)
+                            continue
+                        }
+                        if (motionAtStart?.navigating == true && !motionAtStart.searching) {
+                            if (!citizenPacketBodyClear(npc.world, npc.location.point(), false)) motionAtStart.standingExitObstructed()
+                            else continue
+                        }
+                    }
+                }
+            }
             if (!routes.canResetNightShelter(actor)) actor.nightHomeProgress.clear()
             if (npc.isSeated) { actor.footsteps.reset(); continue }
-            if (separationBudget > 0 && npc.isValid && !actor.sleeping && actor.supplyPickup == null &&
+            if (separationBudget > 0 && (actor.traversal == null || actor.traversal == CitizenRouteAction.CRAWL &&
+                    motionAtStart?.nextTraversal != CitizenRouteAction.CRAWL) && npc.isValid && !actor.sleeping && actor.supplyPickup == null &&
                 !logistics.collectedPending(actor) &&
                 actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) &&
                 audience.activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers)) {
                 separationBudget--
                 citizenRotateAfterAdmission(runtime.actors, actor.workerId)
                 if (collisions.escapeTerrain(actor, now)) continue
-                if (runtime.entityCollisions && !routes.navigationHeld(actor)) {
+                if (actor.traversal == null && runtime.entityCollisions && !routes.navigationHeld(actor)) {
                     if (collisions.advanceResidentYield(actor)) continue
                     val separated = collisions.separateResident(actor)
                     if (separated == true) {
@@ -85,6 +109,10 @@ internal class CivsCitizenMotion(
                 continue
             }
             val route = actor.route
+            if (route?.crawlExitOnly == true && actor.traversal == null) {
+                routes.cancelRoute(actor)
+                continue
+            }
             if (npc.isValid) {
                 val previous = actor.observedYaw
                 if (!actor.sleeping && !actor.observedSleeping && previous != null &&
@@ -121,7 +149,8 @@ internal class CivsCitizenMotion(
                 continue
             }
             routes.observeArrivalWait(actor, route)
-            if (route.trip?.validFor(city) == false) {
+            if (route.trip?.validFor(city) == false ||
+                route.traversalTerritory != null && route.motion.nextTraversal != null && route.traversalTerritory?.matches(city) == false) {
                 // Replan from the observed position after a building change; this is not a stuck-route recovery.
                 routes.cancelForContinuation(actor, city, route)
                 continue
@@ -143,7 +172,7 @@ internal class CivsCitizenMotion(
             // Count only ready navigation frames; capture/search cannot expire this protection.
             if (route.nativeCollisionTicks > 0) route.nativeCollisionTicks--
             route.previousMotion?.let { previous ->
-                if (route.motion.failure != null && route.replanReason in setOf("player-blocked", "resident-blocked")) {
+                if (route.motion.failure != null && previous.failure == null && route.replanReason in setOf("player-blocked", "resident-blocked")) {
                     // A person can seal a narrow corridor. Keep the original route ready
                     // to resume when they leave; a failed detour never licenses teleporting.
                     route.motion.cancel()
@@ -228,9 +257,17 @@ internal class CivsCitizenMotion(
                 continue
             }
             val before = npc.location
+            val traversal = motion.nextTraversal
+            if (traversal != null) {
+                if (traversal == CitizenRouteAction.CRAWL && actor.traversal == null && citizenPacketBodyClear(npc.world, before.point(), false))
+                    actor.crawlEntrance = CivPosition(before.blockX, before.blockY, before.blockZ)
+                actor.traversal = traversal
+                if (traversal == CitizenRouteAction.CRAWL) runtime.traversal.crawl(actor, true)
+                actor.courierInboundPrefix = null
+            }
             val working = actor.attacker == null && actor.collectionSeek == null && actor.collectionHome == null &&
                 workRuntime.workingTravel(actor)
-            val speed = if (actor.attacker != null) 1.1 else if (working)
+            val speed = if (traversal != null) 1.0 else if (actor.attacker != null) 1.1 else if (working)
                 .8 * surfaceSpeed(citizenMotionSurface(before, motion)) else .55
             actor.collisionResident = null
             val next = motion.move(before, speed, { from, to -> collisions.routeMoveAllowed(actor, from, to) }) { destination ->
@@ -280,7 +317,7 @@ internal class CivsCitizenMotion(
                         actor.navigationSuppressed = 0
                     }
                 }
-                if (working) {
+                if (working && traversal == null) {
                     fun grounded(at: Location) =
                         !Tag.CLIMBABLE.isTagged(npc.world.getBlockAt(at.blockX, at.blockY, at.blockZ).type) &&
                             citizenPacketSupported(npc.world, at.point())
@@ -296,6 +333,20 @@ internal class CivsCitizenMotion(
                 } else actor.footsteps.reset()
                 actor.courierInboundPrefix?.let { prefix ->
                     route.trip?.let { prefix.observe(before.point(), next.point(), it) }
+                }
+            }
+            if (traversal != null) {
+                val hook = motion.grapple
+                if (hook != null && hook.castTicks in 1 until CITIZEN_GRAPPLE_CAST_TICKS)
+                    route.progressTick = runtime.navigationTick
+                if (hook != null && hook.castTicks > 0)
+                    runtime.traversal.grapple(actor, hook.low, hook.anchor, hook.castTicks.toDouble() / CITIZEN_GRAPPLE_CAST_TICKS,
+                        hook.stroke, viewers)
+                else if (traversal == CitizenRouteAction.GRAPPLE) runtime.traversal.clear(actor)
+                if (motion.nextTraversal != traversal) leaveTraversal(actor)
+                if (route.crawlExitOnly && actor.traversal == null) {
+                    routes.cancelRoute(actor)
+                    continue
                 }
             }
             if (motion.failure != null) {
@@ -335,7 +386,54 @@ internal class CivsCitizenMotion(
                 }
             }
         }
-        threats.gravity(runtime.actors.values.filter { it.npc.isSeated || it.sleeping || it.route?.motion?.navigating == true }.mapTo(hashSetOf()) { it.workerId })
+        threats.gravity(runtime.actors.values.filter {
+            it.npc.isSeated || it.sleeping || it.traversal != null && routes.transferPending(it) || it.route?.motion?.navigating == true &&
+                (it.traversal == null || it.route?.motion?.nextTraversal == it.traversal)
+        }.mapTo(hashSetOf()) { it.workerId })
+    }
+
+    /** Dropping a route doesn't create headroom or a foothold. Gravity owns an unhooked body until it lands. */
+    private fun leaveTraversal(actor: CitizenActor): Boolean {
+        val at = actor.npc.location.point()
+        val world = actor.npc.world
+        if (!citizenPacketSupported(world, at, allowClimbable = false)) return false
+        if (!citizenPacketBodyClear(world, at, false)) {
+            if (actor.traversal == CitizenRouteAction.GRAPPLE && citizenPacketBodyClear(world, at, false, height = CITIZEN_CRAWL_HEIGHT)) {
+                actor.traversal = CitizenRouteAction.CRAWL
+                runtime.traversal.crawl(actor, true)
+            }
+            return false
+        }
+        if (actor.traversal == CitizenRouteAction.CRAWL) {
+            if (!collisions.canStandAfterCrawl(actor)) return false
+            runtime.traversal.crawl(actor, false)
+        }
+        actor.traversal = null
+        actor.crawlEntrance = null
+        return true
+    }
+
+    /** A foot can still overlap the cap even though its centre ray misses. Back off the lip before resuming the fall. */
+    private fun leaveUnsupportedLip(actor: CitizenActor) {
+        val npc = actor.npc
+        val at = npc.location
+        val fx = at.x - at.blockX
+        val fz = at.z - at.blockZ
+        if (fx in .298.. .702 && fz in .298.. .702 || routes.navigationHeld(actor) ||
+            citizenPacketSupported(npc.world, at.point(), allowClimbable = false)) return
+        val city = runtime.cityById(actor.cityId) ?: return
+        fun backOff(dx: Double, dz: Double): Boolean {
+            val foot = CitizenPoint(at.x + dx * .298, at.y, at.z + dz * .298)
+            if (!citizenPacketSupported(npc.world, foot, allowClimbable = false)) return false
+            val to = at.clone().subtract(dx * CITIZEN_GRAPPLE_STRIDE, 0.0, dz * CITIZEN_GRAPPLE_STRIDE)
+            if (to.blockX != at.blockX || to.blockZ != at.blockZ || !citizenControlStepClear(city, at.point(), to.point()) ||
+                !citizenPacketSegmentClear(npc.world, at.point(), to.point(), false, at.point(), null) ||
+                !collisions.residentMoveAllowed(actor, at, to)) return false
+            npc.teleport(to)
+            return true
+        }
+        if (fx > .702 && backOff(1.0, 0.0) || fx < .298 && backOff(-1.0, 0.0) || fz > .702 && backOff(0.0, 1.0)) return
+        if (fz < .298) backOff(0.0, -1.0)
     }
 
     private fun advanceWander(actor: CitizenActor, city: Settlement, route: CitizenRoute, walk: CitizenWanderWalk,
@@ -406,6 +504,7 @@ internal class CivsCitizenMotion(
 
     /** The last waypoint inside another body retains its route until an ordinary clear-body exit. */
     private fun waitForArrivalBody(actor: CitizenActor, route: CitizenRoute): Boolean {
+        if (actor.traversal != null) return true
         if (!runtime.entityCollisions) return false
         if (routes.arrivalBodyClear(actor)) return false
         route.completion = null

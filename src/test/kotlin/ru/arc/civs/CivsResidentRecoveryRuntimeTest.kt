@@ -21,25 +21,41 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
         }
     }
 
-    test("a failed work route escapes the pit and resumes observed work before delivery") {
+    for (protectedPit in listOf(true, false))
+    test(if (protectedPit) "a failed work route exits a protected pit and resumes observed work before delivery"
+        else "a road worker climbs out on a hook before walking to work and earning credit") {
         residentRuntime { h ->
             val work = h.assignRoadUpkeep()
-            val origin = dryPit(h)
+            val origin = if (protectedPit) {
+                // The town hall permits ordinary departure, but its walls are not public hook anchors.
+                val hall = h.city.buildings.first()
+                h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
+                    if (it.id == hall.id) it.copy(bounds = CivBox(
+                        it.bounds.min.copy(y = 61), it.bounds.max.copy(z = 5))) else it
+                }))
+                dryPit(h, x = 0)
+            } else dryPit(h)
             val npc = h.actor().npc
-            var attempted: CitizenPacketRoute? = null
-            advancePitFixture(h) {
-                attempted = h.routeMotion(h.workerId) ?: attempted
-                npc.location.y > origin.y
+            if (protectedPit) {
+                var attempted: CitizenPacketRoute? = null
+                advancePitFixture(h) {
+                    attempted = h.routeMotion(h.workerId) ?: attempted
+                    npc.location.y > origin.y
+                }
+                requireNotNull(attempted).failure shouldBe "no-path"
+                npc.location.shouldBePitRim(origin)
+            } else climbFromPit(h, origin) {
+                h.observedWork() shouldBe 0L
+                h.deliveries shouldBe 0
             }
-            requireNotNull(attempted).failure shouldBe "no-path"
-            npc.location.shouldBePitRim(origin)
             h.observedWork() shouldBe 0L
             h.deliveries shouldBe 0
 
             advancePitFixture(h) { h.deliveries > 0 }
             (h.observedWork() >= work.durationMillis) shouldBe true
-            h.deliveries shouldBe 1
             h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            pulseWhileReceiptPending(h)
+            h.deliveries shouldBe 1
         }
     }
 
@@ -56,13 +72,12 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
             val origin = dryPit(h)
             val npc = h.actor().npc
 
-            advancePitFixture(h) { npc.location.y > origin.y }
-            npc.location.shouldBePitRim(origin)
+            climbFromPit(h, origin) { h.unloads shouldBe 0 }
             h.actor().plan.courier shouldBe trip
-            h.unloads shouldBe 0
 
             advancePitFixture(h) { h.unloads > 0 }
             citizenCanReachBlock(npc, requireNotNull(warehouse.control)) shouldBe true
+            pulseWhileReceiptPending(h)
             h.unloads shouldBe 1
             h.city.workers.single() shouldBe loaded
         }
@@ -94,13 +109,12 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
                 h.pendingSupplies
             }
 
-            advancePitFixture(h) { npc.location.y > origin.y }
-            npc.location.shouldBePitRim(origin)
+            climbFromPit(h, origin) { pickups shouldBe emptyList() }
             h.actor().foodPickupSource?.container shouldBe source.container
             h.actor().workDetour shouldBe h.actor().plan.token
-            pickups shouldBe emptyList()
 
             advancePitFixture(h) { pickups.isNotEmpty() }
+            pulseWhileReceiptPending(h)
             pickups.single().copy(standing = source.standing) shouldBe source
             CivsResidents.hunger(h.city.workers.single()) shouldBe 10
         }
@@ -335,20 +349,29 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
 
     test("a courier making real physical progress is not teleported after sixty monotonic seconds") {
         residentRuntime { h ->
-            carryingCourier(h)
+            val cargo = carryingCourier(h)
             h.world.getBlockAt(10, 64, 0).type = Material.AIR
-            val npc = h.owner.collisionActors().single()
+            val actor = h.actor()
+            val npc = actor.npc
             h.owner.pulse(2_000)
+            var walkingStartedAt: Long? = null
             for (tick in 1..1_000) {
                 val from = npc.location
                 h.navigate()
-                h.recoveryMillis += 950 // Slow server frames: monotonic time advances independently of game ticks.
-                (from.distance(npc.location) <= .172001) shouldBe true
+                val step = from.distance(npc.location)
+                if (walkingStartedAt == null && step > 0.0 && (actor.route?.motion?.forwardProgress ?: 0.0) > 0.0)
+                    walkingStartedAt = h.recoveryMillis
+                // Simulate slow frames once navigation has accepted a real step.
+                if (walkingStartedAt != null) h.recoveryMillis += 950
                 if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
+                withClue("tick=$tick recovery=${h.recoveryMillis} from=${from.point()} feet=${npc.location.point()}") {
+                    (step <= .172001 && from.distance(npc.location) <= .172001) shouldBe true
+                }
                 if (h.unloads > 0) break
             }
-            (h.recoveryMillis > 60_000L) shouldBe true
+            (h.recoveryMillis - requireNotNull(walkingStartedAt) > 60_000L) shouldBe true
             h.unloads shouldBe 1
+            h.city.workers.single().cargo shouldBe cargo
             h.pendingUnload.isDone shouldBe false
         }
     }
@@ -558,6 +581,30 @@ private fun Location.shouldBePitRim(origin: Location) {
     y shouldBe origin.y + 3.0
     (distanceSquared(origin) <= 11.0) shouldBe true
     citizenPacketSupported(requireNotNull(world), point(), allowClimbable = false) shouldBe true
+}
+
+private fun climbFromPit(h: ResidentRuntime, origin: Location, beforeArrival: () -> Unit) {
+    val actor = h.actor()
+    var previous = origin
+    var pulled = false
+    advancePitFixture(h) {
+        beforeArrival()
+        val at = actor.npc.location
+        (at.distanceSquared(previous) <= .15 * .15) shouldBe true
+        if (actor.traversal == CitizenRouteAction.GRAPPLE && at.y > previous.y) pulled = true
+        previous = at
+        pulled && actor.traversal == null && at.y >= origin.y + 3.0
+    }
+    pulled shouldBe true
+    actor.traversal shouldBe null
+    actor.npc.location.shouldBePitRim(origin)
+}
+
+private fun pulseWhileReceiptPending(h: ResidentRuntime) {
+    repeat(2) {
+        h.navigate(1_000)
+        h.owner.pulse(requireNotNull(h.navigationNow))
+    }
 }
 
 private fun advancePitFixture(h: ResidentRuntime, done: () -> Boolean) {

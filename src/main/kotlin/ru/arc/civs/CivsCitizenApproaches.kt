@@ -71,6 +71,11 @@ internal fun citizenGateLeg(world: World, territory: CivRouteTerritory, from: Ci
         }
         val transit = CivsControlRouteProof.standing(world, exit.transit, allowDoors = true) ?: continue
         val feet = CivsControlRouteProof.standing(world, exit.approach, allowDoors = true, previous = transit) ?: continue
+        if (!CitizenChunks.between(kotlin.math.floor(from.x).toInt(), kotlin.math.floor(from.z).toInt(),
+                exit.approach.x, exit.approach.z).ready(world)) {
+            if (waiting == null) waiting = CitizenGateLeg(exit.gate, exit.approach, null)
+            continue
+        }
         return CitizenGateLeg(exit.gate, exit.approach, feet)
     }
     return waiting

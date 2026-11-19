@@ -489,9 +489,14 @@ class CivsMineVisitTest : FunSpec({
             val waiting = h.addMiner(mine, h.standing.copy(x = h.standing.x + 12).location(h.world))
             val before = h.city
             val (work, routes) = h.nativeWorkOwner()
-            h.runtime.wanderBudget = 8
-            work.update(waiting.actor, h.city, h.world, ++h.now)
-            val idle = requireNotNull(waiting.actor.route)
+            for (tick in 1..40) {
+                h.now += 50
+                h.runtime.wanderBudget = 8
+                work.update(waiting.actor, h.city, h.world, h.now)
+                h.runtime.statuses[waiting.worker.id] shouldBe "mine-waiting"
+                if (waiting.actor.route != null) break
+            }
+            val idle = requireNotNull(waiting.actor.route) { "No idle route after 2 seconds of mine waiting" }
             withClue("target=${idle.authored} bounds=${mine.bounds}") {
                 mine.bounds.contains(idle.authored.x, idle.authored.y, idle.authored.z) shouldBe false
             }

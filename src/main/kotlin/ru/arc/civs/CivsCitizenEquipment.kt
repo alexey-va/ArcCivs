@@ -11,8 +11,8 @@ internal class CivsCitizenEquipment(
     private val threats: CivsResidentThreats,
 ) {
 
-    fun setEquipment(npc: PacketPlayerNpc, plan: CitizenPlan) {
-        npc.setEquipment(EquipmentSlot.HAND, ItemStack(citizenTool(plan) ?: Material.AIR))
+    fun setEquipment(actor: CitizenActor, plan: CitizenPlan) {
+        actor.equip(EquipmentSlot.HAND, ItemStack(citizenTool(plan) ?: Material.AIR))
     }
 
     fun syncResident(npc: PacketPlayerNpc, worker: CivWorker, plan: CitizenPlan) {
@@ -26,12 +26,13 @@ internal class CivsCitizenEquipment(
             val slots = listOf(EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS,
                 EquipmentSlot.FEET, EquipmentSlot.HAND, EquipmentSlot.OFF_HAND)
             slots.forEachIndexed { index, slot ->
-                npc.setEquipment(slot, if (index == 4 && actor?.tavernService?.loaded == true)
+                val item = if (index == 4 && actor?.tavernService?.loaded == true)
                     ItemStack(Material.valueOf(requireNotNull(actor.tavernService).source.material))
                     else if (index == 4 && actor?.mealVisit?.let { it.foodSource == null || it.servedAt != null } == true)
                     ItemStack(Material.valueOf(requireNotNull(actor.mealVisit).plan.material))
                     else if (index == 4 && actor?.careItem != null) ItemStack(requireNotNull(actor.careItem))
-                    else items[index]?.stack() ?: ItemStack(if (index == 4) citizenTool(plan) ?: Material.AIR else Material.AIR))
+                    else items[index]?.stack() ?: ItemStack(if (index == 4) citizenTool(plan) ?: Material.AIR else Material.AIR)
+                if (actor == null) npc.setEquipment(slot, item) else actor.equip(slot, item)
             }
             actor?.equipmentItems = items
             actor?.equipmentType = plan.type

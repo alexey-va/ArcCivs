@@ -15,6 +15,7 @@ internal class CitizenRuntime(
 ) {
     val cityById = cityById ?: { id: UUID -> cityProvider().firstOrNull { it.id == id } }
     val actors = linkedMapOf<UUID, CitizenActor>()
+    val traversal = CivsCitizenTraversalVisuals(this)
     val statuses = mutableMapOf<UUID, String>()
     val closed = AtomicBoolean()
     val pendingHarm = mutableSetOf<UUID>()
