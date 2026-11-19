@@ -3,6 +3,7 @@ package ru.arc.civs
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.Called
+import io.mockk.clearMocks
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -12,6 +13,31 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsCitizenObservationStatusTest : FunSpec({
+    test("absent residents plan only when their world has a viewer or the town admits background work") {
+        residentRuntime { h ->
+            val viewer = requireNotNull(h.paper.server.getPlayer(h.city.owner))
+            val near = viewer.location
+            viewer.teleport(Location(h.paper.addSimpleWorld("elsewhere"), near.x, near.y, near.z))
+            h.owner.pulse(2_000)
+            h.owner.activeCount() shouldBe 0
+            var plans = 0
+            h.courierProvider = { _, _ -> plans++; null }
+            h.owner.pulse(3_000)
+            plans shouldBe 0
+
+            h.background = true
+            h.owner.pulse(4_000)
+            (plans > 0) shouldBe true
+            h.owner.activeCount() shouldBe 1
+            h.background = false
+            h.owner.pulse(5_000)
+            h.owner.activeCount() shouldBe 0
+            viewer.teleport(near)
+            h.owner.pulse(6_000)
+            h.owner.activeCount() shouldBe 1
+        }
+    }
+
     test("travel captions distinguish preparation contact ready movement and stopped segments") {
         val motion = mockk<CitizenPacketRoute>(relaxed = true) {
             every { failure } returns null
@@ -85,6 +111,11 @@ class CivsCitizenObservationStatusTest : FunSpec({
             val route = requireNotNull(h.routeIdentity())
             val workPlans = h.workPlans
             val city = h.city
+            val carrier = h.actor().npc
+            clearMocks(carrier, answers = false)
+            val far = CitizenViewer(city.worldId, CitizenPoint(200.0, 64.0, .5))
+            h.owner.visibleHologramSnapshots(listOf(far)) shouldBe emptyList()
+            verify(exactly = 0) { carrier.bodyYaw } // An assembled snapshot always reads its carrier pose.
             repeat(3) {
                 h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
                 h.owner.hologramSnapshots().single().status shouldBe "workers.status.route-searching"

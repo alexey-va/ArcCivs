@@ -281,7 +281,7 @@ object CivsLogistics {
         }?.let { return it } }
         val source = if (cargo.sourceWorkerId != null) cargo.sourceEntrance else city.building(cargo.sourceBuildingId)?.control ?: cargo.sourceEntrance
         val target = city.building(cargo.targetBuildingId)
-        if (target != null && city.construction?.buildingId == target.id && target.type != BuildingType.BUILDER_HUT &&
+        if (target != null && city.constructionOrder(target.id) != null && target.type != BuildingType.BUILDER_HUT &&
             target.phase in setOf(BuildingPhase.SITE, BuildingPhase.CONSTRUCTING)) {
             // Old construction shipments retain their receipt identity, but never refill the site barrel.
             return constructionDestination(city, target.id, source)

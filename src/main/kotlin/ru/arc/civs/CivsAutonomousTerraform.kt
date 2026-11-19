@@ -327,9 +327,8 @@ internal object CivsAutonomousTerraform {
         }
         if (!building.type.isInfrastructure && standing.values.any { CivsAutonomousGeometry.horizontalContains(building.bounds, it) })
             throw CivsRejection("building-overlap")
-        val obstacles = (city.buildings + listOfNotNull(city.construction?.plannedBuilding))
-            .filter { it.id != building.id }.distinctBy { it.id }
-            .flatMap { civsRouteObstacles(city, it) }
+        val obstacles = civsProtectedBuildings(city).filter { it.id != building.id }
+            .flatMap { civsRouteObstacles(city, it) }.distinct().toList()
         // Port reservations own a future five-wide wall. Ordinary three-wide approaches keep one shoulder away too.
         val portObstacles = if (building.type.isInfrastructure) emptyList() else access.reservedFortificationPorts.map {
             CivBox(it.min.copy(x = it.min.x - 1, z = it.min.z - 1), it.max.copy(x = it.max.x + 1, z = it.max.z + 1))
@@ -841,7 +840,7 @@ internal object CivsAutonomousTerraform {
     /** One immutable input family; every source depot shares its maps and each destination's reverse field. */
     private class RoutePreparation(surface: CivTerrainSurface, standing: Map<Long, CivPosition>, preferredRoads: Set<Long>,
         building: CivBuilding) {
-        val columns = Long2ObjectOpenHashMap<CivTerrainSurfaceColumn>(surface.columns)
+        val columns = surface.copyColumns()
         val retained = Long2ObjectOpenHashMap<CivPosition>(standing)
         val preferred = LongOpenHashSet(preferredRoads)
         // A side field's reservation rectangle can cover the declared door without occupying its apron.

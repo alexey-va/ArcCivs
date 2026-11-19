@@ -722,15 +722,14 @@ internal object CivsSettlementPlans {
             completedPerimeter(city, it, retained)
         }
         val retainedGrowth = candidateFrame != null || predecessor != null
-        val accepted = city.construction?.plannedBuilding
-        val actual = city.buildings.map { if (accepted != null && it.id == accepted.id) accepted else it }
+        val actual = city.buildings.map { city.constructionOrder(it.id)?.plannedBuilding ?: it }
         val actualPlots = actual.filterNot { it.type.isInfrastructure }.map { actualPlot(city, it, templates) }
         val plots = adopted?.plots.orEmpty().filter { old -> city.building(old.building.id) != null || !expanding && deferPerimeter == null &&
             (old.building.type != BuildingType.QUARRY || !CivsAutonomousGeometry.overlaps(old.envelope, frame.core, 3)) }
             .map { old -> actualPlots.firstOrNull { it.building.id == old.building.id }
             ?.let { it.copy(envelope = union(old.envelope, it.envelope), fortification = old.fortification) } ?: old }.toMutableList()
         plots += actualPlots.filter { actualPlot -> plots.none { it.building.id == actualPlot.building.id } }
-        var projected = city.copy(construction = null, constructionQueue = emptyList(),
+        var projected = city.copy(construction = null, deferredConstruction = null, constructionQueue = emptyList(),
             buildings = actual.map { b -> b.copy(phase = if (plots.any { it.building.id == b.id && it.fortification != null })
                 b.phase else BuildingPhase.ACTIVE,
                 bounds = plots.firstOrNull { it.building.id == b.id }?.envelope ?: b.bounds) } +

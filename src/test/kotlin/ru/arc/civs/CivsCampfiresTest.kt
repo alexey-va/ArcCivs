@@ -12,6 +12,7 @@ import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
 import org.bukkit.block.data.Lightable
+import org.bukkit.configuration.file.YamlConfiguration
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 import java.util.function.Predicate
@@ -101,33 +102,61 @@ class CivsCampfiresTest : FunSpec({
         first.expired(699) shouldBe false
         first.expired(700) shouldBe true
         first.visit!!.arrivedAt = 320
-        first.visit!!.conversationAt = 340
-        first.expired(340 + first.meetingTicks - 1) shouldBe false
-        first.expired(340 + first.meetingTicks) shouldBe true
+        val talk = CitizenConversation(listOf("hello", "reply"), UUID(0, 7), 340)
+        first.visit!!.conversation = talk
+        talk.speak(UUID(0, 7), 340) shouldBe true
+        talk.speak(UUID(0, 29), 400) shouldBe true
+        first.expired(459) shouldBe false
+        first.expired(460) shouldBe true
         first.finish(600)
         first.meetingAvailable(2_399) shouldBe false
         first.meetingAvailable(3_601) shouldBe true
         first.available(700, 0, evening = false) shouldBe false
     }
 
-    test("conversation bubbles alternate between arrived speakers using the same topic") {
+    test("a late owner pulse still plays the next line and only its speaker has a bubble") {
         val first = UUID(0, 7)
         val second = UUID(0, 29)
-        val seat = CivPosition(0, 64, 0)
-        val a = CitizenCampVisit(null, seat, 300, partnerId = second)
-        val b = CitizenCampVisit(null, seat, 300, partnerId = first)
-        citizenConversationLine(first, a, 350) shouldBe null
-        a.conversationAt = 350
-        b.conversationAt = 350
-        citizenConversationLine(first, a, 350) shouldBe null
-        a.gestureBeat = 0
-        val greeting = requireNotNull(citizenConversationLine(first, a, 350))
-        greeting.endsWith(".line-0") shouldBe true
-        citizenConversationLine(second, b, 399) shouldBe null
-        citizenConversationLine(first, a, 400) shouldBe null
-        b.gestureBeat = 1
-        citizenConversationLine(second, b, 400) shouldBe greeting.replace(".line-0", ".line-1")
-        citizenConversationLine(first, a, 550) shouldBe null
+        val talk = CitizenConversation(listOf("question", "answer", "thanks"), first, 350)
+        talk.speak(second, 350) shouldBe false
+        talk.speak(first, 350) shouldBe true
+        talk.bubble(first, 350) shouldBe "question"
+        talk.bubble(second, 350) shouldBe null
+        talk.speak(second, 409) shouldBe false
+        talk.bubble(first, 409) shouldBe null
+        talk.speak(first, 485) shouldBe false
+        talk.speak(second, 485) shouldBe true
+        talk.bubble(second, 485) shouldBe "answer"
+        talk.bubble(first, 485) shouldBe null
+        talk.speak(first, 545) shouldBe true
+        talk.bubble(first, 545) shouldBe "thanks"
+        talk.speak(second, 605) shouldBe false
+        talk.finished(605) shouldBe true
+    }
+
+    test("the catalog plays every full exchange before repeating including across a reshuffle") {
+        val topics = (2..4).map { size -> List(size) { "workers.conversation.topic-$size.line-$it" } }
+        val deck = CitizenConversationDeck(topics.flatten().reversed(), kotlin.random.Random(7))
+        var previous: List<String>? = null
+        repeat(6) {
+            val round = List(topics.size) { deck.draw() }
+            round.toSet() shouldBe topics.toSet()
+            (round.first() != previous) shouldBe true
+            previous = round.last()
+        }
+    }
+
+    test("every packaged dialogue can be drawn and rendered in both public languages") {
+        val source = civsLocaleSource()
+        val locales = YamlConfiguration().apply { loadFromString(source) }
+        val section = requireNotNull(locales.getConfigurationSection("ru.workers.conversation"))
+        val text = CivsText.fromYaml(source)
+        val deck = text.residentConversations()
+        val round = List(section.getKeys(false).size) { deck.draw() }
+        round.map { it.first().substringBeforeLast('.').substringAfterLast('.') }.toSet() shouldBe section.getKeys(false)
+        round.flatten().forEach { key ->
+            for (locale in listOf("ru", "en")) plainText(text.render(key, locale)).isNotBlank() shouldBe true
+        }
     }
 
     test("discovery reads one loaded chunk per pulse reuses its cache and invalidates extinguished fires") {

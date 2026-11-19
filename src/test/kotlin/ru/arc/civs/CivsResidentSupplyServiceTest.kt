@@ -84,9 +84,9 @@ class CivsResidentSupplyServiceTest : FunSpec({
 
     for (viaBuilding in listOf(false, true)) for (material in listOf("TORCH", "LADDER"))
         test("creative request dialog supplies $material through its durable destination viaBuilding=$viaBuilding") {
-            serviceScenario { h ->
+            serviceScenario(serverFixture = CivsWorksiteServerFixture()) { h ->
                 val world = CivsWorksiteWorldFixture("service-creative-supply").also(h.paper.server::addWorld)
-                world.loadChunk(0, 0)
+                for (x in -1..0) for (z in -1..0) world.loadChunk(x, z)
                 val player = object : org.mockbukkit.mockbukkit.entity.PlayerMock(h.paper.server, "CreativeSupplyOwner") {
                     override fun closeDialog() = Unit
                 }.also(h.paper.server::addPlayer).also {
@@ -118,9 +118,12 @@ class CivsResidentSupplyServiceTest : FunSpec({
                 every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
                 every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
                 h.start()
-                val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
-                    .get(h.service) as CivsWorksites
-                worksites.pulse(listOf(requireNotNull(h.service.city(player))))
+                h.tickUntil("dispatcher publishes the quarry order") {
+                    h.service.productionOrder(ready, worker)?.matches(quarry) == true
+                }
+                h.tickUntil("miner requests $material for the ordered work") {
+                    h.service.workerRequest(player, worker.id)?.material?.name == material
+                }
                 val amount = CivsLogistics.QUARRY_SUPPLIES.getValue(material)
                 h.service.workerRequest(player, worker.id) shouldBe CivsBuildingRequest(Material.valueOf(material), amount, true)
                 h.service.buildingRequest(player, quarry.id) shouldBe CivsBuildingRequest(Material.valueOf(material), amount, true)

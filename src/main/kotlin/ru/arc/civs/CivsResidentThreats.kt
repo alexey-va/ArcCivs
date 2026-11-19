@@ -62,7 +62,7 @@ internal class CivsResidentThreats(private val plugin: Plugin,
     private var targets = emptyMap<UUID, CivsThreatTarget>()
     private val pursuits = linkedMapOf<UUID, Pursuit>()
     private val projectiles = linkedMapOf<UUID, Flight>()
-    private val equipment = mutableMapOf<UUID, List<ItemStack?>>()
+    private val armor = mutableMapOf<UUID, List<CivResidentItem?>>()
     private val burning = mutableMapOf<UUID, Burning>()
     private val submergedSince = mutableMapOf<UUID, Long>()
     private val falling = mutableMapOf<UUID, Falling>()
@@ -73,12 +73,19 @@ internal class CivsResidentThreats(private val plugin: Plugin,
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
 
-    fun equipment(workerId: UUID, items: List<ItemStack?>) { equipment[workerId] = items.map { it?.clone() } }
+    fun equipment(workerId: UUID, items: List<CivResidentItem?>) {
+        val previous = armor[workerId]
+        for (index in ARMOR_SLOTS.indices) {
+            if (previous?.getOrNull(index) == items.getOrNull(index)) continue
+            armor[workerId] = items.take(ARMOR_SLOTS.size)
+            return
+        }
+    }
 
     fun pulse(current: List<CivsThreatTarget>, now: Long) {
         if (closed) return
         targets = current.associateBy { it.workerId }
-        equipment.keys.retainAll(targets.keys)
+        armor.keys.retainAll(targets.keys)
         burning.keys.retainAll(targets.keys)
         submergedSince.keys.retainAll(targets.keys)
         falling.keys.retainAll(targets.keys)
@@ -356,7 +363,8 @@ internal class CivsResidentThreats(private val plugin: Plugin,
         val mob = source as? Mob ?: ((source as? Projectile)?.shooter as? Mob)
         if (mob != null && mobProtected(target.cityId)) return false
         if (source is Player && !playerAllowed(source, target.npc.location)) return false
-        val damage = citizenArmoredDamage(amount, equipment[target.workerId].orEmpty(), cause)
+        val worn = armor[target.workerId]?.map { it?.stack() }.orEmpty()
+        val damage = citizenArmoredDamage(amount, worn, cause)
         val event = CivsResidentDamageEvent(target.cityId, target.workerId, target.npc.location, source, cause, damage)
         Bukkit.getPluginManager().callEvent(event)
         if (event.isCancelled || !event.damage.isFinite() || event.damage <= 0) return false
@@ -387,7 +395,7 @@ internal class CivsResidentThreats(private val plugin: Plugin,
 
     fun remove(worker: UUID) {
         targets = targets - worker
-        equipment.remove(worker); burning.remove(worker); submergedSince.remove(worker); falling.remove(worker)
+        armor.remove(worker); burning.remove(worker); submergedSince.remove(worker); falling.remove(worker)
         val removed = pursuits.values.filter { it.worker == worker }
         removed.forEach { pursuits.remove(it.monster.uniqueId) }
         removed.forEach { stop(it) }
@@ -421,7 +429,7 @@ internal class CivsResidentThreats(private val plugin: Plugin,
         val retiring = pursuits.values.toList()
         targets = emptyMap()
         pursuits.clear()
-        equipment.clear(); burning.clear(); submergedSince.clear(); falling.clear()
+        armor.clear(); burning.clear(); submergedSince.clear(); falling.clear()
         projectiles.clear(); explosions.clear()
         HandlerList.unregisterAll(this)
         retiring.forEach { stop(it) }
@@ -454,15 +462,16 @@ private class CivsResidentLands(plugin: Plugin) {
         integration.getWorld(player.world)?.hasRoleFlag(player.uniqueId, at, Flags.ATTACK_PLAYER) ?: true
 }
 
+private val ARMOR_SLOTS = listOf(EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET)
+
 internal fun citizenArmoredDamage(amount: Double, items: List<ItemStack?>, cause: DamageCause): Double {
     var armor = 0.0
     var toughness = 0.0
     var protection = 0
-    val slots = listOf(EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET)
-    for (index in 0 until min(4, items.size)) {
+    for (index in 0 until min(ARMOR_SLOTS.size, items.size)) {
         val item = items[index] ?: continue
-        val modifiers = item.itemMeta?.takeIf { it.hasAttributeModifiers() }?.getAttributeModifiers(slots[index])
-            ?: item.type.getDefaultAttributeModifiers(slots[index])
+        val modifiers = item.itemMeta?.takeIf { it.hasAttributeModifiers() }?.getAttributeModifiers(ARMOR_SLOTS[index])
+            ?: item.type.getDefaultAttributeModifiers(ARMOR_SLOTS[index])
         armor += modifiers?.get(Attribute.ARMOR).orEmpty().filter { it.operation == AttributeModifier.Operation.ADD_NUMBER }.sumOf { it.amount }
         toughness += modifiers?.get(Attribute.ARMOR_TOUGHNESS).orEmpty().filter { it.operation == AttributeModifier.Operation.ADD_NUMBER }.sumOf { it.amount }
         protection += item.getEnchantmentLevel(Enchantment.PROTECTION)

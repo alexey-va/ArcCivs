@@ -47,7 +47,7 @@ internal class CivsBuildingRequests(
         val key = city.id to buildingId
         pendingBuildingOrders[key]?.takeUnless { it.isDone }?.let { return@action it }
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
-        rejectIf(city.construction?.buildingId == buildingId, "construction-busy")
+        rejectIf(city.constructionOrder(buildingId) != null, "construction-busy")
         rejectIf(building.phase != BuildingPhase.ACTIVE, "invalid-building")
         rejectIf(building.level >= authority.maximumBuildingLevel(building), "invalid-level")
         CivsResearch.required(building.type, building.level + 1)?.let { rejectIf(!CivsResearch.has(city, it), "research-required") }
@@ -97,7 +97,7 @@ internal class CivsBuildingRequests(
         if (preview.upgrading) {
             val existing = previousCity?.building(blueprint.building.id) ?: throw CivsRejection("building-not-found")
             rejectIf(existing.phase != BuildingPhase.ACTIVE || existing.level + 1 != blueprint.building.level, "invalid-building")
-            rejectIf(previousCity.construction?.buildingId == existing.id, "construction-busy")
+            rejectIf(previousCity.constructionOrder(existing.id) != null, "construction-busy")
             if (existing.id in previousCity.constructionQueue.orEmpty()) {
                 placement.cancelPreview(player.uniqueId)
                 return CompletableFuture.completedFuture(Unit)
@@ -413,7 +413,7 @@ internal class CivsBuildingRequests(
             val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
             rejectIf(building.phase != BuildingPhase.SITE, "invalid-building")
             authority.near(player, city.worldId, building.entrance)
-            construction.clearQueueFailure(city.id)
+            construction.clearQueueFailure(city.id, buildingId)
             if (city.construction != null || city.constructionQueue.orEmpty().isNotEmpty()) {
                 authority.mutate(city.id) { CivsRules.enqueue(it, player.uniqueId, buildingId) }.thenApply { saved ->
                     if (saved.revision != city.revision) CivsDiagnostics.event("construction_enqueued", "city" to city.id,
@@ -436,15 +436,20 @@ internal class CivsBuildingRequests(
         } }.getOrElse { authority.log("clean captured plan $id", it); CompletableFuture.completedFuture(Unit) }
 
     fun cleanupQueuedUpgrades(city: Settlement, buildingIds: Set<UUID>) {
-        city.buildings.filter { it.id in buildingIds && it.id in city.constructionQueue.orEmpty() && it.phase == BuildingPhase.ACTIVE }
+        city.deferredConstruction.orEmpty().filter { it.buildingId in buildingIds && it.id != it.buildingId }.forEach { cleanupCaptured(it.id) }
+        city.buildings.filter { it.id in buildingIds && it.id in city.constructionQueue.orEmpty() && it.phase == BuildingPhase.ACTIVE &&
+            city.constructionOrder(it.id) == null }
             .forEach { cleanupCaptured(queuedDesignId(it)) }
     }
 
-    fun activateBuilding(city: Settlement, building: CivBuilding, player: Player? = null): CompletableFuture<Unit> {
+    fun activateBuilding(city: Settlement, building: CivBuilding, player: Player? = null,
+                         selectedQueuedBuilding: UUID? = null): CompletableFuture<Unit> {
         val buildingId = building.id
         val actor = player?.uniqueId ?: city.owner
         rejectIf(city.pendingDeletion != null, "deletion-pending")
         rejectIf(city.construction != null || city.id in records.busy, "city-busy")
+        rejectIf(city.constructionOrder(buildingId) != null || selectedQueuedBuilding != null &&
+            (selectedQueuedBuilding != buildingId || buildingId !in city.constructionQueue.orEmpty()), "stale-construction")
         if (building.phase == BuildingPhase.SITE) controlInstallations.requirePresent(city.worldId, building)
         requireAssignedBuilder(city, building.id)
         authority.reserveCity(city.id)
@@ -473,7 +478,7 @@ internal class CivsBuildingRequests(
                     authority.releaseCity(city.id)
                     storageActions.relocateControl(city, building, requireNotNull(target.control)).whenCompleteSync(tasks) { relocated, relocationFailure ->
                         if (relocationFailure != null) completeActivation(relocationFailure)
-                        else runCatching { activateBuilding(requireNotNull(relocated), requireNotNull(relocated.building(buildingId)), player) }
+                        else runCatching { activateBuilding(requireNotNull(relocated), requireNotNull(relocated.building(buildingId)), player, selectedQueuedBuilding) }
                             .onSuccess { activated -> activated.whenCompleteSync(tasks) { _, activationFailure ->
                                 completeActivation(activationFailure)
                             } }.onFailure { completeActivation(it) }
@@ -525,7 +530,8 @@ internal class CivsBuildingRequests(
                                         captured.terrain?.route != it.route, "stale-development")
                                     QueuedApproach(city, building, it)
                                 }
-                                startOrder(actor, records.cities.getValue(city.id), captured.copy(capturedSha256 = sitePlan.capturedSha256), bytes, replacement, admit = { current ->
+                                startOrder(actor, records.cities.getValue(city.id), captured.copy(capturedSha256 = sitePlan.capturedSha256), bytes,
+                                    replacement, selectedQueuedBuilding, admit = { current ->
                                     if (player != null) {
                                         rejectIf(!player.isOnline || !current.canManage(player.uniqueId), "not-authorized")
                                         authority.near(player, city.worldId, building.entrance)
@@ -582,7 +588,7 @@ internal class CivsBuildingRequests(
             val plan = state?.plan
             val slot = plan?.plots?.singleOrNull { it.building.id == site.id }
             if (city.id != source.id || city.owner != source.owner || city.worldId != source.worldId ||
-                city.pendingDeletion != null || city.construction != null || city.constructionQueue.orEmpty().firstOrNull() != site.id ||
+                city.pendingDeletion != null || city.construction != null || site.id !in city.constructionQueue.orEmpty() ||
                 state?.paused != false || plan == null || plan != source.autonomy?.plan ||
                 civsPlanBoardLayoutKey(city) != key || site.phase != BuildingPhase.SITE ||
                 !civsSameBuildingGeometry(city.building(site.id), site) || !civsSameBuildingGeometry(slot?.building, site) ||
@@ -596,7 +602,7 @@ internal class CivsBuildingRequests(
 
     /** Starting an order reserves the immutable design; each worked row pays independently later. */
     private fun startOrder(actor: UUID, city: Settlement, plan: CivPlacementPlan, bytes: ByteArray,
-        replacement: QueuedApproach? = null, admit: (Settlement) -> Unit = {}): CompletableFuture<Settlement> {
+        replacement: QueuedApproach? = null, selectedQueuedBuilding: UUID? = null, admit: (Settlement) -> Unit = {}): CompletableFuture<Settlement> {
         rejectIf(city.construction != null, "construction-busy")
         replacement?.apply(city) // Fence the captured site and forecast before writing either prepared journal.
         rejectIf(!CivsAutoStorageMigration.ready(city), "materials-migration-pending")
@@ -621,7 +627,16 @@ internal class CivsBuildingRequests(
         val approach = if (retarget || plan.terrain != null || building.type.isInfrastructure || building.type == BuildingType.DECORATION) null
             else controlInstallations.prepare(city.id, city.worldId, city.owner, building).takeIf { !it.approach.isNullOrEmpty() }
         val result = authority.tracked<Settlement>()
-        CompletableFuture.supplyAsync({
+        val deferred = city.deferredConstruction.orEmpty()
+        // Read one immutable reservation at a time. Neither native reads nor full-plan comparisons run on Main.
+        val compatible = deferred.fold(CompletableFuture.completedFuture(Unit)) { previous, order ->
+            previous.thenCompose { store.loadPlan(order.id) }.thenApplyAsync({ held ->
+                if (held == null || held.id != order.id || held.cityId != city.id || held.worldId != city.worldId ||
+                    held.building != order.plannedBuilding) throw CivsRejection("stale-construction")
+                rejectIf(!civsConstructionPlansCompatible(held, plan, approach?.approach.orEmpty()), "building-overlap")
+            }, executor)
+        }
+        compatible.thenApplyAsync({
             val materials = CivsMaterials.required(plan)
             val terrainBatches = civsTerraformBatches(plan)
             val automaticPreparation = terrainBatches.size.takeIf { it > 0 && plan.terrain?.route?.isEmpty() == true }
@@ -653,9 +668,10 @@ internal class CivsBuildingRequests(
                 val batches = requireNotNull(order.batches)
                 fun reserved(before: Settlement): Settlement {
                     admit(before)
+                    rejectIf(before.deferredConstruction.orEmpty() != deferred, "stale-construction")
                     rejectIf(retarget && before != city, "stale-building")
                     val base = replacement?.apply(before) ?: before
-                    return CivsRules.reserveBuild(base, actor, building, order).let { next ->
+                    return CivsConstructionRules.reserveBuild(base, actor, building, order, selectedQueuedBuilding).let { next ->
                         if (approach == null) next else CivsRules.validate(next.copy(
                             pendingControls = next.pendingControls.orEmpty() + approach))
                     }

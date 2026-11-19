@@ -166,7 +166,7 @@ internal class CivsNavigationWarmup(private val settings: CivsNavigationSettings
 
     /** Worker/cargo cursor changes do not rebuild the footprint or restart completed warming. */
     private fun sameFootprint(a: Settlement, b: Settlement): Boolean = a.worldId == b.worldId && a.center == b.center &&
-        a.buildings == b.buildings && a.construction?.plannedBuilding == b.construction?.plannedBuilding &&
+        a.buildings == b.buildings && a.sameConstructionFootprints(b) &&
         a.inventory?.containers == b.inventory?.containers && a.pendingControls == b.pendingControls &&
         a.roadRouteOverrides == b.roadRouteOverrides && a.forestryJobs?.keys == b.forestryJobs?.keys &&
         a.forestryJobs.orEmpty().all { (id, old) -> b.forestryJobs?.get(id)?.let {

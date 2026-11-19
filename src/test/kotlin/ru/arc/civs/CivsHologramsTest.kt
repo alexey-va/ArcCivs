@@ -16,6 +16,7 @@ import net.kyori.adventure.key.Key
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
 import org.bukkit.Location
 import org.bukkit.entity.Display
+import org.bukkit.metadata.FixedMetadataValue
 import org.bukkit.util.Transformation
 import org.joml.Vector3f
 import ru.arc.paper.npc.PacketPlayerNpc
@@ -24,6 +25,8 @@ import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.display.PacketTextDisplay
 import ru.arc.paper.display.PacketBlockDisplay
+import ru.arc.paper.display.PacketDisplay
+import ru.arc.paper.display.PacketItemDisplay
 import ru.arc.paper.display.PaperPacketDisplays
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Files
@@ -84,6 +87,7 @@ class CivsHologramsTest : FunSpec({
             val plugin = paper.createSimplePlugin("CivsSleepVisualTest")
             val world = ResidentRuntimeWorld().also(paper.server::addWorld)
             world.loadChunk(0, 0)
+            paper.addPlayer("SleepViewer").teleport(Location(world, 2.5, 64.0, 3.5))
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
             val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0 })
             val displays = mockk<PaperPacketDisplays>(relaxed = true)
@@ -155,6 +159,74 @@ class CivsHologramsTest : FunSpec({
                 blocks.forEach { verify(exactly = 1) { it.remove() } }
                 verify(exactly = 1) { label.remove() }
             } finally { renderer.close(); work.close(); tasks.close() }
+        }
+    }
+
+    test("background residents keep their scene information while labels cargo and workplaces follow real viewers") {
+        residentRuntime { h ->
+            h.background = true
+            val viewer = h.paper.server.getPlayer(0)
+            val near = viewer.location
+            val elsewhere = h.paper.addSimpleWorld("other-viewer-world")
+            val plugin = h.paper.createSimplePlugin("ResidentDisplayAudience")
+            h.paper.addPlayer("SceneNPC").apply {
+                teleport(near)
+                setMetadata("NPC", FixedMetadataValue(plugin, true))
+            }
+            val hall = h.city.buildings.single().let { it.copy(control = it.entrance) }
+            h.city = h.city.copy(buildings = listOf(hall))
+            val text = CivsText.fromYaml(civsLocaleSource())
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 8, nanoTime = { 0 })
+            val displays = mockk<PaperPacketDisplays>(relaxed = true)
+            val handles = mutableListOf<PacketDisplay>()
+            every { displays.spawnText(any(), any()) } answers { mockk<PacketTextDisplay>(relaxed = true).also(handles::add) }
+            every { displays.spawnBlock(any(), any()) } answers { mockk<PacketBlockDisplay>(relaxed = true).also(handles::add) }
+            every { displays.spawnItem(any(), any()) } answers { mockk<PacketItemDisplay>(relaxed = true).also(handles::add) }
+            every { displays.closeAsync() } returns CompletableFuture.completedFuture(null)
+            var residentReads = 0
+            var workplaceReads = 0
+            val labels = CivsHolograms(plugin, tasks, text, { viewers ->
+                residentReads++
+                h.owner.visibleHologramSnapshots(viewers).map { it.copy(courierCart = true, cargo = mapOf("PAPER" to 1)) }
+            }, displays, work, { viewers -> workplaceReads++; h.owner.visibleWorkplaceSnapshots(viewers) })
+            try {
+                fun pulse() { labels.pulse(); h.paper.performTicks(4) }
+                pulse()
+                val shown = handles.toList()
+                shown.size shouldBe 10 // Label, parcel and its sample, and seven workplace pieces.
+                viewer.teleport(near.clone().add(80.0, 0.0, 0.0))
+                pulse()
+                shown.forEach { verify(exactly = 1) { it.remove() } }
+                viewer.teleport(Location(elsewhere, near.x, near.y, near.z))
+                pulse()
+                handles.size shouldBe shown.size
+                viewer.teleport(near)
+                pulse()
+                val restored = handles.drop(shown.size)
+                restored.size shouldBe shown.size
+                viewer.disconnect()
+                val reads = residentReads to workplaceReads
+                pulse()
+                (residentReads to workplaceReads) shouldBe reads
+                restored.forEach { verify(exactly = 1) { it.remove() } }
+
+                h.owner.activeCount() shouldBe 1
+                h.owner.hologramSnapshots().single().workerId shouldBe h.workerId
+                h.owner.workplaceSnapshots().single().buildingId shouldBe hall.id
+                val npc = h.actor().npc
+                every { npc.isVisibleByDefault } returns true
+                val bounds = ru.arc.paper.api.ArcSceneBounds(h.world.uid, -16.0, 0.0, -16.0, 16.0, 128.0, 16.0)
+                h.owner.sceneEntityInformation(text, bounds, setOf("packet-npc:${npc.uniqueId}"), 1).size shouldBe 1
+
+                h.paper.addPlayer("ReturningViewer").teleport(near)
+                pulse()
+                handles.size shouldBe shown.size * 3
+            } finally {
+                labels.close()
+                work.close()
+                tasks.close()
+            }
         }
     }
 

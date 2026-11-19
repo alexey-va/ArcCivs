@@ -17,14 +17,15 @@ internal class CivsCityPlans(
     /** Access and upkeep depend on geometry and pending construction, never on worker/stock revisions. */
     private data class RetainedInputs(val cityId: UUID, val owner: UUID, val name: String, val worldId: UUID,
         val center: CivPosition, val radius: Int, val style: String, val buildings: List<CivBuilding>,
-        val constructionId: UUID?, val constructionBuilding: UUID?, val plannedBuilding: CivBuilding?,
+        val constructionId: UUID?, val constructionBuilding: UUID?, val plannedBuilding: CivBuilding?, val deferredPlans: List<CivBuilding>,
         val queue: List<UUID>?, val controls: List<CivControlPlacement>?, val deletion: CivDeletion?,
         val autonomous: Boolean, val layoutHalfWidth: Int?, val adopted: CivSettlementPlan?,
         val discoveries: Set<CivResearchId>, val overrides: Map<String, CivRoadRouteOverride>?) {
         companion object {
             fun from(city: Settlement) = RetainedInputs(city.id, city.owner, city.name, city.worldId,
                 city.center, city.radius, city.style, city.buildings, city.construction?.id,
-                city.construction?.buildingId, city.construction?.plannedBuilding, city.constructionQueue,
+                city.construction?.buildingId, city.construction?.plannedBuilding, city.deferredConstruction?.mapNotNull(CivConstruction::plannedBuilding).orEmpty(),
+                city.constructionQueue,
                 city.pendingControls, city.pendingDeletion, city.autonomy != null, city.autonomy?.layoutHalfWidth,
                 city.autonomy?.plan, city.research?.completed.orEmpty(), city.roadRouteOverrides)
         }
@@ -245,7 +246,7 @@ internal class CivsCityPlans(
     fun loadPlanBoardPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
         require(city.constructionQueue.orEmpty().size <= CivsRules.MAX_SITES)
         val upgrades = city.constructionQueue.orEmpty().mapNotNull(city::building)
-            .filter { it.phase == BuildingPhase.ACTIVE }.map { store.loadPlan(queuedDesignId(it)) }
+            .filter { it.phase == BuildingPhase.ACTIVE && city.constructionOrder(it.id) == null }.map { store.loadPlan(queuedDesignId(it)) }
         val active = loadAutonomousPlans(city)
         return active.thenCombineAsync(CompletableFuture.allOf(*upgrades.toTypedArray()), { retained, _ ->
             retained + upgrades.mapNotNull { it.join() }

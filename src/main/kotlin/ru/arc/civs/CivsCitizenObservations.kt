@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import org.bukkit.Bukkit
+import org.bukkit.Location
 import ru.arc.paper.api.ArcSceneBounds
 import ru.arc.paper.api.ArcSceneEntityInfo
 import java.util.UUID
@@ -69,7 +70,7 @@ internal class CivsCitizenObservations(
     @Volatile private var latestReadFrame = CivResidentReadFrame()
 
     /** This runs on the resident pulse, independently of the per-tick movement owner. */
-    fun publishReadFrame(workers: Map<UUID, Pair<Settlement, CivWorker>>, now: Long) {
+    fun publishReadFrame(workers: Map<UUID, Pair<Settlement, CivWorker>>, now: Long, supplyActivityChanged: (UUID) -> Unit) {
         checkCitizenMainThread()
         val previous = latestReadFrame
         val rows = buildMap(runtime.actors.size) {
@@ -88,7 +89,10 @@ internal class CivsCitizenObservations(
                     sleeping = actor.sleeping, sheltering = actor.sheltering, carrying = plan.courier?.carrying,
                     courierUnavailable = citizenCourierUnavailable(actor, valid, worker.id in runtime.pendingHarm),
                 )
-                put(worker.id, previous.rows[worker.id]?.takeIf { it == row } ?: row)
+                val prior = previous.rows[worker.id]
+                if (prior == null || prior.courierUnavailable != row.courierUnavailable &&
+                    worker.assignment?.let(city::building)?.type == BuildingType.WAREHOUSE) supplyActivityChanged(city.id)
+                put(worker.id, prior?.takeIf { it == row } ?: row)
             }
         }
         latestReadFrame = CivResidentReadFrame(previous.sequence + 1, now,
@@ -345,21 +349,32 @@ internal class CivsCitizenObservations(
             actor.collectionCycle == null && actor.terrainObstructedAt == null
     }
 
-    fun workplaceSnapshots(): List<CivsWorkplaceSnapshot> {
+    fun workplaceSnapshots(viewers: List<CitizenViewer>? = null): List<CivsWorkplaceSnapshot> {
         checkCitizenMainThread()
-        return runtime.cityProvider().flatMap { city -> city.buildings.mapNotNull { building ->
-            building.control?.let { CivsWorkplaceSnapshot(building.id, city.worldId, it,
-                CivsRules.effectiveWorkType(city, building), building.rotation) }
-        } }
+        if (viewers?.isEmpty() == true) return emptyList()
+        return runtime.cityProvider().flatMap { city ->
+            if (viewers != null && viewers.none { it.worldId == city.worldId }) return@flatMap emptyList()
+            city.buildings.mapNotNull { building ->
+                val control = building.control ?: return@mapNotNull null
+                if (viewers != null && !citizenHasViewer(city.worldId, control.point(), viewers, CIVS_PUBLIC_DISPLAY_RANGE)) return@mapNotNull null
+                CivsWorkplaceSnapshot(building.id, city.worldId, control, CivsRules.effectiveWorkType(city, building), building.rotation)
+            }
+        }
     }
 
-    fun hologramSnapshots(): List<CivsNpcHologramSnapshot> {
+    fun hologramSnapshots(viewers: List<CitizenViewer>? = null): List<CivsNpcHologramSnapshot> {
         checkCitizenMainThread()
+        if (viewers?.isEmpty() == true) return emptyList()
         return runtime.actors.values.mapNotNull { actor ->
+            if (viewers != null && viewers.none { it.worldId == actor.worldId }) return@mapNotNull null
             if (!actor.npc.isValid) return@mapNotNull null
-            val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: return@mapNotNull null
+            val at = actor.npc.location
+            val sleep = sleepPresentation(actor)
+            if (viewers != null && !civsResidentDisplayVisible(actor.worldId, at.point(), actor.npc.height, sleep,
+                    viewerRange.toDouble(), viewers)) return@mapNotNull null
+            val city = runtime.cityById(actor.cityId) ?: return@mapNotNull null
             val resident = city.workers.firstOrNull { it.id == actor.workerId } ?: return@mapNotNull null
-            hologramSnapshot(actor, city, resident)
+            hologramSnapshot(actor, city, resident, at, sleep)
         }
     }
 
@@ -368,25 +383,33 @@ internal class CivsCitizenObservations(
         checkCitizenMainThread()
         require(limit in 1..64 && entityIds.size <= 64)
         if (runtime.closed.get() || entityIds.isEmpty()) return emptyList()
-        val cities = runtime.cityProvider().associateBy { it.id }
         val result = ArrayList<ArcSceneEntityInfo>(minOf(limit, runtime.actors.size))
         for (actor in runtime.actors.values) {
             val npc = actor.npc
             if (!npc.isValid || !npc.isVisibleByDefault || "packet-npc:${npc.uniqueId}" !in entityIds) continue
-            val city = cities[actor.cityId] ?: continue
+            val city = runtime.cityById(actor.cityId) ?: continue
             if (city.pendingDeletion != null || city.worldId != bounds.worldId) continue
             val resident = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
             val at = npc.location
             if (!bounds.contains(npc.world.uid, at.x, at.y, at.z)) continue
-            civsSceneEntityInfo(text, bounds, entityIds, hologramSnapshot(actor, city, resident), city)?.let(result::add)
+            civsSceneEntityInfo(text, bounds, entityIds, hologramSnapshot(actor, city, resident, at), city)?.let(result::add)
             if (result.size == limit) break
         }
         return result
     }
 
-    private fun hologramSnapshot(actor: CitizenActor, city: Settlement, resident: CivWorker): CivsNpcHologramSnapshot {
+    private fun sleepPresentation(actor: CitizenActor): CivSleepPresentation? {
         val entity = actor.npc
-        val at = entity.location
+        if (!actor.sleeping || entity.pose != ru.arc.paper.npc.PacketNpcPose.SLEEPING) return null
+        val ground = actor.sleepOrigin ?: return null
+        val body = actor.sleepPose?.bounds ?: return null
+        return CivSleepPresentation(ground.x, ground.y, ground.z, entity.bodyYaw, entity.scale,
+            (body.minX + body.maxX) / 2, body.maxY, (body.minZ + body.maxZ) / 2)
+    }
+
+    private fun hologramSnapshot(actor: CitizenActor, city: Settlement, resident: CivWorker, at: Location,
+                                sleep: CivSleepPresentation? = sleepPresentation(actor)): CivsNpcHologramSnapshot {
+        val entity = actor.npc
         val type = if (resident.cargo != null) BuildingType.WAREHOUSE else
             resident.assignment?.let(city::building)?.let { CivsRules.effectiveWorkType(city, it) }
         val status = activityStatus(actor, city, resident)
@@ -397,14 +420,10 @@ internal class CivsCitizenObservations(
             cargo = resident.cargo?.let { mapOf(it.material to it.amount.toInt()) }.orEmpty(),
             yaw = entity.bodyYaw, nativeHeight = entity.height, hunger = CivsResidents.hunger(resident),
             child = CivsResidents.isChild(resident),
-            sleep = if (actor.sleeping && entity.pose == ru.arc.paper.npc.PacketNpcPose.SLEEPING)
-                actor.sleepOrigin?.let { ground -> actor.sleepPose?.bounds?.let { body ->
-                    CivSleepPresentation(ground.x, ground.y, ground.z, entity.bodyYaw, entity.scale,
-                        (body.minX + body.maxX) / 2, body.maxY, (body.minZ + body.maxZ) / 2)
-                } } else null,
+            sleep = sleep,
             statusInputs = if (status == "waiting-inputs") workStatusInputs(city, resident).distinct() else emptyList(),
-            speech = actor.social.visit?.takeIf { status == "talking" }?.let {
-                citizenConversationLine(resident.id, it, Bukkit.getCurrentTick())
+            speech = actor.social.visit?.conversation?.takeIf { status == "talking" }?.let {
+                it.bubble(resident.id, Bukkit.getCurrentTick())
             })
     }
 }

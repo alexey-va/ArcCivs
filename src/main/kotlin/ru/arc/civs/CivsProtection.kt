@@ -117,13 +117,13 @@ class CivsProtection(
                             }
                         }
                     }
-                    city.construction?.plannedBuilding?.let {
+                    city.constructionOrders().mapNotNull(CivConstruction::plannedBuilding).forEach {
                         add(Footprint(city.worldId, it.bounds, if (city.pendingDeletion != null) emptySet() else editors,
                             adminEditable = city.pendingDeletion == null))
                     }
                     civsProtectedBuildings(city).forEach { building ->
                         val point = building.control ?: return@forEach
-                        val restorers = if (city.pendingDeletion == null && building.phase != BuildingPhase.CONSTRUCTING && city.construction?.buildingId != building.id)
+                        val restorers = if (city.pendingDeletion == null && building.phase != BuildingPhase.CONSTRUCTING && city.constructionOrder(building.id) == null)
                             editors else emptySet()
                         add(Footprint(city.worldId, CivBox(point, point), emptySet(), restorers))
                     }
@@ -135,7 +135,7 @@ class CivsProtection(
                 } }
             // Inventory authority is stricter than owner-attributed native terrain and path edits.
             val inventories = cities.filter { it.autonomy != null }.flatMap { city ->
-                val boxes = city.buildings.map(CivBuilding::bounds) + listOfNotNull(city.construction?.plannedBuilding?.bounds) +
+                val boxes = civsProtectedBuildings(city).map(CivBuilding::bounds).toList() +
                     (city.inventory?.containers.orEmpty() + city.buildings.mapNotNull(CivBuilding::control)).map { CivBox(it, it) }
                 boxes.map { Footprint(city.worldId, it, emptySet(), adminEditable = city.pendingDeletion == null) }
             }.distinct()

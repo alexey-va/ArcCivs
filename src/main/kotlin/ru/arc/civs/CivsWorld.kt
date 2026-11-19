@@ -1,6 +1,5 @@
 package ru.arc.civs
 
-import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import me.angeschossen.lands.api.LandsIntegration
 import me.angeschossen.lands.api.flags.type.Flags
 import org.bukkit.Bukkit
@@ -47,6 +46,7 @@ class CivsWorld(
 ) : AutoCloseable {
     internal var onTerrainChanged: (UUID, Collection<CivPosition>) -> Unit = { _, _ -> }
     internal var scanChunks: ((UUID, UUID, Set<PaperChunkKey>) -> CivsChunkDemand)? = null
+    internal var accessRepairBlocked: (UUID, UUID, CivPosition) -> Boolean = { _, _, _ -> false }
     private val roadWorld = CivsRoadWorld(plugin, cities, ::canModify) { closed }
     private val monitor = Any()
     private val pending = LinkedHashSet<CivsWorldScan<*>>()
@@ -105,8 +105,7 @@ class CivsWorld(
         localFootprint: Boolean = false, markWaterTop: Boolean = false): CompletableFuture<CivTerrainSurface> =
         admit(area = if (localFootprint) null else surveyArea(city)) {
         requireCivs(waterColumns.size <= CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS, "autonomy-search-budget")
-        // Keep an owned snapshot without rebuilding packed coordinates in a boxed Long hash set.
-        AutonomousHeightField(this, city, envelope, previous, LongOpenHashSet(waterColumns), localFootprint = localFootprint,
+        AutonomousHeightField(this, city, envelope, previous, waterColumns, localFootprint = localFootprint,
             markWaterTop = markWaterTop)
     }
 
@@ -128,6 +127,8 @@ class CivsWorld(
     /** Administrative discovery retains the same explicit bounded survey footprint until its result retires. */
     internal fun prospectiveHeightField(city: Settlement, envelope: CivBuilding,
         columns: List<CivPosition>? = null): CompletableFuture<CivTerrainSurface> {
+        if (columns != null && columns.size !in 1..CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS)
+            return CompletableFuture.failedFuture(CivsRejection("autonomy-search-budget"))
         val samples = columns?.toList()
         return admit(area = if (samples == null) surveyArea(city) else null, sampledColumns = samples) {
             requireCivs(city.autonomy != null && city.buildings.singleOrNull()?.id == envelope.id &&
@@ -526,7 +527,7 @@ class CivsWorld(
         override fun validateIdentity(city: Settlement?) {
             requireCivs(city?.pendingDeletion == null && city?.building(building.id) == building &&
                 building.phase == BuildingPhase.ACTIVE &&
-                city.construction?.buildingId != building.id, "stale-building")
+                city.constructionOrder(building.id) == null, "stale-building")
         }
         override fun step() {
             if (index == positions.size) return finish(counts.toMap())
@@ -596,9 +597,9 @@ class CivsWorld(
         }
 
         override fun validateIdentity(city: Settlement?) {
-            requireCivs(city != null && city.autonomy != null && city.pendingDeletion == null &&
+            requireCivs(city != null && city.autonomy?.paused == false && city.pendingDeletion == null &&
                 involved.all { (id, snapshot) -> city.building(id) == snapshot } &&
-                city.construction?.buildingId?.let { it in involved } != true, "stale-building")
+                involved.keys.none { city.constructionOrder(it) != null }, "stale-building")
         }
 
         override fun ready(): Boolean = accessRepairChangedTick != tickSequence
@@ -609,8 +610,9 @@ class CivsWorld(
             val cell = repair.cell
             val before = parse(cell.before)
             val after = parse(cell.after)
-            fun count(key: String) { counts[key] = counts.getValue(key) + 1 }
+            fun count(key: String) { counts[key] = (counts[key] ?: 0) + 1 }
             val support = cell.position.y.toLong() == repair.standing.y.toLong() - 1
+            if (accessRepairBlocked(cityId, worldId, cell.position)) { count("deferred"); return }
             if (before.asString != cell.before || after.asString != cell.after ||
                 !terraformMaterial(before.material) ||
                 (if (support) after.material !in TREE_GROUND else !after.material.isAir) ||
@@ -618,7 +620,10 @@ class CivsWorld(
             val block = try {
                 checkTerrainOwnership(cell.position, repair)
                 read(cell.position)
-            } catch (_: CivsRejection) { count("denied"); return }
+            } catch (failure: CivsRejection) {
+                count(if (failure.reason == "chunks-unloaded") "deferred" else "denied")
+                return
+            }
             val current = block.blockData.asString
             if (current == cell.after) { count("unchanged"); return }
             if (current != cell.before) { count("conflicts"); return }

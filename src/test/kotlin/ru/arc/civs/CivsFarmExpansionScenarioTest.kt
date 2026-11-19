@@ -300,7 +300,8 @@ class CivsFarmExpansionScenarioTest : FunSpec({
             val planted = mutableSetOf<CivPosition>()
             var tilled = 0
             repeat(96) {
-                val work = nextWork("Farmer")
+                // The complete field takes more than one workday. Let an open batch resume at dawn.
+                val work = nextWork("Farmer", maximumPulses = 12_000)
                 work.durationMillis shouldBe 1_500L
                 work.autonomousVisual shouldBe false
                 work.outputs shouldBe emptyMap()

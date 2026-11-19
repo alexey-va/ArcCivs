@@ -32,23 +32,30 @@ internal object CivsSnapshotValidation {
             snapshot(city.buildings.all { validBuilding(city, it) })
             snapshot(city.buildings.all { it.type == BuildingType.TOWN_HALL || it.level <= city.level() })
             snapshot(city.buildings.withIndex().all { (index, building) -> city.buildings.drop(index + 1).none { it.bounds.overlaps(building.bounds) } })
-            val order = city.construction
+            val orders = city.constructionOrders()
+            val deferred = city.deferredConstruction.orEmpty()
+            if (deferred.isNotEmpty()) {
+                snapshot(orders.size <= city.buildings.size && orders.distinctBy { it.id }.size == orders.size &&
+                    orders.distinctBy { it.buildingId }.size == orders.size &&
+                    deferred.all { it.buildingId in city.constructionQueue.orEmpty() })
+            }
             city.constructionQueue?.let { queue ->
                 snapshot(queue.size <= CivsRules.MAX_SITES && queue.distinct().size == queue.size &&
                     queue.all { id -> CivsRules.present(id) && city.building(id)?.let {
-                        it.phase == BuildingPhase.SITE || it.phase == BuildingPhase.ACTIVE &&
+                        deferred.any { order -> order.buildingId == id } || it.phase == BuildingPhase.SITE || it.phase == BuildingPhase.ACTIVE &&
                             (it.level < it.type.maxLevel || CivsPlanBoardBlueprint.needsRefit(it) ||
                                 CivsInfrastructureRebuild.needsRefit(city, it))
-                    } == true && id != order?.buildingId })
+                    } == true && id != city.construction?.buildingId })
             }
             city.pendingDeletion?.buildingId?.let { id -> snapshot(city.building(id)?.type?.let { it != BuildingType.TOWN_HALL } == true) }
-            if (order != null) {
+            for (order in orders) {
                 val plan = order.plannedBuilding
                 snapshot(plan != null && validBuilding(city, plan))
                 val target = plan!!
                 val current = city.building(order.buildingId)
                 snapshot(CivsRules.present(order.id) && current != null && order.buildingId == target.id && order.targetLevel == target.level)
-                snapshot(target.phase == BuildingPhase.CONSTRUCTING && city.buildings.none { it.id != target.id && it.bounds.overlaps(target.bounds) })
+                snapshot(target.phase == BuildingPhase.CONSTRUCTING &&
+                    civsProtectedBuildings(city).none { it.id != target.id && it.bounds.overlaps(target.bounds) })
                 val founding = CivsRules.isFounding(city)
                 val retarget = civsAutonomousHallRetarget(city, current, target)
                 if (retarget) snapshot(order.id != target.id && order.payment != null)
@@ -93,7 +100,7 @@ internal object CivsSnapshotValidation {
                         payment.awaiting.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value })
                 }
             }
-            snapshot(city.buildings.none { it.phase == BuildingPhase.CONSTRUCTING && it.id != order?.buildingId })
+            snapshot(city.buildings.none { it.phase == BuildingPhase.CONSTRUCTING && city.constructionOrder(it.id) == null })
             snapshot(city.workers.size in 0..CivsRules.MAX_SNAPSHOT_RESIDENTS &&
                 city.workers.map { it.id }.distinct().size == city.workers.size)
             CivsCorpses.validate(city)
@@ -178,7 +185,7 @@ internal object CivsSnapshotValidation {
             }
             city.pendingControls?.let { pending ->
                 snapshot(pending.size <= CivsRules.MAX_BUILDINGS && pending.map { it.buildingId }.distinct().size == pending.size)
-                snapshot((city.buildings + listOfNotNull(city.construction?.plannedBuilding)).none { intersectsApproach(city, it) })
+                snapshot(civsProtectedBuildings(city).none { intersectsApproach(city, it) })
                 val approachPoints = pending.flatMap { it.approach.orEmpty() }.map { it.position }
                 snapshot(approachPoints.distinct().size == approachPoints.size)
                 val retired = pending.mapNotNull { it.retire?.position }
@@ -194,7 +201,7 @@ internal object CivsSnapshotValidation {
                         if (hallHandoff) snapshot(receipt.before in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air") &&
                             receipt.approach.orEmpty().isEmpty())
                         snapshot(city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
-                            (building.phase == BuildingPhase.ACTIVE && city.construction?.buildingId != building.id || hallHandoff) &&
+                            (building.phase == BuildingPhase.ACTIVE && city.constructionOrder(building.id) == null || hallHandoff) &&
                             CivsBuildingControls.supported(building.type) &&
                             cell.position != receipt.position && cell.position.y in -4_096..4_096 &&
                             city.contains(cell.position.x, cell.position.z) &&
@@ -213,7 +220,7 @@ internal object CivsSnapshotValidation {
                             CivsRules.validText(cell.before, CivsStore.MAX_BLOCK_STATE_CHARS) && cell.before.startsWith("minecraft:") &&
                             cell.before != cell.after && (cell == campCap || if (building.bounds.contains(point.x, point.y, point.z))
                                 approach.size == 1 && !building.type.isInfrastructure && building.phase == BuildingPhase.ACTIVE &&
-                                    city.construction?.buildingId != building.id && cell == civsControlSupport(receipt.position, cell.before)
+                                    city.constructionOrder(building.id) == null && cell == civsControlSupport(receipt.position, cell.before)
                             else point.x == building.entrance.x && point.z == building.entrance.z &&
                                 point.y.toLong() in (building.entrance.y.toLong() - 1)..(building.entrance.y.toLong() + 1) &&
                                 cell.after == if (point.y < building.entrance.y) "minecraft:dirt" else "minecraft:air")

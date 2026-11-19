@@ -191,9 +191,11 @@ internal class CivsCityDiagnostics(
             order?.phase == ConstructionPhase.WAITING_MATERIALS -> "waiting-materials"
             order?.phase == ConstructionPhase.PAUSED -> constructionFailureStatus(order.failure)
             order?.phase in setOf(ConstructionPhase.PLACING, ConstructionPhase.READY_TO_PLACE) -> "placing"
-            buildingId in city.constructionQueue.orEmpty() -> construction.queueFailure(city.id, buildingId)?.let {
-                constructionFailureStatus(it)
-            } ?: "queued"
+            buildingId in city.constructionQueue.orEmpty() -> {
+                val held = city.constructionOrder(buildingId)
+                if (held?.phase == ConstructionPhase.WAITING_MATERIALS) "waiting-materials"
+                else (construction.queueFailure(city.id, buildingId) ?: held?.failure)?.let(::constructionFailureStatus) ?: "queued"
+            }
             building.phase == BuildingPhase.SITE -> "site"
             else -> {
                 val workers = city.workers.filter { worker -> worker.assignment?.let(city::building)?.let { assigned ->

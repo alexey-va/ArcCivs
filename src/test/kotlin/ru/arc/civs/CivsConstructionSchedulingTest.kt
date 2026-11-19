@@ -38,6 +38,10 @@ class CivsConstructionSchedulingTest : FunSpec({
                 firstPaste.ready.asBoolean shouldBe false
                 val terrace = h.terrain.getValue(second)
                 terrace.first() shouldBe false
+                val anchor = requireNotNull(h.order(second).plannedBuilding).anchor
+                val earth = anchor.copy(x = anchor.x - 1, y = anchor.y - 1)
+                h.runtime.holdsAccessRepairCell(second, earth) shouldBe true
+                h.runtime.holdsAccessRepairCell(second, earth.copy(z = earth.z + 1)) shouldBe false
                 val waiting = h.addCity(3, paid = false)
                 h.arrived += waiting
 
@@ -121,6 +125,61 @@ class CivsConstructionSchedulingTest : FunSpec({
         }
     }
 
+    test("a partially pasted row admits a queued site only after native cancellation and resumes its exact capture") {
+        MockBukkitTestRuntime.open().use { paper ->
+            ConstructionSchedulingFixture(paper).use { h ->
+                val cityId = h.addCity(1)
+                val paid = h.order(cityId)
+                val next = h.addQueuedSite(cityId)
+                h.arrived += cityId
+                h.pulse()
+                val paste = h.pastes.getValue(cityId).single()
+                paste.write()
+                h.arrived -= cityId
+                h.tick()
+                paste.ready.asBoolean shouldBe false
+                h.time += 30_000
+                h.pulse()
+                paste.cancellations shouldBe 1
+                h.runtime.pulseQueue()
+                h.tick()
+                h.activatedSites shouldBe emptyList()
+                h.order(cityId) shouldBe paid
+                h.runtime.isPlacing(cityId) shouldBe true
+
+                paste.completion.complete(ArcSchematicMutationResult(1, 0, true))
+                h.tick()
+                h.runtime.pulseQueue()
+                h.tick()
+                h.activatedSites shouldBe listOf(next.id)
+                h.order(cityId).buildingId shouldBe next.id
+                h.city(cityId).deferredConstruction shouldBe listOf(paid)
+                h.completeQueuedSite(cityId)
+                h.arrived += cityId
+                h.time += 29_999
+                h.runtime.pulseQueue()
+                h.tick()
+                h.city(cityId).construction shouldBe null
+                h.time++
+                h.runtime.pulseQueue()
+                h.tick()
+                h.order(cityId) shouldBe paid
+                h.activatedSites shouldBe listOf(next.id)
+                h.pulse()
+                val resumed = h.pastes.getValue(cityId).last()
+                (resumed !== paste) shouldBe true
+                resumed.write()
+                resumed.completion.complete(ArcSchematicMutationResult(0, 1, false))
+                h.tick()
+                h.order(cityId).id shouldBe paid.id
+                h.order(cityId).workDone shouldBe 1
+                h.order(cityId).payment?.reservedBatch shouldBe null
+                h.nativeWrites shouldBe listOf(cityId)
+                h.payments shouldBe emptyList()
+            }
+        }
+    }
+
     test("a native protection failure during a builder yield pauses the same paid row") {
         MockBukkitTestRuntime.open().use { paper ->
             ConstructionSchedulingFixture(paper).use { h ->
@@ -157,13 +216,17 @@ private class ConstructionSchedulingFixture(private val paper: MockBukkitTestRun
     val payments = mutableListOf<UUID>()
     val validations = mutableListOf<UUID>()
     val nativeWrites = mutableListOf<UUID>()
+    val activatedSites = mutableListOf<UUID>()
     val pastes = mutableMapOf<UUID, MutableList<ConstructionNativePaste>>()
     val terrain = mutableMapOf<UUID, Pair<() -> Boolean, CompletableFuture<Unit>>>()
     var time = 10_000L
     val runtime = CivsConstructionRuntime(paper.createSimplePlugin("ConstructionScheduling"), tasks, adapter, blueprints,
         store, Executor(Runnable::run), mockk(relaxed = true), mockk(relaxed = true), citizens, mockk(relaxed = true),
-        { cities }, emptySet(), emptySet(), { true }, { false }, { true }, { true }, { _, action -> action() },
-        { id, update -> save(update(cities.getValue(id))) }, { _, _ -> error("Unexpected activation") },
+        { cities }, emptySet(), emptySet(), { true }, { false }, { true }, { _, action -> action() },
+        { id, update -> save(update(cities.getValue(id))) }, { city, building ->
+            activatedSites += building.id
+            save(admitQueuedTestSite(city, building)).thenApply { Unit }
+        },
         { city, order, cost ->
             cost shouldBe mapOf("STONE" to 1L)
             payments += city.id
@@ -224,6 +287,19 @@ private class ConstructionSchedulingFixture(private val paper: MockBukkitTestRun
     }
 
     private fun save(city: Settlement) = CompletableFuture.completedFuture(city.also { cities[it.id] = it })
+    fun city(id: UUID): Settlement = cities.getValue(id)
+    fun addQueuedSite(id: UUID): CivBuilding {
+        val city = staffedQueueTestCity(city(id))
+        val previous = requireNotNull(order(id).plannedBuilding)
+        val anchor = previous.anchor.copy(x = previous.anchor.x + 16)
+        val site = previous.copy(id = UUID.randomUUID(), anchor = anchor, bounds = CivBox(anchor, anchor.copy(y = 65)),
+            entrance = anchor, phase = BuildingPhase.SITE, control = anchor)
+        cities[id] = CivsRules.placeSite(city, city.owner, site)
+        native.loadChunk(anchor.x shr 4, anchor.z shr 4)
+        native.getBlockAt(anchor.x, anchor.y, anchor.z).type = Material.BARREL
+        return site
+    }
+    fun completeQueuedSite(id: UUID) { cities[id] = completeQueuedTestSite(city(id)) }
     fun order(cityId: UUID) = requireNotNull(cities.getValue(cityId).construction)
     fun block(cityId: UUID): Material = requireNotNull(order(cityId).plannedBuilding).anchor.let { native.getBlockAt(it.x, it.y, it.z).type }
     fun pulse() { runtime.pulse(); tick() }

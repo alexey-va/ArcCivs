@@ -28,27 +28,15 @@ internal class CivsResidentSupplies(
     private var testingSupplyCursor = 0
     private val supplyNoopDiagnostics = linkedMapOf<UUID, String>()
     private val autoSupplies = CivsAutoSupplies()
-    private val forestrySurplus = CivsForestrySurplus()
-    private val surplusRefreshAt = mutableMapOf<UUID, Long>()
     private val autoSupplyTurns = CivsCityTurns()
 
-    /** New forestry admission observes existing supply evidence; it never scans or moves inventory. */
-    internal fun forestrySurplus(city: Settlement, timber: String): Boolean {
-        val now = authority.now()
-        val decision = forestrySurplus.observe(city, supply.observation(city.id), supply.craftJobs(city.id), now) {
-            storage.supplyCaptureCurrent(city, it, requireComplete = true)
-        }
-        if (decision.familyStock == null && now >= surplusRefreshAt.getOrDefault(city.id, Long.MIN_VALUE)) {
-            supply.request(city.id)
-            surplusRefreshAt[city.id] = now + 5_000L
-        }
-        return decision.blocks(timber)
-    }
+    internal fun productionOrder(city: Settlement, worker: CivWorker): CivProductionOrder? =
+        supply.productionOrder(city.id, worker)
 
-    internal fun forestrySurplusDebug(cityId: UUID?): Map<String, Any?> = forestrySurplus.debug(cityId, authority.now())
+    internal fun forestrySurplusDebug(cityId: UUID?): Map<String, Any?> = supply.forestryDebug(cityId)
 
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? =
-        supply.craftJobs(city.id)[worker.id]?.takeIf { CivsCarpentry.valid(city, worker, it) }
+        supply.craftJob(city.id, worker.id)?.takeIf { CivsCarpentry.valid(city, worker, it) }
 
     /** Recipe context only; status and public scene reads never capture native inventories. */
     internal fun workStatusInputs(city: Settlement, worker: CivWorker): List<String> {
@@ -156,11 +144,17 @@ internal class CivsResidentSupplies(
         if (CivsRules.isBuilder(city, building) || building.type in CivsWorksites.TYPES) return true
         val inputs = craftPlan(city, worker)?.inputs ?: if (building.type == BuildingType.SAWMILL) return false
             else CivsProduction.inputs(city, building)
-        return CivsEquipment.inputsReady(worker, inputs, authority.planningBuildingStock(city, building.id))
+        val missing = CivsEquipment.storageInputs(worker, inputs)
+        if (missing.isEmpty()) return true
+        val stock = authority.planningBuildingStock(city, building.id)
+        return missing.all { (material, count) -> (stock[material] ?: 0L) >= count }
     }
 
     internal fun requireAutonomousStorage(city: Settlement, buildingId: UUID? = null) {
-        rejectIf(CivsAutonomy.legacyStock(city) && !storage.autonomousCapacityCurrent(city, buildingId), "storage-observation-stale")
+        if (CivsAutonomy.legacyStock(city) && !storage.autonomousCapacityCurrent(city, buildingId)) {
+            authority.requestSupplyEvidence(city.id)
+            throw CivsRejection("storage-observation-stale")
+        }
     }
 
     fun requireAutonomousDepotStorage(city: Settlement) {
@@ -362,16 +356,20 @@ internal class CivsResidentSupplies(
     }
 
     fun pulseAutoSupplies() {
-        forestrySurplus.retain(records.cities.keys)
-        surplusRefreshAt.keys.retainAll(records.cities.keys)
         autoSupplies.retain(records.cities.values.filter { it.autonomy != null }.mapTo(hashSetOf(), Settlement::id))
         val city = autoSupplyTurns.next(records.cities, authority.now(), 1_000L) {
             it.autonomy?.paused == false && CivsAutoStorageMigration.ready(it) && it.id !in records.busy &&
                 it.id !in records.unhealthy && it.pendingDeletion == null && !inventoryJournal.pending(it.id) && authority.settlementActive(it)
         } ?: return
-        val observation = autoSupplyObservation(city) ?: return
+        val observation = supply.observation(city.id)
+        if (!CivsAutoSupplies.observed(city, observation)) {
+            authority.requestSupplyEvidence(city.id)
+            return
+        }
         val need = runCatching { construction.supplyNeed(city) }.getOrNull()
         val demand = autoSupplies.next(city, need, residentFoods, observation, supply.craftJobs(city.id), authority.upkeepRequirements(city)) ?: return
+        // A cached shortage only nominates a grant. Fresh native evidence is required before reservation and at commit.
+        if (autoSupplyObservation(city) == null) return
         runCatching { authority.inventoryMutation(city.id, { current ->
             val fresh = autoSupplyObservation(current) ?: throw CivsRejection("storage-observation-stale")
             rejectIf(demand !in CivsAutoSupplies.demands(current, construction.supplyNeed(current), residentFoods,
@@ -401,7 +399,7 @@ internal class CivsResidentSupplies(
         val snapshot = supply.observation(city.id)
         val observed = snapshot?.inputKey as? CivSupplyObservation
         if (!CivsAutoSupplies.observed(city, snapshot) || observed == null || !storage.supplyCaptureCurrent(city, observed.capture)) {
-            supply.request(city.id)
+            authority.requestSupplyEvidence(city.id)
             return null
         }
         return snapshot

@@ -784,7 +784,7 @@ internal class CivsAutonomousPlacement(
                 else -> adopted?.routes?.get(buildingId.toString()) ?: throw CivsRejection("invalid-plan")
             }
             val paidApproach = if (!keepOriginalApproach && !infrastructure && pinned != null && previous?.phase == BuildingPhase.SITE &&
-                city.construction == null && city.constructionQueue.orEmpty().firstOrNull() == buildingId &&
+                city.construction == null && buildingId in city.constructionQueue.orEmpty() &&
                 adopted != null && reservedRoute != null && reservedRoute == pinnedRoute &&
                 civsSameBuildingGeometry(reservation?.building, previous))
                 CivsAutonomousTerraform.paidApproach(city, option.building, reservedRoute, CivsSettlementLayout.frame(city),
@@ -966,7 +966,7 @@ internal object CivsAutonomousGeometry {
     fun candidates(city: Settlement, current: CivBuilding, future: CivBuilding,
         access: CivAutonomousAccess = CivAutonomousAccess()): List<CivsAutonomousCandidate> {
         val bounds = union(withField(current.bounds, current), withField(future.bounds, future))
-        val occupied = city.buildings.map { futureBounds(city, it) } + listOfNotNull(city.construction?.plannedBuilding?.bounds)
+        val occupied = city.buildings.map { futureBounds(city, it) } + city.constructionOrders().mapNotNull { it.plannedBuilding?.bounds }
         val entries = city.buildings.flatMap(::approach)
         val fields = city.buildings.flatMap { CivsWorksiteLayouts.field(it) + CivsWorksiteLayouts.irrigation(it) }
         val roads = access.standing(city, current.id).values

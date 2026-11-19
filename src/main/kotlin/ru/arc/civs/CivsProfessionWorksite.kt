@@ -28,7 +28,9 @@ internal abstract class CivsProfessionWorksite(
         city.autonomy?.paused == false && CivsAutonomousWorksites.supports(city, building)
     abstract fun hasBudget(city: Settlement, worker: CivWorker, building: CivBuilding, current: CivWorldWork?): Boolean
     protected abstract fun propose(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
-        current: CivWorldWork?): CivWorksiteDiscovery
+        current: CivWorldWork?, order: CivProductionOrder?): CivWorksiteDiscovery
+
+    protected open fun continuePaidWork(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? = null
 
     protected fun toolWork(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         current: CivWorldWork?): CivWorldWork? =
@@ -85,7 +87,19 @@ internal abstract class CivsProfessionWorksite(
             if (replacement != null) return CivWorksiteDiscovery.Selected(replacement)
             if (approaches.rejectedWorkSpots[worker.id]?.pending != null) return CivWorksiteDiscovery.Unavailable
         }
-        val proposal = propose(city, worker, building, world, current)
+        val requiresOrder = context.ordersApply(city, building)
+        val order = if (requiresOrder) context.order(city, worker, building) else null
+        val proposal = when {
+            !requiresOrder || order != null -> propose(city, worker, building, world, current, order)
+            current != null -> CivWorksiteDiscovery.Retained
+            else -> {
+                val work = toolWork(city, worker, building, world, null) ?: continuePaidWork(city, worker, building, world)
+                if (work == null && context.spotSearchPending) return CivWorksiteDiscovery.Pending
+                if (work == null && context.currentNeed(city, worker)?.status == "searching-work")
+                    context.blocked(worker, "waiting-orders")
+                result(work, null)
+            }
+        }
         if (proposal !is CivWorksiteDiscovery.Selected) return proposal
         val work = CivsAutonomousWorksites.visual(city, building, proposal.work)
         context.needs.remove(worker.id)

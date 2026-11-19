@@ -36,11 +36,14 @@ internal class CivsForestryWorksite(
     override fun recoverRejected(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         pending: CivWorkCached): CivWorldWork? = approaches.retryForestApproach(city, worker, building, world, pending)
     override fun propose(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
-        current: CivWorldWork?): CivWorksiteDiscovery {
+        current: CivWorldWork?, order: CivProductionOrder?): CivWorksiteDiscovery {
         if (current != null && !CivsForestry.care(current)) return CivWorksiteDiscovery.Retained
         return result(toolWork(city, worker, building, world, current)
-            ?: plan(city, worker, building, world, harvestOnly = current != null), current)
+            ?: plan(city, worker, building, world, harvestOnly = current != null, order = order), current)
     }
+    override fun continuePaidWork(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? =
+        city.forestryJobs?.get(building.id.toString())?.takeIf { searchEligible(city, worker, building) }
+            ?.let { forestBatch(city, worker, building, world, it) }
     override fun searchEligible(city: Settlement, worker: CivWorker, building: CivBuilding): Boolean =
         CivsAutonomy.legacyStock(city) || CivsEquipment.slots(worker)[4]?.material?.endsWith(toolSuffix) == true
     override fun validatePlan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World, work: CivWorldWork) {
@@ -217,7 +220,7 @@ internal class CivsForestryWorksite(
     }
 
     fun plan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
-        harvestOnly: Boolean): CivWorldWork? {
+        harvestOnly: Boolean, order: CivProductionOrder?): CivWorldWork? {
         spotSearchPending = false
         val paid = city.forestryJobs?.get(building.id.toString())
         if (!searchEligible(city, worker, building)) {
@@ -225,15 +228,11 @@ internal class CivsForestryWorksite(
             return null
         }
         if (paid != null) return forestBatch(city, worker, building, world, paid)
-        // A selected work action is retained by propose(); paid tree jobs above always finish.
-        // Only a fully evidenced family surplus may pause every fresh species before native scanning.
-        if (CivsProduction.options(BuildingType.FORESTER).all { context.forestrySurplus(city, it) })
-            return blocked(worker, "storage-surplus", CivsProduction.material(building), reason = "timber-family-surplus")
         if (!takeDiscoveryTurn(city, worker, building)) return blocked(worker, "waiting")
         val paths = context.protectedForestryPaths(city)
         val timber = requireNotNull(CivsProduction.material(building))
         val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
-        val growConfiguredTimber = !context.forestrySurplus(city, timber)
+        val growConfiguredTimber = order?.allows(timber) != false
         val availableSaplings = if (!CivsAutonomy.legacyStock(city))
             CivsEquipment.available(worker, context.stock(city, building.id)).filterKeys { it.endsWith("_SAPLING") } else emptyMap()
         val supplies = if (!CivsAutonomy.legacyStock(city)) availableSaplings[sapling] ?: 0L else forestSupply(city, worker, building, sapling)
@@ -261,7 +260,7 @@ internal class CivsForestryWorksite(
             search.retryAt = null
         }
         forestScans[worker.id]?.takeIf { it.building == building }?.let { scan ->
-            if (!context.forestrySurplus(city, scan.scan.timber))
+            if (order?.allows(scan.scan.timber) != false)
                 return finishForestScan(city, worker, building, world, scan)
             forestScans.remove(worker.id) // No first receipt exists yet; another needed species may still be admitted.
         }
@@ -289,7 +288,7 @@ internal class CivsForestryWorksite(
                 search.mature.remove(point); return null
             }
             val treeTimber = base.type.name
-            if (context.forestrySurplus(city, treeTimber)) return null
+            if (order?.allows(treeTimber) == false) return null
             val roots = if (CivsForestry.large(treeTimber)) forestPlot(city, building, world, point, Material.valueOf(treeTimber), budgeted = true)
                 ?: if (treeTimber == "DARK_OAK_LOG") emptyList() else listOf(point) else listOf(point)
             if (!forestBudget()) return null
@@ -440,7 +439,12 @@ internal class CivsForestryWorksite(
     }
 
     private fun takeDiscoveryTurn(city: Settlement, worker: CivWorker, building: CivBuilding): Boolean {
-        fun eligible(candidate: CivWorker) = candidate.assignment == building.id && searchEligible(city, candidate, building)
+        fun continuing(candidate: CivWorker) = context.plan(city, candidate)?.let(::citizenWorkFocus) != null ||
+            approaches.rejectedWorkSpots[candidate.id]?.pending?.let { context.cachedMatches(city, candidate, building, it) } == true
+
+        val ordered = context.ordersApply(city, building)
+        fun eligible(candidate: CivWorker) = candidate.assignment == building.id && searchEligible(city, candidate, building) &&
+            (!ordered || candidate.id == worker.id || continuing(candidate) || context.order(city, candidate, building) != null)
 
         val turn = discoveryTurns.getOrPut(building.id) { DiscoveryTurn(worker.id, worker.completedCycles) }
         val owner = city.workers.firstOrNull { it.id == turn.workerId && eligible(it) }
@@ -449,8 +453,7 @@ internal class CivsForestryWorksite(
             discoveryTurns[building.id] = DiscoveryTurn(worker.id, worker.completedCycles, emptyAdmissions = 1)
             return true
         }
-        val active = hasPending(owner.id) || context.plan(city, owner)?.let(::citizenWorkFocus) != null ||
-            approaches.rejectedWorkSpots[owner.id]?.pending?.let { context.cachedMatches(city, owner, building, it) } == true ||
+        val active = hasPending(owner.id) || continuing(owner) ||
             approaches.workSpots[owner.id]?.target?.let { it in forestSearches[owner.id]?.care.orEmpty() } == true
         if (active || turn.cycle == owner.completedCycles && turn.emptyAdmissions < FOREST_TURN_ADMISSIONS) {
             if (owner.id != worker.id) return false

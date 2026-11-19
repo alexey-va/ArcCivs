@@ -185,7 +185,8 @@ open class ArcCivsPlugin : JavaPlugin() {
                             citizens::nudgeResident, bodyPassAllowed = citizens::passingBodies))
                         citizens.residentStepAllowed = collisions::canResidentMove
                     }
-                    val labels = CivsHolograms(this, lifecycle.tasks, text, citizens::hologramSnapshots, queue, citizens::workplaceSnapshots)
+                    val labels = CivsHolograms(this, lifecycle.tasks, text, citizens, queue)
+                    citizens.residentConversations = text.residentConversations()
                     citizens.showIdleNap = labels.idleNap::show
                     lifecycle.own(AutoCloseable {
                         labels.close()

@@ -59,9 +59,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         get() = context.residentFeet
         set(value) { context.residentFeet = value }
 
-    internal var forestrySurplus: (Settlement, String) -> Boolean
-        get() = context.forestrySurplus
-        set(value) { context.forestrySurplus = value }
+    internal var productionOrder: ((Settlement, CivWorker) -> CivProductionOrder?)?
+        get() = context.productionOrder
+        set(value) { context.productionOrder = value }
 
     fun plan(city: Settlement, worker: CivWorker): CivWorldWork? = context.plan(city, worker)
     fun rejectStanding(city: Settlement, worker: CivWorker, work: CivWorldWork, temporary: Boolean = false): Boolean =

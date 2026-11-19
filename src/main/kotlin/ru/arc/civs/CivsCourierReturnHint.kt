@@ -78,7 +78,7 @@ internal class CitizenCourierInboundPrefix private constructor(
             trip.cityId != city.id || trip.network.geometry.world != worldId || trip.network.geometry.center != center ||
             trip.network.geometry.radius != radius || segmentObserved && trip.walked.isEmpty()) { walked = null; return }
         val combined = previous + trip.walked
-        val geometry = CivsPaths.Geometry(city.worldId, city.center, city.radius, city.buildings, city.construction?.plannedBuilding)
+        val geometry = CivsPaths.Geometry(city)
         walked = combined.takeIf { it.size <= CivsPaths.MAX_TRIP_CELLS && it.all(geometry::outside) }
     }
 

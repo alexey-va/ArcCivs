@@ -133,7 +133,8 @@ class CivsStore(
                 "Construction storage changes require their durable inventory receipt"
             }
             require(before.pendingControls == snapshot.pendingControls && before.pendingDeletion == snapshot.pendingDeletion &&
-                before.construction == snapshot.construction && before.buildings == snapshot.buildings) {
+                before.construction == snapshot.construction && before.deferredConstruction == snapshot.deferredConstruction &&
+                before.buildings == snapshot.buildings) {
                 "World mutation intents require a durable save"
             }
             require(loadInventoryTransactions(root).none { it.cityId == snapshot.id }) { "Pending inventory owns its city revision" }
@@ -1057,6 +1058,10 @@ class CivsStore(
 
     private fun snapshotBuilding(building: CivBuilding) = building.copy(transit = building.transit?.toList())
 
+    private fun snapshotConstruction(order: CivConstruction) = order.copy(
+        plannedBuilding = order.plannedBuilding?.let(::snapshotBuilding), materials = order.materials?.toMap(),
+        payment = order.payment?.let { it.copy(awaiting = it.awaiting?.toMap()) })
+
     private fun snapshotWorker(worker: CivWorker) = worker.copy(skills = worker.skills?.toMap(),
         inventory = worker.inventory?.toMap(), items = worker.items?.toList(), parentIds = worker.parentIds?.toSet(),
         life = worker.life?.let { it.copy(education = it.education?.toMap()) })
@@ -1068,8 +1073,8 @@ class CivsStore(
         inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
             constructionBuffers = it.constructionBuffers?.mapValues { (_, group) -> group.detached() },
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
-        construction = city.construction?.let { it.copy(plannedBuilding = it.plannedBuilding?.let(::snapshotBuilding), materials = it.materials?.toMap(),
-            payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
+        construction = city.construction?.let(::snapshotConstruction),
+        deferredConstruction = city.deferredConstruction?.map(::snapshotConstruction),
         pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList(), retire = it.retire?.copy()) },
         constructionQueue = city.constructionQueue?.toList(),
         mineProgress = city.mineProgress?.toMap(),

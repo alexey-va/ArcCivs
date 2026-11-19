@@ -13,7 +13,7 @@ internal fun civSupplyInputs(city: Settlement): Any = listOf(
 )
 
 /** Owner metadata is stripped before dispatch; no native inventory or callback enters the worker. */
-internal data class CivSupplyObservation(val inputs: Any, val capture: CivSupplyCaptureResult)
+internal data class CivSupplyObservation(val inputs: Any, val capture: CivSupplyCaptureResult, val itemReceipt: UUID? = null)
 
 /** Stock estimates include a staffed depot even while its courier is finishing another job. */
 internal fun CivSupplySnapshot.canSupply(source: CivSupplyStore, relaysInReachOfTarget: List<CivSupplyStore>): Boolean {
@@ -46,6 +46,7 @@ internal class CivsSupplyPlanning(
     private val unavailable: (UUID) -> Boolean,
     private val crafts: Map<UUID, CivCraftJob> = emptyMap(),
     private val constructionNeed: Map<String, Long>? = null,
+    private val itemReceipt: UUID? = null,
 ) {
     private var stores: Map<UUID, CivSupplyStore>? = null
     private var requests = emptyList<CivSupplyRequest>()
@@ -129,7 +130,8 @@ internal class CivsSupplyPlanning(
                 CivsLogistics.constructionDestination(city, order.buildingId, source.control)?.let { courier.warehouseId to it.id }
             }.toMap()
         }.orEmpty()
-        return CivSupplySnapshot(city.id, CivSupplyObservation(civSupplyInputs(city), requireNotNull(capture.result)), requireNotNull(stores),
+        return CivSupplySnapshot(city.id, CivSupplyObservation(civSupplyInputs(city), requireNotNull(capture.result), itemReceipt),
+            requireNotNull(stores),
             requests, couriers.toList(), emptyList(), existing.toMap(), materials.mapValues { it.value.maxStackSize },
             constructionTargets, craftWorkers.toList(), crafts.toMap(), constructionId = city.construction?.id,
             stockTargets = CivsCarpentry.stockTargets(city), maximumTransferDistance = CivsLogistics.maximumTransferDistance(city))

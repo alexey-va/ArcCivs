@@ -830,6 +830,10 @@ class CivsProtectionTest : FunSpec({
             listener.isProtected(world.uid, 16, 64, -17) shouldBe true
             listener.isProtected(world.uid, 16, 67, -17) shouldBe false
             listener.isProtected(UUID.randomUUID(), 16, 64, -17) shouldBe false
+            city = city.copy(construction = null, deferredConstruction = listOf(requireNotNull(city.construction)),
+                constructionQueue = listOf(building.id))
+            listener.refresh() shouldBe false
+            listener.isProtected(world.uid, 16, 64, -17) shouldBe true
         }
     }
 })

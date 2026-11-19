@@ -17,10 +17,14 @@ data class CivConstructionStorageOwner(val cityId: UUID, val worldId: UUID, val 
                 it.anchor == building.anchor && it.rotation == building.rotation && it.bounds == building.bounds }
         } == true
 
-    fun held(city: Settlement): Boolean = !returningForDeletion(city) && (city.construction?.let { it.buildingId == target.id &&
-        it.targetLevel == target.level && civsSameBuildingGeometry(it.plannedBuilding, target) } == true ||
-        city.building(original.id)?.let { it.level == original.level && it.schematicId == original.schematicId &&
-            it.id in city.constructionQueue.orEmpty() } == true)
+    fun held(city: Settlement): Boolean {
+        if (returningForDeletion(city)) return false
+        city.constructionOrder(target.id)?.let {
+            return it.targetLevel == target.level && civsSameBuildingGeometry(it.plannedBuilding, target)
+        }
+        return city.building(original.id)?.let { it.level == original.level && it.schematicId == original.schematicId &&
+            it.id in city.constructionQueue.orEmpty() } == true
+    }
 
     fun returningForDeletion(city: Settlement) = city.pendingDeletion?.let { it.buildingId == null || it.buildingId == original.id } == true
 
@@ -41,7 +45,7 @@ data class CivConstructionStorageOwner(val cityId: UUID, val worldId: UUID, val 
             original.phase == BuildingPhase.ACTIVE && !original.type.isInfrastructure && civsRelocationLocal(original, p) ||
             p !in inventory.containers && inventory.containers.size >= CivInventory.MAX_CONTAINERS ||
             !civsConstructionStorageFootprint(city, original, target, p) ||
-            city.construction?.plannedBuilding?.let { civsRelocationLocal(it, p) } == true ||
+            city.constructionOrders().any { order -> order.plannedBuilding?.let { civsRelocationLocal(it, p) } == true } ||
             city.pendingControls.orEmpty().any { it.position == p || it.retire?.position == p || it.approach.orEmpty().any { c -> c.position == p } })
             return null
         return p
@@ -215,9 +219,9 @@ internal data class CivConstructionStorageBatch(val holder: CivRelocatedContaine
 
 internal fun civsConstructionReturnAllowed(city: Settlement, building: CivBuilding, p: CivPosition): Boolean {
     if (city.pendingControls.orEmpty().any { it.retire != null && (p == it.position || p == it.retire.position) }) return false
-    if (city.pendingDeletion == null && city.construction?.let { order -> listOfNotNull(city.building(order.buildingId), order.plannedBuilding).any {
+    if (city.pendingDeletion == null && city.constructionOrders().any { order -> listOfNotNull(city.building(order.buildingId), order.plannedBuilding).any {
             civsRelocationLocal(it, p)
-        } } == true) return false
+        } }) return false
     if (city.pendingDeletion?.let { deletion -> city.buildings.any { it.control == p && (deletion.buildingId == null || deletion.buildingId == it.id) } } == true) return false
     if (civsRelocationLocal(building, p)) return p == building.control ||
         building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure || p in city.inventory?.containers.orEmpty()

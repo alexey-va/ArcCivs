@@ -97,8 +97,9 @@ class CivsCitizens(
     nightShelterRecoveryAllowed: (Settlement, CivPosition) -> Boolean = { _, _ -> false },
     sleepingFloors: (CivBuilding) -> CompletableFuture<CivSleepingFloorMask> = {
         CompletableFuture.completedFuture(CivSleepingFloorMask(emptyList())) },
+    cityById: ((UUID) -> Settlement?)? = null,
 ) : Listener, AutoCloseable {
-    private val runtime = CitizenRuntime(plugin, navigationSettings.entityCollisions, cityProvider)
+    private val runtime = CitizenRuntime(plugin, navigationSettings.entityCollisions, cityById, cityProvider)
     internal var residentLifeEnabled: Boolean
         get() = runtime.residentLifeEnabled
         set(value) { runtime.residentLifeEnabled = value }
@@ -131,6 +132,9 @@ class CivsCitizens(
     private val shelter: CivsCitizenShelters
     private val couriers: CivsCitizenCouriers
     private val leisure: CivsCitizenLeisure
+    internal var residentConversations: CitizenConversationDeck?
+        get() = leisure.conversations
+        set(value) { leisure.conversations = value }
     internal var showIdleNap: ((Location, Float, Double) -> CivsIdleNapVisual)?
         get() = leisure.nap.show
         set(value) { leisure.nap.show = value }
@@ -139,6 +143,9 @@ class CivsCitizens(
     private val combat: CivsCitizenCombat
     private val observations: CivsCitizenObservations
     private val plans: CivsCitizenPlanning
+    internal var productionOrder: ((Settlement, CivWorker) -> CivProductionOrder?)?
+        get() = plans.productionOrder
+        set(value) { plans.productionOrder = value }
     private val equipment: CivsCitizenEquipment
     private val audience: CivsCitizenAudience
     private val skins: List<CitizenSkin>
@@ -170,10 +177,9 @@ class CivsCitizens(
     /** Current feet and accepted journey endpoints extend the developed chunk envelope. */
     internal fun chunkPositions(): Map<UUID, Collection<CivPosition>> {
         checkCitizenMainThread()
-        val cities = cityProvider().associateBy { it.id }
         val positions = linkedMapOf<UUID, MutableList<CivPosition>>()
         for (actor in actors.values) {
-            if (!actor.npc.isValid || cities[actor.cityId]?.worldId != actor.worldId) continue
+            if (!actor.npc.isValid || runtime.cityById(actor.cityId)?.worldId != actor.worldId) continue
             val points = positions.getOrPut(actor.cityId) { mutableListOf() }
             actor.npc.location.let { points += CivPosition(it.blockX, it.blockY, it.blockZ) }
             points += actor.plan.storage
@@ -434,6 +440,7 @@ class CivsCitizens(
         statuses.keys.retainAll(workers.keys)
         admission.retain(workers.keys, actors.keys)
         val viewers = audience.viewers()
+        leisure.viewers = viewers
 
         for (actor in actors.values.toList()) {
             val current = workers[actor.workerId]
@@ -463,6 +470,7 @@ class CivsCitizens(
             }
             if (reason != null) {
                 if (actor.idleNap != null) leisure.nap.stop(actor)
+                if (actor.social.visit?.partnerId != null && actor.npc.isValid) leisure.stopCamp(actor, reason)
                 if (reason == "chunk-unloaded" && backgroundActive(city.id) && plan != null) {
                     // The new plan may precede the next chunk-owner pulse and actor reconciliation.
                     actor.pendingChunkTarget = plan.workplace ?: plan.storage
@@ -489,8 +497,19 @@ class CivsCitizens(
         workers.values.filter { it.second.id !in actors && it.second.id in pendingHarm }.forEach { (city, worker) ->
             admission.record(city, worker, null, null, "injury-pending", nowMillis)
         }
+        val dormantCities = cities.values.filter { city ->
+            city.workers.isNotEmpty() && viewers.none { it.worldId == city.worldId } && !backgroundActive(city.id)
+        }.associate { it.id to if (plugin.server.getWorld(it.worldId) == null) "world-unloaded" else "sleeping" }
         val candidates = workers.values.filter { it.second.id !in actors && it.second.id !in pendingHarm }
-            .map { (city, worker) -> Triple(city, worker, plans.plan(city, worker)) }
+            .mapNotNull { (city, worker) ->
+                val reason = dormantCities[city.id]
+                if (reason == null) Triple(city, worker, plans.plan(city, worker)) else {
+                    statuses[worker.id] = reason
+                    if (reason == "sleeping") admission.sleeping(worker.id)
+                    admission.record(city, worker, null, null, reason, nowMillis)
+                    null
+                }
+            }
             .sortedByDescending { (city, worker, plan) -> plan != null &&
                 citizenHasViewer(city.worldId, admission.origin(city, worker.id, plan).point(), viewers, viewerRange) }
         for ((city, worker, plan) in candidates) {
@@ -576,10 +595,10 @@ class CivsCitizens(
                     "ArcCivs NPC spawn failed city=${city.id} worker=$workerId attempt=${retry.attempts}", error)
             }
         }
-        campfires.scanOne(Bukkit.getCurrentTick()) { plugin.server.getWorld(it) }
+        if (viewers.isNotEmpty()) campfires.scanOne(Bukkit.getCurrentTick()) { plugin.server.getWorld(it) }
         threats.pulse(actors.values.filter { it.workerId !in pendingHarm && it.npc.isValid }
             .map { CivsThreatTarget(it.cityId, it.workerId, it.npc) }, nowMillis)
-        observations.publishReadFrame(workers, nowMillis)
+        observations.publishReadFrame(workers, nowMillis, supplyActivityChanged)
     }
 
     /** Hand over admitted work, courier transfers and short idle legs on the existing bounded pulse. */
@@ -589,8 +608,8 @@ class CivsCitizens(
         // Both owner cadences can submit observed resident-life and work receipts.
         runtime.residentObservedAt = nowMillis
         logistics.drainCompletions(nowMillis)
-        val cities = cityProvider().associateBy { it.id }
         val viewers = audience.viewers()
+        leisure.viewers = viewers
         // At most eight existing actors, rotated after admission; no spawn, scan or threat pulse.
         // Extra worksite kinds use slots only for admitted work or a brief committed handoff.
         val candidates = actors.values.filter { it.workerId !in pendingHarm &&
@@ -601,7 +620,7 @@ class CivsCitizens(
                 it.plan.type == BuildingType.WAREHOUSE && it.plan.courier != null) }.take(8)
         for (actor in candidates) {
             citizenRotateAfterAdmission(actors, actor.workerId)
-            val city = cities[actor.cityId]?.takeIf { it.pendingDeletion == null } ?: continue
+            val city = runtime.cityById(actor.cityId)?.takeIf { it.pendingDeletion == null } ?: continue
             val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
             val world = actor.npc.world
             if (world.uid != city.worldId || world.time in 12_000L..23_000L ||
@@ -626,7 +645,7 @@ class CivsCitizens(
             it.supplyPickup == null && !logistics.collectedPending(it) && it.social.visit == null }.take(4)
         for (actor in idle) {
             citizenRotateAfterAdmission(actors, actor.workerId)
-            val city = cities[actor.cityId]?.takeIf { it.pendingDeletion == null } ?: continue
+            val city = runtime.cityById(actor.cityId)?.takeIf { it.pendingDeletion == null } ?: continue
             val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
             val world = actor.npc.world
             if (world.uid != city.worldId || world.time in 12_000L..23_000L ||
@@ -856,12 +875,12 @@ class CivsCitizens(
     }
     @EventHandler(priority = EventPriority.MONITOR)
     fun onQuit(event: PlayerQuitEvent) {
-        audience.pruneViewers(event.player.uniqueId)
+        leisure.releaseUnseen(audience.pruneViewers(event.player.uniqueId))
         leisure.nap.releaseUnseen(event.player.uniqueId)
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
-    fun onWorldChange(event: PlayerChangedWorldEvent) = audience.pruneViewers()
+    fun onWorldChange(event: PlayerChangedWorldEvent) = leisure.releaseUnseen(audience.pruneViewers())
 
     private fun invalidateCampfire(block: org.bukkit.block.Block) {
         if (block.type == Material.CAMPFIRE || block.type == Material.SOUL_CAMPFIRE)
@@ -1049,6 +1068,7 @@ class CivsCitizens(
         save: (CitizenNavigationDebugFrame) -> CompletableFuture<Map<String, Any?>>): CitizenNavigationDebugArm =
         routes.armNavigationDebug(city, worker, cycle, goal, save)
 
+    internal var supplyActivityChanged: (UUID) -> Unit = {}
     internal fun residentReadFrame(): CivResidentReadFrame = observations.readFrame()
 
     internal fun courierSupplySources(cityId: UUID, retainedSources: Set<UUID> = emptySet()): Map<UUID, CivPosition> = couriers.courierSupplySources(cityId, retainedSources)
@@ -1085,8 +1105,10 @@ class CivsCitizens(
     internal fun canReassign(cityId: UUID, workerId: UUID): Boolean = observations.canReassign(cityId, workerId)
 
     fun workplaceSnapshots(): List<CivsWorkplaceSnapshot> = observations.workplaceSnapshots()
+    internal fun visibleWorkplaceSnapshots(viewers: List<CitizenViewer>) = observations.workplaceSnapshots(viewers)
 
     fun hologramSnapshots(): List<CivsNpcHologramSnapshot> = observations.hologramSnapshots()
+    internal fun visibleHologramSnapshots(viewers: List<CitizenViewer>) = observations.hologramSnapshots(viewers)
 
     fun sceneEntityInformation(text: CivsText, bounds: ArcSceneBounds, entityIds: Set<String>, limit: Int): List<ArcSceneEntityInfo> = observations.sceneEntityInformation(text, bounds, entityIds, limit)
 

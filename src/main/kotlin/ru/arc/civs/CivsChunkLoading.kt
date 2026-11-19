@@ -73,8 +73,7 @@ internal data class CivsChunkArea(val world: UUID, val minX: Int, val maxX: Int,
                     }
                 }
             }
-            city.buildings.forEach { building(it, city.minePlans?.get(it.id.toString())) }
-            city.construction?.plannedBuilding?.let { building(it, city.minePlans?.get(it.id.toString())) }
+            civsProtectedBuildings(city).forEach { building(it, city.minePlans?.get(it.id.toString())) }
             city.minePlans.orEmpty().values.flatMap { it.levels.orEmpty() }.forEach { building(it.building, it.state()) }
             points(city.inventory?.containers.orEmpty())
             city.pendingControls.orEmpty().forEach { receipt ->
@@ -145,6 +144,7 @@ internal class CivsChunkLoading(
     }
 
     val retainedChunks: Int get() = registry.activeChunkCount
+    internal var onActivityChanged: (UUID) -> Unit = {}
     /** Shares the one plugin ticket registry; never creates or loads a missing source chunk. */
     internal fun retainLoaded(key: PaperChunkKey): PaperChunkTicketLease {
         check(org.bukkit.Bukkit.isPrimaryThread())
@@ -395,7 +395,7 @@ internal class CivsChunkLoading(
     }
 
     private fun sameFootprint(first: Settlement, second: Settlement): Boolean = first.center == second.center &&
-        first.buildings == second.buildings && first.construction?.plannedBuilding == second.construction?.plannedBuilding &&
+        first.buildings == second.buildings && first.sameConstructionFootprints(second) &&
         first.inventory?.containers == second.inventory?.containers && first.pendingControls == second.pendingControls &&
         sameMines(first.minePlans.orEmpty(), second.minePlans.orEmpty()) &&
         sameForestry(first.forestryJobs.orEmpty(), second.forestryJobs.orEmpty()) &&
@@ -491,13 +491,19 @@ internal class CivsChunkLoading(
     fun chunkUnloading(event: ChunkUnloadEvent) {
         val key = PaperChunkKey(event.world.uid, event.chunk.x, event.chunk.z)
         ready -= key
-        cities.values.filter { key in it.chunks }.forEach { it.ready = false }
+        for ((id, city) in cities) if (city.ready && key in city.chunks) {
+            city.ready = false
+            status(id, "loading")
+        }
         release(key)
     }
 
     private fun status(city: UUID, value: String) {
-        if (statuses.put(city, value) != value) CivsDiagnostics.event("settlement_chunks", "city" to city,
-            "state" to value, "chunks" to cities[city]?.chunks?.size, "retained" to retainedChunks, "maximum" to maximumChunks)
+        val previous = statuses.put(city, value)
+        if (previous == value) return
+        if (previous == "active" || value == "active") onActivityChanged(city)
+        CivsDiagnostics.event("settlement_chunks", "city" to city, "state" to value,
+            "chunks" to cities[city]?.chunks?.size, "retained" to retainedChunks, "maximum" to maximumChunks)
     }
 
     override fun close() {

@@ -1,5 +1,7 @@
 package ru.arc.civs
 
+import java.util.UUID
+
 import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.block.BlockFace
@@ -108,4 +110,28 @@ internal fun civsIntersectsCity(box: CivBox, city: Settlement): Boolean =
 internal fun civsProtectedBuildings(city: Settlement): Sequence<CivBuilding> = sequence {
     yieldAll(city.buildings)
     city.construction?.plannedBuilding?.let { yield(it) }
+    val deferred = city.deferredConstruction ?: return@sequence
+    for (index in deferred.indices) deferred[index].plannedBuilding?.let { yield(it) }
 }
+
+/** Geometry caches retain the accepted outlines, independently of a builder's payment and work cursor. */
+internal fun Settlement.constructionFootprints(): Map<UUID, CivBuilding> {
+    if (deferredConstruction.isNullOrEmpty()) return construction?.plannedBuilding?.let { mapOf(it.id to it) }.orEmpty()
+    return buildMap { for (order in constructionOrders()) order.plannedBuilding?.let { put(it.id, it) } }
+}
+
+internal fun Settlement.matchesConstructionFootprints(footprints: Map<UUID, CivBuilding>): Boolean {
+    val active = construction?.plannedBuilding
+    val deferred = deferredConstruction.orEmpty()
+    if (footprints.size != deferred.size + (if (active == null) 0 else 1) ||
+        active != null && footprints[active.id] != active) return false
+    for (index in deferred.indices) {
+        val building = deferred[index].plannedBuilding ?: return false
+        if (footprints[building.id] != building) return false
+    }
+    return true
+}
+
+internal fun Settlement.sameConstructionFootprints(other: Settlement): Boolean =
+    if (deferredConstruction === other.deferredConstruction) construction?.plannedBuilding == other.construction?.plannedBuilding
+    else other.matchesConstructionFootprints(constructionFootprints())

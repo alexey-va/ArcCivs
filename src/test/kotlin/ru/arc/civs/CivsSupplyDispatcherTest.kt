@@ -305,6 +305,64 @@ class CivsSupplyDispatcherTest : FunSpec({
         }
     }
 
+    test("production lots survive unrelated supply changes and new demand wakes on the next city review") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("ProductionDispatch")))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0L })
+            val original = forestryCity(autonomous = false)
+            val farm = original.buildings.last().copy(type = BuildingType.FARM, production = "WHEAT")
+            var city = original.copy(buildings = listOf(original.buildings.first(), farm).map { it.copy(control = it.anchor) })
+            val worker = city.workers.single()
+            var now = 10_000L
+            var tick = 0L
+            var reviews = 0
+            var logisticsCurrent = true
+            work.drainAvailable { tick }
+            lateinit var dispatcher: CivsSupplyDispatcher
+            dispatcher = CivsSupplyDispatcher(tasks, work, { id, _ ->
+                val snapshot = supplyObservation(city)
+                val survey = if (dispatcher.productionReviewDue(id, now)) {
+                    reviews++
+                    CivsProductionOrders.survey(city, snapshot, now)
+                } else null
+                val step: () -> CivSupplySnapshot? = { snapshot.copy(productionSurvey = survey) }
+                step
+            }, { _, _ -> logisticsCurrent }, Executor(Runnable::run), { now })
+            fun pulse() { tick++; paper.performTicks(1); dispatcher.request(city.id); dispatcher.pulse() }
+            try {
+                pulse()
+                val order = requireNotNull(dispatcher.productionOrder(city.id, worker))
+                order.untilCycle shouldBe 4L
+                var working = worker.copy(completedCycles = 1L, hunger = 18)
+                city = city.copy(workers = listOf(working), inventory = CivInventory(CivStorageMode.VIRTUAL, mapOf("WHEAT" to 100L)))
+                repeat(20) {
+                    now += 1_000L
+                    pulse()
+                    dispatcher.productionOrder(city.id, working) shouldBe order
+                }
+                reviews shouldBe 1
+                logisticsCurrent = false
+                now = 40_000L
+                pulse()
+                dispatcher.productionOrder(city.id, working) shouldBe order
+                reviews shouldBe 2
+                working = working.copy(completedCycles = order.untilCycle)
+                city = city.copy(workers = listOf(working))
+                dispatcher.productionOrder(city.id, working) shouldBe null
+                now = 70_000L
+                pulse()
+                dispatcher.productionOrder(city.id, working) shouldBe null
+                city = city.copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
+                now = 100_000L
+                pulse()
+                requireNotNull(dispatcher.productionOrder(city.id, working)).fromCycle shouldBe working.completedCycles
+                reviews shouldBe 4
+                dispatcher.remove(city.id)
+                dispatcher.productionOrder(city.id, working) shouldBe null
+            } finally { dispatcher.close(); work.close(); tasks.close() }
+        }
+    }
+
     test("focused supply diagnostics expose accepted tool and upkeep stock requests before truncation without recapture") {
         MockBukkitTestRuntime.open().use { paper ->
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("SupplyDiagnostics")))

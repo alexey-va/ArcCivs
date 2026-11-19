@@ -2121,6 +2121,10 @@ class CivsConstructionStorageTest : FunSpec({
             val paused = CivConstruction(UUID.randomUUID(), target.id, original.level, 4, 1,
                 ConstructionPhase.PAUSED, Stock(), failure = "world-changed", plannedBuilding = target)
             pin.held(city.copy(construction = paused)) shouldBe true
+            val deferred = city.copy(construction = null, constructionQueue = listOf(original.id), deferredConstruction = listOf(paused))
+            pin.held(deferred) shouldBe true
+            pin.held(deferred.copy(pendingDeletion = CivDeletion(original.id))) shouldBe false
+            pin.held(deferred.copy(deferredConstruction = listOf(paused.copy(plannedBuilding = target.copy(rotation = (target.rotation + 90) % 360))))) shouldBe false
             pin.held(city.copy(construction = paused.copy(plannedBuilding = target.copy(rotation = (target.rotation + 90) % 360)))) shouldBe false
             pin.held(city.copy(constructionQueue = listOf(original.id))) shouldBe true
             pin.held(city) shouldBe false

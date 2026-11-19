@@ -12,6 +12,9 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import org.bukkit.Location
+import org.bukkit.Material
+import org.bukkit.block.Barrel
+import org.bukkit.inventory.ItemStack
 
 class CivsAutonomousInfrastructureServiceTest : FunSpec({
     test("operator terrain capture rejects an unready service and a worker outside the selected city without native access") {
@@ -62,18 +65,21 @@ class CivsAutonomousInfrastructureServiceTest : FunSpec({
         } finally { unmockkConstructor(CivsAutonomousPlacement::class) }
     }
 
-    test("historical access repair precedes growth with empty stock and publishes no construction or resource credit") {
+    test("a denied historical path retries separately while an unrelated paid building enters native placement") {
         serviceScenario { h ->
-            val city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), workers = emptyList())
+            val paid = h.incrementalPlacement(ConstructionPhase.PLACING, paid = true, stock = 1)
+            val city = paid.city.copy(autonomy = CivAutonomy())
             val older = city.buildings.first()
-            val offender = city.buildings.last()
+            val offender = city.buildings.single { it.type == BuildingType.HOUSE }
+            val builderStore = requireNotNull(city.buildings.single { it.type == BuildingType.BUILDER_HUT }.control)
+            val target = requireNotNull(city.construction?.plannedBuilding)
             val write = CivPlanBlock(older.entrance, "minecraft:air", "minecraft:coarse_dirt")
             val plan = CivPlacementPlan(offender.id, city.id, city.worldId, offender, emptyList(),
                 terrain = CivTerraformPlan(offender.bounds, listOf(write), listOf(offender.entrance), 63, 0, 1))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.store.loadPlan(offender.id) } returns CompletableFuture.completedFuture(plan)
             var repair = CompletableFuture<Map<String, Int>>()
-            every { h.worldAdapter.repairAutonomousAccess(city, any()) } answers { repair }
+            every { h.worldAdapter.repairAutonomousAccess(match { it.id == city.id }, any()) } answers { repair }
             h.start()
             h.paper.addPlayer("AccessOwner").teleport(Location(h.world, 0.5, 65.0, 0.5))
             val development = autonomousDevelopment(h.service)
@@ -82,6 +88,7 @@ class CivsAutonomousInfrastructureServiceTest : FunSpec({
             verify(exactly = 1) { h.worldAdapter.repairAutonomousAccess(city, listOf(
                 CivAutonomousAccessRepair(older.id, offender.id, older.entrance,
                     write.copy(before = write.after, after = write.before)))) }
+            verify(exactly = 1) { h.blueprints.paste(any(), city.worldId, target.anchor, any(), any()) }
             h.saves shouldBe emptyList()
             repair.complete(mapOf("changed" to 0, "unchanged" to 0, "conflicts" to 0, "denied" to 1)); h.tick()
             development.accessReady(city) shouldBe false
@@ -89,6 +96,9 @@ class CivsAutonomousInfrastructureServiceTest : FunSpec({
             verify(exactly = 1) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
             repair = CompletableFuture()
             h.time += 30_001
+            development.pulseAccessRepair(); h.tick()
+            verify(exactly = 1) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
+            h.time += 270_000
             development.pulseAccessRepair(); h.tick()
             repair.complete(mapOf("changed" to 1, "unchanged" to 0, "conflicts" to 0, "denied" to 0)); h.tick()
             development.accessReady(city) shouldBe true
@@ -101,8 +111,21 @@ class CivsAutonomousInfrastructureServiceTest : FunSpec({
             })) shouldBe false
             development.pulseAccessRepair(); h.tick()
             verify(exactly = 2) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
-            h.service.settlements().single().stock shouldBe Stock()
-            h.saves shouldBe emptyList()
+            verify(exactly = 1) { h.blueprints.paste(any(), city.worldId, target.anchor, any(), any()) }
+            for (snapshot in h.saves.map { it.first } + h.service.settlements().single()) {
+                snapshot.stock shouldBe city.stock
+                snapshot.inventory shouldBe city.inventory
+                snapshot.construction shouldBe city.construction
+                snapshot.constructionQueue shouldBe city.constructionQueue
+                snapshot.deferredConstruction shouldBe city.deferredConstruction
+                snapshot.buildings shouldBe city.buildings
+                snapshot.roadRouteOverrides shouldBe city.roadRouteOverrides
+            }
+            val barrel = h.world.getBlockAt(builderStore.x, builderStore.y, builderStore.z).state as Barrel
+            barrel.inventory.getItem(0) shouldBe ItemStack(Material.STONE)
+            verify(exactly = 0) { h.store.saveInventoryTransaction(match { tx -> tx.changes.any {
+                it.container == builderStore && it.before?.material == "STONE"
+            } }) }
             verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any()) }
         }
     }

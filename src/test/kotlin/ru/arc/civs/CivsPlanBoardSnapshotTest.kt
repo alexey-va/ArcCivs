@@ -40,6 +40,11 @@ class CivsPlanBoardSnapshotTest : FunSpec({
         snapshot.buildings.count { it.id == existing.id } shouldBe 1
         snapshot.plannedBuildings.count { it.id == existing.id } shouldBe 1
         snapshot.routes shouldBe emptyMap()
+        val parked = city.copy(construction = null, deferredConstruction = listOf(requireNotNull(city.construction)),
+            constructionQueue = listOf(site.id, existing.id))
+        val parkedSnapshot = civsPlanBoardSnapshot(civsPlanBoardCapture(parked), emptyList())
+        parkedSnapshot.plannedBuildings shouldBe listOf(site, upgrade)
+        (parkedSnapshot.layoutKey != civsPlanBoardLayoutKey(parked.copy(deferredConstruction = null))) shouldBe true
         val constructing = existing.copy(phase = BuildingPhase.CONSTRUCTING)
         val fresh = base.copy(buildings = listOf(base.buildings.first(), constructing), construction = boardOrder(constructing))
         civsPlanBoardSnapshot(fresh, emptyList()).let {

@@ -20,6 +20,7 @@ class Auto2WorksitesScenarioTest : FunSpec({
             forest.status shouldBe "felling-tree"
             forest.forestry!!.job.thinning shouldBe true
             val treeBefore = snapshot(forest.changes.map { it.position })
+            checkpointAvailableCity()
             val before = city
 
             val interrupted = observedCompletion(forest)
@@ -121,6 +122,7 @@ class Auto2WorksitesScenarioTest : FunSpec({
         val recipe = auto2Recipe()
         SettlementScenario.run("auto2-lands-fence", AUTO2_CENTER, recipe.capture, { world -> auto2Town(world, recipe) }) {
             val work = nextWork("forester")
+            checkpointAvailableCity()
             val cells = snapshot(work.changes.map { it.position } + guardedCells(town))
             val before = city
             val lands = paper.createSimplePlugin("Lands")
@@ -220,7 +222,8 @@ private fun ScenarioTown.auto2Town(world: CivsWorksiteWorldFixture, recipe: Auto
             slot == 4 && role == "forester" -> CivResidentItem("IRON_AXE", 1)
             slot == 4 && role == "miner" -> CivResidentItem("IRON_PICKAXE", 1)
             slot == CivsEquipment.BAG && role == "forester" -> CivResidentItem("OAK_SAPLING", 4)
-            slot == CivsEquipment.BAG && role in listOf("miner", "builder") -> CivResidentItem("COBBLESTONE", 64)
+            // Both can pay for their work while the town still has a reason to order more stone.
+            slot == CivsEquipment.BAG && role in listOf("miner", "builder") -> CivResidentItem("COBBLESTONE", 4)
             slot == CivsEquipment.BAG + 1 && role == "miner" -> CivResidentItem("LADDER", 64)
             slot == CivsEquipment.BAG + 2 && role == "miner" -> CivResidentItem("TORCH", 64)
             else -> null

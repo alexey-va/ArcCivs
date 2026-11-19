@@ -65,8 +65,7 @@ internal fun citizenStorageTarget(city: Settlement, own: CivBuilding, world: Wor
         if (coordinates.any { it !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }) continue
         val point = CivPosition(coordinates[0].toInt(), coordinates[1].toInt(), coordinates[2].toInt())
         if (city.contains(point.x, point.z) &&
-            city.buildings.none { it.id != own.id && it.bounds.contains(point.x, point.y, point.z) } &&
-            city.construction?.plannedBuilding?.takeIf { it.id != own.id }?.bounds?.contains(point.x, point.y, point.z) != true &&
+            civsProtectedBuildings(city).none { it.id != own.id && it.bounds.contains(point.x, point.y, point.z) } &&
             citizenControlClear(city, point) && safe(point)) return point
     }
     return null
@@ -359,8 +358,7 @@ internal fun citizenRecoveryTarget(city: Settlement, target: CivPosition, safe: 
         if (x !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() || y !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() ||
             z !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) continue
         val point = CivPosition(x.toInt(), y.toInt(), z.toInt())
-        if (city.contains(point.x, point.z) && city.buildings.none { it.bounds.contains(point.x, point.y, point.z) } &&
-            city.construction?.plannedBuilding?.bounds?.contains(point.x, point.y, point.z) != true && safe(point)) return point
+        if (city.contains(point.x, point.z) && civsProtectedBuildings(city).none { it.bounds.contains(point.x, point.y, point.z) } && safe(point)) return point
     }
     return null
 }

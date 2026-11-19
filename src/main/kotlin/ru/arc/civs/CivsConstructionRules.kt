@@ -17,7 +17,7 @@ internal fun civsAutonomousHallRetarget(city: Settlement, source: CivBuilding?, 
     val originalControl = civsAutonomousHallOriginalControl(source, target) ?: return false
     if (!source.bounds.contains(originalControl.x, originalControl.y, originalControl.z)) return false
     if (source.control != originalControl && (source.control != target.control ||
-            city.construction?.plannedBuilding != target)) return false
+            city.constructionOrder(source.id)?.plannedBuilding != target)) return false
     return CivsAutonomousGeometry.atHeight(source.copy(control = originalControl), target.anchor.y)
         .copy(phase = BuildingPhase.CONSTRUCTING) == target &&
         source.bounds.contains(target.control.x, target.control.y, target.control.z)
@@ -50,7 +50,8 @@ internal fun civsAutonomousHallHandoff(city: Settlement, building: CivBuilding,
 
 /** Pure construction admission, exact payment and durable batch transitions. */
 internal object CivsConstructionRules {
-    fun reserveBuild(city: Settlement, actor: UUID, building: CivBuilding, order: CivConstruction): Settlement {
+    fun reserveBuild(city: Settlement, actor: UUID, building: CivBuilding, order: CivConstruction,
+        selectedQueuedBuilding: UUID? = null): Settlement {
         CivsRules.authorized(city, actor)
         CivsRules.check(city.pendingControls.orEmpty().none { it.buildingId == building.id && it.retire != null }, "city-busy")
         val plan = building.copy(phase = BuildingPhase.CONSTRUCTING)
@@ -70,13 +71,17 @@ internal object CivsConstructionRules {
             CivsRules.check(replay == reserved, "invalid-construction")
             return city
         }
+        val deferred = city.deferredConstruction.orEmpty()
+        CivsRules.check(deferred.none { it.buildingId == plan.id || it.id == order.id }, "construction-busy")
         val existing = city.building(plan.id)
         val retarget = civsAutonomousHallRetarget(city, existing, plan)
         if (retarget) CivsRules.check(order.id != plan.id && order.payment != null, "invalid-construction")
-        if (existing?.phase != BuildingPhase.SITE && plan.id !in city.constructionQueue.orEmpty())
+        val queue = city.constructionQueue.orEmpty()
+        if (existing?.phase != BuildingPhase.SITE && plan.id !in queue)
             CivsResearch.required(plan.type, plan.level)?.let { CivsRules.check(CivsResearch.has(city, it), "research-required") }
-        if (city.constructionQueue.orEmpty().isNotEmpty())
-            CivsRules.check(city.constructionQueue!!.first() == plan.id, "construction-busy")
+        if (selectedQueuedBuilding != null)
+            CivsRules.check(selectedQueuedBuilding == plan.id && plan.id in queue, "construction-busy")
+        else if (queue.isNotEmpty()) CivsRules.check(queue.first() == plan.id, "construction-busy")
         CivsRules.check(plan.type == BuildingType.TOWN_HALL || plan.level <= city.level(), "town-hall-level-required")
         if (existing == null) {
             CivsRules.check(plan.type != BuildingType.TOWN_HALL && plan.level == 1, "invalid-level")
@@ -92,7 +97,8 @@ internal object CivsConstructionRules {
                 CivsPlanBoardBlueprint.refit(existing, plan) || CivsInfrastructureRebuild.refit(existing, plan), "invalid-level")
         }
         CivsRules.check(!CivsSnapshotValidation.intersectsApproach(city, plan), "building-overlap")
-        CivsRules.check(CivsSnapshotValidation.validBuilding(city, plan) && city.buildings.none { it.id != plan.id && it.bounds.overlaps(plan.bounds) }, "invalid-building")
+        CivsRules.check(CivsSnapshotValidation.validBuilding(city, plan) &&
+            civsProtectedBuildings(city).none { it.id != plan.id && it.bounds.overlaps(plan.bounds) }, "invalid-building")
         CivsRules.check(workRouteWithinReach(city, plan.entrance, plan.type.isInfrastructure), "work-route-too-long")
         CivsRules.check(city.stock.covers(reserved.cost), "not-enough-resources")
         val remaining = city.stock - reserved.cost
@@ -104,6 +110,31 @@ internal object CivsConstructionRules {
             buildings = if (existing == null) city.buildings + plan else if (existing.phase == BuildingPhase.SITE && !retarget)
                 city.buildings.map { if (it.id == plan.id) plan else it } else city.buildings,
             construction = reserved, constructionQueue = city.constructionQueue?.filterNot { it == plan.id }))
+    }
+
+    /** The caller has settled the current native placement before yielding its slot. */
+    fun defer(city: Settlement, expected: CivConstruction): Settlement {
+        CivsRules.check(city.pendingDeletion == null, "deletion-pending")
+        val deferred = city.deferredConstruction.orEmpty()
+        if (expected in deferred) return city
+        CivsRules.check(city.construction == expected, "stale-construction")
+        CivsRules.check(city.pendingControls.orEmpty().none { it.buildingId == expected.buildingId }, "city-busy")
+        return CivsRules.changed(city, city.copy(construction = null, deferredConstruction = deferred + expected,
+            constructionQueue = city.constructionQueue.orEmpty() + expected.buildingId))
+    }
+
+    fun resume(city: Settlement, buildingId: UUID): Settlement {
+        CivsRules.check(city.pendingDeletion == null, "deletion-pending")
+        city.construction?.let { current ->
+            CivsRules.check(current.buildingId == buildingId, "construction-busy")
+            return city
+        }
+        val deferred = city.deferredConstruction.orEmpty()
+        val order = deferred.firstOrNull { it.buildingId == buildingId } ?: CivsRules.reject("stale-construction")
+        CivsRules.check(buildingId in city.constructionQueue.orEmpty(), "stale-construction")
+        return CivsRules.changed(city, city.copy(construction = order,
+            deferredConstruction = (deferred - order).takeIf { it.isNotEmpty() },
+            constructionQueue = city.constructionQueue?.filterNot { it == buildingId }))
     }
 
     /** Same nearest available depot and three-dimensional entrance distance as citizenPlan. */

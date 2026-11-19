@@ -131,6 +131,7 @@ class CivsMineSafetySliceTest : FunSpec({
 class CivsMineLandingClearanceTest : FunSpec({
     test("a captured one-high landing prioritizes its own paid body clearance then seals the old frontier across reload") {
         withLandingClearance { f ->
+            f.runtime.productionOrder = { _, _ -> null }
             val beforeCobble = CivsEquipment.plainCount(f.city.workers.single(), "COBBLESTONE").toLong()
             val old = f.excavation
             f.block(LANDING_FAR_WALL).type shouldBe Material.AIR
@@ -188,6 +189,7 @@ class CivsMineLandingClearanceTest : FunSpec({
                     break
                 }
                 f.reload()
+                f.runtime.productionOrder = { _, _ -> null }
             }
             sealed shouldBe true
             withClue("native receipt trace:\n${trace.joinToString("\n")}") {
@@ -200,6 +202,9 @@ class CivsMineLandingClearanceTest : FunSpec({
                 f.block(LANDING_NECK.copy(y = 44)).type shouldBe Material.STONE
             }
             f.block(LANDING_FAR_WALL).type shouldBe Material.COBBLESTONE
+            repeat(8) { f.runtime.pulse(listOf(f.city)) }
+            f.runtime.plan(f.city, f.city.workers.single()) shouldBe null
+            f.runtime.idleReason(f.city, f.city.workers.single()) shouldBe "waiting-orders"
             CivsEquipment.plainCount(f.city.workers.single(), "COBBLESTONE").toLong() shouldBe
                 beforeCobble + 5L
         }

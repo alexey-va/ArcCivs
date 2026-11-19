@@ -72,7 +72,13 @@ internal class CivsWorksiteContext(
     var spotSearchPending = false
     var mutationBlocked: (UUID, CivPosition) -> Boolean = { _, _ -> false }
     var residentFeet: (UUID) -> Location? = { null }
-    var forestrySurplus: (Settlement, String) -> Boolean = { _, _ -> false }
+    var productionOrder: ((Settlement, CivWorker) -> CivProductionOrder?)? = null
+
+    fun ordersApply(city: Settlement, building: CivBuilding): Boolean =
+        productionOrder != null && CivsProductionOrders.applies(city, building)
+
+    fun order(city: Settlement, worker: CivWorker, building: CivBuilding): CivProductionOrder? =
+        productionOrder?.invoke(city, worker)?.takeIf { it.matches(building) }
     val cached = hashMapOf<UUID, Cached>()
     val needs = hashMapOf<UUID, Need>()
 

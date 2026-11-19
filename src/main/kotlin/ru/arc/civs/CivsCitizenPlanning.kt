@@ -21,6 +21,8 @@ internal class CivsCitizenPlanning(
     private val residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
     private val acceleratedWork: (Settlement) -> Boolean = { false },
 ) {
+    var productionOrder: ((Settlement, CivWorker) -> CivProductionOrder?)? = null
+
     private val routes get() = routesOwner()
     private val couriers get() = couriersOwner()
     private val leisure get() = leisureOwner()
@@ -168,6 +170,21 @@ internal class CivsCitizenPlanning(
             base = if (job == null && base.type == BuildingType.SAWMILL) base.copy(idleReason = "waiting-orders")
                 else if (job != null) base.copy(token = base.token.copy(craftJobId = job.id),
                     suppliesNeeded = !CivsEquipment.inputsReady(worker, job.inputs, emptyMap())) else base
+        }
+        val orders = productionOrder
+        if (orders != null && building != null && base.courier == null && base.idleReason == null &&
+            base.token.craftJobId == null && base.type !in CivsWorksites.TYPES && CivsProductionOrders.applies(city, building)) {
+            val order = orders(city, worker)
+            if (order == null || !order.matches(building) || !order.allows(order.configured)) {
+                // Preserve an observed cycle, including its supplies or depot trip, while demand is reviewed.
+                actor?.takeIf {
+                    it.cycle.phase != CitizenPhase.IDLE && it.cycle.phase != CitizenPhase.CLOSED &&
+                        it.plan.token == base.token && it.plan.type == base.type && it.plan.idleReason == null &&
+                        it.plan.storage == base.storage &&
+                        (it.plan.workplace == base.workplace || it.plan.workstation != null)
+                }?.let { return it.plan }
+                return base.copy(workMillis = 0, idleReason = "waiting-orders")
+            }
         }
         if (workstation != null && !CivsAutonomy.legacyStock(city) && base.type in CivsWorkstations.TYPES &&
             base.courier == null && base.worldWork == null) {

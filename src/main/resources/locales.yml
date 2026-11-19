@@ -613,20 +613,310 @@ ru:
   workers:
     conversation:
       topic-0:
-        line-0: '<#fff0d5>Как дорога к складу?'
-        line-1: '<#fff0d5>Подсохла после дождя.'
-        line-2: '<#fff0d5>Хорошо, пройдём после обеда.'
-        line-3: '<#fff0d5>Договорились.'
+        line-0: '<#fff0d5>В распутицу где посуше?'
+        line-1: '<#fff0d5>По краю тропы.'
+        line-2: '<#fff0d5>А я смотрю, где птицы ходят.'
+        line-3: '<#fff0d5>Тогда за утками не ходи.'
       topic-1:
-        line-0: '<#fff0d5>Уже созрела пшеница?'
-        line-1: '<#fff0d5>На солнечной грядке — да.'
-        line-2: '<#fff0d5>Надо сказать пекарю.'
-        line-3: '<#fff0d5>Он обрадуется.'
+        line-0: '<#fff0d5>Спелая пшеница тихо шуршит.'
+        line-1: '<#fff0d5>Как бумага?'
+        line-2: '<#fff0d5>Мягче. Бумага так не умеет.'
+        line-3: '<#fff0d5>Прислушаюсь, как доведётся.'
       topic-2:
-        line-0: '<#fff0d5>Слышал, строят новый дом?'
-        line-1: '<#fff0d5>Видел, крышу уже начали.'
-        line-2: '<#fff0d5>Скоро будет новоселье.'
-        line-3: '<#fff0d5>Зайду посмотреть.'
+        line-0: '<#fff0d5>Что дарить на новоселье?'
+        line-1: '<#fff0d5>Табуретку.'
+        line-2: '<#fff0d5>А почему табуретку?'
+        line-3: '<#fff0d5>Гостям же надо где-то сесть.'
+      topic-3:
+        line-0: '<#fff0d5>На развилке я оглядываюсь.'
+        line-1: '<#fff0d5>Кого-то ждёшь?'
+        line-2: '<#fff0d5>Запоминаю обратный путь.'
+      topic-4:
+        line-0: '<#fff0d5>С тобой я всё время спешу.'
+        line-1: '<#fff0d5>А я боюсь отстать от тебя!'
+        line-2: '<#fff0d5>Хорошо хоть остановились.'
+      topic-5:
+        line-0: '<#fff0d5>В детстве у нас было правило.'
+        line-1: '<#fff0d5>И какое же?'
+        line-2: '<#fff0d5>Не ступать на щели меж камней.'
+        line-3: '<#fff0d5>Я до сих пор так хожу.'
+      topic-6:
+        line-0: '<#fff0d5>Объясни дорогу без «вон там».'
+        line-1: '<#fff0d5>И пальцем не показывать?'
+        line-2: '<#fff0d5>Ладно, палец оставим.'
+      topic-7:
+        line-0: '<#fff0d5>Дома я сразу разуваюсь.'
+        line-1: '<#fff0d5>А я первым делом иду к окну.'
+        line-2: '<#fff0d5>В сапогах?'
+        line-3: '<#fff0d5>Вот и мету потом пол.'
+      topic-8:
+        line-0: '<#fff0d5>Узелок на память помогает?'
+        line-1: '<#fff0d5>Помню, что надо вспомнить.'
+        line-2: '<#fff0d5>А что именно?'
+        line-3: '<#fff0d5>Вот тут бы второй узелок.'
+      topic-9:
+        line-0: '<#fff0d5>Дед всем кивал вместо слов.'
+        line-1: '<#fff0d5>И тебе тоже?'
+        line-2: '<#fff0d5>Мне ещё и подмигивал.'
+      topic-10:
+        line-0: '<#fff0d5>Своих узнаёшь по шагам?'
+        line-1: '<#fff0d5>Брата всегда. Пяткой стучит.'
+        line-2: '<#fff0d5>А моего выдают ключи.'
+      topic-11:
+        line-0: '<#fff0d5>Люблю новые сапоги.'
+        line-1: '<#fff0d5>Даже когда скрипят?'
+        line-2: '<#fff0d5>Особенно когда скрипят.'
+      topic-12:
+        line-0: '<#fff0d5>Мне бы хлебную корочку.'
+        line-1: '<#fff0d5>А мне серединку.'
+        line-2: '<#fff0d5>Нам бы каравай на двоих.'
+      topic-13:
+        line-0: '<#fff0d5>Как узнать пирожок с капустой?'
+        line-1: '<#fff0d5>Защипываем гребешком.'
+        line-2: '<#fff0d5>А круглые тогда с чем?'
+        line-3: '<#fff0d5>С яблоком. Их я больше люблю.'
+      topic-14:
+        line-0: '<#fff0d5>Сколько это — щепотка соли?'
+        line-1: '<#fff0d5>А чьими пальцами брать?'
+        line-2: '<#fff0d5>Вот и у нас так спорят.'
+      topic-15:
+        line-0: '<#fff0d5>Я пенку с молока снимаю.'
+        line-1: '<#fff0d5>Мне бы её. С детства люблю.'
+      topic-16:
+        line-0: '<#fff0d5>Чистишь яблоко одной лентой?'
+        line-1: '<#fff0d5>До половины. Потом рвётся.'
+        line-2: '<#fff0d5>Уже хватит на пышные усы.'
+      topic-17:
+        line-0: '<#fff0d5>Люблю чай в тяжёлой кружке.'
+        line-1: '<#fff0d5>В ней теплее?'
+        line-2: '<#fff0d5>Рукам уж точно.'
+      topic-18:
+        line-0: '<#fff0d5>С чего начать мириться?'
+        line-1: '<#fff0d5>Поставь рядом вторую чашку.'
+        line-2: '<#fff0d5>А что сказать?'
+        line-3: '<#fff0d5>Просто спроси, налить ли чаю.'
+      topic-19:
+        line-0: '<#fff0d5>За столом я сажусь с краю.'
+        line-1: '<#fff0d5>Поближе к хлебу?'
+        line-2: '<#fff0d5>Оттуда сподручнее за солью.'
+      topic-20:
+        line-0: '<#fff0d5>Я при вязании считаю вслух.'
+        line-1: '<#fff0d5>А если кто-то заговорит?'
+        line-2: '<#fff0d5>Тогда шарф выходит пошире.'
+      topic-21:
+        line-0: '<#fff0d5>Я люблю яркие заплаты.'
+        line-1: '<#fff0d5>Я-то подбираю цвет в цвет.'
+        line-2: '<#fff0d5>Мне в детстве шили цветочком.'
+        line-3: '<#fff0d5>Такие даже прятать жалко.'
+      topic-22:
+        line-0: '<#fff0d5>В детстве был любимый звук.'
+        line-1: '<#fff0d5>Дождь по крыше?'
+        line-2: '<#fff0d5>Мамина коробка с пуговицами.'
+      topic-23:
+        line-0: '<#fff0d5>Хороший звук у рубанка.'
+        line-1: '<#fff0d5>Ш-ш-ш, когда вдоль волокон?'
+        line-2: '<#fff0d5>Ага. А поперёк он ворчит.'
+      topic-24:
+        line-0: '<#fff0d5>Зачем делать карандаш плоским?'
+        line-1: '<#fff0d5>Чтоб со стола не укатился.'
+        line-2: '<#fff0d5>Вот куда мои все деваются.'
+      topic-25:
+        line-0: '<#fff0d5>Молоток в какой руке держишь?'
+        line-1: '<#fff0d5>В левой.'
+        line-2: '<#fff0d5>Тогда встану напротив.'
+        line-3: '<#fff0d5>Получится как в зеркале.'
+      topic-26:
+        line-0: '<#fff0d5>Ох уж эта пыль у совка.'
+        line-1: '<#fff0d5>Которую метёшь и метёшь?'
+        line-2: '<#fff0d5>Её я беру влажной тряпкой.'
+      topic-27:
+        line-0: '<#fff0d5>Гнутые гвозди я берегу.'
+        line-1: '<#fff0d5>Выпрямляешь их потом?'
+        line-2: '<#fff0d5>Из них крючки хорошие.'
+      topic-28:
+        line-0: '<#fff0d5>На дне кружки хочу рыбку.'
+        line-1: '<#fff0d5>Живую, что ли?'
+        line-2: '<#fff0d5>Рисунок. Допьёшь и увидишь.'
+      topic-29:
+        line-0: '<#fff0d5>Мне удобнее овальная корзина.'
+        line-1: '<#fff0d5>Чем она лучше круглой?'
+        line-2: '<#fff0d5>По колену не бьёт на ходу.'
+      topic-30:
+        line-0: '<#fff0d5>Люблю суп деревянной ложкой.'
+        line-1: '<#fff0d5>Ею и о край миски не звякнешь.'
+      topic-31:
+        line-0: '<#fff0d5>Я в сучках на доске вижу глаза.'
+        line-1: '<#fff0d5>А если сучок всего один?'
+        line-2: '<#fff0d5>Значит, доска подмигивает.'
+      topic-32:
+        line-0: '<#fff0d5>За работой я тихонько свищу.'
+        line-1: '<#fff0d5>Всегда один мотив?'
+        line-2: '<#fff0d5>Начало одно. Конец как выйдет.'
+      topic-33:
+        line-0: '<#fff0d5>Нитка у меня вечно путается.'
+        line-1: '<#fff0d5>Длинную берёшь?'
+        line-2: '<#fff0d5>Да, чтобы подольше хватило.'
+        line-3: '<#fff0d5>Я лучше дважды вдену.'
+      topic-34:
+        line-0: '<#fff0d5>Мне проще показать руками.'
+        line-1: '<#fff0d5>А я умею подбирать слова.'
+        line-2: '<#fff0d5>Ты объясняй, а я покажу.'
+      topic-35:
+        line-0: '<#fff0d5>Беру сперва трудную работу.'
+        line-1: '<#fff0d5>А я сперва мелкую.'
+        line-2: '<#fff0d5>Чтобы руку размять?'
+        line-3: '<#fff0d5>Чтоб уже что-то было готово.'
+      topic-36:
+        line-0: '<#fff0d5>Люблю слушать шум дождя.'
+        line-1: '<#fff0d5>А мне легко дышится после него.'
+      topic-37:
+        line-0: '<#fff0d5>Умею стрекотать как кузнечик.'
+        line-1: '<#fff0d5>А ну, попробуй.'
+        line-2: '<#fff0d5>Вот теперь стесняюсь.'
+      topic-38:
+        line-0: '<#fff0d5>На одуванчик дую зажмурясь.'
+        line-1: '<#fff0d5>Загадываешь желание?'
+        line-2: '<#fff0d5>Просто пух в глаза летит.'
+      topic-39:
+        line-0: '<#fff0d5>Люблю смотреть на муравьёв.'
+        line-1: '<#fff0d5>Когда несут одну хвоинку?'
+        line-2: '<#fff0d5>Да. Как они с ней поворачивают!'
+      topic-40:
+        line-0: '<#fff0d5>У сосны и у ели запах разный.'
+        line-1: '<#fff0d5>С закрытыми глазами узнаешь?'
+        line-2: '<#fff0d5>По хвое, если растереть.'
+      topic-41:
+        line-0: '<#fff0d5>Первый снег или последний?'
+        line-1: '<#fff0d5>Первый. Так тихо делается.'
+        line-2: '<#fff0d5>А я люблю первые проталины.'
+      topic-42:
+        line-0: '<#fff0d5>Какое дерево посадить у дома?'
+        line-1: '<#fff0d5>Я за яблоню.'
+        line-2: '<#fff0d5>А мне бы берёзу. Тень лёгкая.'
+      topic-43:
+        line-0: '<#fff0d5>Облака мне напоминают овец.'
+        line-1: '<#fff0d5>И тёмные тучи тоже?'
+        line-2: '<#fff0d5>Те похожи на немытых.'
+      topic-44:
+        line-0: '<#fff0d5>Бабушка сеяла морковь с песком.'
+        line-1: '<#fff0d5>А зачем с песком?'
+        line-2: '<#fff0d5>Так лучше видно, где посеяно.'
+      topic-45:
+        line-0: '<#fff0d5>Какую травку сразу узнаёшь?'
+        line-1: '<#fff0d5>Укроп. По запаху на пальцах.'
+        line-2: '<#fff0d5>А я так мяту узнаю.'
+      topic-46:
+        line-0: '<#fff0d5>У пня я всегда считаю кольца.'
+        line-1: '<#fff0d5>До самой коры?'
+        line-2: '<#fff0d5>Если никто не собьёт со счёта.'
+      topic-47:
+        line-0: '<#fff0d5>Игра в «блинчики» знакома?'
+        line-1: '<#fff0d5>Это где камень скачет по воде?'
+        line-2: '<#fff0d5>Ага. Сколько раз подскочит.'
+        line-3: '<#fff0d5>А у нас это «лягушки»!'
+      topic-48:
+        line-0: '<#fff0d5>Зимой я скучаю по траве.'
+        line-1: '<#fff0d5>По зелёному цвету?'
+        line-2: '<#fff0d5>По щекотке на босых пятках.'
+      topic-49:
+        line-0: '<#fff0d5>У пчелы вся шубка в пыльце.'
+        line-1: '<#fff0d5>А меня коленки смешат.'
+        line-2: '<#fff0d5>Будто в жёлтых штанишках.'
+      topic-50:
+        line-0: '<#fff0d5>Месяц похож на лодку.'
+        line-1: '<#fff0d5>И куда на нём плыть?'
+        line-2: '<#fff0d5>Да хоть просто свесить ноги.'
+      topic-51:
+        line-0: '<#fff0d5>Хочешь, нарисую птицу словами?'
+        line-1: '<#fff0d5>Попробуй. Какой у неё хвост?'
+        line-2: '<#fff0d5>Вилочкой.'
+        line-3: '<#fff0d5>Ласточка!'
+      topic-52:
+        line-0: '<#fff0d5>Сыграем в слова? Начну. Река.'
+        line-1: '<#fff0d5>Арбуз!'
+        line-2: '<#fff0d5>Заяц. Тебе на «ц».'
+        line-3: '<#fff0d5>Цапля. Теперь тебе на «я».'
+      topic-53:
+        line-0: '<#fff0d5>Скажи быстро «три тетерева».'
+        line-1: '<#fff0d5>Три тетеререва.'
+        line-2: '<#fff0d5>Кажется, там лишний тетерев.'
+      topic-54:
+        line-0: '<#fff0d5>Меня в детстве звали Шишкой.'
+        line-1: '<#fff0d5>Из-за шишек на лбу?'
+        line-2: '<#fff0d5>Из-за шишек в карманах.'
+      topic-55:
+        line-0: '<#fff0d5>Какое имя подойдёт коту?'
+        line-1: '<#fff0d5>Хозяин.'
+        line-2: '<#fff0d5>Да он и так знает.'
+      topic-56:
+        line-0: '<#fff0d5>Любишь страшные сказки?'
+        line-1: '<#fff0d5>Если все вернутся домой.'
+        line-2: '<#fff0d5>Тогда знаю одну для тебя.'
+      topic-57:
+        line-0: '<#fff0d5>С тобой хорошо молчать.'
+        line-1: '<#fff0d5>Давай ещё чуть-чуть постоим.'
+      topic-58:
+        line-0: '<#fff0d5>О чём думаешь, пока идёшь?'
+        line-1: '<#fff0d5>Придумываю сказку.'
+        line-2: '<#fff0d5>Каждый раз новую?'
+        line-3: '<#fff0d5>Каждый раз продолжение.'
+      topic-59:
+        line-0: '<#fff0d5>Я всегда стучу трижды.'
+        line-1: '<#fff0d5>Два быстрых, потом ещё один?'
+        line-2: '<#fff0d5>Значит, уже узнаёшь.'
+      topic-60:
+        line-0: '<#fff0d5>Я люблю короткие письма.'
+        line-1: '<#fff0d5>В две строчки?'
+        line-2: '<#fff0d5>В два слова. «Приезжай. Ждём».'
+      topic-61:
+        line-0: '<#fff0d5>Мой рост отмечали у двери.'
+        line-1: '<#fff0d5>На цыпочки вставать разрешали?'
+        line-2: '<#fff0d5>Пятки проверяли первым делом.'
+      topic-62:
+        line-0: '<#fff0d5>Мне неловко просить о помощи.'
+        line-1: '<#fff0d5>А тебе приятно помогать?'
+        line-2: '<#fff0d5>Ещё бы.'
+        line-3: '<#fff0d5>Вот и мне тоже.'
+      topic-63:
+        line-0: '<#fff0d5>Ты сны запоминаешь?'
+        line-1: '<#fff0d5>Пока глаза не открою.'
+        line-2: '<#fff0d5>Я стараюсь их вслух повторить.'
+      topic-64:
+        line-0: '<#fff0d5>По чему в дороге скучаешь?'
+        line-1: '<#fff0d5>По скрипу двери.'
+        line-2: '<#fff0d5>Ты же хочешь её смазать!'
+        line-3: '<#fff0d5>Дома хочу. В гостях скучаю.'
+      topic-65:
+        line-0: '<#fff0d5>Чем для тебя пахнет дом?'
+        line-1: '<#fff0d5>Сушёной мятой.'
+        line-2: '<#fff0d5>А для меня — тёплой стружкой.'
+      topic-66:
+        line-0: '<#fff0d5>Лица помню, а имена путаю.'
+        line-1: '<#fff0d5>Я людей по смеху запоминаю.'
+        line-2: '<#fff0d5>Тогда меня издали узнаешь.'
+      topic-67:
+        line-0: '<#fff0d5>Дай вспомнить, зачем я здесь.'
+        line-1: '<#fff0d5>Постоим. Само вспомнится.'
+        line-2: '<#fff0d5>Точно. Поздороваться!'
+        line-3: '<#fff0d5>Ну здравствуй.'
+      topic-68:
+        line-0: '<#fff0d5>Варежки зовёшь рукавицами?'
+        line-1: '<#fff0d5>Варежки у нас шерстяные.'
+        line-2: '<#fff0d5>А рукавицы?'
+        line-3: '<#fff0d5>В них дрова носили.'
+      topic-69:
+        line-0: '<#fff0d5>Вот бы лишний час в сутках.'
+        line-1: '<#fff0d5>Уже есть на него дело?'
+        line-2: '<#fff0d5>Хочу хоть один без дела.'
+      topic-70:
+        line-0: '<#fff0d5>Рисую дом. Начинаю с дыма.'
+        line-1: '<#fff0d5>Ещё даже трубы нет!'
+        line-2: '<#fff0d5>А её к дыму потом пристрою.'
+      topic-71:
+        line-0: '<#fff0d5>Всё хочу сказать тебе спасибо.'
+        line-1: '<#fff0d5>А за что?'
+        line-2: '<#fff0d5>За то, что слушаешь до конца.'
+        line-3: '<#fff0d5>А я люблю твои рассказы.'
     home-unassigned: 'Нет жилья'
     child: 'Ребёнок'
     adult: 'Взрослый'
@@ -834,7 +1124,7 @@ ru:
       waiting-inputs: 'Ждёт материалы'
       waiting-input-materials: 'Ждёт: <materials>'
       waiting-supplies: 'Ждёт припасы'
-      waiting-orders: 'Ждёт заявку на перевозку'
+      waiting-orders: 'Ждёт заказ'
       moving-to-pickup: 'Идёт за грузом'
       loading-cargo: 'Забирает груз'
       collecting-supplies: 'Забирает припасы'
@@ -2070,20 +2360,310 @@ en:
   workers:
     conversation:
       topic-0:
-        line-0: '<#fff0d5>How is the road to the warehouse?'
-        line-1: '<#fff0d5>It dried out after the rain.'
-        line-2: '<#fff0d5>Good. We can go after lunch.'
-        line-3: '<#fff0d5>Sounds good.'
+        line-0: '<#fff0d5>Where''s it driest in mud season?'
+        line-1: '<#fff0d5>Along the edge of the path.'
+        line-2: '<#fff0d5>I watch where the birds walk.'
+        line-3: '<#fff0d5>Don''t follow the ducks, then.'
       topic-1:
-        line-0: '<#fff0d5>Is the wheat ready yet?'
-        line-1: '<#fff0d5>The sunny patch is ready.'
-        line-2: '<#fff0d5>We should tell the baker.'
-        line-3: '<#fff0d5>That will make his day.'
+        line-0: '<#fff0d5>Ripe wheat has a little rustle.'
+        line-1: '<#fff0d5>Like paper?'
+        line-2: '<#fff0d5>Softer. Paper can''t do that.'
+        line-3: '<#fff0d5>I''ll listen next time.'
       topic-2:
-        line-0: '<#fff0d5>Did you hear about the new house?'
-        line-1: '<#fff0d5>I saw them start the roof.'
-        line-2: '<#fff0d5>There will be a housewarming soon.'
-        line-3: '<#fff0d5>I will go take a look.'
+        line-0: '<#fff0d5>What''s a good housewarming gift?'
+        line-1: '<#fff0d5>A stool.'
+        line-2: '<#fff0d5>Why a stool?'
+        line-3: '<#fff0d5>The guests need a place to sit.'
+      topic-3:
+        line-0: '<#fff0d5>I look back at every fork.'
+        line-1: '<#fff0d5>Expecting someone?'
+        line-2: '<#fff0d5>Just learning the way home.'
+      topic-4:
+        line-0: '<#fff0d5>I always hurry to keep up.'
+        line-1: '<#fff0d5>I''m trying to keep up with you!'
+        line-2: '<#fff0d5>Good thing we stopped.'
+      topic-5:
+        line-0: '<#fff0d5>We had a rule when we were kids.'
+        line-1: '<#fff0d5>What was it?'
+        line-2: '<#fff0d5>Don''t step on the paving cracks.'
+        line-3: '<#fff0d5>I still walk that way.'
+      topic-6:
+        line-0: '<#fff0d5>Give directions without “there.”'
+        line-1: '<#fff0d5>No pointing, either?'
+        line-2: '<#fff0d5>All right, you can point.'
+      topic-7:
+        line-0: '<#fff0d5>I take my boots off at the door.'
+        line-1: '<#fff0d5>I head straight for the window.'
+        line-2: '<#fff0d5>With your boots on?'
+        line-3: '<#fff0d5>Well, I do a lot of sweeping.'
+      topic-8:
+        line-0: '<#fff0d5>Does a knot help you remember?'
+        line-1: '<#fff0d5>I remember there''s something.'
+        line-2: '<#fff0d5>What, though?'
+        line-3: '<#fff0d5>I''d need a second knot for that.'
+      topic-9:
+        line-0: '<#fff0d5>Granddad said hello with a nod.'
+        line-1: '<#fff0d5>You got a nod too?'
+        line-2: '<#fff0d5>I got a wink with mine.'
+      topic-10:
+        line-0: '<#fff0d5>Know your family by their steps?'
+        line-1: '<#fff0d5>My brother. Heavy on his heels.'
+        line-2: '<#fff0d5>Mine''s got jangling keys.'
+      topic-11:
+        line-0: '<#fff0d5>I like a new pair of boots.'
+        line-1: '<#fff0d5>Even the squeaky ones?'
+        line-2: '<#fff0d5>Especially the squeaky ones.'
+      topic-12:
+        line-0: '<#fff0d5>I could go for a crust of bread.'
+        line-1: '<#fff0d5>I like the soft middle.'
+        line-2: '<#fff0d5>We should share a loaf.'
+      topic-13:
+        line-0: '<#fff0d5>How do I spot a cabbage pie?'
+        line-1: '<#fff0d5>Ours have a little crimped ridge.'
+        line-2: '<#fff0d5>What goes in the round ones?'
+        line-3: '<#fff0d5>Apple. Those are my favourites.'
+      topic-14:
+        line-0: '<#fff0d5>How much is a pinch of salt?'
+        line-1: '<#fff0d5>Whose fingers do the pinching?'
+        line-2: '<#fff0d5>That''s the argument at our house.'
+      topic-15:
+        line-0: '<#fff0d5>I skim the skin off milk.'
+        line-1: '<#fff0d5>I''ll have it. Always loved it.'
+      topic-16:
+        line-0: '<#fff0d5>Can you peel an apple in one go?'
+        line-1: '<#fff0d5>Halfway. Then the peel breaks.'
+        line-2: '<#fff0d5>Still long enough for a moustache.'
+      topic-17:
+        line-0: '<#fff0d5>I like my tea in a heavy mug.'
+        line-1: '<#fff0d5>Does it stay warm?'
+        line-2: '<#fff0d5>My hands do.'
+      topic-18:
+        line-0: '<#fff0d5>How do you make up after a row?'
+        line-1: '<#fff0d5>Set out a second cup.'
+        line-2: '<#fff0d5>And what would you say?'
+        line-3: '<#fff0d5>Just ask if they''d like some tea.'
+      topic-19:
+        line-0: '<#fff0d5>I like the end seat at a table.'
+        line-1: '<#fff0d5>Closer to the bread?'
+        line-2: '<#fff0d5>I''m always up to fetch the salt.'
+      topic-20:
+        line-0: '<#fff0d5>I count out loud when I knit.'
+        line-1: '<#fff0d5>What if someone talks to you?'
+        line-2: '<#fff0d5>Well, the scarf gets wider.'
+      topic-21:
+        line-0: '<#fff0d5>I like bright patches.'
+        line-1: '<#fff0d5>I try to match the cloth.'
+        line-2: '<#fff0d5>Mine used to be little flowers.'
+        line-3: '<#fff0d5>Those would be a shame to hide.'
+      topic-22:
+        line-0: '<#fff0d5>I had a favourite sound as a kid.'
+        line-1: '<#fff0d5>Rain on the roof?'
+        line-2: '<#fff0d5>Mum''s button tin.'
+      topic-23:
+        line-0: '<#fff0d5>I like the sound of a hand plane.'
+        line-1: '<#fff0d5>That soft shush along the grain?'
+        line-2: '<#fff0d5>Yes. The other way it grumbles.'
+      topic-24:
+        line-0: '<#fff0d5>Why make a pencil flat?'
+        line-1: '<#fff0d5>So it won''t roll off the bench.'
+        line-2: '<#fff0d5>So that''s where all mine go.'
+      topic-25:
+        line-0: '<#fff0d5>Which hand holds your hammer?'
+        line-1: '<#fff0d5>My left.'
+        line-2: '<#fff0d5>I''ll stand facing you, then.'
+        line-3: '<#fff0d5>Like looking in a mirror.'
+      topic-26:
+        line-0: '<#fff0d5>That last bit of dust is a pain.'
+        line-1: '<#fff0d5>The line you keep sweeping at?'
+        line-2: '<#fff0d5>I get it with a damp cloth.'
+      topic-27:
+        line-0: '<#fff0d5>I save bent nails.'
+        line-1: '<#fff0d5>Do you straighten them later?'
+        line-2: '<#fff0d5>Some make nice little hooks.'
+      topic-28:
+        line-0: '<#fff0d5>I''d like a fish in my mug.'
+        line-1: '<#fff0d5>A live one?'
+        line-2: '<#fff0d5>Painted inside, under the tea.'
+      topic-29:
+        line-0: '<#fff0d5>I prefer an oval basket.'
+        line-1: '<#fff0d5>Why that shape?'
+        line-2: '<#fff0d5>It doesn''t bump my knee.'
+      topic-30:
+        line-0: '<#fff0d5>I like a wooden soup spoon.'
+        line-1: '<#fff0d5>It''s quiet against the bowl.'
+      topic-31:
+        line-0: '<#fff0d5>Knots in a plank look like eyes.'
+        line-1: '<#fff0d5>And if there''s only one knot?'
+        line-2: '<#fff0d5>The plank must be winking.'
+      topic-32:
+        line-0: '<#fff0d5>I whistle softly while I work.'
+        line-1: '<#fff0d5>Always the same tune?'
+        line-2: '<#fff0d5>Same start. The end varies.'
+      topic-33:
+        line-0: '<#fff0d5>My thread keeps tangling up.'
+        line-1: '<#fff0d5>Are you cutting long pieces?'
+        line-2: '<#fff0d5>Yes, so I won''t run out.'
+        line-3: '<#fff0d5>I''d sooner thread it twice.'
+      topic-34:
+        line-0: '<#fff0d5>It''s easier for me to show how.'
+        line-1: '<#fff0d5>I can put it into words.'
+        line-2: '<#fff0d5>You tell it, and I''ll show it.'
+      topic-35:
+        line-0: '<#fff0d5>I do the hardest job first.'
+        line-1: '<#fff0d5>I pick a little job first.'
+        line-2: '<#fff0d5>To warm up a bit?'
+        line-3: '<#fff0d5>I like having something done.'
+      topic-36:
+        line-0: '<#fff0d5>I like listening to rain.'
+        line-1: '<#fff0d5>I like the air when it''s over.'
+      topic-37:
+        line-0: '<#fff0d5>I can chirp like a cricket.'
+        line-1: '<#fff0d5>Let''s hear it.'
+        line-2: '<#fff0d5>Now you''ve got me feeling shy.'
+      topic-38:
+        line-0: '<#fff0d5>I blow dandelions with eyes shut.'
+        line-1: '<#fff0d5>Making a wish?'
+        line-2: '<#fff0d5>It keeps the fluff out of my eyes.'
+      topic-39:
+        line-0: '<#fff0d5>I like watching ants at work.'
+        line-1: '<#fff0d5>When they carry one pine needle?'
+        line-2: '<#fff0d5>Yes. How do they take corners?'
+      topic-40:
+        line-0: '<#fff0d5>Pine and spruce smell different.'
+        line-1: '<#fff0d5>Can you tell with your eyes shut?'
+        line-2: '<#fff0d5>If I rub the needles, yes.'
+      topic-41:
+        line-0: '<#fff0d5>First snow or the last to melt?'
+        line-1: '<#fff0d5>The first. It gets so quiet.'
+        line-2: '<#fff0d5>I like the first bare patches.'
+      topic-42:
+        line-0: '<#fff0d5>What tree would you plant?'
+        line-1: '<#fff0d5>An apple tree, I think.'
+        line-2: '<#fff0d5>I''d like a birch. Such light shade.'
+      topic-43:
+        line-0: '<#fff0d5>Clouds look like sheep to me.'
+        line-1: '<#fff0d5>Even the dark clouds?'
+        line-2: '<#fff0d5>Those sheep need a wash.'
+      topic-44:
+        line-0: '<#fff0d5>Gran sowed carrots with sand.'
+        line-1: '<#fff0d5>What did the sand do?'
+        line-2: '<#fff0d5>It showed where she''d sown them.'
+      topic-45:
+        line-0: '<#fff0d5>Which herbs do you recognise?'
+        line-1: '<#fff0d5>Dill. By the smell on my fingers.'
+        line-2: '<#fff0d5>That''s how I recognise mint.'
+      topic-46:
+        line-0: '<#fff0d5>I count the rings on tree stumps.'
+        line-1: '<#fff0d5>Right to the bark?'
+        line-2: '<#fff0d5>Unless I lose count.'
+      topic-47:
+        line-0: '<#fff0d5>Ever play “pancakes”?'
+        line-1: '<#fff0d5>The one with stones on water?'
+        line-2: '<#fff0d5>Yes. A pancake for every bounce.'
+        line-3: '<#fff0d5>Ours were little frogs!'
+      topic-48:
+        line-0: '<#fff0d5>I miss the grass in winter.'
+        line-1: '<#fff0d5>Just seeing all that green?'
+        line-2: '<#fff0d5>The way it tickles bare feet.'
+      topic-49:
+        line-0: '<#fff0d5>Bees get pollen all over them.'
+        line-1: '<#fff0d5>I like their knobbly knees.'
+        line-2: '<#fff0d5>Like little yellow trousers.'
+      topic-50:
+        line-0: '<#fff0d5>A crescent moon looks like a boat.'
+        line-1: '<#fff0d5>Where would you sail it?'
+        line-2: '<#fff0d5>I''d just dangle my feet.'
+      topic-51:
+        line-0: '<#fff0d5>Shall I draw you a bird in words?'
+        line-1: '<#fff0d5>Go on. What''s its tail like?'
+        line-2: '<#fff0d5>Forked.'
+        line-3: '<#fff0d5>A swallow!'
+      topic-52:
+        line-0: '<#fff0d5>A last-letter game? I''ll go. River!'
+        line-1: '<#fff0d5>Robin!'
+        line-2: '<#fff0d5>Nettle. Your letter''s E.'
+        line-3: '<#fff0d5>Eel. Your turn with an L.'
+      topic-53:
+        line-0: '<#fff0d5>Say “three tiny turtles” fast.'
+        line-1: '<#fff0d5>Three tiny turturtles.'
+        line-2: '<#fff0d5>I think an extra turtle snuck in.'
+      topic-54:
+        line-0: '<#fff0d5>They called me Pinecone as a kid.'
+        line-1: '<#fff0d5>Always falling out of trees?'
+        line-2: '<#fff0d5>My pockets were full of cones.'
+      topic-55:
+        line-0: '<#fff0d5>What''s a good name for a cat?'
+        line-1: '<#fff0d5>Boss.'
+        line-2: '<#fff0d5>Oh, he knows that already.'
+      topic-56:
+        line-0: '<#fff0d5>Do you like scary stories?'
+        line-1: '<#fff0d5>If everyone makes it home.'
+        line-2: '<#fff0d5>Then I know just the story.'
+      topic-57:
+        line-0: '<#fff0d5>I like being quiet with you.'
+        line-1: '<#fff0d5>Let''s stay a little longer.'
+      topic-58:
+        line-0: '<#fff0d5>What do you think about on walks?'
+        line-1: '<#fff0d5>I make up a story.'
+        line-2: '<#fff0d5>A new one each time?'
+        line-3: '<#fff0d5>The next bit each time.'
+      topic-59:
+        line-0: '<#fff0d5>I knock three times at a door.'
+        line-1: '<#fff0d5>Two quick taps, then one more?'
+        line-2: '<#fff0d5>So you do know my knock.'
+      topic-60:
+        line-0: '<#fff0d5>I like getting short letters.'
+        line-1: '<#fff0d5>Just a couple of lines?'
+        line-2: '<#fff0d5>Two words. “Come visit.”'
+      topic-61:
+        line-0: '<#fff0d5>We marked my height by the door.'
+        line-1: '<#fff0d5>Did they let you stand on tiptoe?'
+        line-2: '<#fff0d5>They checked my heels first.'
+      topic-62:
+        line-0: '<#fff0d5>I feel awkward asking for help.'
+        line-1: '<#fff0d5>Do you like helping people?'
+        line-2: '<#fff0d5>Of course.'
+        line-3: '<#fff0d5>Well, so do I.'
+      topic-63:
+        line-0: '<#fff0d5>Do dreams stay with you?'
+        line-1: '<#fff0d5>Till I open my eyes.'
+        line-2: '<#fff0d5>I try to tell mine out loud.'
+      topic-64:
+        line-0: '<#fff0d5>What do you miss on long trips?'
+        line-1: '<#fff0d5>The squeak of my door.'
+        line-2: '<#fff0d5>I thought you wanted to oil it!'
+        line-3: '<#fff0d5>I do at home. Away, I miss it.'
+      topic-65:
+        line-0: '<#fff0d5>What smell means home to you?'
+        line-1: '<#fff0d5>Dried mint.'
+        line-2: '<#fff0d5>Warm wood shavings for me.'
+      topic-66:
+        line-0: '<#fff0d5>I know faces. Names escape me.'
+        line-1: '<#fff0d5>I remember how people laugh.'
+        line-2: '<#fff0d5>You''d hear me a mile off.'
+      topic-67:
+        line-0: '<#fff0d5>Give me a moment. Why am I here?'
+        line-1: '<#fff0d5>Take your time. It''ll come.'
+        line-2: '<#fff0d5>Right. I meant to say hello!'
+        line-3: '<#fff0d5>Well, hello there.'
+      topic-68:
+        line-0: '<#fff0d5>Are mittens for work too?'
+        line-1: '<#fff0d5>At home, mittens meant wool.'
+        line-2: '<#fff0d5>And the work gloves?'
+        line-3: '<#fff0d5>Those were for carrying logs.'
+      topic-69:
+        line-0: '<#fff0d5>I wish days had one extra hour.'
+        line-1: '<#fff0d5>Got a job in mind for it?'
+        line-2: '<#fff0d5>I''d like one with nothing to do.'
+      topic-70:
+        line-0: '<#fff0d5>I draw smoke before the roof.'
+        line-1: '<#fff0d5>Before there''s even a chimney?'
+        line-2: '<#fff0d5>I''ll put it under the smoke later.'
+      topic-71:
+        line-0: '<#fff0d5>I keep meaning to thank you.'
+        line-1: '<#fff0d5>What for?'
+        line-2: '<#fff0d5>For always hearing me out.'
+        line-3: '<#fff0d5>And I like your stories.'
     home-unassigned: 'No home'
     child: 'Child'
     adult: 'Adult'
@@ -2291,7 +2871,7 @@ en:
       waiting-inputs: 'Waiting for materials'
       waiting-input-materials: 'Waiting for: <materials>'
       waiting-supplies: 'Waiting for supplies'
-      waiting-orders: 'Waiting for a transport request'
+      waiting-orders: 'Waiting for an order'
       moving-to-pickup: 'Walking to collect cargo'
       loading-cargo: 'Picking up cargo'
       collecting-supplies: 'Collecting supplies'

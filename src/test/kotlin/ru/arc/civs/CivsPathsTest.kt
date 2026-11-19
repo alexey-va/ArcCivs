@@ -66,6 +66,19 @@ class CivsPathsTest : FunSpec({
         paths.remembered(city.id) shouldBe emptySet()
     }
 
+    test("parking a construction order keeps the learned network and its protected footprint") {
+        val city = pathsCity()
+        val target = city.buildings.first().copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
+        val order = CivConstruction(UUID.randomUUID(), target.id, 2, 3, 0, ConstructionPhase.CONSTRUCTING, Stock(),
+            plannedBuilding = target)
+        val paths = CivsPaths()
+        val trip = paths.begin(city.copy(construction = order))
+        val parked = city.copy(deferredConstruction = listOf(order), constructionQueue = listOf(target.id))
+        trip.validFor(parked) shouldBe true
+        (paths.begin(parked).network === trip.network) shouldBe true
+        trip.validFor(city) shouldBe false
+    }
+
     test("an unload beyond the negative city edge keeps pending learning while its exact edge chunk retires it") {
         val city = pathsCity()
         val paths = CivsPaths()

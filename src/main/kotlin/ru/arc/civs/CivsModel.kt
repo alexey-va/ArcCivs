@@ -246,9 +246,15 @@ data class Settlement(
     val research: CivResearchState? = null,
     /** Paid local road corrections; the original building placement journals stay immutable. */
     val roadRouteOverrides: Map<String, CivRoadRouteOverride>? = null,
+    /** Accepted orders waiting in constructionQueue with their original captures, payments and work cursors. */
+    val deferredConstruction: List<CivConstruction>? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }
+    fun constructionOrder(buildingId: UUID): CivConstruction? = construction?.takeIf { it.buildingId == buildingId }
+        ?: deferredConstruction?.firstOrNull { it.buildingId == buildingId }
+    fun constructionOrders(): List<CivConstruction> = if (construction == null) deferredConstruction.orEmpty()
+        else if (deferredConstruction.isNullOrEmpty()) listOf(construction) else listOf(construction) + deferredConstruction
     fun contains(x: Int, z: Int): Boolean = kotlin.math.abs(x.toLong() - center.x) <= radius &&
         kotlin.math.abs(z.toLong() - center.z) <= radius
     fun level(): Int = buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }?.level?.coerceAtLeast(1) ?: 1

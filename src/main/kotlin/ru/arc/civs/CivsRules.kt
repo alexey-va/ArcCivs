@@ -155,7 +155,7 @@ object CivsRules {
         constructionWorkers(city, buildingId).fold(materials) { remaining, worker -> CivsEquipment.storageInputs(worker, remaining) }
 
     internal fun workplaceAvailable(city: Settlement, building: CivBuilding): Boolean =
-        building.phase == BuildingPhase.ACTIVE && (city.construction?.takeIf { it.buildingId == building.id }
+        building.phase == BuildingPhase.ACTIVE && (city.constructionOrder(building.id)
             ?.let { it.targetLevel > building.level } ?: true)
 
     fun productionAvailable(city: Settlement, building: CivBuilding): Boolean =
@@ -262,8 +262,7 @@ object CivsRules {
         CivsResearch.required(site.type, site.level)?.let { check(CivsResearch.has(city, it), "research-required") }
         requireBuildingSlot(city, site.type, ESSENTIAL_BUILDINGS + BuildingType.BUILDER_HUT)
         check(!CivsSnapshotValidation.intersectsApproach(city, site), "building-overlap")
-        check(CivsSnapshotValidation.validBuilding(city, site) && city.buildings.none { it.bounds.overlaps(site.bounds) } &&
-            city.construction?.plannedBuilding?.bounds?.overlaps(site.bounds) != true, "invalid-building")
+        check(CivsSnapshotValidation.validBuilding(city, site) && civsProtectedBuildings(city).none { it.bounds.overlaps(site.bounds) }, "invalid-building")
         check(workRouteWithinReach(city, site.entrance, site.type.isInfrastructure), "work-route-too-long")
         val queue = if (city.construction != null || city.constructionQueue.orEmpty().isNotEmpty())
             city.constructionQueue.orEmpty() + site.id else city.constructionQueue
@@ -280,12 +279,13 @@ object CivsRules {
     fun enqueue(city: Settlement, actor: UUID, buildingId: UUID): Settlement {
         authorized(city, actor)
         val building = city.building(buildingId) ?: reject("invalid-building")
+        if (city.deferredConstruction.orEmpty().any { it.buildingId == buildingId }) return city
         if (buildingId !in city.constructionQueue.orEmpty())
             check(city.pendingControls.orEmpty().none { it.buildingId == buildingId && it.retire != null }, "city-busy")
         check(building.phase == BuildingPhase.SITE || building.phase == BuildingPhase.ACTIVE &&
             (building.level < building.type.maxLevel || CivsPlanBoardBlueprint.needsRefit(building) ||
                 CivsInfrastructureRebuild.needsRefit(city, building)), "invalid-building")
-        check(city.construction?.buildingId != buildingId, "construction-busy")
+        check(city.constructionOrder(buildingId) == null, "construction-busy")
         check(building.phase == BuildingPhase.SITE || building.type == BuildingType.TOWN_HALL ||
             building.level < city.level() || CivsPlanBoardBlueprint.needsRefit(building) ||
             CivsInfrastructureRebuild.needsRefit(city, building), "town-hall-level-required")
@@ -332,6 +332,7 @@ object CivsRules {
             families = city.families?.filterNot { it.homeId == buildingId },
             construction = city.construction?.takeUnless { it.buildingId == buildingId },
             constructionQueue = city.constructionQueue?.filterNot { it == buildingId },
+            deferredConstruction = city.deferredConstruction?.filterNot { it.buildingId == buildingId }?.takeIf { it.isNotEmpty() },
             pendingControls = city.pendingControls?.filterNot { it.buildingId == buildingId }, inventory = inventory)
         return next
     }
@@ -351,7 +352,7 @@ object CivsRules {
         authorized(city, actor)
         val building = city.building(buildingId) ?: reject("building-not-found")
         check(material in CivsProduction.options(city, building), "invalid-production")
-        check(city.construction?.buildingId != buildingId, "construction-busy")
+        check(city.constructionOrder(buildingId) == null, "construction-busy")
         if (building.production == material) return city
         return changed(city, city.copy(buildings = city.buildings.map { if (it.id == buildingId) it.copy(production = material) else it },
             workers = city.workers.map { worker -> if (worker.assignment == buildingId) worker.copy(
@@ -716,7 +717,7 @@ object CivsRules {
     }
 
     internal fun isFounding(city: Settlement): Boolean = city.buildings.size == 1 && city.buildings.single().let {
-        it.type == BuildingType.TOWN_HALL && it.level == 1 && it.phase == BuildingPhase.CONSTRUCTING && city.construction?.buildingId == it.id
+        it.type == BuildingType.TOWN_HALL && it.level == 1 && it.phase == BuildingPhase.CONSTRUCTING && city.constructionOrder(it.id) != null
     }
 
     internal fun validText(text: String, max: Int): Boolean = text.isNotBlank() && text == text.trim() && text.length <= max && text.none { it.isISOControl() }

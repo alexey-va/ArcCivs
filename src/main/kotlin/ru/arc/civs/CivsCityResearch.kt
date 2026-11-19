@@ -12,6 +12,7 @@ internal class CivsCityResearch(
     private val tasks: LifecycleTaskScope,
     private val storage: CivsStorage,
     private val researchSupply: (Settlement) -> CivSupplySnapshot? = { null },
+    private val requestEvidence: (UUID) -> Unit = {},
 ) {
     private var researchCursor = 0
     private data class AdmissionObservation(val at: Long, val revision: Long, val detail: Map<String, Any?>)
@@ -122,13 +123,20 @@ internal class CivsCityResearch(
             return selected
         }
         CivsResearch.automatic(city)?.let { return remember("historical-project", it) }
-        val snapshot = researchSupply(city) ?: return remember("supply-observation-missing")
-        val observation = snapshot.inputKey as? CivSupplyObservation ?: return remember("supply-observation-metadata-missing")
+        fun missing(reason: String, details: Map<String, Any?> = emptyMap()): CivResearchId? {
+            requestEvidence(city.id)
+            return remember(reason, details = details)
+        }
+        val snapshot = researchSupply(city) ?: return missing("supply-observation-missing")
+        val observation = snapshot.inputKey as? CivSupplyObservation ?: return missing("supply-observation-metadata-missing")
         val capture = mapOf("captureStartedAtMillis" to observation.capture.startedAtMillis)
-        if (!CivsAutoSupplies.observed(city, snapshot)) return remember("supply-observation-not-current", details = capture)
-        if (!storage.supplyCaptureCurrent(city, observation.capture)) return remember("supply-capture-not-current", details = capture)
+        if (!CivsAutoSupplies.observed(city, snapshot)) return missing("supply-observation-not-current", capture)
         val available = civsResearchAvailableMaterials(city, snapshot)
         val selected = CivsResearch.automatic(city, available)
+        if (!storage.supplyCaptureCurrent(city, observation.capture)) {
+            if (selected != null) requestEvidence(city.id)
+            return remember("supply-capture-not-current", details = capture)
+        }
         val bills = CivResearchId.entries.filter { CivsResearch.reason(city, it) == null }
             .associateWith { CivsResearch.cost(city, it).materials }
         val materials = bills.values.flatMap { it.keys }.toSet()

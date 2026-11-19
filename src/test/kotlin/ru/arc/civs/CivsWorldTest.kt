@@ -208,8 +208,12 @@ class CivsAutonomousHeightFieldSnapshotTest : FunSpec({
             callerColumns.clear()
             callerColumns += civsTerrainKey(1, 0)
             s.scheduler.tick()
-            completed(captured).at(0, 0)!!.waterBottomY shouldBe 63
-            completed(captured).at(1, 0)!!.waterBottomY shouldBe null
+            val surface = completed(captured)
+            surface.at(0, 0)!!.waterBottomY shouldBe 63
+            surface.at(1, 0)!!.waterBottomY shouldBe null
+            surface.at(2, 0) shouldBe null
+            surface.at(0, -2) shouldBe null
+            surface.copyColumns() shouldBe surface.columns
 
             s.world.getBlockAt(0, 64, 0).type = Material.AIR
             val refreshed = s.subject.autonomousHeightField(city, building, waterColumns = callerColumns)
@@ -1236,6 +1240,24 @@ class CivsWorldTest : FunSpec({
             block.blockData.asString shouldBe original
             s.cities.single() shouldBe city
             if (obstacle == "container") (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 2)
+        }
+    }
+
+    test("an occupied historical cell remains untouched while the adjacent inverse completes") {
+        worldScenario { s ->
+            val city = worldAccessCity(s)
+            val held = CivPosition(0, 64, 0)
+            val clear = held.copy(x = 1)
+            val repairs = listOf(held, clear).map { p ->
+                s.world.getBlockAt(p.x, p.y, p.z).type = Material.DIRT
+                worldAccessRepair(city, p, CivPlanBlock(p, "minecraft:dirt", "minecraft:air"))
+            }
+            s.subject.accessRepairBlocked = { id, world, p -> id == city.id && world == city.worldId && p == held }
+            val result = s.subject.repairAutonomousAccess(city, repairs)
+            s.scheduler.tick()
+            completed(result).filterValues { it > 0 } shouldBe mapOf("changed" to 1, "deferred" to 1)
+            s.world.getBlockAt(held.x, held.y, held.z).type shouldBe Material.DIRT
+            s.world.getBlockAt(clear.x, clear.y, clear.z).type shouldBe Material.AIR
         }
     }
 

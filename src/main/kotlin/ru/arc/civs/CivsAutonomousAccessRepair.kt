@@ -22,10 +22,10 @@ internal fun civsAutonomousAccessRepairs(city: Settlement, plans: List<CivPlacem
     fun air(data: String) = data in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
     city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.forEach { building ->
         // from() has checked the retained journal's identity, world, geometry and bounded route.
-        if (building.id in access.routes && city.construction?.buildingId != building.id) {
+        if (building.id in access.routes && city.constructionOrder(building.id) == null) {
             retained.getValue(building.id).terrain!!.blocks.forEach cells@ { original ->
                 val (owner, feet) = older[civsTerrainKey(original.position.x, original.position.z)] ?: return@cells
-                if (city.construction?.buildingId == owner || original.position in ambiguous) return@cells
+                if (city.constructionOrder(owner) != null || original.position in ambiguous) return@cells
                 val y = original.position.y
                 val restoresAccess = if (y == feet.y - 1) !air(original.before) && air(original.after)
                     else y in feet.y..feet.y + 1 && air(original.before) && !air(original.after)

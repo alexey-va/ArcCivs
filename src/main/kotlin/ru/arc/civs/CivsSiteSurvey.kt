@@ -1,6 +1,8 @@
 package ru.arc.civs
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet
 import org.bukkit.HeightMap
 import org.bukkit.Location
 import org.bukkit.Material
@@ -11,9 +13,45 @@ import ru.arc.civs.CivsTerrainPolicy.fullTerraformSupport
 import ru.arc.civs.CivsTerrainPolicy.passableTerraform
 import ru.arc.civs.CivsTerrainPolicy.MAXIMUM_TREE_READS
 
+/** A full survey visits every column once, X first. Its coordinates are implicit in the rectangle. */
+private class SurfaceRaster(private val minX: Int, private val minZ: Int, private val width: Int, private val depth: Int) :
+    AbstractMap<Long, CivTerrainSurfaceColumn>() {
+    private val cells = ArrayList<CivTerrainSurfaceColumn>(width * depth)
+    override val values: Collection<CivTerrainSurfaceColumn> = java.util.Collections.unmodifiableList(cells)
+
+    fun append(column: CivTerrainSurfaceColumn) { cells += column }
+
+    private fun keyAt(index: Int) = civsTerrainKey(minX + index % width, minZ + index / width)
+
+    fun copyColumns() = Long2ObjectOpenHashMap<CivTerrainSurfaceColumn>(cells.size).also { target ->
+        for (index in cells.indices) target.put(keyAt(index), cells[index])
+    }
+
+    override fun get(key: Long): CivTerrainSurfaceColumn? {
+        val x = (key shr 32) - minX
+        val z = key.toInt().toLong() - minZ
+        if (x !in 0L until width.toLong() || z !in 0L until depth.toLong()) return null
+        return cells[z.toInt() * width + x.toInt()]
+    }
+
+    override fun containsKey(key: Long): Boolean = get(key) != null
+    override val entries: Set<Map.Entry<Long, CivTerrainSurfaceColumn>> = object : AbstractSet<Map.Entry<Long, CivTerrainSurfaceColumn>>() {
+        override val size get() = cells.size
+        override fun iterator(): Iterator<Map.Entry<Long, CivTerrainSurfaceColumn>> = cells.indices.asSequence().map { index ->
+            java.util.AbstractMap.SimpleImmutableEntry(keyAt(index), cells[index])
+        }.iterator()
+    }
+}
+
+/** Preserve primitive traversal when the detached route search takes its private copy. */
+internal fun CivTerrainSurface.copyColumns() = when (val source = columns) {
+    is SurfaceRaster -> source.copyColumns()
+    else -> Long2ObjectOpenHashMap(source)
+}
+
 /** Captures settlement surface columns, including any explicitly requested water-depth probes. */
 internal class AutonomousHeightField(access: CivsWorld, private val citySnapshot: Settlement, envelope: CivBuilding,
-    private val previous: CivBuilding?, private val waterColumns: Set<Long>,
+    private val previous: CivBuilding?, waterColumns: Set<Long>,
     private val prospective: Boolean = false, private val requested: List<CivPosition>? = null,
     private val localFootprint: Boolean = false, private val markWaterTop: Boolean = false) :
     CivsWorldScan<CivTerrainSurface>(access, citySnapshot.id, citySnapshot.owner, citySnapshot.worldId, envelope) {
@@ -21,21 +59,26 @@ internal class AutonomousHeightField(access: CivsWorld, private val citySnapshot
     private val radius = citySnapshot.radius.coerceIn(0, 127)
     private val width = if (localFootprint) building.bounds.max.x - building.bounds.min.x + 1 else radius * 2 + 1
     private val depth = if (localFootprint) building.bounds.max.z - building.bounds.min.z + 1 else width
-    private val area = requested?.size ?: (width * depth)
-    // Packed adjacent X/Z keys collide under Long.hashCode; retain raster order with mixed long hashing.
-    private val columns = Long2ObjectLinkedOpenHashMap<CivTerrainSurfaceColumn>()
+    private val area = (requested?.size?.toLong() ?: (width.toLong() * depth)).also {
+        requireCivs(it in 0L..CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS.toLong(), "autonomy-search-budget")
+    }.toInt()
+    // Explicit sample requests already own their keys. Detach the full survey's caller-owned water mask.
+    private val waterColumns = if (requested == null) LongOpenHashSet(waterColumns) else waterColumns
+    private val raster = if (requested == null) SurfaceRaster(
+        if (localFootprint) building.bounds.min.x else Math.subtractExact(citySnapshot.center.x, radius),
+        if (localFootprint) building.bounds.min.z else Math.subtractExact(citySnapshot.center.z, radius), width, depth) else null
+    private val samples = if (requested != null) Long2ObjectLinkedOpenHashMap<CivTerrainSurfaceColumn>(area) else null
     private var topY: Int? = null
     private var waterTopY: Int? = null
     private var probeY = 0
     private var probes = 0
 
-    init { requireCivs(area <= CivsAutonomousTerraform.MAXIMUM_SURFACE_COLUMNS, "autonomy-search-budget") }
     override fun validateIdentity(city: Settlement?) {
         if (prospective) requireCivs(city == null, "stale-building")
         else requireUnchangedBuilding(city, previous)
     }
     override fun step() {
-        if (index == area) return finish(CivTerrainSurface(world.minHeight, world.maxHeight, columns))
+        if (index == area) return finish(CivTerrainSurface(world.minHeight, world.maxHeight, raster ?: requireNotNull(samples)))
         val sample = requested?.get(index)
         val x = sample?.x ?: if (localFootprint) building.bounds.min.x + index % width
             else Math.addExact(citySnapshot.center.x, index % width - radius)
@@ -44,8 +87,9 @@ internal class AutonomousHeightField(access: CivsWorld, private val citySnapshot
         val key = civsTerrainKey(x, z)
         fun complete(ground: Int, natural: Boolean, loaded: Boolean = true, water: CivTerrainSurfaceColumn? = null,
             dirtPath: Boolean = false, cleanGrass: Boolean = false) {
-            columns[key] = water?.copy(topY = topY ?: ground) ?:
+            val column = water?.copy(topY = topY ?: ground) ?:
                 CivTerrainSurfaceColumn(ground, natural, loaded, topY ?: ground, dirtPath = dirtPath, cleanGrass = cleanGrass)
+            if (raster != null) raster.append(column) else requireNotNull(samples).put(key, column)
             index++; topY = null; waterTopY = null; probes = 0
         }
         if (!world.isChunkLoaded(x shr 4, z shr 4) ||

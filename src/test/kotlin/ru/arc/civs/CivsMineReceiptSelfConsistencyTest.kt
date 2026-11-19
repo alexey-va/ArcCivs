@@ -188,7 +188,7 @@ private fun landingDependencyReceipts(paper: MockBukkitTestRuntime, plugin: Plug
             world.getBlockAt(control.x + 1, control.y - 1, control.z).type = Material.COBBLESTONE
             world.getBlockAt(control.x + 1, control.y, control.z).type = Material.AIR
             world.getBlockAt(control.x + 1, control.y + 1, control.z).type = Material.AIR
-            val initialSupply = mapOf("COBBLESTONE" to 512L, "LADDER" to 128L, "TORCH" to 128L)
+            val initialSupply = mapOf("COBBLESTONE" to 4L, "LADDER" to 128L, "TORCH" to 128L)
             var slot = 0
             initialSupply.forEach { (material, count) ->
                 var remaining = count
@@ -198,8 +198,13 @@ private fun landingDependencyReceipts(paper: MockBukkitTestRuntime, plugin: Plug
                     remaining -= amount
                 }
             }
-            store.save(initial).join() shouldBe initial
-            val storage = CivsStorage(plugin) { chunk ->
+            // The local support batch leaves the city's real cobblestone reserve unfilled.
+            val miner = initial.workers.single()
+            val support = CivsEquipment.plainCount(miner, "COBBLESTONE").toLong() - 4
+            val ready = initial.copy(workers = listOf(CivsEquipment.consumeInputs(miner, mapOf("COBBLESTONE" to support))))
+            store.save(ready).join() shouldBe ready
+            var at = 1_000_000L
+            val storage = CivsStorage(plugin, supplyClock = { at }) { chunk ->
                 controls.values.filter { it.x shr 4 == chunk.x && it.z shr 4 == chunk.z }
                     .map { it.state }.toTypedArray()
             }
@@ -210,7 +215,6 @@ private fun landingDependencyReceipts(paper: MockBukkitTestRuntime, plugin: Plug
             every { renderer.drained() } returns CompletableFuture.completedFuture(null)
             val boundary = mockk<CivsBoundaryRenderer>(relaxed = true)
             every { boundary.drained() } returns CompletableFuture.completedFuture(null)
-            var at = 1_000_000L
             val authority = CivsService(plugin, tasks, CivsSettings(directory, setOf(world.name), 96,
                 500, 50_000, 4, 120, 48, 96), store, mockk(relaxed = true), direct,
                 worldAdapter = access, previewRenderer = renderer, citizenRuntime = citizens,
@@ -236,6 +240,8 @@ private fun landingDependencyReceipts(paper: MockBukkitTestRuntime, plugin: Plug
             fun nextWork(): CivWorldWork {
                 try {
                     repeat(512) {
+                        at += 50
+                        paper.performTicks(1)
                         val city = current()
                         runtime.pulse(listOf(city))
                         runtime.plan(city, city.workers.single())?.let { return it }

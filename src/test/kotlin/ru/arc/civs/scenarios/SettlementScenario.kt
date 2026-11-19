@@ -125,7 +125,7 @@ internal class SettlementScenario private constructor(
     private fun createService(): CivsService = CivsService(plugin, tasks,
         CivsSettings(root.resolve("unused-private-schematics"), setOf(world.name), 128, 10, 50_000, 4, 120, 48, 96),
         store, blueprints, Executor(Runnable::run), previewRenderer = renderer, citizenRuntime = citizens,
-        clock = { now }, boundaryRenderer = boundary, storageAdapter = CivsStorage(plugin) { emptyArray() },
+        clock = { now }, boundaryRenderer = boundary, storageAdapter = CivsStorage(plugin, supplyClock = { now }) { emptyArray() },
         supplyExecutor = Executor(Runnable::run)).also { created ->
             if (actualResidents) {
                 // Plan-board packets are unrelated to resident arrival/receipts; retain its spatial guards.
@@ -148,7 +148,6 @@ internal class SettlementScenario private constructor(
     fun nextWork(resident: String, maximumPulses: Int = 2_000): CivWorldWork {
         val workerId = town.workers.getValue(resident).id
         repeat(maximumPulses) {
-            io.runNext()
             val current = city
             val worker = current.workers.single { it.id == workerId }
             worksites.pulse(listOf(current))
@@ -158,7 +157,7 @@ internal class SettlementScenario private constructor(
                 record("planned $resident ${next.status} cycle=${next.cycle} mine=${next.miningStep} focus=${next.focus} changes=${next.changes.size}")
                 return next
             }
-            tick()
+            advanceProductionTicks(1)
         }
         error("No work for $resident within $maximumPulses pulses\n${diagnostics()}")
     }
@@ -215,6 +214,13 @@ internal class SettlementScenario private constructor(
 
     /** One queued storage operation, including RAM admission, without running the next server callback. */
     fun persistOne(): Boolean = io.runNext().also { record("storage step pending=${io.pending}") }
+
+    /** Finish earlier city writes before isolating the next receipt or changing the native authority. */
+    fun checkpointAvailableCity() {
+        val records = serviceField<CivsCityRecords>("records")
+        advanceUntil("previous city writes") { city.id !in records.busy && io.pending == 0 }
+        checkpoint()
+    }
 
     /** Explicit clean checkpoint; do not advance resident movement while draining the storage lane. */
     fun checkpoint() {

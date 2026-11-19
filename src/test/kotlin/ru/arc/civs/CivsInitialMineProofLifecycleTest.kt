@@ -8,11 +8,13 @@ import io.mockk.every
 import io.mockk.mockk
 import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.plugin.Plugin
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.nio.file.Files
+import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
@@ -46,7 +48,14 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
     upperOnly: Boolean = false) =
     failOnUnsupportedMockBukkitOperation {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
-            val world = CivsWorksiteWorldFixture("initial-mine-proof").also(paper.server::addWorld)
+            val world = object : CivsWorksiteWorldFixture("initial-mine-proof") {
+                // Pinned MockBukkit does not implement tickets. This fixture preloads every work chunk.
+                private val tickets = mutableSetOf<Triple<Int, Int, Plugin>>()
+                override fun addPluginChunkTicket(x: Int, z: Int, plugin: Plugin): Boolean =
+                    tickets.add(Triple(x, z, plugin))
+                override fun removePluginChunkTicket(x: Int, z: Int, plugin: Plugin): Boolean =
+                    tickets.remove(Triple(x, z, plugin))
+            }.also(paper.server::addWorld)
             val plugin = paper.createSimplePlugin("InitialMineProofLifecycle")
             var directory = Files.createTempDirectory("initial-mine-proof-")
             val directories = mutableListOf(directory)
@@ -103,10 +112,23 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                 cap.forEach { world.getBlockAt(it.x, it.y, it.z).type = nativeCap }
                 // The large entry has more lights than one ordinary eight-torch supply trip.
                 val worker = CivsEquipment.collectSupplies(spatialWorker(mine, "IRON_PICKAXE"), mapOf("TORCH" to 24L))
-                val city = CivsRules.validate(spatialCity(world.uid, listOf(mine), worker).copy(
+                // The shaft yields more rock than an idle town's reserve. An unfinished house needs that output.
+                val house = CivBuilding(UUID.randomUUID(), BuildingType.HOUSE, 1, CivPosition(24, 64, 24), 0, "fixture/house",
+                    CivBox(CivPosition(24, 64, 24), CivPosition(39, 64, 55)), CivPosition(24, 64, 23), BuildingPhase.CONSTRUCTING)
+                val footprint = house.bounds
+                val houseBlocks = (footprint.min.x..footprint.max.x).flatMap { x -> (footprint.min.z..footprint.max.z).map { z ->
+                    CivPlanBlock(CivPosition(x, house.anchor.y, z), "minecraft:air", "minecraft:cobblestone")
+                } }
+                val batches = CivConstructionBatches(civsBuildBatches(house.bounds, 16).size, 16)
+                val demand = CivConstruction(UUID.randomUUID(), house.id, 1, batches.total, 0, ConstructionPhase.PAUSED, Stock(),
+                    failure = "builder-required", plannedBuilding = house, batches = batches,
+                    materials = mapOf("COBBLESTONE" to houseBlocks.size.toLong()), payment = CivConstructionPayment())
+                val city = CivsRules.validate(spatialCity(world.uid, listOf(mine, house), worker).copy(
+                    construction = demand,
                     inventory = CivInventory(CivStorageMode.PHYSICAL),
                     settings = CivSettlementSettings(chunkLoading = false),
                     minePlans = mapOf(mine.id.toString() to state)))
+                store.savePlan(CivPlacementPlan(demand.id, city.id, world.uid, house, houseBlocks)).join()
                 city.buildings.mapNotNull(CivBuilding::control).forEach {
                     world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL
                 }
@@ -130,7 +152,7 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                 val boundary = mockk<CivsBoundaryRenderer>(relaxed = true)
                 every { boundary.drained() } returns CompletableFuture.completedFuture(null)
                 fun createService(): CivsService {
-                    storage = CivsStorage(plugin) { emptyArray() }
+                    storage = CivsStorage(plugin, supplyClock = { at }) { emptyArray() }
                     val access = CivsWorld(plugin, tasks) { service?.settlements() ?: listOf(city) }
                     return CivsService(plugin, tasks, CivsSettings(directory, setOf(world.name), 96,
                         500, 50_000, 4, 120, 48, 96), store, mockk(relaxed = true), direct,
@@ -213,9 +235,11 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                 for (receipt in 0 until maximumReceipts) {
                     if (openingCount() == 27L) break
                     var work: CivWorldWork? = null
-                    for (pulse in 0 until 512) {
+                    // Advance the fixture clock through the next order review while native worksite scans tick.
+                    for (tick in 0 until 800) {
+                        at += 250
+                        paper.performTicks(1)
                         val live = current()
-                        runtime.pulse(listOf(live))
                         refusal = blockedOpening()
                         if (refusal != null) break
                         work = runtime.plan(live, live.workers.single())
@@ -223,6 +247,7 @@ private fun initialMineLifecycle(nativeCap: Material, recordedCap: Material, ope
                     }
                     if (refusal != null) break
                     val selected = withClue("before cap: ${runtime.debug()}") { requireNotNull(work) }
+                    await(authority.afterCityAvailable(city.id) { CompletableFuture.completedFuture(Unit) })
                     val live = current()
                     if (upperOnly) {
                         if (receipt == 0) selected.miningOrdinal shouldBe plan.sections.getValue(entrance).first()

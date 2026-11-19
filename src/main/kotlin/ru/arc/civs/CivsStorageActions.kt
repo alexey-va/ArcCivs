@@ -79,7 +79,8 @@ internal class CivsStorageActions(
     fun buildingMaterials(player: Player, buildingId: UUID): CompletableFuture<Map<String, Long>> = authority.action("building_materials", player, "building" to buildingId) {
         val city = authority.managed(player)
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
-        if (city.construction?.buildingId == buildingId) CompletableFuture.completedFuture(CivsMaterials.unpaid(city.construction.materials.orEmpty()))
+        val order = city.constructionOrder(buildingId)
+        if (order != null) CompletableFuture.completedFuture(CivsMaterials.unpaid(order.materials.orEmpty()))
         else if (building.phase != BuildingPhase.SITE && buildingId !in city.constructionQueue.orEmpty()) CompletableFuture.completedFuture(emptyMap())
         else store.loadPlan(queuedDesignId(building)).thenApplyAsync({ plan ->
             requireQueuedDesign(requireNotNull(plan), city, building)
@@ -116,7 +117,7 @@ internal class CivsStorageActions(
         rejectIf(city.id in records.busy, "city-busy")
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         rejectIf(city.inventory?.mode != CivStorageMode.PHYSICAL, "invalid-storage-mode")
-        val order = city.construction?.takeIf { it.buildingId == buildingId }
+        val order = city.constructionOrder(buildingId)
         rejectIf(order == null && building.phase != BuildingPhase.SITE && buildingId !in city.constructionQueue.orEmpty(), "invalid-building")
         // Legacy orders paid their complete bill when reserved; their estimate must never mint another payment.
         if (order != null && order.payment == null) return CompletableFuture.completedFuture(CivsSupplyResult(0, 0, false))
@@ -137,11 +138,12 @@ internal class CivsStorageActions(
             runCatching {
                 rejectIf(!player.isOnline || grant && !mayGrantMaterials(player), "not-authorized")
                 val current = authority.managed(player)
-                rejectIf(current.id != city.id || current.building(buildingId) != building || current.construction != city.construction ||
+                rejectIf(current.id != city.id || current.building(buildingId) != building || current.constructionOrder(buildingId) != order ||
                     constructionStore(current, buildingId, destination.id) != destination, "invalid-building")
                 authority.near(player, current.worldId, if (hutId == null) building.entrance else destination.entrance)
                 var supplied: CivStorageSupplyPlan? = null
                 authority.inventoryMutation(current.id, { lockedCity ->
+                    rejectIf(lockedCity.constructionOrder(buildingId) != order, "stale-construction")
                     val missing = constructionDeficit(requireNotNull(materials), storage.constructionAvailable(lockedCity, buildingId))
                     val local = storage.buildingAvailable(lockedCity, destination.id)
                     val desired = missing.mapValues { (material, count) -> count + (local[material] ?: 0L) }
@@ -248,8 +250,11 @@ internal class CivsStorageActions(
                     job.demandMaterial, job.targetBuildingId, if (carriedMissing.isEmpty()) "crafting" else "waiting-materials")
             }
         }
+        val refreshing = snapshot == null || !residentSupplies.craftObservationCurrent(city)
+        if (refreshing && city.workers.any { it.assignment == buildingId && !CivsResidents.isChild(it) })
+            authority.requestSupplyEvidence(city.id)
         return CivCarpentryView(building.level, !CivsRules.productionAvailable(city, building),
-            snapshot == null || !residentSupplies.craftObservationCurrent(city), orders, CivsCarpentry.views(building.type))
+            refreshing, orders, CivsCarpentry.views(building.type))
     }
 
     fun setStorageMode(player: Player, mode: CivStorageMode): CompletableFuture<Unit> = authority.cityAction("storage_mode", player, "mode" to mode) { city ->
@@ -347,7 +352,7 @@ internal class CivsStorageActions(
             val building = before.building(buildingId) ?: throw CivsRejection("building-not-found")
             rejectIf(before.id in records.busy || construction.isPlacing(before.id) || inventoryJournal.pending(before.id), "city-busy")
             rejectIf(before.pendingControls.orEmpty().any { it.buildingId == buildingId && it.retire != null }, "city-busy")
-            rejectIf(before.construction?.buildingId == buildingId, "construction-busy")
+            rejectIf(before.constructionOrder(buildingId) != null, "construction-busy")
             rejectIf(building.phase != BuildingPhase.ACTIVE, "control-relocation-site")
             val result = authority.tracked<Unit>()
             buildingControl(player, buildingId).whenCompleteSync(tasks) { target, failure ->
@@ -358,7 +363,7 @@ internal class CivsStorageActions(
                     rejectIf(point != expectedTarget, "control-location-changed")
                     val current = authority.managed(player)
                     rejectIf(current.id != before.id || current.building(buildingId) != building, "control-location-changed")
-                    rejectIf(current.construction?.buildingId == buildingId || construction.isPlacing(current.id), "construction-busy")
+                    rejectIf(current.constructionOrder(buildingId) != null || construction.isPlacing(current.id), "construction-busy")
                     rejectIf(inventoryJournal.pending(current.id), "inventory-recovery")
                     authority.near(player, current.worldId, point)
                     relocateControl(current, building, point).thenApply { Unit }
@@ -386,7 +391,7 @@ internal class CivsStorageActions(
             it.takeIf { block.type == Material.BARREL }
         }
         return authority.mutate(current.id) { city ->
-            rejectIf(city.building(building.id) != building || city.construction?.buildingId == building.id, "control-location-changed")
+            rejectIf(city.building(building.id) != building || city.constructionOrder(building.id) != null, "control-location-changed")
             if (point == old) city else {
                 val inventory = city.inventory
                 rejectIf(inventory == null && city.autonomy == null, "materials-migration-pending")
@@ -430,8 +435,7 @@ internal class CivsStorageActions(
             rejectIf(player.eyeLocation.distanceSquared(block.location) > 64, "too-far")
             rejectIf(block.type !in setOf(Material.CHEST, Material.TRAPPED_CHEST, Material.BARREL), "look-at-container")
             rejectIf(!world.canModify(city.owner, block), "lands-denied")
-            rejectIf(civsProtectedBuildings(city).any { it.phase == BuildingPhase.CONSTRUCTING && it.bounds.contains(point.x, point.y, point.z) } ||
-                city.construction?.plannedBuilding?.bounds?.contains(point.x, point.y, point.z) == true, "construction-busy")
+            rejectIf(civsProtectedBuildings(city).any { it.phase == BuildingPhase.CONSTRUCTING && it.bounds.contains(point.x, point.y, point.z) }, "construction-busy")
             authority.mutate(city.id) { before ->
                 val inventory = before.inventory ?: throw CivsRejection("materials-migration-pending")
                 if (point in inventory.containers || before.buildings.any { it.control == point }) before

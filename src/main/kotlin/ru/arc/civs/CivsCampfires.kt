@@ -7,8 +7,10 @@ import org.bukkit.block.Block
 import org.bukkit.block.data.Lightable
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.random.Random
 
 internal const val CITIZEN_CAMP_RANGE = 24
+internal const val CITIZEN_CONVERSATION_RANGE = 24
 private const val CAMP_CACHE_TICKS = 2_400
 private const val MAX_CAMP_CHUNKS = 256
 private const val MAX_FIRES_PER_CHUNK = 16
@@ -16,19 +18,57 @@ private const val MAX_FIRES_PER_CHUNK = 16
 internal data class CitizenCampfire(val worldId: UUID, val position: CivPosition)
 internal data class CitizenCampVisit(val fire: CitizenCampfire?, val seat: CivPosition, val startedAt: Int,
                                     var arrivedAt: Int? = null, var greeted: Boolean = false,
-                                    val partnerId: UUID? = null, var conversationAt: Int? = null,
-                                    var gestureBeat: Int = -1)
+                                    val partnerId: UUID? = null, var conversation: CitizenConversation? = null) {
+    val conversationAt get() = conversation?.startedAt
+}
 
-internal fun citizenConversationLine(workerId: UUID, visit: CitizenCampVisit, tick: Int): String? {
-    val partner = visit.partnerId ?: return null
-    val began = visit.conversationAt ?: return null
-    val age = tick - began
-    if (age !in 0 until 200) return null
-    val beat = age / 50
-    val turn = if (workerId < partner) 0 else 1
-    if (beat % 2 != turn || visit.gestureBeat != beat) return null
-    val topic = Math.floorMod(workerId.hashCode() xor partner.hashCode() xor began, 3)
-    return "workers.conversation.topic-$topic.line-$beat"
+/** One shuffled catalog for the active runtime, advanced only when a pair actually starts talking. */
+internal class CitizenConversationDeck(keys: Collection<String>, private val random: Random = Random.Default) {
+    private val topics = keys.filter { it.startsWith("workers.conversation.") }.groupBy { it.substringBeforeLast('.') }
+        .map { (topic, keys) ->
+            val lines = keys.sorted()
+            require(lines.size in 2..4 && lines.withIndex().all { (n, key) -> key == "$topic.line-$n" }) {
+                "ArcCivs conversation $topic requires two to four consecutive lines starting at line-0"
+            }
+            lines
+        }.also { require(it.isNotEmpty()) { "ArcCivs requires at least one resident conversation" } }
+    private var round = emptyList<List<String>>()
+    private var next = 0
+
+    fun draw(): List<String> {
+        if (next == round.size) {
+            val previous = round.lastOrNull()
+            round = topics.toMutableList().apply {
+                shuffle(random)
+                if (size > 1 && first() == previous) java.util.Collections.swap(this, 0, lastIndex)
+            }
+            next = 0
+        }
+        return round[next++]
+    }
+}
+
+/** Both stationary residents share this turn cursor. A late simulation pulse still delivers the next reply. */
+internal class CitizenConversation(private val lines: List<String>, private val first: UUID, val startedAt: Int) {
+    private var line = -1
+    private var spokenAt = startedAt
+
+    fun speak(worker: UUID, tick: Int): Boolean {
+        val next = line + 1
+        if (next >= lines.size || (next % 2 == 0) != (worker == first) || line >= 0 && tick - spokenAt < TURN_TICKS)
+            return false
+        line = next
+        spokenAt = tick
+        return true
+    }
+
+    fun bubble(worker: UUID, tick: Int): String? =
+        if (line >= 0 && (line % 2 == 0) == (worker == first) && tick - spokenAt in 0 until TURN_TICKS - 5)
+            lines[line] else null
+
+    fun finished(tick: Int): Boolean = line == lines.lastIndex && tick - spokenAt >= TURN_TICKS
+
+    private companion object { const val TURN_TICKS = 60 }
 }
 
 /** Transient social time never grants work, advances a delivery, or survives an actor's retirement. */
@@ -40,7 +80,6 @@ internal class CitizenCampRoutine(private val workerId: UUID) {
     private var eveningDay: Long? = null
     private var firstMeetingAt: Int? = null
     val restTicks: Int = 500 + Math.floorMod(workerId.hashCode(), 401)
-    val meetingTicks: Int = 160 + Math.floorMod(workerId.hashCode(), 121)
 
     fun available(tick: Int, day: Long, evening: Boolean): Boolean =
         visit == null && (!evening || eveningDay != day) && lastAttempt?.let { tick - it >= delay } != false
@@ -68,8 +107,8 @@ internal class CitizenCampRoutine(private val workerId: UUID) {
     }
 
     fun expired(tick: Int): Boolean = visit?.let {
-        if (it.partnerId != null) tick - (it.conversationAt ?: it.startedAt) >=
-            if (it.conversationAt == null) 400 else meetingTicks
+        if (it.partnerId != null) it.conversation?.let { talk -> talk.finished(tick) || tick - talk.startedAt >= 400 }
+            ?: (tick - it.startedAt >= 400)
         else tick - (it.arrivedAt ?: it.startedAt) >= if (it.arrivedAt == null) 900 else restTicks
     } ?: false
 }

@@ -27,6 +27,9 @@ internal class CivsStorageContainers(
     private val checkReady: () -> Unit,
     private val canModify: (Settlement, CivPosition) -> Boolean,
     clock: () -> Long,
+    onSupplyChanged: (UUID) -> Unit,
+    private val onSupplyNeeded: (UUID) -> Unit,
+    canObserve: (Settlement, CivPosition) -> Boolean,
 ) {
     private val index = CivsContainerIndex(plugin.server, tileEntities)
     private val supplyCaptures = CivsSupplyCaptures(index, { city, buildings, positions ->
@@ -35,7 +38,7 @@ internal class CivsStorageContainers(
     }, ::captureSupplyContainer, { city, position, value ->
         storagePositionAllowed(city, position, value.type) && value.acceptsInsert == civsNativeContainerAcceptsInsert(city, position) &&
             (city.autonomy == null || canModify(city, position))
-    }, clock)
+    }, clock, onSupplyChanged, canObserve)
     private val autonomousCaptures = mutableMapOf<UUID, CivSupplyCaptureResult>()
 
     fun positions(city: Settlement): Map<CivPosition, String?> = frozenPositions(city.id) ?: index.positions(city)
@@ -50,7 +53,9 @@ internal class CivsStorageContainers(
     fun startSupplyCapture(city: Settlement, forceNative: Boolean): CivsSupplyCapture = supplyCaptures.start(city, forceNative)
     fun settlementSupplyRead(city: Settlement): CivSettlementSupplyRead = supplyCaptures.readFrame(city)
     fun planningBuildingStock(city: Settlement, buildingId: UUID): Map<String, Long>? =
-        supplyCaptures.planningBuildingStock(city, buildingId)
+        supplyCaptures.planningBuildingStock(city, buildingId).also {
+            if (it == null && city.inventory?.mode == CivStorageMode.PHYSICAL) onSupplyNeeded(city.id)
+        }
 
     fun planningPositions(city: Settlement, buildings: List<CivBuilding>): Map<UUID, Map<CivPosition, String?>> {
         val frozen = frozenPositions(city.id)
@@ -62,11 +67,12 @@ internal class CivsStorageContainers(
     }
 
     fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? =
-        supplyCaptures.planningContainer(city, buildingId, position)
+        supplyCaptures.planningContainer(city, buildingId, position).also { if (it == null) onSupplyNeeded(city.id) }
     fun invalidateSupplyPositions(worldId: UUID, positions: Collection<CivPosition>) =
         positions.forEach { supplyCaptures.changed(worldId, it) }
     fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null,
-        requireComplete: Boolean = false): Boolean = supplyCaptures.current(city, result, buildingIds, requireComplete)
+        requireComplete: Boolean = false, requireStableContents: Boolean = false): Boolean =
+        supplyCaptures.current(city, result, buildingIds, requireComplete, requireStableContents)
     fun supplyRevision(cityId: UUID): Long = supplyCaptures.revision(cityId)
     fun invalidateSupply(cityId: UUID, buildingIds: Set<UUID>?) = supplyCaptures.invalidate(cityId, buildingIds)
     fun debug(cityId: UUID?): Map<String, Any?> = mapOf("containerIndex" to index.debug(cityId), "supplyCaptures" to supplyCaptures.debug(cityId))

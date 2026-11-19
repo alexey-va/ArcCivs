@@ -45,6 +45,11 @@ internal fun civsPlanBoardLayoutKey(city: Settlement): String {
     city.buildings.forEach(::building)
     field(city.construction?.plannedBuilding != null)
     city.construction?.plannedBuilding?.let(::building)
+    if (!city.deferredConstruction.isNullOrEmpty()) {
+        field("deferred-construction")
+        field(city.deferredConstruction.size)
+        city.deferredConstruction.forEach { it.plannedBuilding?.let(::building) }
+    }
     field(city.constructionQueue.orEmpty().size)
     city.constructionQueue.orEmpty().forEach(::field)
     CivsSettlementPlans.current(city)?.let { plan ->
@@ -73,6 +78,8 @@ internal fun civsPlanBoardLayoutKey(city: Settlement): String {
 
 private fun CivBuilding.boardCopy(): CivBuilding = copy(transit = transit?.toList())
 
+private fun CivConstruction.boardCopy(): CivConstruction = copy(plannedBuilding = plannedBuilding?.boardCopy())
+
 internal fun queuedUpgradeId(buildingId: UUID, targetLevel: Int): UUID =
     UUID.nameUUIDFromBytes("arccivs-upgrade/$buildingId/$targetLevel".toByteArray(Charsets.UTF_8))
 
@@ -96,7 +103,8 @@ internal fun requireQueuedDesign(plan: CivPlacementPlan, city: Settlement, build
 /** Called on Main before any asynchronous plan read, including caller-owned list detachment. */
 internal fun civsPlanBoardCapture(city: Settlement): Settlement = city.copy(
     buildings = city.buildings.map { it.boardCopy() },
-    construction = city.construction?.let { it.copy(plannedBuilding = it.plannedBuilding?.boardCopy()) },
+    construction = city.construction?.boardCopy(),
+    deferredConstruction = city.deferredConstruction?.map { it.boardCopy() },
     constructionQueue = city.constructionQueue?.toList(),
     research = city.research?.copy(completed = city.research.completed.toSet(), project = null),
     roadRouteOverrides = city.roadRouteOverrides?.mapValues { (_, value) ->
@@ -110,13 +118,15 @@ internal fun civsPlanBoardSnapshot(city: Settlement, saved: List<CivPlacementPla
     val planned = linkedMapOf<UUID, CivBuilding>()
     city.buildings.filter { it.phase != BuildingPhase.ACTIVE }.forEach { planned[it.id] = it.boardCopy() }
     val plans = saved.associateBy(CivPlacementPlan::id)
-    city.constructionQueue.orEmpty().mapNotNull(city::building).filter { it.phase == BuildingPhase.ACTIVE }.forEach { building ->
+    city.constructionQueue.orEmpty().mapNotNull(city::building).filter {
+        it.phase == BuildingPhase.ACTIVE && city.constructionOrder(it.id) == null
+    }.forEach { building ->
         val plan = plans[queuedDesignId(building)] ?: throw CivsRejection("plan-board-queued-plan-unavailable")
         if (runCatching { requireQueuedDesign(plan, city, building) }.isFailure)
             throw CivsRejection("plan-board-queued-plan-mismatch")
         planned[building.id] = plan.building.boardCopy()
     }
-    city.construction?.plannedBuilding?.let { planned[it.id] = it.boardCopy() }
+    city.constructionOrders().forEach { order -> order.plannedBuilding?.let { planned[it.id] = it.boardCopy() } }
     val access = CivAutonomousAccess.from(city, saved.filter {
         it.id == CivsWarehouseRefit.retainedPlanId(it.building)
     })

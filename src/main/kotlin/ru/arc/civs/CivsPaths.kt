@@ -12,10 +12,12 @@ import kotlin.math.floor
 /** Remember walked corridors; Trails alone owns their wear, material and walking speed. Main thread only. */
 internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads = { RetainedRoads.EMPTY }) {
     internal data class Geometry(val world: UUID, val center: CivPosition, val radius: Int,
-                                 val buildings: List<CivBuilding>, val planned: CivBuilding?) {
-        private val protectedBuildings = buildings + listOfNotNull(planned)
+                                 val buildings: List<CivBuilding>, val planned: Map<UUID, CivBuilding>) {
+        constructor(city: Settlement) : this(city.worldId, city.center, city.radius, city.buildings, city.constructionFootprints())
+
+        val protectedBuildings = buildings + planned.values
         fun matches(city: Settlement): Boolean = world == city.worldId && center == city.center && radius == city.radius &&
-            buildings == city.buildings && planned == city.construction?.plannedBuilding
+            buildings == city.buildings && city.matchesConstructionFootprints(planned)
 
         fun outside(point: CivPosition): Boolean = contains(point) && !onPlot(point)
 
@@ -146,7 +148,7 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
         val roads = CivsRoadGraph(retainedRoads.index, learned)
 
         internal fun debugPolicy(allowedBuildings: Set<UUID>, logs: Set<Material>, leaves: Set<Material>) = CitizenNavigationDebugPolicy(
-            geometry.center, geometry.radius, (geometry.buildings + listOfNotNull(geometry.planned))
+            geometry.center, geometry.radius, geometry.protectedBuildings
                 .map(CitizenNavigationDebugBuilding::of), allowedBuildings.toSet(), preferred.toSet(),
             retainedRoads.debugSupports().toSet(), preferCourierRoads, (logs + leaves).mapTo(sortedSetOf(), Material::name))
 
@@ -189,9 +191,8 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
 
     fun begin(city: Settlement, preferCourierRoads: Boolean = false, roads: RetainedRoads = courierRoads(city),
         territory: CivRouteTerritory? = null): Trip {
-        val geometry = geometry(city)
-        val network = networks[city.id]?.takeIf { it.geometry == geometry }
-            ?: Network(geometry).also { networks[city.id] = it }
+        val network = networks[city.id]?.takeIf { it.geometry.matches(city) }
+            ?: Network(Geometry(city)).also { networks[city.id] = it }
         while (networks.size > MAX_CITIES) networks.remove(networks.keys.first())
         return Trip(city.id, network, preferCourierRoads, roads, territory)
     }
@@ -265,8 +266,6 @@ internal class CivsPaths(private val courierRoads: (Settlement) -> RetainedRoads
 
     internal fun remembered(cityId: UUID): Set<CivPosition> = networks[cityId]?.cells?.toSet().orEmpty()
 
-    private fun geometry(city: Settlement) =
-        Geometry(city.worldId, city.center, city.radius, city.buildings, city.construction?.plannedBuilding)
 
     private fun nearCorridor(existing: Set<CivPosition>, point: CivPosition): Boolean {
         for (dx in -2..2) for (dz in -2..2) for (dy in -1..1)

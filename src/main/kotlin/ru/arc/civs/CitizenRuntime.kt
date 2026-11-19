@@ -10,8 +10,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal class CitizenRuntime(
     val plugin: Plugin,
     val entityCollisions: Boolean = true,
+    cityById: ((UUID) -> Settlement?)? = null,
     val cityProvider: () -> Collection<Settlement>,
 ) {
+    val cityById = cityById ?: { id: UUID -> cityProvider().firstOrNull { it.id == id } }
     val actors = linkedMapOf<UUID, CitizenActor>()
     val statuses = mutableMapOf<UUID, String>()
     val closed = AtomicBoolean()

@@ -118,7 +118,7 @@ internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean,
         service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), allowedWorlds, 96,
             maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens,
             backendTransfer = transfer, clock = { time }, boundaryRenderer = boundary,
-            storageAdapter = storageFactory?.invoke(plugin) ?: CivsStorage(plugin) { emptyArray() },
+            storageAdapter = storageFactory?.invoke(plugin) ?: CivsStorage(plugin, supplyClock = { time }) { emptyArray() },
             supplyExecutor = Executor(Runnable::run))
     }
     fun prepareFounding(name: String, style: String): CompletableFuture<Unit> =

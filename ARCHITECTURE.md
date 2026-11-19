@@ -105,6 +105,15 @@ not intercept walking producers. Existing carried shipments retain their durable
 identity through restart and destination recovery. Actual holders determine space;
 full storage keeps the untransferred goods with their current owner.
 
+The supply dispatcher reviews production demand every 30 seconds using the
+inventory observation it already collects. It subtracts goods on hand,
+carried goods and promised output before assigning a finite batch to a worker.
+A forester accepts one tree, other producers take up to four work cycles.
+Workers consult their assigned order directly. A delivery during a batch
+affects the next allocation. Started trees, work receipts and cargo keep their
+existing recovery rules. A partially observed town can replenish a small local
+reserve at a known workplace while a distant store is unavailable.
+
 `CivsAutoSupplies` is the additional Auto privilege. It considers only known
 construction, accepted work/research and hungry-resident demands. It uses the
 existing bounded native supply capture, subtracts local items, carried supplies,
@@ -161,6 +170,9 @@ receives the same preparation when activated; an active building upgrade retains
 its completed footprint.
 
 Native geometry reads share `CivsWorld`'s existing 2,048-cell / 2 ms scan budget.
+Rectangular height surveys append columns in scan order to an array sized for the
+validated bounds. Sparse water probes keep their explicit coordinates. The
+detached route search takes its own copy before applying proposed terrain.
 The height field is limited to 65,536 columns and a deterministic radius of at most
 127 even when the city's radius grows. Each selected draft captures at most 131,072
 cells and changes at most 32,768. Cut or fill is limited to 24 blocks relative to
@@ -243,10 +255,12 @@ Completed building captures retain the executed terrain journal, including a SIT
 recaptured before its first payment. Later roads preserve these earlier route
 columns and entrance grades; their shoulders cannot bury them, and new footprints
 cannot cover them. A bounded legacy repair derives exact inverse writes from
-later retained journals that obstruct older completed approaches. It runs before
-growth even with empty stock, changes at most 512 cells and one block per tick,
-and skips changed, occupied or protected cells. It neither grants resources nor
-counts as resident construction; `autonomous_access_repaired` reports its counts.
+later retained journals that obstruct older completed approaches. It runs
+independently of new construction, processes at most 512 cells and writes at
+most one block per tick. It preserves changed blocks and rechecks protection
+and active construction or inventory claims before each write. A blocked cell
+delays its repair while another construction project may proceed. The repair
+grants no items or builder credit. `autonomous_access_repaired` reports its counts.
 
 `civs debug autonomy [city UUID]` reads cached goal, stock, retry and placement
 progress and the last bounded placement result without starting work. `autonomous_goal_selected`,
@@ -660,6 +674,11 @@ at most 256 chunks for 120 seconds and invalidates affected chunks on block even
 Six distinct safe standing positions avoid controls, fire and occupied seats;
 travel expires after 45 seconds and rest lasts 25–45 seconds. Work, cargo and
 night sheltering supersede leisure. No chunks are loaded for discovery.
+Two idle residents near a human viewer can stop, face each other and exchange
+two to four lines. One packet text display follows the current speaker. Each
+turn lasts at least three seconds. The runtime shuffles 72 conversations and
+uses the whole pool before repeating. A viewer must stay within 24 blocks of
+each participant. Work, hunger, danger or nightfall can end the meeting early.
 All route segments, safe endpoints and collision nudges reject lit campfire
 cells touching the resident's body or support. Execution rechecks live heat;
 a resident already touching fire may leave it. Fire damage remains active.
@@ -931,8 +950,12 @@ CPU executor. A shared ledger assigns all couriers together: construction first,
 ordinary requests/collection with trip-distance and courier fairness. Source units, destination
 partial stacks/empty slots and producer meetings cannot be booked twice. Accepted empty trips
 survive unrelated city revisions; relevant native generations and domain inputs fence new
-results. Inventory events request refreshes; a fresh capture every 5 seconds also detects writers
-which bypass events. Stale inputs coalesce into a new calculation; failed trips receive backoff.
+results. Inventory events and journal writes invalidate the affected holders. The dispatcher
+coalesces requests for the affected city, including changes to courier availability and chunk
+activity. It checks eligibility every five seconds. An eligible quiet city gets a stock audit
+on the 30-second production review interval to detect native writers that bypass events.
+Active logistics, failed production reviews and readers that need fresh stock can request an
+earlier capture. Physical observations expire after five seconds. Failed trips receive backoff.
 Reload/close fence and drain jobs. Physical pickup freshly checks source surplus, demand, bag
 room, destination room and actual arrival before the existing durable receipt. Temporary
 reservations end only before pickup or at a definitive receipt outcome; unknown commits remain
@@ -1071,8 +1094,11 @@ the latest checkpoint, subject to the same accepted crash rollback. Completing t
 clears its reservation and advances within the bounded
 session while credit remains; the next trip is required when that credit ends. Legacy
 orders with null payment state retain their already-paid 256-cell tile algorithm.
-New SITE plans and accepted ACTIVE-building upgrades for the next level share a
-persistent FIFO queue, with only one active construction. The unique marker cell is omitted from new paste plans;
+New SITE plans and accepted upgrades share a persistent queue. One project per city runs at a time.
+The builder takes the first available project. A missing batch, denied site or unavailable route can yield
+to another project after the current world operation and inventory receipt have settled. The city saves
+the deferred order with its original capture, progress and payment. Resumption revalidates the same row.
+The unique marker cell is omitted from new paste plans;
 matching existing target blocks need no replacement. Core's provider-owned paste
 splits new placement around the control into at most six crops, applied sequentially
 in one batch while preserving the barrel and its inventory. Durable completion
@@ -1114,12 +1140,15 @@ labels respect terrain occlusion and never use the paste origin or a future upgr
 marker. State changes update existing packet handles. Leaving, deletion, reload and
 shutdown retire them with the existing scene; no physical entities or world scan.
 
-SITE plans may be placed while a different building is under construction. A
-persistent ordered list of building IDs holds requested SITE jobs, with one active
-construction. Duplicate requests are idempotent. Starting the next job reloads its
-saved plan and captures/revalidates current terrain. A failed queue head retains
-its position and exposes a concrete retry reason; it is not silently skipped.
-Upgrades retain their existing active-order contract.
+SITE plans may be placed while another building is under construction. The
+builder takes the first eligible project in the city's saved queue. A project
+waiting for materials, a usable site or access stays queued with its reason.
+If the blocked project has already started, the city retains its order ID,
+captured plan, completed rows and payments. The next eligible project can
+proceed once any outstanding write is settled. Its captured earthworks must
+preserve the other order's blocks and walking route, including shared roads.
+Resuming uses the same order, including after a restart. Duplicate requests keep
+the existing queue entry.
 Each service pulse offers queued construction the shared world budget first.
 A city waiting to retry its queue head keeps its place. Other cities can use
 available capacity for construction, access repairs or new development.

@@ -3,6 +3,7 @@ package ru.arc.civs
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.World
+import java.util.UUID
 import kotlin.math.abs
 
 /** Campfire, conversation and idle-walk admission and interruption. */
@@ -21,6 +22,18 @@ internal class CivsCitizenLeisure(
     private val logistics get() = logisticsOwner()
     private val life get() = lifeOwner()
     val nap = CivsCitizenNap(runtime, collisionsOwner)
+    var viewers: List<CitizenViewer> = emptyList()
+    var conversations: CitizenConversationDeck? = null
+
+    private fun observed(actor: CitizenActor): Boolean = viewers.isNotEmpty() && actor.npc.isValid &&
+        citizenHasViewer(actor.worldId, actor.npc.location.point(), viewers, CITIZEN_CONVERSATION_RANGE)
+
+    fun releaseUnseen(remaining: List<CitizenViewer>) {
+        viewers = remaining
+        for (actor in runtime.actors.values) {
+            if (actor.social.visit != null && !observed(actor)) stopCamp(actor, "audience-left")
+        }
+    }
 
     fun speak(actor: CitizenActor, event: CitizenVoiceEvent) {
         if (actor.sheltering || actor.sleeping || actor.workerId in runtime.pendingHarm ||
@@ -49,15 +62,18 @@ internal class CivsCitizenLeisure(
     }
 
     fun gather(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
-        val tick = Bukkit.getCurrentTick()
         val routine = actor.social
         var visit = routine.visit
+        if (visit == null && (viewers.isEmpty() || runtime.campBudget == 0)) return false
+        val tick = Bukkit.getCurrentTick()
         if (visit == null) {
             val evening = actor.plan.idleReason == null
             if (actor.route?.let { it.wanderWalk == null } == true ||
-                runtime.campBudget == 0 || !routine.available(tick, world.fullTime / 24_000, evening)) return false
+                !routine.available(tick, world.fullTime / 24_000, evening) || !observed(actor)) return false
             runtime.campBudget--
             citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+            if (startMeeting(actor, city, worker, world, now, tick))
+                return continueMeeting(actor, city, worker, world, tick)
             val origin = citizenIdleBuilding(city, worker) ?: return false
             val anchor = citizenIdleAnchor(city, origin)
             val allowed = city.buildings.filter { it.id == origin.id || it.type == BuildingType.TOWN_HALL }.mapTo(hashSetOf()) { it.id }
@@ -74,8 +90,6 @@ internal class CivsCitizenLeisure(
                     citizenCampfireVisible(world, point, fire.position)
             }?.let { fire to it } }.firstOrNull()
             if (place == null) {
-                if (startMeeting(actor, city, worker, world, now, tick))
-                    return continueMeeting(actor, city, world, tick)
                 routine.discoveryMiss(tick)
                 return false
             }
@@ -89,9 +103,12 @@ internal class CivsCitizenLeisure(
                 stopCamp(actor, "route-unavailable")
                 return false
             }
+        } else if (!observed(actor)) {
+            stopCamp(actor, "audience-left")
+            return false
         }
         val activeVisit = requireNotNull(visit)
-        if (activeVisit.partnerId != null) return continueMeeting(actor, city, world, tick)
+        if (activeVisit.partnerId != null) return continueMeeting(actor, city, worker, world, tick)
         val fire = requireNotNull(activeVisit.fire)
         if (routine.expired(tick) || !citizenCampfireLit(world, fire.position) ||
             !citizenIdleTerrain(world, activeVisit.seat, city.buildings)) {
@@ -142,31 +159,53 @@ internal class CivsCitizenLeisure(
 
     /** Reuse the social admission budget and lifecycle for a short pair encounter without a fireplace. */
     private fun startMeeting(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, now: Long, tick: Int): Boolean {
-        fun free(other: CitizenActor): Boolean = other.cityId == city.id && other.worldId == city.worldId &&
-            other.npc.isValid && other.npc.world == world && !other.sleeping &&
-            !other.sheltering && other.attacker == null && other.foodSource == null && other.supplyPickup == null &&
-            !logistics.collectedPending(other) && other.collectionSeek == null && other.collectionHome == null &&
-            !other.returningToWarehouse && other.workerId !in runtime.pendingHarm &&
-            other.mealVisit == null && other.tavernService == null &&
-            (other.route == null || other.route?.idleAnchor != null) &&
-            other.plan.idleReason in setOf("unassigned", "no-construction", "waiting-growth", "waiting-tool", "construction-paused") &&
-            citizenCampEligible(other.plan, other.cycle.phase, world.time) &&
-            city.workers.firstOrNull { it.id == other.workerId }?.let { !CivsResidents.isChild(it) && it.cargo == null } == true &&
-            other.social.meetingAvailable(tick)
-        if (!free(actor)) return false
-        val partner = runtime.actors.values.asSequence().filter { it !== actor && free(it) &&
-            it.npc.location.distanceSquared(actor.npc.location) <= 6.0 * 6.0 }
-            .minByOrNull { it.npc.location.distanceSquared(actor.npc.location) } ?: return false
-        val otherWorker = city.workers.first { it.id == partner.workerId }
+        if (conversations == null || !actor.social.meetingAvailable(tick) || !freeToTalk(actor, worker)) return false
+        val from = actor.npc.location
+        var partner: CitizenActor? = null
+        var otherWorker: CivWorker? = null
+        var nearest = 6.0 * 6.0
+        for (resident in city.workers) {
+            val other = runtime.actors[resident.id] ?: continue
+            if (other === actor || other.cityId != city.id || other.worldId != city.worldId || !other.npc.isValid ||
+                other.npc.world != world || other.route?.let { it.wanderWalk == null } == true) continue
+            val distance = other.npc.location.distanceSquared(from)
+            if (distance > nearest || !other.social.meetingAvailable(tick) || !freeToTalk(other, resident) || !observed(other)) continue
+            nearest = distance
+            partner = other
+            otherWorker = resident
+        }
+        if (partner == null || otherWorker == null) return false
         val home = citizenIdleBuilding(city, worker) ?: return false
         val otherHome = citizenIdleBuilding(city, otherWorker) ?: return false
-        val from = actor.npc.location
         val otherFrom = partner.npc.location
+        fun meet(first: CivPosition, second: CivPosition, approach: Boolean): Boolean {
+            routes.cancelRoute(actor)
+            routes.cancelRoute(partner)
+            actor.social.startMeeting(partner.workerId, first, tick)
+            partner.social.startMeeting(actor.workerId, second, tick)
+            if (approach && (!routes.startRoute(actor, world, first, now, idleAnchor = home.entrance) ||
+                !routes.startRoute(partner, world, second, now, idleAnchor = otherHome.entrance))) {
+                stopCamp(actor, "route-unavailable")
+                return false
+            }
+            CivsDiagnostics.event("citizen_meeting", "city" to city.id, "worker" to actor.workerId,
+                "partner" to partner.workerId, "action" to "start", "seat" to first, "partner_seat" to second)
+            return true
+        }
+        val here = CivPosition(from.blockX, from.blockY, from.blockZ)
+        val there = CivPosition(otherFrom.blockX, otherFrom.blockY, otherFrom.blockZ)
+        if (nearest in 1.3 * 1.3..3.5 * 3.5 && abs(from.y - otherFrom.y) <= 1.0 &&
+            citizenArrived(from, here.location(world)) && citizenArrived(otherFrom, there.location(world)) &&
+            threats.visible(from.clone().add(0.0, actor.npc.eyeHeight, 0.0), otherFrom.clone().add(0.0, partner.npc.eyeHeight, 0.0)))
+            return meet(here, there, approach = false)
         val middle = CivPosition(kotlin.math.floor((from.x + otherFrom.x) / 2).toInt(),
             from.blockY, kotlin.math.floor((from.z + otherFrom.z) / 2).toInt())
-        fun safe(other: CitizenActor, origin: CivBuilding, seat: CivPosition): Boolean =
+        val halls = city.buildings.filter { it.type == BuildingType.TOWN_HALL }.map { it.id }
+        val firstAccess = (halls + home.id).toSet()
+        val secondAccess = (halls + otherHome.id).toSet()
+        fun safe(other: CitizenActor, origin: CivBuilding, allowed: Set<UUID>, seat: CivPosition): Boolean =
             citizenWithinIdleArea(origin.entrance, seat.point()) &&
-                citizenRouteCellAllowed(city, setOf(origin.id) + city.buildings.filter { it.type == BuildingType.TOWN_HALL }.map { it.id }, seat.x, seat.z) &&
+                citizenRouteCellAllowed(city, allowed, seat.x, seat.z) &&
                 citizenControlClear(city, seat) && collisions.idleDestinationFree(other, seat.location(world)) &&
                 citizenStandable(world, seat) && citizenIdleTerrain(world, seat, city.buildings)
         // Six pairs / twelve standing checks at most; no block-volume or population scan beyond 48 owned runtime.actors.
@@ -177,31 +216,28 @@ internal class CivsCitizenLeisure(
                 from.point().distanceSquared(second.point()) + otherFrom.point().distanceSquared(first.point())) {
                 val swap = first; first = second; second = swap
             }
-            if (!safe(actor, home, first) || !safe(partner, otherHome, second) ||
+            if (!safe(actor, home, firstAccess, first) || !safe(partner, otherHome, secondAccess, second) ||
                 !threats.visible(first.location(world).add(0.0, actor.npc.eyeHeight, 0.0),
                     second.location(world).add(0.0, partner.npc.eyeHeight, 0.0))) continue
-            // Optional walks need not finish in the same pulse for nearby adults to meet.
-            if (actor.route?.wanderWalk != null) routes.cancelRoute(actor)
-            routes.cancelRoute(partner)
-            actor.social.startMeeting(partner.workerId, first, tick)
-            partner.social.startMeeting(actor.workerId, second, tick)
-            if (!routes.startRoute(actor, world, first, now, idleAnchor = home.entrance) ||
-                !routes.startRoute(partner, world, second, now, idleAnchor = otherHome.entrance)) {
-                stopCamp(actor, "route-unavailable")
-                return false
-            }
-            CivsDiagnostics.event("citizen_meeting", "city" to city.id, "worker" to actor.workerId,
-                "partner" to partner.workerId, "action" to "start", "seat" to first, "partner_seat" to second)
-            return true
+            return meet(first, second, approach = true)
         }
         return false
     }
 
-    private fun continueMeeting(actor: CitizenActor, city: Settlement, world: World, tick: Int): Boolean {
+    private fun freeToTalk(actor: CitizenActor, worker: CivWorker): Boolean =
+        actor.cycle.phase == CitizenPhase.IDLE && actor.plan.idleReason in MEETING_IDLE_REASONS &&
+            !CivsResidents.isChild(worker) && CivsResidents.hunger(worker) > 14 && worker.cargo == null && worker.pendingStock == null &&
+            !actor.sleeping && !actor.sheltering && actor.idleNap == null && actor.attacker == null &&
+            actor.workerId !in runtime.pendingHarm && actor.terrainObstructedAt == null && actor.residentYield == null &&
+            actor.foodSource == null && actor.mealVisit == null && actor.tavernService == null && actor.supplyPickup == null &&
+            !logistics.collectedPending(actor) && actor.collectionSeek == null && actor.collectionHome == null &&
+            !actor.returningToWarehouse && actor.outputReturn == null && actor.plan.courier == null
+
+    private fun continueMeeting(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, tick: Int): Boolean {
         val visit = actor.social.visit ?: return false
         val partner = runtime.actors[visit.partnerId]?.takeIf { it.cityId == city.id && it.npc.isValid &&
             it.social.visit?.partnerId == actor.workerId }
-        if (partner == null || actor.social.expired(tick) ||
+        if (partner == null || !observed(partner) || actor.social.expired(tick) || !freeToTalk(actor, worker) ||
             !citizenStandable(world, visit.seat) || !citizenIdleTerrain(world, visit.seat, city.buildings)) {
             stopCamp(actor, if (partner == null) "partner-unavailable" else "visit-ended")
             return false
@@ -221,25 +257,30 @@ internal class CivsCitizenLeisure(
         val eye = actor.npc.location.add(0.0, actor.npc.eyeHeight, 0.0)
         val otherEye = partner.npc.location.add(0.0, partner.npc.eyeHeight, 0.0)
         val (yaw, pitch) = citizenLookDirection(eye, otherEye)
-        routes.look(actor.npc, yaw, pitch)
+        actor.lookYaw = yaw
+        actor.lookPitch = pitch
         if (otherVisit.arrivedAt == null) { runtime.statuses[actor.workerId] = "meeting"; return true }
         if (eye.distanceSquared(otherEye) > 4.0 * 4.0 || !threats.visible(eye, otherEye)) {
             stopCamp(actor, "partner-occluded")
             return false
         }
-        if (visit.conversationAt == null) {
-            visit.conversationAt = tick
-            otherVisit.conversationAt = tick
+        val facing = abs(citizenAngleChange(actor.npc.bodyYaw, yaw)) <= 20f
+        val dialogue = visit.conversation ?: run {
+            if (!facing || abs(citizenAngleChange(partner.npc.bodyYaw, yaw + 180f)) > 20f) {
+                runtime.statuses[actor.workerId] = "meeting"
+                return true
+            }
+            CitizenConversation(requireNotNull(conversations).draw(), actor.workerId, tick).also {
+                visit.conversation = it
+                otherVisit.conversation = it
+            }
         }
-        val beat = (tick - requireNotNull(visit.conversationAt)) / 50
-        val turn = if (actor.workerId < partner.workerId) 0 else 1
-        if (beat % 2 == turn && visit.gestureBeat != beat && abs(citizenAngleChange(actor.npc.bodyYaw, yaw)) <= 20f) {
+        if (facing && dialogue.speak(actor.workerId, tick)) {
             actor.npc.swingMainHand()
             speak(actor, if (visit.greeted) CitizenVoiceEvent.IDLE else CitizenVoiceEvent.GREET)
             visit.greeted = true
-            visit.gestureBeat = beat
         }
-        city.workers.firstOrNull { it.id == actor.workerId }?.let { life.creditRest(actor, city, it, tick) }
+        life.creditRest(actor, city, worker, tick)
         runtime.statuses[actor.workerId] = "talking"
         return true
     }
@@ -298,4 +339,9 @@ internal class CivsCitizenLeisure(
 
     private fun inside(building: CivBuilding, x: Int, z: Int): Boolean =
         x in building.bounds.min.x..building.bounds.max.x && z in building.bounds.min.z..building.bounds.max.z
+
+    private companion object {
+        val MEETING_IDLE_REASONS = setOf("unassigned", "no-construction", "waiting-growth", "waiting-tool",
+            "waiting-orders", "waiting-materials", "construction-paused")
+    }
 }

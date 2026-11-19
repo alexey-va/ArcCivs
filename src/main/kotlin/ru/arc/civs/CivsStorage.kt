@@ -25,6 +25,7 @@ import org.bukkit.event.entity.ItemMergeEvent
 import org.bukkit.event.entity.ItemDespawnEvent
 import org.bukkit.event.entity.EntityTeleportEvent
 import org.bukkit.event.entity.EntityPortalEvent
+import org.bukkit.event.inventory.InventoryAction
 import org.bukkit.event.inventory.InventoryClickEvent
 import org.bukkit.event.inventory.InventoryDragEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
@@ -71,7 +72,7 @@ class CivsStorage(private val plugin: Plugin,
     tileEntities: (Chunk) -> Array<BlockState> = { it.tileEntities }) : Listener, AutoCloseable {
     private data class Claim(val city: Settlement, val positions: Map<CivPosition, String?>, val playerId: UUID?,
         val worldPositions: Set<CivPosition> = emptySet(), val groundItems: Set<UUID> = emptySet(),
-        val viewersAllowed: Boolean = false)
+        val viewersAllowed: Boolean = false, val itemOnly: Boolean = false)
     private val claims = mutableMapOf<UUID, Claim>()
     private val cityClaims = mutableMapOf<UUID, UUID>()
     private val locked = mutableMapOf<Key, UUID>()
@@ -86,6 +87,8 @@ class CivsStorage(private val plugin: Plugin,
     internal var forestryLeafCurrentCity: (UUID) -> Settlement? = { null }
     internal var relocationCurrentCity: (UUID) -> Settlement? = { null }
     internal var terrainChanged: (UUID, Collection<CivPosition>) -> Unit = { _, _ -> }
+    internal var onSupplyChanged: (UUID) -> Unit = {}
+    internal var onSupplyNeeded: (UUID) -> Unit = {}
     internal var collectedChunkLease: (PaperChunkKey) -> PaperChunkTicketLease = { error("Collection chunk leases are not wired") }
     internal var validateUpkeepNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "upkeep-authority-unavailable"))
@@ -123,7 +126,11 @@ class CivsStorage(private val plugin: Plugin,
     private val persistenceTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val containers = CivsStorageContainers(plugin, tileEntities,
         { cityId -> cityClaims[cityId]?.let(claims::get)?.positions }, ::checkReady,
-        { city, position -> foodCanModify(city, position) }, supplyClock)
+        { city, position -> foodCanModify(city, position) }, supplyClock, { onSupplyChanged(it) }, { onSupplyNeeded(it) },
+        canObserve = { city, position ->
+            val key = Key(city.worldId, position)
+            !receiptBootstrap && key !in locked && key !in lockedWorld && key !in retiringControls
+        })
     private val planner = CivsStoragePlanner(containers, ::checkReady, ::checkClaim,
         { cityId -> claims.getValue(cityClaims.getValue(cityId)).playerId }, { residentFoods })
     private val relocations = CivsContainerRelocationPlanner(containers, { worldId -> plugin.server.getWorld(worldId) },
@@ -249,8 +256,9 @@ class CivsStorage(private val plugin: Plugin,
         checkReady(); containers.invalidateSupplyPositions(worldId, positions)
     }
     internal fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null,
-        requireComplete: Boolean = false): Boolean {
-        checkReady(); return containers.supplyCaptureCurrent(city, result, buildingIds, requireComplete = requireComplete)
+        requireComplete: Boolean = false, requireStableContents: Boolean = false): Boolean {
+        checkReady()
+        return containers.supplyCaptureCurrent(city, result, buildingIds, requireComplete, requireStableContents)
     }
     internal fun supplyRevision(cityId: UUID): Long { checkReady(); return containers.supplyRevision(cityId) }
     internal fun rememberAutonomousCapacity(city: Settlement, result: CivSupplyCaptureResult) {
@@ -384,10 +392,18 @@ class CivsStorage(private val plugin: Plugin,
         reject(worldPositions.any { lockedWorld[Key(claim.city.worldId, it)]?.let { id -> id != transaction.id } == true }, "storage-busy")
         reject(groundItems.any { lockedGround[it]?.let { id -> id != transaction.id } == true }, "storage-busy")
         val viewersAllowed = transaction.containerRelocation == null && transaction.warehouseRefit == null && (keepViewersOpen || claim.playerId == null)
+        val before = claim.city
+        val after = transaction.after
+        val itemOnly = worldPositions.isEmpty() && transaction.containerRelocation == null &&
+            before.inventory?.mode == CivStorageMode.PHYSICAL && after.inventory?.mode == CivStorageMode.PHYSICAL &&
+            before.inventory.containers == after.inventory.containers &&
+            before.inventory.constructionBuffers == after.inventory.constructionBuffers &&
+            after.copy(workers = before.workers, inventory = before.inventory, revision = before.revision) == before
         claims[transaction.id] = claim.copy(worldPositions = worldPositions, groundItems = groundItems,
-            viewersAllowed = viewersAllowed)
+            viewersAllowed = viewersAllowed, itemOnly = itemOnly)
         worldPositions.forEach { lockedWorld[Key(claim.city.worldId, it)] = transaction.id }
         groundItems.forEach { lockedGround[it] = transaction.id }
+        if (itemOnly) containers.invalidateSupplyPositions(before.worldId, positions.keys)
         // Retain full frozen source membership for stock reads; native locks cover only receipt coordinates.
         if (!viewersAllowed) closeViewers(transaction.id, claim.playerId)
     }
@@ -453,7 +469,12 @@ class CivsStorage(private val plugin: Plugin,
         claim.positions.keys.forEach { locked.remove(Key(claim.city.worldId, it), transactionId) }
         claim.worldPositions.forEach { lockedWorld.remove(Key(claim.city.worldId, it), transactionId) }
         claim.groundItems.forEach { lockedGround.remove(it, transactionId) }
+        if (claim.itemOnly) onSupplyChanged(claim.city.id)
     }
+
+    /** Recovery locks and ordinary city writes have no read-only planning exception. */
+    internal fun supplyReadReceipt(cityId: UUID): UUID? =
+        cityClaims[cityId]?.takeIf { !receiptBootstrap && claims[it]?.itemOnly == true }
 
     /** Main-thread claim identity; a source fence keeps the same city revision reserved. */
     internal fun hasClaim(city: Settlement): Boolean {
@@ -1442,9 +1463,20 @@ class CivsStorage(private val plugin: Plugin,
     fun indexWorldUnload(event: WorldUnloadEvent) { containers.worldUnloaded(event.world) }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun supplyClick(event: InventoryClickEvent) { containers.supplyChanged(event.view.topInventory) }
+    fun supplyClick(event: InventoryClickEvent) {
+        val top = event.view.topInventory
+        val affectsTop = when (event.action) {
+            InventoryAction.NOTHING -> false
+            InventoryAction.MOVE_TO_OTHER_INVENTORY, InventoryAction.COLLECT_TO_CURSOR, InventoryAction.UNKNOWN -> true
+            else -> event.rawSlot in 0 until top.size
+        }
+        if (affectsTop) containers.supplyChanged(top)
+    }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun supplyDrag(event: InventoryDragEvent) { containers.supplyChanged(event.view.topInventory) }
+    fun supplyDrag(event: InventoryDragEvent) {
+        val top = event.view.topInventory
+        if (event.rawSlots.any { it in 0 until top.size }) containers.supplyChanged(top)
+    }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun supplyMove(event: InventoryMoveItemEvent) { containers.supplyChanged(event.source); containers.supplyChanged(event.destination) }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

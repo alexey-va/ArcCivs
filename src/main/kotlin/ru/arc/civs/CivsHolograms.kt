@@ -50,16 +50,24 @@ class CivsHolograms internal constructor(
     private val plugin: Plugin,
     private val tasks: LifecycleTaskScope,
     private val text: CivsText,
-    private val snapshots: () -> List<CivsNpcHologramSnapshot>,
+    private val snapshots: (List<CitizenViewer>) -> List<CivsNpcHologramSnapshot>,
     private val displays: PaperPacketDisplays,
     private val nativeWork: BudgetedTaskQueue? = null,
-    private val workplaces: () -> List<CivsWorkplaceSnapshot> = { emptyList() },
+    private val workplaces: (List<CitizenViewer>) -> List<CivsWorkplaceSnapshot> = { emptyList() },
 ) : AutoCloseable {
     constructor(plugin: Plugin, tasks: LifecycleTaskScope, text: CivsText,
                 snapshots: () -> List<CivsNpcHologramSnapshot>, nativeWork: BudgetedTaskQueue? = null,
                 workplaces: () -> List<CivsWorkplaceSnapshot> = { emptyList() }) :
-        this(plugin, tasks, text, snapshots, nativeWork?.let { PaperPacketDisplays(plugin, "civs-residents", it) }
-            ?: PaperPacketDisplays(plugin, "civs-residents"), nativeWork, workplaces)
+        this(plugin, tasks, text, { viewers -> snapshots().filter {
+            civsResidentDisplayVisible(it.worldId, CitizenPoint(it.x, it.y, it.z), it.nativeHeight, it.sleep, it.actor?.viewRange, viewers)
+        } }, nativeWork?.let { PaperPacketDisplays(plugin, "civs-residents", it) }
+            ?: PaperPacketDisplays(plugin, "civs-residents"), nativeWork, { viewers -> workplaces().filter {
+                citizenHasViewer(it.worldId, it.control.point(), viewers, CIVS_PUBLIC_DISPLAY_RANGE)
+            } })
+
+    internal constructor(plugin: Plugin, tasks: LifecycleTaskScope, text: CivsText, citizens: CivsCitizens, work: BudgetedTaskQueue) :
+        this(plugin, tasks, text, citizens::visibleHologramSnapshots, PaperPacketDisplays(plugin, "civs-residents", work),
+            work, citizens::visibleWorkplaceSnapshots)
 
     private data class Desired(val snapshot: CivsNpcHologramSnapshot, val text: Component, val vitals: Component,
         private val textInputs: List<String> = snapshot.statusInputs.toList()) {
@@ -90,8 +98,10 @@ class CivsHolograms internal constructor(
     internal fun pulse() {
         check(Bukkit.isPrimaryThread()) { "Resident nameplates require the server thread" }
         if (closed || !tasks.isCurrent(epoch)) return
+        val viewers = citizenViewers(plugin)
         val previous = desired
-        desired = snapshots().asSequence().filter { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() &&
+        val residents = if (viewers.isEmpty()) emptyList() else snapshots(viewers)
+        desired = residents.asSequence().filter { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() &&
             it.health.isFinite() && it.maxHealth.isFinite() && it.health >= 0 && it.maxHealth > 0 &&
             it.health <= it.maxHealth && it.hunger in 0..20 && it.nativeHeight.isFinite() && it.nativeHeight > 0 &&
             Bukkit.getWorld(it.worldId) != null && (it.actor == null || it.actor.isValid) && it.sleep?.valid() != false }
@@ -105,7 +115,7 @@ class CivsHolograms internal constructor(
                         Desired(npc, civsNpcHologramText(text, npc, vitals), vitals)
                     }
             }
-        decor.capture(workplaces())
+        decor.capture(if (viewers.isEmpty()) emptyList() else workplaces(viewers))
         if (pending || decor.current() && rendered.size == desired.size && rendered.all { (id, shown) -> samePresentation(shown.value, desired[id]) }) return
         pending = true
         work.submit({ !closed && tasks.isCurrent(epoch) }, ::reconcileOne).whenComplete { _, failure ->
@@ -190,7 +200,7 @@ class CivsHolograms internal constructor(
             return
         }
         val existing = shown.speech
-        val bubble = existing ?: displays.spawnText(location, text.render(key)).also {
+        val bubble = existing ?: displays.spawnText(location, text.render(null, key)).also {
             shown.speech = it
             it.billboard = Display.Billboard.CENTER
             it.alignment = TextDisplay.TextAlignment.CENTER
@@ -198,7 +208,7 @@ class CivsHolograms internal constructor(
             it.backgroundColor = Color.fromARGB(215, 45, 34, 23)
             it.isShadowed = true
             it.isSeeThrough = false
-            it.viewRange = .375f
+            it.viewRange = CITIZEN_CONVERSATION_RANGE / 64f
             it.displayWidth = 4f
             it.displayHeight = 1f
             it.brightness = Display.Brightness(15, 15)
@@ -207,7 +217,7 @@ class CivsHolograms internal constructor(
         }
         val before = shown.value?.snapshot
         if (existing == null || before?.actor !== speaker) bubble.attachTo(speaker)
-        if (existing != null && before?.speech != key) bubble.text(text.render(key))
+        if (existing != null && before?.speech != key) bubble.text(text.render(null, key))
     }
 
     override fun close() {
@@ -240,6 +250,20 @@ class CivsHolograms internal constructor(
 internal const val CIVS_NPC_TEXT_SCALE = 0.55f
 internal const val CIVS_NPC_TEXT_WIDTH = 220
 internal const val CIVS_NPC_TEXT_GAP = .20
+// Core packet display viewRange 1f is 64 blocks from its frame, including the carrier's height.
+internal const val CIVS_PUBLIC_DISPLAY_RANGE = 64
+
+internal fun civsResidentDisplayVisible(worldId: UUID, feet: CitizenPoint, height: Double, sleep: CivSleepPresentation?,
+                                       carrierRange: Double?, viewers: List<CitizenViewer>): Boolean {
+    val frame = when {
+        sleep != null -> CitizenPoint(sleep.centreX, sleep.topY + CIVS_NPC_TEXT_GAP, sleep.centreZ)
+        carrierRange == null -> CitizenPoint(feet.x, feet.y + height + CIVS_NPC_TEXT_GAP, feet.z)
+        else -> CitizenPoint(feet.x, feet.y + height, feet.z)
+    }
+    // Sleeping labels are detached. Mounted labels and cargo also require the same viewer to see the carrier.
+    return viewers.any { it.worldId == worldId && it.point.distanceSquared(frame) <= CIVS_PUBLIC_DISPLAY_RANGE * CIVS_PUBLIC_DISPLAY_RANGE &&
+        (sleep != null || carrierRange == null || it.point.distanceSquared(feet) <= carrierRange * carrierRange) }
+}
 internal const val CIVS_NPC_TEXT_OFFSET = 1.8 + CIVS_NPC_TEXT_GAP
 
 internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot,

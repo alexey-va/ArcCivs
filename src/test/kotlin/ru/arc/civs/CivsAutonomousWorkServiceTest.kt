@@ -43,6 +43,9 @@ class CivsAutonomousWorkServiceTest : FunSpec({
             val barrel = h.world.getBlockAt(source.container.x, source.container.y, source.container.z)
                 .also { it.type = Material.BARREL }.let { (it.state as Barrel).inventory }
             barrel.setItem(0, ItemStack(Material.BREAD, 4))
+            barrel.setItem(1, ItemStack(Material.WHEAT, 64))
+            val farmControl = requireNotNull(farm.control)
+            h.world.getBlockAt(farmControl.x, farmControl.y, farmControl.z).type = Material.BARREL
             every { h.citizens.residentCollectionFeet(hungry.id, false) } returns source.standing.location(h.world)
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(town))
             val admission = CompletableFuture<CivInventoryTransaction>()
@@ -53,13 +56,30 @@ class CivsAutonomousWorkServiceTest : FunSpec({
             }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.world.time = 18_000
-            h.start()
+            val storage = CivsService::class.java.getDeclaredField("storage").also { it.isAccessible = true }
+                .get(h.service) as CivsStorage
             val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
                 .get(h.service) as CivsWorksites
             CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }.set(worksites, { 0L })
-            val pickup = h.service.pickupResidentFood(town.id, hungry.id, source)
+            val pickup = h.service.start().thenCompose {
+                // Warm only the native holder cache. A retained order would mask this regression.
+                val capture = storage.startSupplyCapture(town)
+                while (!capture.step()) Unit
+                requireNotNull(capture.result).plainStock?.get("WHEAT") shouldBe 64L
+                h.service.productionOrder(town, farmer) shouldBe null
+                h.service.pickupResidentFood(town.id, hungry.id, source)
+            }
             h.tickUntil("unrelated barrel receipt waits for storage acknowledgement") { held != null }
             h.service.collectionAvailable(town.id) shouldBe false
+            h.service.productionOrder(town, farmer) shouldBe null
+            storage.planningBuildingStock(town, hall.id) shouldBe null
+            storage.planningContainer(town, hall.id, source.container) shouldBe null
+            h.tickUntil("dispatcher publishes the first farm order during the unrelated receipt") {
+                h.service.productionOrder(town, farmer) != null
+            }
+            val order = requireNotNull(h.service.productionOrder(town, farmer))
+            order.matches(farm) shouldBe true
+            order.allows("WHEAT") shouldBe true
             repeat(2) { worksites.pulse(listOf(town)) }
             worksites.plan(town, farmer) shouldBe null
 
@@ -68,6 +88,11 @@ class CivsAutonomousWorkServiceTest : FunSpec({
             val work = requireNotNull(worksites.plan(town, farmer))
             work.focus shouldBe ripe
             shouldThrow<CivsRejection> { worksites.validate(town, work) }.reason shouldBe "city-busy"
+            shouldThrow<CivsRejection> {
+                h.service.inventoryMutation(town.id, { error("A second receipt reached native preparation") }) { city, inventory ->
+                    city.copy(inventory = inventory)
+                }
+            }.reason shouldBe "city-busy"
             pickup.isDone shouldBe false
             barrel.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
             h.service.settlements().single() shouldBe town
@@ -78,7 +103,8 @@ class CivsAutonomousWorkServiceTest : FunSpec({
             admission.complete(requireNotNull(held))
             val after = h.await(pickup)
             CivsEquipment.plainCount(after.workers.first { it.id == hungry.id }, "BREAD") shouldBe 4L
-            barrel.isEmpty shouldBe true
+            barrel.getItem(0) shouldBe null
+            barrel.getItem(1) shouldBe ItemStack(Material.WHEAT, 64)
             worksites.plan(after, farmer) shouldBe work
             worksites.validate(after, work)
             h.world.getBlockAt(ripe.x, ripe.y, ripe.z).type = Material.STONE

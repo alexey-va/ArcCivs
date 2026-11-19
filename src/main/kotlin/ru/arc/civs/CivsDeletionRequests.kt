@@ -134,13 +134,13 @@ internal class CivsDeletionRequests(
                         if (deleteFailure != null) result.completeExceptionally(deleteFailure)
                         else {
                             val id = requireNotNull(city.pendingDeletion.buildingId)
-                            construction.clearQueueFailure(city.id)
+                            construction.clearQueueFailure(city.id, id)
                             deletionFailures.remove(city.id)
                             controlInstallations.forgetFailure(id)
                             storage.refreshBuilding(requireNotNull(saved))
                             buildingRequests.cleanupQueuedUpgrades(city, setOf(id))
                             CivsDiagnostics.event("building_deleted", "city" to city.id, "building" to id,
-                                "construction_cancelled" to city.construction?.takeIf { it.buildingId == id }?.id)
+                                "construction_cancelled" to city.constructionOrder(id)?.id)
                             tasks.runLater(1) { if (authority.ready()) construction.pulseQueue() }
                             result.complete(Unit)
                         }

@@ -66,6 +66,18 @@ class CivsResidentThreatsTest : FunSpec({
             }
             val source = mockk<Entity> { every { uniqueId } returns UUID.randomUUID() }
             val id = UUID.randomUUID()
+            val head = ItemStack(Material.LEATHER_HELMET).apply {
+                addUnsafeEnchantment(Enchantment.BLAST_PROTECTION, 2)
+                editMeta { it.addAttributeModifier(Attribute.ARMOR, AttributeModifier(NamespacedKey("arccivs-test", "helmet"),
+                    5.0, AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.HEAD)) }
+            }
+            val helmet = mockk<CivResidentItem> { every { stack() } returns head }
+            val cargo = mockk<CivResidentItem>()
+            val worn = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }
+            worn[0] = helmet
+            worn[CivsEquipment.BAG] = cargo
+            val expected = citizenArmoredDamage(57.0, listOf(head), DamageCause.ENTITY_EXPLOSION)
+            (expected < 57.0) shouldBe true
             var hits = 0
             var cancel = true
             paper.server.pluginManager.registerEvents(object : Listener {
@@ -77,20 +89,33 @@ class CivsResidentThreatsTest : FunSpec({
             }, plugin)
             val threats = CivsResidentThreats(plugin) { worker, damage ->
                 worker shouldBe id
-                (damage > 0) shouldBe true
+                damage shouldBe expected
                 hits++
             }
             try {
-                threats.pulse(listOf(CivsThreatTarget(UUID.randomUUID(), id, npc)), 1_000)
+                val target = CivsThreatTarget(UUID.randomUUID(), id, npc)
+                threats.equipment(id, worn)
+                worn[0] = null
+                threats.pulse(listOf(target), 1_000)
                 fun explosion(cancelled: Boolean = false) = EntityExplodeEvent(source,
                     Location(terrain, .5, 64.0, .5), mutableListOf(), 0f, ExplosionResult.DESTROY).also { it.isCancelled = cancelled }
                 threats.onExplosion(explosion(true))
+                verify(exactly = 0) { helmet.stack() }
                 hits shouldBe 0
                 threats.onExplosion(explosion())
                 hits shouldBe 0
                 cancel = false
                 threats.onExplosion(explosion())
                 hits shouldBe 1
+
+                // A pending injury temporarily removes the target. The same armor must be restored when it returns.
+                threats.pulse(emptyList(), 2_000)
+                worn[0] = helmet
+                threats.equipment(id, worn)
+                threats.pulse(listOf(target), 3_000)
+                threats.onExplosion(explosion())
+                hits shouldBe 2
+                verify(exactly = 0) { cargo.stack() }
             } finally { threats.close() }
         }
     }

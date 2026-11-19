@@ -45,7 +45,7 @@ internal class CivRouteTerritory(city: Settlement) {
     private val center = city.center
     private val radius = city.radius
     private val buildings = city.buildings
-    private val planned = city.construction?.plannedBuilding
+    private val planned = city.constructionFootprints()
     private val chunks = hashMapOf<Long, MutableList<Plot>>()
     private val large = mutableListOf<Plot>()
     val controls = CitizenRouteControls(city)
@@ -67,7 +67,7 @@ internal class CivRouteTerritory(city: Settlement) {
     }
 
     fun matches(city: Settlement): Boolean = world == city.worldId && center == city.center && radius == city.radius &&
-        buildings == city.buildings && planned == city.construction?.plannedBuilding
+        buildings == city.buildings && city.matchesConstructionFootprints(planned)
 
     fun onPlot(point: CivPosition): Boolean =
         chunks[columnKey(point.x shr 4, point.z shr 4)]?.any { it.covers(point.x, point.z) } == true ||

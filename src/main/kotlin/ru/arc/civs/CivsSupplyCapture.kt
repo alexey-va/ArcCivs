@@ -75,6 +75,8 @@ internal class CivsSupplyCaptures(
     private val read: (Settlement, CivPosition, String?) -> CivSupplyCapturedContainer?,
     private val canReuse: (Settlement, CivPosition, CivSupplyCapturedContainer) -> Boolean,
     private val clock: () -> Long,
+    private val onChanged: (UUID) -> Unit = {},
+    private val canObserve: (Settlement, CivPosition) -> Boolean = { _, _ -> true },
 ) {
     private class Geometry(val world: UUID, val owner: UUID, val center: CivPosition, val radius: Int,
         val buildings: List<CivBuilding>, val registered: List<CivPosition>, val mode: CivStorageMode?, val autonomous: Boolean,
@@ -137,7 +139,8 @@ internal class CivsSupplyCaptures(
         fun sameGeometry() = geometry != null && geometries[city.id] === geometry
         return CivsSupplyCapture(city, keys, { current, position, type ->
             val now = clock()
-            val retained = if (!forceNative && sameGeometry()) cache[position]?.takeIf {
+            val observable = canObserve(current, position)
+            val retained = if (observable && !forceNative && sameGeometry()) cache[position]?.takeIf {
                 it.type == type && fresh(it.readAt, now) && canReuse(current, position, it.value)
             } else null
             if (retained != null) {
@@ -145,7 +148,7 @@ internal class CivsSupplyCaptures(
                 retained.value
             } else {
                 val revision = plainRevisions[city.id]
-                val value = read(current, position, type)
+                val value = if (observable) read(current, position, type) else null
                 val readAt = clock()
                 reads[position] = readAt
                 if (sameGeometry() && plainRevisions[city.id] == revision) {
@@ -203,7 +206,7 @@ internal class CivsSupplyCaptures(
     }
 
     fun planningContainer(city: Settlement, buildingId: UUID, position: CivPosition): CivSupplyCapturedContainer? {
-        if (city.pendingDeletion != null || geometries[city.id]?.matches(city) != true) return null
+        if (city.pendingDeletion != null || !canObserve(city, position) || geometries[city.id]?.matches(city) != true) return null
         val indexed = cities[city.id]?.get(buildingId)?.key?.positions
         val expectedType = when {
             indexed?.containsKey(position) == true -> indexed[position]
@@ -220,10 +223,11 @@ internal class CivsSupplyCaptures(
         readAt != null && now - readAt in 0 until HOLDER_TTL_MILLIS
 
     fun current(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>?,
-        requireComplete: Boolean = false): Boolean {
+        requireComplete: Boolean = false, requireStableContents: Boolean = false): Boolean {
         if (city.id != result.cityId) return false
         update(city)
-        if (requireComplete && (!result.complete || result.coverageRevision != plainRevisions[city.id] || !index.covered(city) ||
+        if ((requireComplete || requireStableContents) && result.coverageRevision != plainRevisions[city.id]) return false
+        if (requireComplete && (!result.complete || !index.covered(city) ||
                 result.startedAtMillis?.let { !fresh(it) } == true)) return false
         return (buildingIds ?: result.stores.keys).all { id ->
             val captured = result.stores[id]?.key ?: return@all false
@@ -331,6 +335,7 @@ internal class CivsSupplyCaptures(
 
     fun invalidate(cityId: UUID, buildingIds: Set<UUID>? = null) {
         val stores = cities[cityId] ?: return
+        val before = revision(cityId)
         dirtyPlain(cityId)
         if (buildingIds == null) {
             holders[cityId]?.clear()
@@ -342,10 +347,12 @@ internal class CivsSupplyCaptures(
             stores.values.filter { store -> store.key.buildingId in buildingIds || store.key.positions.keys.any { it in positions } }
                 .forEach { dirty(cityId, it) }
         }
+        if (revision(cityId) != before) onChanged(cityId)
     }
 
     fun changed(worldId: UUID, position: CivPosition) {
         index.citiesAt(worldId, position).forEach { cityId ->
+            val before = revision(cityId)
             dirtyPlain(cityId)
             val invalidated = holders[cityId]?.remove(position) != null
             if (invalidated || position in unfinishedControls[cityId].orEmpty().values ||
@@ -358,11 +365,13 @@ internal class CivsSupplyCaptures(
                     key.type in setOf(BuildingType.WAREHOUSE, BuildingType.BUILDER_HUT) && key.phase == BuildingPhase.ACTIVE &&
                     key.bounds.contains(position.x, position.y, position.z))
             }.forEach { dirty(cityId, it) }
+            if (revision(cityId) != before) onChanged(cityId)
         }
     }
 
     fun chunkChanged(worldId: UUID, x: Int, z: Int) {
         index.citiesInChunk(worldId, x, z).forEach { cityId ->
+            val before = revision(cityId)
             dirtyPlain(cityId)
             if (holders[cityId]?.keys?.removeIf { (it.x shr 4) == x && (it.z shr 4) == z } == true ||
                 unfinishedControls[cityId].orEmpty().values.any { (it.x shr 4) == x && (it.z shr 4) == z } ||
@@ -374,6 +383,7 @@ internal class CivsSupplyCaptures(
                     key.type in setOf(BuildingType.WAREHOUSE, BuildingType.BUILDER_HUT) && key.phase == BuildingPhase.ACTIVE &&
                     x in (key.bounds.min.x shr 4)..(key.bounds.max.x shr 4) && z in (key.bounds.min.z shr 4)..(key.bounds.max.z shr 4))
             }.forEach { dirty(cityId, it) }
+            if (revision(cityId) != before) onChanged(cityId)
         }
     }
 

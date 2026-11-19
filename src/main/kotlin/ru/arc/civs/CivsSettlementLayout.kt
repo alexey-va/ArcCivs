@@ -248,7 +248,8 @@ internal object CivsSettlementLayout {
             CivsWorksiteLayouts.field(current) + CivsWorksiteLayouts.irrigation(current) +
             CivsWorksiteLayouts.field(future) + CivsWorksiteLayouts.irrigation(future)).let(::box)
         val occupied = city.buildings.filter { it.id != current.id }.map { CivsAutonomousGeometry.futureBounds(city, it) } +
-            listOfNotNull(city.construction?.plannedBuilding?.takeIf { it.id != current.id }?.bounds) + access.reservedFortificationPorts
+            city.constructionOrders().mapNotNull { it.plannedBuilding?.takeIf { planned -> planned.id != current.id }?.bounds } +
+            access.reservedFortificationPorts
         val protected = (city.buildings.filter { it.id != current.id }.flatMap(CivsAutonomousGeometry::approach) +
             access.standing(city, current.id).values).mapTo(hashSetOf(), ::key)
         val frontages = streetFrontages(city, access, frame)

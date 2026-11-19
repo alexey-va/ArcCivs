@@ -305,8 +305,7 @@ internal const val CIVS_BUILDING_BOUNDARY_PART_LIMIT = 128
 internal fun civsBuildingBoundaryGeometry(city: Settlement, viewerX: Double, viewerY: Double, viewerZ: Double,
                                          planned: CivBox? = null, plannedBuildingId: UUID? = null): List<CivsBoundaryPart> {
     require(viewerX.isFinite() && viewerY.isFinite() && viewerZ.isFinite())
-    val buildings = city.buildings.associateByTo(linkedMapOf()) { it.id }
-    city.construction?.plannedBuilding?.let { buildings[it.id] = it }
+    val buildings = civsProtectedBuildings(city).associateBy { it.id }
     fun conflict(building: CivBuilding) = building.id != plannedBuildingId && planned?.overlaps(building.bounds) == true
     fun distance(building: CivBuilding): Double {
         val box = building.bounds
@@ -387,9 +386,9 @@ internal fun civsNearbyConstructionCity(cities: Collection<Settlement>, worldId:
 }
 
 private fun civsConstructionSites(city: Settlement): Collection<CivBuilding> {
-    val sites = city.buildings.filter { it.phase != BuildingPhase.ACTIVE || it.id == city.construction?.buildingId }
+    val sites = city.buildings.filter { it.phase != BuildingPhase.ACTIVE || city.constructionOrder(it.id) != null }
         .associateByTo(linkedMapOf()) { it.id }
-    city.construction?.plannedBuilding?.let { sites[it.id] = it }
+    city.constructionOrders().forEach { order -> order.plannedBuilding?.let { sites[it.id] = it } }
     return sites.values
 }
 

@@ -145,6 +145,40 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a producer waits for a published order and keeps only the accepted cycle") {
+        residentRuntime { h ->
+            val smeltery = h.assignFarm().copy(type = BuildingType.SMELTERY, schematicId = "smeltery1", production = "STONE")
+            h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == smeltery.id) smeltery else it })
+            var order: CivProductionOrder? = null
+            h.owner.productionOrder = { _, worker -> order?.takeIf { it.matches(worker) } }
+
+            h.owner.pulse(2_000)
+            h.actor().plan.idleReason shouldBe "waiting-orders"
+            h.phase() shouldBe CitizenPhase.IDLE
+
+            val worker = h.city.workers.single()
+            order = CivProductionOrder(smeltery.id, "STONE", "STONE", worker.completedCycles, worker.completedCycles + 1, 8)
+            h.owner.pulse(3_000)
+            val actor = h.actor()
+            val accepted = actor.plan
+            val cycle = actor.cycle
+            accepted.idleReason shouldBe null
+            (cycle.phase in setOf(CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.WORKING)) shouldBe true
+
+            order = null
+            h.owner.pulse(3_100)
+            actor.plan shouldBe accepted
+            (actor.cycle === cycle) shouldBe true
+
+            h.city = CivsRules.setProduction(h.city, h.city.owner, smeltery.id, "CHARCOAL", 3_200)
+            h.owner.pulse(3_200)
+            h.actor().plan.idleReason shouldBe "waiting-orders"
+            h.actor().plan.token.industryRecipe shouldBe "CHARCOAL"
+            cycle.phase shouldBe CitizenPhase.CLOSED
+            h.deliveries shouldBe 0
+        }
+    }
+
     fun prepareCarriedMealAtTavern(h: ResidentRuntime, guard: Boolean = false): PacketPlayerNpc {
         val npc = h.prepareDiningSeat(guard)
         val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
@@ -3751,6 +3785,13 @@ class CivsResidentsRuntimeTest : FunSpec({
             secondState["partner"] shouldBe actors.first().uniqueId
             (firstState["seat"] != secondState["seat"]) shouldBe true
             val beforeGestures = actors.associate { it.uniqueId to h.gestures.getOrDefault(it.uniqueId, 0) }
+            val spoken = mutableListOf<Pair<UUID, String>>()
+            fun observeBubbles() {
+                val visible = h.owner.hologramSnapshots().mapNotNull { npc -> npc.speech?.let { npc.workerId to it } }
+                (visible.size <= 1) shouldBe true
+                visible.singleOrNull()?.takeUnless { it == spoken.lastOrNull() }?.let(spoken::add)
+            }
+            observeBubbles()
             var endedAt: Long? = null
             for (tick in 1..320) {
                 h.navigate()
@@ -3758,6 +3799,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                     h.owner.pulse(requireNotNull(h.navigationNow))
                     h.clearRecordedCalls()
                 }
+                if (tick % 5 == 0) observeBubbles()
                 if (actors.all { h.socialState(it.uniqueId)["visit"] == false }) { endedAt = h.navigationNow; break }
                 if (tick >= 20) for ((npc, other) in listOf(actors.first() to actors.last(), actors.last() to actors.first())) {
                     val desired = citizenLookDirection(npc.location.add(0.0, npc.eyeHeight, 0.0),
@@ -3772,6 +3814,9 @@ class CivsResidentsRuntimeTest : FunSpec({
                 (requireNotNull(endedAt) - start in 7_000L..14_000L) shouldBe true
             }
             actors.forEach { npc -> (h.gestures.getOrDefault(npc.uniqueId, 0) - beforeGestures.getValue(npc.uniqueId) in 1..4) shouldBe true }
+            spoken.map { it.second.substringAfterLast('.') } shouldBe listOf("line-0", "line-1", "line-2", "line-3")
+            spoken.map { it.first }.distinct().size shouldBe 2
+            spoken.zipWithNext().all { (a, b) -> a.first != b.first } shouldBe true
             for (tick in 1..400) {
                 h.navigate()
                 if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
@@ -3787,8 +3832,8 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("street partners release both visits when work a threat night or departure takes priority") {
-        for (interruption in listOf("work", "threat", "night", "departure")) {
+    test("street partners release both visits when work hunger a threat night or departure takes priority") {
+        for (interruption in listOf("work", "hunger", "threat", "night", "departure")) {
             residentRuntime(workerId = UUID(0, 7)) { h ->
                 val actors = h.startSocialPair()
                 h.awaitConversation()
@@ -3799,6 +3844,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                         h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(22, 64, 0), emptyList(),
                             durationMillis = 1_000, status = "working-field")
                     }
+                    "hunger" -> h.prepareHallMeals(setOf(h.workerId))
                     "threat" -> actors.first().location.let { h.monsterAt(it.x + 1.0, it.z) }
                     "night" -> h.world.time = 13_000
                     "departure" -> h.city = h.city.copy(workers = h.city.workers.filter { it.id != actors.last().uniqueId })
@@ -3810,6 +3856,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 withClue(interruption) {
                     remaining.size shouldBe if (interruption == "departure") 1 else 2
                     remaining.all { h.socialState(it.uniqueId)["visit"] == false } shouldBe true
+                    h.owner.hologramSnapshots().all { it.speech == null } shouldBe true
                     remaining.all { h.owner.status(it.uniqueId) !in setOf("workers.status.meeting", "workers.status.talking") } shouldBe true
                     if (interruption == "work") {
                         (h.phase(h.workerId) in setOf(CitizenPhase.TO_WORK, CitizenPhase.WORKING)) shouldBe true
@@ -3818,6 +3865,35 @@ class CivsResidentsRuntimeTest : FunSpec({
                     h.deliveries shouldBe 0
                 }
             }
+        }
+    }
+
+    test("a background town only holds a conversation while at least one nearby viewer remains") {
+        residentRuntime(workerId = UUID(0, 7)) { h ->
+            h.background = true
+            val first = h.paper.server.onlinePlayers.single()
+            val near = first.location
+            val far = Location(h.world, 60.5, 64.0, .5)
+            first.teleport(far)
+            val actors = h.startSocialPair()
+            repeat(30) {
+                h.paper.performTicks(20)
+                h.owner.pulse(2_000L + (it + 1) * 1_000L)
+                h.clearRecordedCalls()
+            }
+            actors.all { h.socialState(it.uniqueId)["visit"] == false } shouldBe true
+            first.teleport(near)
+            h.awaitConversation()
+            val second = h.paper.addPlayer("StreetObserver")
+            second.teleport(near)
+            first.teleport(far)
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            actors.all { h.socialState(it.uniqueId)["conversation_at"] != null } shouldBe true
+            second.teleport(far)
+            h.owner.pulse(requireNotNull(h.navigationNow) + 1)
+            h.owner.activeCount() shouldBe 2
+            actors.all { h.socialState(it.uniqueId)["visit"] == false } shouldBe true
+            h.owner.hologramSnapshots().all { it.speech == null } shouldBe true
         }
     }
 
@@ -5785,6 +5861,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
         owner.residentLifeEnabled = true
     }
     fun startSocialPair(): List<PacketPlayerNpc> {
+        owner.residentConversations = CitizenConversationDeck(List(4) { "workers.conversation.topic-0.line-$it" })
         for (x in -2..1) for (z in -2..1) world.loadChunk(x, z)
         city = city.copy(workers = city.workers + CivWorker(UUID(0, 29), "Neighbour", null))
         navigationNow = 2_000

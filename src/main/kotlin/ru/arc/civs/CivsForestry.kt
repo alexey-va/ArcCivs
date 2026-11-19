@@ -188,12 +188,12 @@ internal object CivsForestry {
     /** One active worksite city's protected approaches, transit columns and retained roads. */
     class PathColumns(city: Settlement, retained: Set<Pair<Int, Int>>) {
         private val buildings = city.buildings
-        private val plannedBuilding = city.construction?.plannedBuilding
+        private val planned = city.constructionFootprints()
         private val retainedColumns = retained.toSet()
         val columns = paths(city, retainedColumns)
 
         fun matches(city: Settlement, retained: Set<Pair<Int, Int>>): Boolean =
-            buildings == city.buildings && plannedBuilding == city.construction?.plannedBuilding && retainedColumns == retained
+            buildings == city.buildings && city.matchesConstructionFootprints(planned) && retainedColumns == retained
     }
 
     fun blockedColumn(city: Settlement, x: Int, z: Int, paths: Set<Pair<Int, Int>>): Boolean =

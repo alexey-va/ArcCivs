@@ -29,7 +29,7 @@ internal object CivsFarmExpansion {
         require(operating.size <= 192 && operating.all { city.contains(it.first, it.second) }, "city-coverage")
         val others = settlements.filter { it.worldId == city.worldId }.flatMap { other ->
             other.buildings.filter { it.id != building.id }.map { CivsAutonomousGeometry.futureBounds(other, it) } +
-                listOfNotNull(other.construction?.plannedBuilding?.takeIf { it.id != building.id }?.bounds) +
+                other.constructionOrders().mapNotNull { it.plannedBuilding?.takeIf { planned -> planned.id != building.id }?.bounds } +
                 CivsSettlementPlans.current(other)?.plots.orEmpty().filter { it.building.id != building.id }.map { it.envelope }
         }
         require(operating.none { (x, z) -> others.any { x in it.min.x..it.max.x && z in it.min.z..it.max.z } }, "other-building-or-reservation")

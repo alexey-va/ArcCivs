@@ -65,6 +65,8 @@ class CivsText private constructor(
 
     fun literal(value: Any?): Component = renderer.literal(value).color(BODY).decoration(TextDecoration.ITALIC, false)
 
+    internal fun residentConversations() = CitizenConversationDeck(messages.getValue("ru").keys)
+
     /** Pack glyphs arc:resident_{health,food}_{full,half,empty}; shared by dialogs and nameplates. */
     fun residentVitals(player: Player?, health: Double, maximum: Double, hunger: Int): Component {
         fun number(value: Double) = String.format(Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.')

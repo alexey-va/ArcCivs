@@ -14,6 +14,7 @@ import org.bukkit.block.Barrel
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
 import org.bukkit.block.Chest
+import org.bukkit.event.inventory.InventoryAction
 import org.bukkit.event.inventory.InventoryClickEvent
 import org.bukkit.event.inventory.InventoryDragEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
@@ -29,6 +30,78 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsSupplyCaptureTest : FunSpec({
+    test("quiet cities reconcile silent edits at thirty seconds and repeated native events wake only their city") {
+        supplyCaptureScenario { h ->
+            val neighbor = h.city.copy(id = UUID.randomUUID())
+            val towns = listOf(h.city, neighbor).associateBy(Settlement::id)
+            val unhealthy = hashSetOf<UUID>()
+            val receipts = hashSetOf<UUID>()
+            val records = CivsCityRecords({ towns }, emptySet(), unhealthy, { false }, { false }, { null }, { 0L }, { 0 })
+            val admissions = mutableListOf<UUID>()
+            val requests = mutableListOf<UUID>()
+            val authority = mockk<CivsService> {
+                every { now() } answers { h.now }
+                every { settlementActive(any()) } answers { admissions += firstArg<Settlement>().id; true }
+            }
+            val dispatcher = mockk<CivsSupplyDispatcher>(relaxUnitFun = true) {
+                every { cityIds() } returns towns.keys
+                every { logisticsPending(any()) } returns false
+                every { productionReviewDue(any(), any()) } returns false
+                every { request(any()) } answers {
+                    val id = firstArg<UUID>()
+                    requests += id
+                    if (id == h.city.id) h.capture()
+                    true
+                }
+            }
+            val journal = mockk<CivsInventoryJournal> { every { pending(any()) } answers { firstArg<UUID>() in receipts } }
+            val cargo = CivsCargoRequests(authority, records, { error("no resident supply operation") }, mockk(), mockk(),
+                CivsResidentFoods.BREAD_ONLY, mockk(), h.storage, mockk(), dispatcher, mockk(), journal)
+            h.storage.onSupplyChanged = cargo::inputsChanged
+            h.storage.onSupplyNeeded = cargo::evidenceNeeded
+            cargo.pulseSupply()
+            val holders = h.reads
+            holders shouldBe 4
+            requests shouldBe towns.keys.toList()
+            repeat(119) { h.now += 250; cargo.pulseSupply() }
+            h.reads shouldBe holders
+            admissions.size shouldBe 12  // Two cities at 0, 5, 10, 15, 20 and 25 seconds.
+
+            val point = requireNotNull(h.warehouse.control)
+            val slots = h.nodes.getValue(point).contents
+            slots[0] = ItemStack(Material.BREAD, 7)
+            h.now += 250
+            cargo.pulseSupply()
+            h.reads shouldBe holders * 2
+            h.storage.planningBuildingStock(h.city, h.warehouse.id)?.get("BREAD") shouldBe 7L
+
+            requests.clear()
+            slots[0] = ItemStack(Material.BREAD, 3)
+            repeat(8) { h.storage.supplyPickup(h.pickup(point)) }
+            cargo.pulseSupply()
+            requests shouldBe listOf(h.city.id)
+            h.reads shouldBe holders * 2 + 1
+            h.storage.planningBuildingStock(h.city, h.warehouse.id)?.get("BREAD") shouldBe 3L
+
+            requests.clear()
+            h.now += 5_000
+            repeat(4) { h.storage.planningBuildingStock(h.city, h.warehouse.id) shouldBe null }
+            cargo.pulseSupply()
+            requests shouldBe listOf(h.city.id)
+            h.storage.planningBuildingStock(h.city, h.warehouse.id)?.get("BREAD") shouldBe 3L
+
+            unhealthy += h.city.id
+            receipts += h.city.id
+            cargo.inputsChanged(h.city.id)
+            cargo.pulseSupply()
+            verify(exactly = 0) { dispatcher.remove(h.city.id) }
+            receipts.clear()
+            cargo.inputsChanged(h.city.id)
+            cargo.pulseSupply()
+            verify(exactly = 1) { dispatcher.remove(h.city.id) }
+        }
+    }
+
     test("stable city revisions and contents events reuse layout while a holder change projects only its store") {
         supplyCaptureScenario { h ->
             val index = CivsContainerIndex(h.server) { h.nodes.values.map { it.state }.toTypedArray() }
@@ -430,9 +503,20 @@ class CivsSupplyCaptureTest : FunSpec({
         supplyCaptureScenario { h ->
             val inventory = h.nodes.getValue(h.warehouse.control!!).inventory
             val view = mockk<InventoryView> { every { topInventory } returns inventory }
+            fun click(action: InventoryAction, slot: Int) = h.storage.supplyClick(mockk<InventoryClickEvent> {
+                every { this@mockk.view } returns view
+                every { this@mockk.action } returns action
+                every { rawSlot } returns slot
+            })
+            fun drag(vararg slots: Int) = h.storage.supplyDrag(mockk<InventoryDragEvent> {
+                every { this@mockk.view } returns view
+                every { rawSlots } returns slots.toSet()
+            })
             val events = listOf<() -> Unit>(
-                { h.storage.supplyClick(mockk<InventoryClickEvent> { every { this@mockk.view } returns view }) },
-                { h.storage.supplyDrag(mockk<InventoryDragEvent> { every { this@mockk.view } returns view }) },
+                { click(InventoryAction.PICKUP_ALL, 0) },
+                { click(InventoryAction.MOVE_TO_OTHER_INVENTORY, 28) },
+                { click(InventoryAction.COLLECT_TO_CURSOR, 28) },
+                { drag(1, 28) },
                 { h.storage.supplyMove(InventoryMoveItemEvent(inventory, ItemStack(Material.STONE),
                     h.nodes.getValue(CivPosition(2, 64, 0)).inventory, true)) },
                 { h.storage.supplyPickup(h.pickup(h.warehouse.control!!)) },
@@ -447,6 +531,9 @@ class CivsSupplyCaptureTest : FunSpec({
             }
             val before = h.capture()
             val revision = h.storage.supplyRevision(h.city.id)
+            click(InventoryAction.PLACE_ALL, 28)
+            click(InventoryAction.NOTHING, 0)
+            drag(28, 29)
             h.storage.supplyPickup(h.pickup(CivPosition(3, 64, 0)))
             h.storage.supplyRevision(h.city.id) shouldBe revision
             h.storage.supplyCaptureCurrent(h.city, before) shouldBe true

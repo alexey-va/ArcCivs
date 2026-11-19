@@ -23,17 +23,28 @@ internal class CivsCargoRequests(
     private val inventoryJournal: CivsInventoryJournal,
 ) {
     private val residentSupplies get() = residentSuppliesOwner()
-    private data class SupplyObservation(val storageRevision: Long, val legacyRevision: Long?, val requestedAt: Long)
-    private val supplyObservations = mutableMapOf<UUID, SupplyObservation>()
+    private val changedCities = linkedSetOf<UUID>()
+    private val requestedAt = mutableMapOf<UUID, Long>()
+    private var reconciledAt: Long? = null
     private val capacityWrites = mutableSetOf<UUID>()
     private data class CargoWait(val cityId: UUID, val shipmentId: UUID, val destinationId: UUID,
         val storageRevision: Long, val retryAt: Long)
     private val cargoWaits = mutableMapOf<UUID, CargoWait>()
     private val cargoRedirects = mutableSetOf<UUID>()
 
-    fun clearObservations() { supplyObservations.clear(); cargoWaits.clear(); cargoRedirects.clear() }
+    fun inputsChanged(cityId: UUID) { changedCities += cityId }
+    fun cityPublished(city: Settlement) {
+        if (CivsAutonomy.legacyStock(city)) inputsChanged(city.id)
+        else if (supply.request(city.id)) requestedAt[city.id] = authority.now()
+    }
+    fun evidenceNeeded(cityId: UUID) {
+        if (requestedAt[cityId]?.let { authority.now() - it in 0 until CivsSupplyDispatcher.REFRESH_MILLIS } != true)
+            inputsChanged(cityId)
+    }
+    fun clearObservations() { changedCities.clear(); requestedAt.clear(); reconciledAt = null; cargoWaits.clear(); cargoRedirects.clear() }
     fun forgetObservation(cityId: UUID) {
-        supplyObservations.remove(cityId)
+        changedCities.remove(cityId)
+        requestedAt.remove(cityId)
         cargoWaits.entries.removeIf { it.value.cityId == cityId }
     }
 
@@ -50,46 +61,63 @@ internal class CivsCargoRequests(
     }
 
     fun pulseSupply() {
-        val relevant = records.cities.values.filter { city -> city.pendingDeletion == null &&
-            (city.inventory != null || city.autonomy?.paused == false) &&
-            city.id !in records.unhealthy && (if (city.autonomy?.paused == false && city.inventory?.mode == CivStorageMode.PHYSICAL)
-                authority.settlementActive(city)
-            else if (CivsAutonomy.legacyStock(city)) authority.settlementActive(city) && city.workers.any { worker ->
-                worker.cargo != null || worker.pendingStock != null || worker.assignment?.let(city::building)?.let {
-                    it.type == BuildingType.WAREHOUSE || CivsRules.resource(it.type) != null
-                } == true
-            } else (city.inventory?.mode == CivStorageMode.PHYSICAL && city.workers.isNotEmpty() &&
-                (authority.settlementActive(city) || city.workers.any { citizens.residentFeet(it.id) != null })) ||
-                city.workers.any { worker ->
-                worker.cargo != null || worker.assignment?.let(city::building)?.type.let {
-                    it == BuildingType.WAREHOUSE || it == BuildingType.FORESTER || it in CivsCarpentry.workshops
-                }
-            }) }
-        val ids = relevant.mapTo(hashSetOf(), Settlement::id)
-        // An unknown receipt outcome keeps its accepted batch reserved until the existing
-        // recovery owner publishes or definitively rejects that receipt.
-        ids += supply.cityIds().filter { inventoryJournal.pending(it) }
-        (supply.cityIds() - ids).forEach { supply.remove(it); supplyObservations.remove(it) }
         val now = authority.now()
-        for (city in relevant) {
-            val storageRevision = storage.supplyRevision(city.id)
-            val legacyRevision = city.revision.takeIf { CivsAutonomy.legacyStock(city) }
-            val previous = supplyObservations[city.id]
-            if (previous == null || storageRevision != previous.storageRevision || legacyRevision != previous.legacyRevision ||
-                now - previous.requestedAt >= 5_000L) {
-                supply.request(city.id)
-                supplyObservations[city.id] = SupplyObservation(storageRevision, legacyRevision, now)
+        val reconcile = reconciledAt?.let { now - it in 0 until CivsSupplyDispatcher.REFRESH_MILLIS } != true
+        if (reconcile || changedCities.isNotEmpty()) {
+            val changed = changedCities.toSet()
+            changedCities.clear()
+            val candidates = if (reconcile) records.cities.keys + supply.cityIds() + changed else changed
+            if (reconcile) reconciledAt = now
+            for (id in candidates) {
+                val city = records.cities[id]
+                if (city != null && supplyRelevant(city)) {
+                    val elapsed = requestedAt[id]?.let { now - it }
+                    // Idle physical stores still reconcile silent writers on the production review interval.
+                    if (id in changed || elapsed == null || elapsed !in 0 until CivsProductionOrders.REVIEW_MILLIS ||
+                        elapsed >= CivsSupplyDispatcher.REFRESH_MILLIS && (supply.logisticsPending(id) ||
+                            !CivsAutonomy.legacyStock(city) && supply.productionReviewDue(id, now))) {
+                        supply.request(id)
+                        requestedAt[id] = now
+                    }
+                } else if (!inventoryJournal.pending(id)) {
+                    // Unknown receipts keep their accepted batch reserved until recovery settles the outcome.
+                    supply.remove(id)
+                    forgetObservation(id)
+                }
             }
-            refreshWaitingCargo(city)
         }
-        cargoWaits.entries.removeIf { it.value.cityId !in ids }
+        if (cargoWaits.isNotEmpty()) {
+            for (id in cargoWaits.values.mapTo(hashSetOf(), CargoWait::cityId)) {
+                records.cities[id]?.takeIf(::supplyRelevant)?.let(::refreshWaitingCargo)
+            }
+        }
+    }
+
+    private fun supplyRelevant(city: Settlement): Boolean {
+        if (city.pendingDeletion != null || city.id in records.unhealthy ||
+            city.inventory == null && city.autonomy?.paused != false) return false
+        val physical = city.inventory?.mode == CivStorageMode.PHYSICAL
+        if (city.autonomy?.paused == false && physical) return authority.settlementActive(city)
+        if (CivsAutonomy.legacyStock(city)) return authority.settlementActive(city) && city.workers.any { worker ->
+            worker.cargo != null || worker.pendingStock != null || worker.assignment?.let(city::building)?.let {
+                it.type == BuildingType.WAREHOUSE || CivsRules.resource(it.type) != null
+            } == true
+        }
+        if (physical && city.workers.isNotEmpty() && (authority.settlementActive(city) ||
+                city.workers.any { citizens.residentFeet(it.id) != null })) return true
+        return city.workers.any { worker ->
+            worker.cargo != null || worker.assignment?.let(city::building)?.let { building ->
+                building.type == BuildingType.WAREHOUSE || building.type in CivsCarpentry.workshops || CivsProductionOrders.manages(building)
+            } == true
+        }
     }
 
     fun captureSupply(cityId: UUID, retained: Map<UUID, CivCourierPlan>): () -> CivSupplySnapshot? {
         val frame = authority.settlementWorkFrame(cityId) ?: throw CivsRejection("storage-unavailable")
         val city = frame.city.takeIf { it.inventory != null || it.autonomy?.paused == false }
             ?: throw CivsRejection("storage-unavailable")
-        if (cityId in records.busy) throw CivsRejection("city-busy")
+        val itemReceipt = supplyReadReceipt(cityId)
+        if (itemReceipt != null && !supply.productionReviewDue(cityId, authority.now())) throw CivsRejection("city-busy")
         if (CivsAutonomy.legacyStock(city)) {
             val capture = storage.startSupplyCapture(city)
             return capture@{
@@ -127,13 +155,33 @@ internal class CivsCargoRequests(
         }
         val capture = CivsSupplyPlanning(city, storage.startSupplyCapture(city), retained,
             { frame.residents.courierPosition(cityId, it) }, { frame.residents.courierUnavailable(cityId, it) }, supply.craftJobs(cityId),
-            construction.supplyNeed(city)?.toMap())
+            construction.supplyNeed(city)?.toMap(), itemReceipt = itemReceipt)
         return {
             if (!authority.ready() || cityId in records.unhealthy) throw CivsRejection("storage-unavailable")
-            if (cityId in records.busy) throw CivsRejection("city-busy")
-            capture.step()?.let { snapshot -> snapshot.copy(requests = snapshot.requests +
-                residentSupplies.upkeepSupplyRequests(city) { id -> snapshot.stores[id]?.stock.orEmpty() }) }
+            if (supplyReadReceipt(cityId) != itemReceipt) throw CivsRejection("storage-observation-stale")
+            capture.step()?.let { snapshot ->
+                val at = authority.now()
+                val survey = if (supply.productionReviewDue(cityId, at)) CivsProductionOrders.survey(city, snapshot, at) else null
+                snapshot.copy(requests = snapshot.requests +
+                    residentSupplies.upkeepSupplyRequests(city) { id -> snapshot.stores[id]?.stock.orEmpty() },
+                    productionSurvey = survey)
+            }
         }
+    }
+
+    private fun supplyReadReceipt(cityId: UUID): UUID? = if (cityId !in records.busy) null
+        else storage.supplyReadReceipt(cityId) ?: throw CivsRejection("city-busy")
+
+    fun validateProduction(snapshot: CivSupplySnapshot): Boolean {
+        val city = records.cities[snapshot.cityId]?.takeIf { authority.ready() && it.id !in records.unhealthy &&
+            it.pendingDeletion == null && it.autonomy?.paused != true } ?: return false
+        val observation = snapshot.inputKey as? CivSupplyObservation ?: return false
+        if (supplyReadReceipt(city.id) != observation.itemReceipt) return false
+        if (observation.itemReceipt == null) return true
+        val survey = requireNotNull(snapshot.productionSurvey)
+        return observation.inputs == civSupplyInputs(city) &&
+            (survey.unavailable != null || storage.supplyCaptureCurrent(city, observation.capture,
+                survey.knownStores, requireStableContents = true))
     }
 
     fun validateSupply(snapshot: CivSupplySnapshot, plans: Map<UUID, CivCourierPlan>): Boolean {

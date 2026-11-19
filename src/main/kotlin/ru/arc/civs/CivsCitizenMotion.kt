@@ -114,7 +114,7 @@ internal class CivsCitizenMotion(
                 actor.footsteps.reset()
                 continue
             }
-            val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: continue
+            val city = runtime.cityById(actor.cityId) ?: continue
             val walk = route.wanderWalk
             if (walk != null) {
                 if (advanceWander(actor, city, route, walk, now, wanderHandoffs > 0)) wanderHandoffs--

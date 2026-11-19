@@ -56,7 +56,8 @@ internal data class CivSupplySnapshot(val cityId: UUID, val inputKey: Any,
     val craftWorkers: List<CivCraftWorker> = emptyList(), val craftJobs: Map<UUID, CivCraftJob> = emptyMap(),
     val craftEpoch: UUID = UUID.randomUUID(), val constructionId: UUID? = null,
     val stockTargets: Map<UUID, Map<String, Long>> = emptyMap(), val autonomousStock: Boolean = false,
-    val maximumTransferDistance: Int = CivsRules.MAX_WORK_ROUTE_DISTANCE) {
+    val maximumTransferDistance: Int = CivsRules.MAX_WORK_ROUTE_DISTANCE,
+    val productionSurvey: CivProductionSurvey? = null) {
     internal fun detached() = copy(inputKey = Unit,
         stores = stores.mapValues { (_, value) -> value.copy(stock = value.stock.toMap(), desiredStock = value.desiredStock.toMap(),
             capacity = value.capacity.copy(partialRoom = value.capacity.partialRoom.toMap())) },
@@ -81,6 +82,7 @@ internal class CivsSupplyDispatcher(
     private val validate: (CivSupplySnapshot, Map<UUID, CivCourierPlan>) -> Boolean,
     executor: Executor? = null,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val validateProduction: (CivSupplySnapshot) -> Boolean = { true },
 ) : AutoCloseable {
     private class Job(val generation: Long, var step: (() -> CivSupplySnapshot?)?) {
         val cancelled = AtomicBoolean()
@@ -102,6 +104,7 @@ internal class CivsSupplyDispatcher(
         var job: Job? = null
         var plans = emptyMap<UUID, CivCourierPlan>()
         var crafts = emptyMap<UUID, CivCraftJob>()
+        var production = CivProductionBoard()
         var observation: CivSupplySnapshot? = null
         var captured: CaptureSummary? = null
         var acceptedGeneration: Long? = null
@@ -115,6 +118,7 @@ internal class CivsSupplyDispatcher(
     private val ownsWork = nativeWork == null
     private val nativeWork = nativeWork ?: BudgetedTaskQueue(tasks, 64, 1_000_000L, System::nanoTime, MAXIMUM_JOBS)
     private val cities = linkedMapOf<UUID, City>()
+    private val pending = linkedMapOf<UUID, City>()
     private val ownedExecutor = if (executor == null) BoundedAsyncExecutor("ArcCivs-supply", 1, MAXIMUM_JOBS) else null
     private val executor = executor ?: requireNotNull(ownedExecutor)
     private var closed = false
@@ -124,14 +128,53 @@ internal class CivsSupplyDispatcher(
     fun request(cityId: UUID): Boolean {
         checkOwner()
         if (closed || !tasks.isCurrent(epoch)) return false
-        cities.getOrPut(cityId, ::City).requested = true
+        val city = cities.getOrPut(cityId, ::City)
+        city.requested = true
+        pending[cityId] = city
         return true
     }
 
     fun plan(cityId: UUID, workerId: UUID): CivCourierPlan? { checkOwner(); return cities[cityId]?.plans?.get(workerId) }
     fun retained(cityId: UUID): Map<UUID, CivCourierPlan> { checkOwner(); return cities[cityId]?.plans?.toMap().orEmpty() }
+    fun productionReviewDue(cityId: UUID, now: Long): Boolean {
+        checkOwner()
+        val board = cities[cityId]?.production ?: return true
+        val interval = if (board.failure == null) CivsProductionOrders.REVIEW_MILLIS else REFRESH_MILLIS
+        return board.reviewedAt == null || now - board.reviewedAt >= interval
+    }
+
+    fun productionOrder(cityId: UUID, worker: CivWorker): CivProductionOrder? {
+        checkOwner()
+        return cities[cityId]?.production?.orders?.get(worker.id)?.takeIf { it.matches(worker) }
+    }
+
+    fun forestryDebug(cityId: UUID?): Map<String, Any?> {
+        checkOwner()
+        val now = clock()
+        val selected = cities.entries.filter { (id, city) -> (cityId == null || id == cityId) && city.production.reviewedAt != null }
+        return mapOf("source" to "production-orders", "freshNativeRead" to false, "total" to selected.size,
+            "truncated" to (selected.size > 8), "entries" to selected.take(8).map { (id, city) ->
+                val board = city.production
+                val timber = board.timber
+                mapOf("city" to id, "reason" to (board.failure ?: if (board.partial) "capture-partial" else if (timber?.paused == true) "timber-family-surplus" else "below-surplus"),
+                    "evaluatedAtMillis" to board.reviewedAt, "decisionAgeMillis" to board.reviewedAt?.let { now - it },
+                    "snapshotAgeMillis" to board.capturedAt?.let { now - it }, "paused" to timber?.paused,
+                    "familyStock" to timber?.familyStock?.takeIf { board.failure == null && !board.partial },
+                    "observedFamilyStock" to timber?.familyStock?.takeIf { board.failure == null },
+                    "neededSpecies" to timber?.neededUnits?.keys?.sorted(),
+                    "uncertainSpecies" to timber?.uncertainSpecies?.sorted())
+            })
+    }
+
+    fun craftJob(cityId: UUID, workerId: UUID): CivCraftJob? { checkOwner(); return cities[cityId]?.crafts?.get(workerId) }
     fun craftJobs(cityId: UUID): Map<UUID, CivCraftJob> { checkOwner(); return cities[cityId]?.crafts?.toMap().orEmpty() }
     fun observation(cityId: UUID): CivSupplySnapshot? { checkOwner(); return cities[cityId]?.observation }
+    fun logisticsPending(cityId: UUID): Boolean {
+        checkOwner()
+        val city = cities[cityId] ?: return false
+        return city.plans.isNotEmpty() || city.crafts.isNotEmpty() ||
+            city.observation?.let { it.requests.isNotEmpty() && it.couriers.isNotEmpty() } == true
+    }
     fun craftObservation(cityId: UUID): CivSupplySnapshot? = observation(cityId)?.takeIf { it.craftWorkers.isNotEmpty() }
     fun releaseCraft(cityId: UUID, workerId: UUID, jobId: UUID) {
         checkOwner()
@@ -139,7 +182,8 @@ internal class CivsSupplyDispatcher(
         if (city.crafts[workerId]?.id != jobId) return
         city.crafts = city.crafts - workerId
         city.generation++; city.job?.cancel(); city.job = null
-        city.requested = true; city.after = Long.MIN_VALUE
+        city.after = Long.MIN_VALUE
+        request(cityId)
     }
     fun failure(cityId: UUID): String? { checkOwner(); return cities[cityId]?.failure }
     fun cityIds(): Set<UUID> { checkOwner(); return cities.keys.toSet() }
@@ -170,6 +214,11 @@ internal class CivsSupplyDispatcher(
                 "requested" to city.requested, "failure" to city.failure,
                 "retryAfterMillis" to if (city.after > now) city.after - now else 0L,
                 "acceptedGeneration" to city.acceptedGeneration,
+                "productionOrders" to sample(city.production.orders.entries.filter { workerId == null || it.key == workerId }) { (id, order) ->
+                    mapOf("worker" to id, "building" to order.buildingId, "material" to order.material,
+                        "fromCycle" to order.fromCycle, "untilCycle" to order.untilCycle, "unitsPerCycle" to order.unitsPerCycle,
+                        "anyTimber" to order.anyTimber)
+                },
                 "focusBuilding" to focus?.toString(),
                 "capture" to city.captured?.let { mapOf("generation" to it.generation,
                     "ageMillis" to (now - it.at).coerceAtLeast(0), "generationStale" to (it.generation != city.generation),
@@ -265,16 +314,18 @@ internal class CivsSupplyDispatcher(
         city.plans = city.plans - workerId
         city.generation++
         city.job?.cancel(); city.job = null
-        city.requested = true; city.after = Long.MIN_VALUE
+        city.after = Long.MIN_VALUE
+        request(cityId)
     }
 
-    fun remove(cityId: UUID) { checkOwner(); cities.remove(cityId)?.job?.cancel() }
+    fun remove(cityId: UUID) { checkOwner(); pending.remove(cityId); cities.remove(cityId)?.job?.cancel() }
 
     /** Retire every city generation during reload without replacing the shared work resources. */
     fun clear() {
         checkOwner()
         cities.values.forEach { it.job?.cancel() }
         cities.clear()
+        pending.clear()
     }
 
     /** No incomplete future is awaited, and every native cursor shares the injected Core allowance. */
@@ -283,19 +334,26 @@ internal class CivsSupplyDispatcher(
         if (closed) return
         if (!tasks.isCurrent(epoch)) { close(); return }
         val now = clock()
-        for ((id, city) in cities.toMap()) poll(id, city, now)
-        var running = cities.values.count { it.job != null }
-        for (id in cities.keys.toList()) {
+        pollPending(now)
+        var running = pending.values.count { it.job != null }
+        for (id in pending.keys.toList()) {
             if (running >= MAXIMUM_JOBS) break
-            val city = cities.getValue(id)
+            val city = pending[id] ?: continue
             if (!city.requested || city.job != null || now < city.after) continue
             start(id, city, now)
             if (city.job != null) running++
             // Cached city state does not occupy admission; dirty cities rotate even beyond 48.
-            cities.remove(id); cities[id] = city
+            if (pending.remove(id, city)) pending[id] = city
         }
         nativeWork.drainAvailable { Bukkit.getCurrentTick().toLong() }
-        for ((id, city) in cities.toMap()) poll(id, city, now)
+        pollPending(now)
+    }
+
+    private fun pollPending(now: Long) {
+        for ((id, city) in pending.toMap()) {
+            poll(id, city, now)
+            if (!city.requested && city.job == null) pending.remove(id, city)
+        }
     }
 
     private fun start(id: UUID, city: City, now: Long) {
@@ -324,21 +382,54 @@ internal class CivsSupplyDispatcher(
             if (job.native?.isDone == true) {
                 requireNotNull(job.native).join() // Already complete; never waits on the owner.
                 job.native = null
-                val data = requireNotNull(job.snapshot).detached()
+                val snapshot = requireNotNull(job.snapshot)
+                val productionOnly = (snapshot.inputKey as? CivSupplyObservation)?.itemReceipt != null
+                val data = snapshot.detached()
                 val ages = city.ages.toMap()
                 val lastAssigned = city.lastAssigned.toMap()
                 val workers = city.blockedWorkers.keys.toSet()
                 val trips = city.blockedTrips.keys.toSet()
                 val cancelled = job.cancelled
+                val previousProduction = city.production
                 job.result = CompletableFuture.supplyAsync({
-                    allocateCivSupplies(data, ages, lastAssigned, workers, trips, now, cancelled)
+                    if (productionOnly) {
+                        val survey = requireNotNull(data.productionSurvey)
+                        return@supplyAsync CivSupplyAllocation(emptyMap(), emptySet(), emptySet(), production =
+                            CivsProductionOrders.allocate(survey, data, emptyMap(), previousProduction, now))
+                    }
+                    // A smith's selected ordinary lot and a catalogue craft cannot spend the same worker cycle.
+                    val craftWorkers = data.craftWorkers.filter { candidate ->
+                        val batch = previousProduction.orders[candidate.workerId]
+                        val craft = data.craftJobs[candidate.workerId]
+                        craft?.cycle == candidate.cycle && craft.buildingId == candidate.buildingId ||
+                            batch == null || batch.buildingId != candidate.buildingId ||
+                            candidate.cycle !in batch.fromCycle until batch.untilCycle ||
+                            batch.configured != data.stores[candidate.buildingId]?.outputMaterial
+                    }
+                    val available = if (craftWorkers.size == data.craftWorkers.size) data else data.copy(craftWorkers = craftWorkers)
+                    val allocation = allocateCivSupplies(available, ages, lastAssigned, workers, trips, now, cancelled)
+                    val survey = data.productionSurvey
+                    if (survey == null) allocation else allocation.copy(production =
+                        CivsProductionOrders.allocate(survey, data, allocation.crafts, previousProduction, now))
                 }, executor)
             }
             val future = job.result
             if (future?.isDone != true) return
             val result = future.join()
             val snapshot = requireNotNull(job.snapshot)
-            if (validate(snapshot, result.plans)) {
+            val productionOnly = (snapshot.inputKey as? CivSupplyObservation)?.itemReceipt != null
+            val production = result.production?.takeIf { validateProduction(snapshot) }
+            production?.let { board ->
+                val captured = board.capturedAt
+                city.production = if (board.failure == null && snapshot.productionSurvey?.city?.inventory?.mode == CivStorageMode.PHYSICAL &&
+                    (captured == null || now - captured !in 0..CivsForestrySurplus.MAXIMUM_AGE_MILLIS))
+                    city.production.copy(reviewedAt = now, capturedAt = captured, failure = "capture-age-invalid")
+                else board
+            }
+            if (result.production != null && production == null) city.requested = true
+            if (productionOnly) {
+                failure(id, city, if (production == null) "stale-input" else null)
+            } else if (validate(snapshot, result.plans)) {
                 if (!current(id, city, job)) return
                 if (city.plans != result.plans) {
                     val retained = result.plans.count { (worker, plan) -> city.plans[worker] == plan }
@@ -350,7 +441,7 @@ internal class CivsSupplyDispatcher(
                     city.lastAssigned[worker] = now
                 city.plans = result.plans.toMap()
                 city.crafts = result.crafts.toMap()
-                city.observation = snapshot
+                city.observation = if (snapshot.productionSurvey == null) snapshot else snapshot.copy(productionSurvey = null)
                 city.acceptedGeneration = job.generation
                 city.ages.keys.retainAll(result.seen)
                 for (key in result.seen) city.ages.putIfAbsent(key, now)
@@ -416,7 +507,7 @@ internal data class CivSupplyTrip(val source: UUID, val worker: UUID?, val targe
         plan.destinationBuildingId, plan.cargo.material) }
 }
 internal data class CivSupplyAllocation(val plans: Map<UUID, CivCourierPlan>, val seen: Set<CivSupplyTask>, val served: Set<CivSupplyTask>,
-    val crafts: Map<UUID, CivCraftJob> = emptyMap())
+    val crafts: Map<UUID, CivCraftJob> = emptyMap(), val production: CivProductionBoard? = null)
 private class CivSupplyBudget : RuntimeException()
 
 /** Shared slot arithmetic: reserving a partial new stack leaves room only for that material. */

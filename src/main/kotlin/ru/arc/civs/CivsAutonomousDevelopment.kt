@@ -86,7 +86,7 @@ internal class CivsAutonomousDevelopment(
     private val autonomousPlacement: CivsAutonomousPlacement,
     private val executor: Executor,
     private val settlements: () -> Map<UUID, Settlement>,
-    private val busy: MutableSet<UUID>,
+    private val busy: Set<UUID>,
     private val unhealthy: Set<UUID>,
     private val isPlacing: (UUID) -> Boolean,
     private val ready: () -> Boolean,
@@ -149,8 +149,14 @@ internal class CivsAutonomousDevelopment(
     }
     private val unpaidRecoveryCursors = mutableMapOf<UUID, UnpaidRecoveryCursor>()
     private val autonomyWarnAt = mutableMapOf<UUID, Long>()
-    private val autonomousAccessChecked = mutableMapOf<UUID, List<CivBuilding>>()
-    private val autonomousAccessRetryAt = mutableMapOf<UUID, Long>()
+    private data class CheckedAccess(val owner: UUID, val world: UUID, val buildings: List<CivBuilding>,
+        val skippedConstruction: UUID?, val retryAt: Long?) {
+        fun matches(city: Settlement): Boolean = owner == city.owner && world == city.worldId &&
+            (skippedConstruction == null || skippedConstruction == city.construction?.buildingId) &&
+            civsSameBuildingLayout(buildings, city.buildings)
+    }
+    private val autonomousAccessChecked = mutableMapOf<UUID, CheckedAccess>()
+    private val accessRepairs = mutableMapOf<UUID, CompletableFuture<*>>()
     private val infrastructureRebuildRetryAt = mutableMapOf<UUID, Long>()
     private val farmExpansionRetryAt = mutableMapOf<UUID, Long>()
     private val autonomyTurns = CivsCityTurns()
@@ -164,6 +170,7 @@ internal class CivsAutonomousDevelopment(
         "placement" to autonomousPlacement.debug(cityId))
 
     fun paused(cityId: UUID) {
+        cancelAccessRepair(cityId)
         searchFailures.remove(cityId)
         occupiedUpgrades.remove(cityId)
         failedGrowthYields.remove(cityId)
@@ -177,6 +184,7 @@ internal class CivsAutonomousDevelopment(
     }
 
     fun reset() {
+        accessRepairs.keys.toList().forEach(::cancelAccessRepair)
         autonomyTurns.clear()
         searchFailures.clear()
         occupiedUpgrades.clear()
@@ -191,12 +199,12 @@ internal class CivsAutonomousDevelopment(
         deferredInitialPlans.clear()
         unpaidRecoveryCursors.clear()
         autonomousAccessChecked.clear()
-        autonomousAccessRetryAt.clear()
         infrastructureRebuildRetryAt.clear()
         farmExpansionRetryAt.clear()
     }
 
     fun cancel() {
+        accessRepairs.keys.toList().forEach(::cancelAccessRepair)
         autonomyTurns.clear()
         searchFailures.clear()
         occupiedUpgrades.clear()
@@ -209,35 +217,47 @@ internal class CivsAutonomousDevelopment(
         deferredInitialPlans.clear()
     }
 
-    fun accessReady(city: Settlement): Boolean = city.autonomy == null ||
-        civsSameBuildingLayout(autonomousAccessChecked[city.id], city.buildings)
+    private fun cancelAccessRepair(cityId: UUID) { accessRepairs.remove(cityId)?.cancel(false) }
 
-    /** A bounded inverse of older terrain journals runs before growth, even when resource stock is empty. */
+    /** Completion of historical maintenance for this layout, including any temporarily excluded building. */
+    fun accessReady(city: Settlement): Boolean = city.autonomy == null ||
+        autonomousAccessChecked[city.id]?.let { it.retryAt == null && it.matches(city) } == true
+
+    /** A bounded inverse of older terrain journals runs independently of construction and stock. */
     fun pulseAccessRepair() {
-        val city = cities.values.firstOrNull { it.autonomy?.paused == false && it.pendingDeletion == null &&
-            !accessReady(it) && it.id !in busy && it.id !in unhealthy && !isPlacing(it.id) &&
-            it.id !in autonomyRequests && now() >= (autonomousAccessRetryAt[it.id] ?: 0L) &&
-            (settlementActive(it) || it.construction != null) } ?: return
-        busy += city.id
+        val at = now()
+        val city = cities.values.firstOrNull { candidate ->
+            candidate.autonomy?.paused == false && candidate.pendingDeletion == null && candidate.id !in accessRepairs &&
+                candidate.id !in unhealthy && autonomousAccessChecked[candidate.id]?.let {
+                    it.matches(candidate) && (it.retryAt == null || at < it.retryAt)
+                } != true && (settlementActive(candidate) || candidate.construction != null)
+        } ?: return
         val prepared = runCatching { loadAutonomousPlans(city).thenApplyAsync({
             civsAutonomousAccessRepairs(city, it)
         }, executor) }.getOrElse { CompletableFuture.failedFuture(it) }
+        accessRepairs[city.id] = prepared
         prepared.whenCompleteSync(tasks) { repairs, failure ->
+            if (!accessRepairs.remove(city.id, prepared)) return@whenCompleteSync
             fun completed(counts: Map<String, Int>?, error: Throwable?) {
-                busy -= city.id
                 if (closed) return
-                if (error == null && (counts?.get("denied") ?: 0) == 0 && civsSameBuildingLayout(cities[city.id]?.buildings, city.buildings)) {
-                    autonomousAccessChecked[city.id] = city.buildings.toList()
-                    autonomousAccessRetryAt.remove(city.id)
+                val current = cities[city.id]
+                val denied = counts?.get("denied") ?: 0
+                val deferred = counts?.get("deferred") ?: 0
+                val check = CheckedAccess(city.owner, city.worldId, city.buildings, city.construction?.buildingId, null)
+                if (current == null || current.autonomy?.paused != false || current.pendingDeletion != null || !check.matches(current)) return
+                if (error == null && denied == 0 && deferred == 0) {
+                    autonomousAccessChecked[city.id] = check
                     if ((counts?.get("changed") ?: 0) > 0 || (counts?.get("conflicts") ?: 0) > 0) CivsDiagnostics.record(Level.WARNING, city.id, CivsDiagnostics.line(
                         "autonomous_access_repaired", "city" to city.id, "candidates" to repairs.orEmpty().size,
                         "result" to counts, "source" to "retained-terrain-inverse", "work_credit" to false), plugin.logger)
-                    pulseConstruction()
+                    if ((counts?.get("changed") ?: 0) > 0) pulseConstruction()
                 } else {
-                    autonomousAccessRetryAt[city.id] = now() + 30_000L
+                    val delay = if (error == null && denied > 0 && deferred == 0) 300_000L else 30_000L
+                    autonomousAccessChecked[city.id] = check.copy(retryAt = now() + delay)
                     CivsDiagnostics.record(Level.WARNING, city.id, CivsDiagnostics.line("autonomous_access_repair_blocked", "city" to city.id,
                         "reason" to (CivsDiagnostics.rejection(error)?.reason ?: when {
-                            (counts?.get("denied") ?: 0) > 0 -> "autonomy-access-denied"
+                            deferred > 0 -> "world-busy"
+                            denied > 0 -> "autonomy-access-denied"
                             error == null -> "stale-building"
                             else -> "storage-unavailable"
                         }), "result" to counts), plugin.logger)
@@ -245,13 +265,17 @@ internal class CivsAutonomousDevelopment(
                 }
             }
             if (failure != null) { completed(null, failure); return@whenCompleteSync }
-            if (!ready() || !civsSameBuildingLayout(cities[city.id]?.buildings, city.buildings) || cities[city.id]?.autonomy?.paused != false) {
+            val current = cities[city.id]
+            if (!ready() || current?.owner != city.owner || current.worldId != city.worldId || current.autonomy?.paused != false ||
+                current.pendingDeletion != null || current.id in unhealthy || !civsSameBuildingLayout(current.buildings, city.buildings)) {
                 completed(null, CivsRejection("stale-building")); return@whenCompleteSync
             }
             if (repairs.isNullOrEmpty()) { completed(emptyMap(), null); return@whenCompleteSync }
-            runCatching { world.repairAutonomousAccess(city, repairs) }
-                .onSuccess { it.whenCompleteSync(tasks) { counts, error -> completed(counts, error) } }
-                .onFailure { completed(null, it) }
+            val operation = runCatching { world.repairAutonomousAccess(city, repairs) }.getOrElse { CompletableFuture.failedFuture(it) }
+            accessRepairs[city.id] = operation
+            operation.whenCompleteSync(tasks) { counts, error ->
+                if (accessRepairs.remove(city.id, operation)) completed(counts, error)
+            }
         }
     }
 
@@ -262,6 +286,7 @@ internal class CivsAutonomousDevelopment(
         val maintenanceDue = at >= nextMaintenanceAt
         if (maintenanceDue) {
             nextMaintenanceAt = at + interval
+            autonomousAccessChecked.keys.retainAll(cities.keys)
             searchFailures.retain(cities.keys)
             occupiedUpgrades.entries.removeIf { (id, refusal) -> id !in cities || at >= refusal.until }
             ordinaryTurnsOwed.keys.retainAll(cities.keys)
@@ -287,7 +312,7 @@ internal class CivsAutonomousDevelopment(
             if (city.autonomy?.paused != false || city.pendingDeletion != null || city.id in busy || city.id in unhealthy ||
                 city.id in autonomyRequests || isPlacing(city.id) || city.construction != null || !city.constructionQueue.isNullOrEmpty() ||
                 !city.pendingControls.isNullOrEmpty() || at < (autonomyRetryAt[city.id] ?: 0L) || !CivsAutoStorageMigration.ready(city)) return false
-            if (accessReady(city) && settlementActive(city)) return true
+            if (settlementActive(city)) return true
             // Inactive towns keep the ordinary five-second cadence for layout and viewer checks.
             autonomyTurns.defer(city.id, at, interval)
             return false

@@ -36,6 +36,6 @@ internal class CivsCitizenEquipment(
             actor?.equipmentItems = items
             actor?.equipmentType = plan.type
         }
-        threats.equipment(worker.id, items.map { it?.stack() })
+        threats.equipment(worker.id, items)
     }
 }
