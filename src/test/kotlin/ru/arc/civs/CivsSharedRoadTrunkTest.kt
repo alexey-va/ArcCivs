@@ -5,6 +5,52 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsSharedRoadTrunkTest : FunSpec({
+    test("a paid fork joins only the level median before the upper street climbs") {
+        val shared = (-2..0).map { CivPosition(it, 70, 0) }
+        val main = shared + (1..5).map { CivPosition(it, 70, 0) } +
+            (1..12).map { CivPosition(5, if (it < 8) 70 else 71, it) }
+        val branch = shared + (1..4).map { CivPosition(0, 70, it) } + (4..12).map { CivPosition(1, 70, it) }
+        val landing = requireNotNull(CivsRoadFork.landing(main, branch))
+        landing.floors shouldBe ((2..6).map { CivPosition(3, 69, it) } +
+            (2..3).map { CivPosition(2, 69, it) }).toSet()
+        landing.floors.none { p -> (main + branch).any { it.x == p.x && it.z == p.z } } shouldBe true
+        CivsRoadFork.landing(main.map { it.copy(y = 70) }, branch) shouldBe null
+        CivsRoadFork.landing(main, branch.drop(2)) shouldBe null
+        CivsRoadFork.replaceable("minecraft:spruce_planks") shouldBe false
+        CivsRoadFork.replaceable("minecraft:dirt_path") shouldBe false
+    }
+
+    test("three-wide farm and forester streets share the approach across a one-block grass median") {
+        val hall = CivBuilding(UUID(234, 1), BuildingType.TOWN_HALL, 1, CivPosition(0, 69, 0), 270, "fixture/hall",
+            CivBox(CivPosition(-5, 68, -2), CivPosition(-1, 75, 2)), CivPosition(0, 70, 0), BuildingPhase.ACTIVE)
+        val forest = CivBuilding(UUID(234, 2), BuildingType.FORESTER, 1, CivPosition(4, 69, -16), 0, "fixture/forester",
+            CivBox(CivPosition(3, 68, -20), CivPosition(5, 75, -17)), CivPosition(4, 70, -16), BuildingPhase.ACTIVE)
+        val farm = CivBuilding(UUID(234, 3), BuildingType.FARM, 1, CivPosition(0, 69, -12), 0, "fixture/farm",
+            CivBox(CivPosition(-1, 68, -16), CivPosition(1, 75, -13)), CivPosition(0, 70, -12), BuildingPhase.SITE)
+        val city = Settlement(UUID(234, 4), UUID(234, 5), "Forest lane", UUID(234, 6), hall.entrance,
+            32, "fixture", Stock(), listOf(hall, forest), emptyList(), autonomy = CivAutonomy())
+        val trunk = (0..4).map { CivPosition(it, 70, 0) } + (1..16).map { CivPosition(4, 70, -it) }
+        val access = CivAutonomousAccess(routes = mapOf(forest.id to trunk))
+        for (bridgeOpen in listOf(true, false)) {
+            val surface = CivTerrainSurface(-64, 320, buildMap {
+                for (x in -2..6) for (z in -20..2) {
+                    val open = x in -1..1 || x in 3..5 || z in -1..1 || bridgeOpen && z in -9..-7
+                    put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(69, open))
+                }
+            })
+            val route = CivsAutonomousTerraform.draft(city, CivTerraformOption(farm, 0), surface, access,
+                preferredRoads = trunk.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }).route
+            route.first() shouldBe hall.entrance
+            route.last() shouldBe farm.entrance
+            route.map { it.y }.distinct() shouldBe listOf(70)
+            if (bridgeOpen) {
+                route.takeWhile { it in trunk }.last().z shouldBe -9
+            } else {
+                route.count { it.x == 4 } shouldBe 0
+            }
+        }
+    }
+
     for (protectedFlank in listOf(false, true)) for (trunkDrops in listOf(false, true)) {
         test("a quarry shares the level trunk until a safe flat branch, protected flank=$protectedFlank trunk drops=$trunkDrops") {
             // A lower paid trunk would add a descent and climb. Reuse its level prefix;

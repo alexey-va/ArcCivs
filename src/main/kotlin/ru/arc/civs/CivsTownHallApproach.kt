@@ -7,7 +7,7 @@ import kotlin.math.sign
 /** A founding capture and local fragments of real outbound routes. Complete routes remain in their original journals. */
 data class CivHallBranch(val owner: UUID, val plan: UUID, val routeSha256: String, val prefix: List<CivPosition>)
 data class CivHallApproach(val founding: CivPerimeterCapture, val branches: List<CivHallBranch>,
-    val crossings: List<CivHallBranch>? = null) {
+    val crossings: List<CivHallBranch>? = null, val sharedLanding: Boolean = false) {
     internal fun detached() = copy(branches = branches.map { it.copy(prefix = it.prefix.toList()) },
         crossings = crossings?.map { it.copy(prefix = it.prefix.toList()) })
 }
@@ -95,6 +95,22 @@ internal class CivsTownHallApproach private constructor(
     }
 
     private val links = linkedMapOf<CivPosition,String>()
+    /** A side street falling along the retaining wall can leave at the foot of the main flight.
+     * Join its last necessary tread at the original grade and retain the entire street beyond it. */
+    private fun sideLanding(branch: CivHallBranch): CivPosition? {
+        val bottom = feet.lastIndex
+        if (!witness.sharedLanding || bottom !in 2..4 || feet.first() <= feet.last() ||
+            feet[bottom] != feet[bottom-1]) return null
+        val crest = branch.prefix.takeWhile { depth(it) == 0 }
+        return crest.zipWithNext().firstOrNull { (join, lower) ->
+            abs(lane(join) - axis) in 2..4 && join.y == feet.last() && lower.y == join.y - 1 &&
+                abs(lane(lower) - axis) > abs(lane(join) - axis)
+        }?.first
+    }
+    private val sideLandings = witness.branches.mapNotNull { branch -> sideLanding(branch)?.let { branch.owner to it } }.toMap()
+    private val oldLayout by lazy(LazyThreadSafetyMode.NONE) {
+        CivsTownHallApproach(hall, witness.copy(sharedLanding = false), axis, rows, feet, style)
+    }
     private fun MutableMap<CivPosition,String>.finishAt(s: Int, d: Int, y: Int, highSide: Int? = null, highDepth: Int = d) {
         val p = point(s,y,d)
         if (p in path || p in retainedTerminalFloors) return
@@ -118,6 +134,25 @@ internal class CivsTownHallApproach private constructor(
     private fun planJoin(branch: CivHallBranch, pending: MutableMap<CivPosition,String>): List<CivPosition>? {
         val route = branch.prefix
         val bottom = feet.lastIndex
+        sideLandings[branch.owner]?.let { join ->
+            val s = lane(join)
+            val direction = (s - axis).sign
+            val walk = downSpine(bottom).toMutableList()
+            for (offset in 1..abs(s - axis)) {
+                val lane = axis + direction * offset
+                pending.finishAt(lane, bottom, join.y - 1)
+                walk += point(lane, join.y, bottom)
+                // The short lower turn shares one level landing with the street. A one-cell
+                // line around its old grass shoulders would leave an isolated island.
+                if (offset >= 2) for (d in 1 until bottom) pending.finishAt(lane, d, join.y - 1)
+            }
+            for (d in bottom - 1 downTo 1) {
+                pending.finishAt(s, d, join.y - 1)
+                walk += point(s, join.y, d)
+            }
+            pending.finishAt(s, 0, join.y - 1, s - direction)
+            return walk + join
+        }
         val end = route.firstOrNull { depth(it) in bottom..bottom+1 && abs(lane(it)-axis)<=4 && it.y==feet.last() }
         if (end != null) {
             val d = depth(end)
@@ -233,6 +268,7 @@ internal class CivsTownHallApproach private constructor(
     }
 
     private val retiredShoulders = hashMapOf<CivPosition,String>()
+    private val loweredCaps = hashMapOf<CivPosition, Pair<CivPosition, String>>()
 
     /** New treads, exact connections to each paid street and the redundant pavement left behind. */
     val surfaces: Map<CivPosition, String> = buildMap {
@@ -274,14 +310,50 @@ internal class CivsTownHallApproach private constructor(
                 put(if (d>0 && abs(s-axis)==2) p else old,CivsEntrancePath.GRASS)
             }
         }
+        val sideBranches = witness.branches.filter { it.owner in sideLandings && it.owner in joins }
+        if (sideBranches.isNotEmpty()) {
+            val crestColumns = sideBranches.flatMap { it.prefix.takeWhile { p -> depth(p) == 0 } }
+                .mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            // Return the old cheek and crest columns to the lower ground. Only the old layout's
+            // exact surface and its dirt bedding may be removed by this column's paid receipt.
+            for ((old, finish) in oldLayout.surfaces) {
+                val d = depth(old)
+                val s = lane(old)
+                if (s in axis - 1..axis + 1 || d !in 0 until feet.lastIndex || old.y <= feet.last() - 1 ||
+                    joins.values.any { walk -> old.copy(y = old.y + 1) in walk }) continue
+                if (finish != CivsEntrancePath.GRASS && civsTerrainKey(old.x, old.z) !in crestColumns) continue
+                val lower = old.copy(y = feet.last() - 1)
+                remove(old)
+                putIfAbsent(lower, CivsEntrancePath.GRASS)
+                loweredCaps[lower] = old to finish
+            }
+            for ((low, _) in links) {
+                if (low in loweredCaps || low.y != feet.last() - 1) continue
+                // An original paid shoulder between the two descending streets can still be
+                // grass. Its signed grade bounds this cut even if no previous upkeep ran there.
+                val key = civsTerrainKey(low.x, low.z)
+                val grades = sideBranches.mapNotNull { paidProfiles.getValue(it.owner)[key] }.distinct()
+                val old = grades.singleOrNull()?.takeIf { it.y > low.y && it.y - low.y <= 2 } ?: continue
+                loweredCaps[low] = old to CivsEntrancePath.GRASS
+            }
+        }
     }
     val columns = surfaces.keys.associateBy { civsTerrainKey(it.x, it.z) }
     fun retiredShoulder(p: CivPosition) = p in retiredShoulders
     fun bank(p: CivPosition) = surfaces[p] == CivsEntrancePath.GRASS
+    fun loweredFrom(p: CivPosition): CivPosition? = loweredCaps[p]?.first
+    fun mayClear(p: CivPosition, at: CivPosition, data: String): Boolean {
+        val (old, finish) = loweredCaps[p] ?: return CivsRoadMaintenance.clearanceGround(data) || paidFinish(at, data)
+        if (at.x != p.x || at.z != p.z || at.y !in p.y + 1..old.y) return false
+        val originalGrade = paidProfiles.values.any { it[civsTerrainKey(at.x, at.z)] == at }
+        return paidFinish(at, data) || originalGrade && data == "minecraft:coarse_dirt" ||
+            if (at == old) finish == data else data == "minecraft:dirt"
+    }
     fun yard(p: CivPosition) = depth(p) < 0 && p in surfaces
     /** Historical pavement belongs to its actual paid grade, style and downhill direction. */
     fun paidFinish(p: CivPosition, data: String): Boolean {
         if (!CivsRoadMaintenance.surface(data)) return false
+        if (sideLandings.isNotEmpty() && oldLayout.surfaces[p] == data) return true
         val key = civsTerrainKey(p.x, p.z)
         fun matches(expected: String): Boolean {
             if (data==expected) return true
@@ -370,6 +442,7 @@ internal class CivsTownHallApproach private constructor(
     fun fundedBefore(p: CivPosition, data: String): Boolean {
         if (p !in surfaces) return false
         retiredShoulders[p]?.let { return it == data }
+        if (p in loweredCaps) return CivsRoadMaintenance.forecourtSoil(data) || paidFinish(p, data)
         if (cover(data) || air(data) || data == "minecraft:coarse_dirt") return true
         if (data == "minecraft:dirt_path") return yard(p) || paidFinish(p, data)
         if (yard(p)) return CivsRoadMaintenance.forecourtSoil(data)
@@ -492,7 +565,7 @@ internal class CivsTownHallApproach private constructor(
             if (branches.isEmpty()) return null
             // A spatially independent wall path may cross the foot of the Hall. Preserve its existing
             // flat centreline and signed height. Its own structure, gate ports and ROAD transit stay excluded.
-            val ordinary = CivHallApproach(CivPerimeterCapture(founding.id, sha), branches)
+            val ordinary = CivHallApproach(CivPerimeterCapture(founding.id, sha), branches, sharedLanding = true)
             val grade by lazy(LazyThreadSafetyMode.NONE) { from(city,hall,ordinary) }
             val crossings = routes.mapNotNull { (id, route) ->
                 val source = city.building(id) ?: return@mapNotNull null

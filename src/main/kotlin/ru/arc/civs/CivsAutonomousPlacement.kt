@@ -111,7 +111,7 @@ internal class CivsAutonomousPlacement(
 
     /** One adopted plan, using the same detached height field, catalogue and finite solvers. */
     fun plan(city: Settlement, unpaidSite: CivAutonomousDesign? = null,
-        recoverPerimeter: Boolean = false): CompletableFuture<CivSettlementPlan> {
+        recoverPerimeter: Boolean = false, laterGrowth: List<BuildingType> = emptyList()): CompletableFuture<CivSettlementPlan> {
         val result = CompletableFuture<CivSettlementPlan>()
         synchronized(jobs) {
             if (closed) return CompletableFuture.failedFuture(CivsRejection("world-closed"))
@@ -196,8 +196,8 @@ internal class CivsAutonomousPlacement(
                     .map { it.building.type }
                 if (seed == null) {
                     return@thenCombineAsync try {
-                        CompletableFuture.completedFuture(CivsSettlementPlans.prepareGrowth(projected, loaded, input.second,
-                            access, profile, fortification = input.third))
+                        CompletableFuture.completedFuture(CivsSettlementPlans.prepareDevelopmentGrowth(projected, loaded, input.second,
+                            access, profile, input.third, laterGrowth))
                     } catch (failure: CivsRejection) {
                         if (!CivsSettlementPlans.compactCivicMayFit(projected, input.second, access, profile, failure)) throw failure
                         val type = profile.last()

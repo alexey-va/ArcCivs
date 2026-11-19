@@ -27,6 +27,8 @@ class CivsTownHallApproachTest : FunSpec({
                 List(4) { flat } + listOf(69 to "out", 69 to path)),
             Profile("two consecutive drops", listOf(69, 68, 67, 67),
                 listOf(flat, 68 to "in", 67 to "in", 66 to path)),
+            Profile("side street one level below the bottom landing", listOf(69, 68, 67, 67),
+                listOf(flat, 68 to "in", 67 to "in", 66 to path)),
             Profile("two drops between offset routes", listOf(69, 69, 69, 68, 68, 68, 67, 67),
                 listOf(flat, flat, flat, 68 to "in", 67 to path, 67 to path, 67 to "in", 66 to path)),
             Profile("five drops beside a parallel route", listOf(69, 68, 67, 66, 65, 64, 64),
@@ -66,6 +68,9 @@ class CivsTownHallApproachTest : FunSpec({
                 val side = when (profile.name) {
                     "two consecutive drops" -> listOf(entrance, CivPosition(1, 69, 0), CivPosition(2, 68, 0)) +
                         (3..10).map { CivPosition(it, roadFeet, 0) }
+                    "side street one level below the bottom landing" -> (0..9).map { lane ->
+                        CivPosition(-lane, 69 - (lane - 1).coerceIn(0, 3), 0)
+                    }
                     "five drops beside a parallel route" -> listOf(entrance, CivPosition(1, 68, 0), CivPosition(2, 68, 0)) +
                         (1..end + 2).map { CivPosition(2, feet(maxOf(1, it)), it) }
                     "two drops between offset routes" -> listOf(entrance, CivPosition(0, 69, 1),
@@ -99,8 +104,25 @@ class CivsTownHallApproachTest : FunSpec({
                         val facing = when (finish) { "in" -> inward[turn]; "out" -> inward[(turn + 2) % 4]; else -> null }
                         val surface = facing?.let { "minecraft:spruce_stairs[facing=$it,half=bottom,shape=straight,waterlogged=false]" } ?: finish
                         for (lane in -1..1) put(rotate(CivPosition(lane, floorY, depth)), surface)
-                        if (facing != null) for (lane in listOf(-2, 2)) put(rotate(CivPosition(lane, floorY, depth)), grass)
+                        if (facing != null) for (lane in listOf(-2, 2)) {
+                            val shared = profile.name == "side street one level below the bottom landing"
+                            put(rotate(CivPosition(lane, if (shared) 66 else floorY, depth)), if (shared && lane < 0) path else grass)
+                        }
                     }
+                }
+                if (profile.name == "side street one level below the bottom landing") {
+                    val access = CivAutonomousAccess.from(city, plans)
+                    val layout = requireNotNull(access.hallApproach(city))
+                    val branch = layout.travel(routes.last())
+                    val trunk = layout.travel(routes.first())
+                    branch.take(4) shouldBe trunk.take(4)
+                    val low = rotate(CivPosition(-3, 66, 1))
+                    layout.surfaces[low] shouldBe path
+                    val old = access.hallApproach(city, requireNotNull(access.hallWitness).copy(sharedLanding = false))!!
+                    old.surfaces[rotate(CivPosition(2, 68, 1))] shouldBe grass
+                    val lower = rotate(CivPosition(2, 66, 1))
+                    layout.mayClear(lower, lower.copy(y = 68), "minecraft:oak_planks") shouldBe false
+                    layout.mayClear(lower, lower.copy(y = 67), "minecraft:cobblestone") shouldBe false
                 }
                 if (profile.name == "five drops beside a parallel route") {
                     for (d in listOf(2, 4)) {

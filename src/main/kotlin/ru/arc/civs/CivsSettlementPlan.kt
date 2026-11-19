@@ -413,6 +413,34 @@ internal object CivsSettlementPlans {
     }
 
     /** Add a quarter only after the next ordinary plot no longer fits the current one. Paid work stays pinned. */
+    internal fun prepareDevelopmentGrowth(city: Settlement, templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>,
+        surface: CivTerrainSurface, retained: CivAutonomousAccess, profile: List<BuildingType>,
+        fortification: CivFortificationTemplate?, laterGrowth: List<BuildingType>): CivSettlementPlan {
+        val firstRefusal = try {
+            return prepareGrowth(city, templates, surface, retained, profile, fortification)
+        } catch (failure: CivsRejection) {
+            failure
+        }
+        if (laterGrowth.isEmpty() || !canYieldGrowth(firstRefusal) || !fullyLoadedSurvey(city, surface)) throw firstRefusal
+        val adopted = current(city) ?: throw firstRefusal
+        if (adopted.plots.any { city.building(it.building.id) == null } ||
+            city.buildings.filter { it.type.isInfrastructure }.mapTo(hashSetOf()) { it.id } !=
+                retained.infrastructure.mapTo(hashSetOf()) { it.id }) throw firstRefusal
+        // The ordered town profile bounds the work. All projects reuse the same loaded terrain and paid journals.
+        val existingTypes = profile.dropLast(1)
+        for (type in laterGrowth) {
+            try {
+                return prepareGrowth(city, templates, surface, retained, existingTypes + type, fortification)
+            } catch (failure: CivsRejection) {
+                if (!canYieldGrowth(failure)) throw failure
+            }
+        }
+        throw firstRefusal
+    }
+
+    private fun canYieldGrowth(failure: CivsRejection): Boolean =
+        civicObstruction(failure) && failure.values["stage"] !in setOf("retained-growth-old-incomplete", "retained-growth-capture")
+
     fun prepareGrowth(city: Settlement, templates: Map<BuildingType, Pair<CivBuilding, CivBuilding>>,
         surface: CivTerrainSurface, retained: CivAutonomousAccess, profile: List<BuildingType>,
         fortification: CivFortificationTemplate? = null): CivSettlementPlan {

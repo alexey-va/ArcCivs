@@ -21,17 +21,20 @@ data class CivCraftJob(val id: UUID, val workerId: UUID, val buildingId: UUID, v
     val constructionId: UUID? = null)
 
 internal data class CivCraftWorker(val workerId: UUID, val buildingId: UUID, val cycle: Long,
-    val level: Int, val carried: Map<String, Long>, val axe: Boolean, val type: BuildingType = BuildingType.SAWMILL)
+    val level: Int, val carried: Map<String, Long>, val axe: Boolean, val type: BuildingType = BuildingType.SAWMILL,
+    val outputs: Set<String>? = null, val selected: String? = null)
 internal data class CivCraftRecipe(val id: String, val material: String, val amount: Long,
     val level: Int, val inputs: Map<String, Long>, val stripping: Boolean = false, val workshop: BuildingType = BuildingType.SAWMILL)
 internal data class CivCraftAllocation(val jobs: Map<UUID, CivCraftJob>,
     val required: Map<UUID, Map<String, Long>>, val requests: List<CivSupplyRequest>)
 
-/** Exact Minecraft 1.21.11 recipe batches, checked against Mojang server SHA1
- * 64bb6d763bed0a9f1d632ec347938594144943ed. No price, yield or speed multiplier. */
+/** Exact Minecraft 1.21.11 carpentry/tool batches (Mojang server SHA1
+ * 64bb6d763bed0a9f1d632ec347938594144943ed) and existing CivsProduction industrial batches.
+ * No price, yield or speed multiplier. */
 internal object CivsCarpentry {
     const val VERSION = 1
-    val workshops = setOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH)
+    val processors = setOf(BuildingType.SMELTERY, BuildingType.CRUSHER)
+    val workshops = setOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH) + processors
     val woods = listOf("OAK", "SPRUCE", "BIRCH", "JUNGLE", "ACACIA", "DARK_OAK")
     val recipes: List<CivCraftRecipe> = buildList {
         fun recipe(id: String, material: String, amount: Long, level: Int,
@@ -73,6 +76,11 @@ internal object CivsCarpentry {
             val iron = when (tool) { "IRON_SHOVEL" -> 1L; "IRON_HOE" -> 2L; else -> 3L }
             add(CivCraftRecipe("blacksmith/${tool.lowercase()}", tool, 1, 1,
                 mapOf("IRON_INGOT" to iron, "STICK" to 2L), workshop = BuildingType.BLACKSMITH))
+        }
+        for (type in processors) for (material in CivsProduction.options(type)) {
+            add(CivCraftRecipe("${type.name.lowercase()}/${material.lowercase()}", material,
+                requireNotNull(CivsProduction.amount(type, material)), if (material == "SAND") 2 else 1,
+                CivsProduction.inputs(type, material), workshop = type))
         }
     }
     private val byId = recipes.associateBy(CivCraftRecipe::id)
@@ -151,6 +159,7 @@ internal object CivsCarpentry {
             worker.assignment == building.id && worker.completedCycles == job.cycle && worker.cargo == null &&
             !CivsResidents.isChild(worker) && building.type == recipe.workshop &&
             CivsRules.productionAvailable(city, building) && recipe.level <= building.level &&
+            (building.type !in processors || recipe.material in CivsProduction.options(city, building)) &&
             (!recipe.stripping || CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") == true) &&
             (job.constructionId == null || city.construction?.id == job.constructionId)
     }
@@ -179,6 +188,11 @@ internal object CivsCarpentry {
         if (snapshot.craftWorkers.isEmpty()) return CivCraftAllocation(emptyMap(), emptyMap(), emptyList())
         require(snapshot.craftWorkers.size <= 48 && snapshot.requests.size <= 2_048)
         val workers = snapshot.craftWorkers.associateBy(CivCraftWorker::workerId)
+        fun canMake(worker: CivCraftWorker, recipe: CivCraftRecipe, selected: Boolean = true) =
+            recipe.workshop == worker.type && recipe.level <= worker.level && (!recipe.stripping || worker.axe) &&
+                (worker.outputs == null || recipe.material in worker.outputs) &&
+                (!selected || worker.selected == null || recipe.material == worker.selected)
+        val available = recipes.filter { recipe -> workers.values.any { canMake(it, recipe) } }.groupBy(CivCraftRecipe::material)
         val roots = snapshot.requests.filter { it.needed > it.inTransit && it.material in byMaterial }
             .sortedWith(compareByDescending<CivSupplyRequest> { it.construction }.thenBy { it.buildingId.toString() }.thenBy { it.material }) + snapshot.stockTargets.toSortedMap(compareBy(UUID::toString)).flatMap { (target, desired) ->
                 desired.map { (material, count) -> CivSupplyRequest(target, material, count, 0) }
@@ -248,10 +262,9 @@ internal object CivsCarpentry {
                 add(promised, job.material, job.amount)
             }
             val costCache = hashMapOf<Pair<String, Long>, Long>()
-            fun alternatives(material: String) = (if (only?.material == material) listOfNotNull(recipe(only))
-                else byMaterial[material].orEmpty().distinctBy { if (material in generic) material else it.id }).filter {
-                it.workshop == worker.type && it.level <= worker.level && (!it.stripping || worker.axe)
-            }
+            fun alternatives(material: String) = if (only?.material == material)
+                listOfNotNull(recipe(only)).filter { canMake(worker, it, selected = false) }
+            else available[material].orEmpty().distinctBy { if (material in generic) material else it.id }
             fun cost(material: String, amount: Long, depth: Int = 0): Long {
                 budget(); check(depth <= 8)
                 val missing = (amount - (actual[material] ?: 0) - (promised[material] ?: 0)).coerceAtLeast(0)
@@ -268,7 +281,7 @@ internal object CivsCarpentry {
                     } ?: missing
                 }
             }
-            // Null recipe with pending=true means another accepted batch must finish first.
+            // Foreign intermediates must finish in their own workshop before this resident can use them.
             fun need(material: String, amount: Long, depth: Int = 0, oneBatch: Boolean = false): Pair<CivCraftRecipe?, Boolean> {
                 budget(); check(depth <= 8)
                 val used = minOf(amount, actual[material] ?: 0)
@@ -289,6 +302,7 @@ internal object CivsCarpentry {
                     child.first?.let { return it to false }
                     pending = pending || child.second
                 }
+                pending = pending || !canMake(worker, recipe, selected = only?.recipeId != recipe.id)
                 return (if (pending) null else recipe) to pending
             }
             var bufferInputsReserved = false
@@ -319,10 +333,10 @@ internal object CivsCarpentry {
             }
             return null
         }
-        // Revalidate retained intent against current demand before adding new output promises.
+        // Revalidate demand before adding output promises; a manual selection only controls new batches.
         val retained = snapshot.craftJobs.filter { (id, job) -> workers[id]?.let { worker ->
             job.workerId == id && job.buildingId == worker.buildingId && job.cycle == worker.cycle &&
-                recipe(job)?.let { it.workshop == worker.type && it.level <= worker.level && (!it.stripping || worker.axe) } == true &&
+                recipe(job)?.let { canMake(worker, it, selected = false) } == true &&
                 (job.constructionId == null || job.constructionId == snapshot.constructionId)
         } == true }.toSortedMap(compareBy(UUID::toString))
         for ((id, job) in retained) {

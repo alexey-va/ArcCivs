@@ -9,6 +9,9 @@ internal object CivsSnapshotValidation {
             snapshot(CivsRules.present(city.id, city.owner, city.worldId, city.center, city.stock, city.buildings, city.workers, city.members))
             snapshot(CivsRules.validText(city.name, 48) && CivsRules.validText(city.style, 128) && city.radius > 0 && city.revision >= 0 && city.createdAt >= 0)
             snapshot(city.owner !in city.members && city.members.all { CivsRules.present(it) })
+            city.settings?.lastGarrisonIssue?.let { times ->
+                snapshot(times.all { (material, time) -> material in CivsVillageProvisions.loads && time >= 0 })
+            }
             city.autonomy?.let { autonomy ->
                 snapshot((city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) && city.members.isEmpty() &&
                     autonomy.recruitmentMinutes in 0..CivsAutonomy.RECRUITMENT_MINUTES)

@@ -15,8 +15,8 @@ internal class CitizenWander(workerId: UUID) {
     private val random = Random(workerId.mostSignificantBits xor java.lang.Long.rotateLeft(workerId.leastSignificantBits, 23))
     private val recentStarts = ArrayDeque<CitizenPoint>()
     private var nextAt: Long? = null
-    fun ready(now: Long, returning: Boolean = false): Boolean {
-        if (nextAt == null) schedule(now, if (returning) 0L else 100L + random.nextInt(301))
+    fun ready(now: Long, returning: Boolean = false, spreadStarts: Boolean = false): Boolean {
+        if (nextAt == null) schedule(now, if (returning) 0L else 100L + random.nextInt(if (spreadStarts) 2_401 else 301))
         return now >= requireNotNull(nextAt)
     }
 
@@ -35,7 +35,7 @@ internal class CitizenWander(workerId: UUID) {
         return if (diagonal) listOf(CITIZEN_WANDER_DIAGONALS[(heading and 7) / 2]) + fallback else fallback
     }
 
-    fun legLimit(): Int = 4 + random.nextInt(3)
+    fun legLimit(short: Boolean = false): Int = if (short) 4 + random.nextInt(3) else 24 + random.nextInt(41)
     fun targetVariation(): Int = random.nextInt(16)
     fun rememberStart(at: CitizenPoint) {
         if (recentStarts.size == 6) recentStarts.removeFirst()
@@ -58,6 +58,7 @@ internal class CitizenWanderWalk(val home: CivBuilding, val outsideHome: Boolean
     val token: CitizenToken, val startedAt: Long, var legLimit: Int, val departureBuilding: CivBuilding?,
     val anchor: CivPosition, val streets: CivsPaths.RetainedRoads) {
     val remaining = ArrayDeque<CitizenPoint>()
+    var outingLimit = legLimit
     val allowedBuildings = setOfNotNull(departureBuilding?.id)
     var leavingBuilding = false
     val mode get() = if (leavingBuilding) "building-exit" else "local"
@@ -111,7 +112,7 @@ private const val WANDER_EDGES = 96
 
 /** Small owner-thread flood. Only its chosen feet survive admission; movement samples native terrain again. */
 internal fun citizenWanderPath(world: World, start: CitizenPoint, walk: CitizenWanderWalk, buildings: List<CivBuilding>, wander: CitizenWander,
-    yaw: Float, halfWidth: Double, firstStepFree: (CitizenPoint) -> Boolean): List<CitizenPoint> {
+    yaw: Float, halfWidth: Double, maxSteps: Int = walk.legLimit, firstStepFree: (CitizenPoint) -> Boolean): List<CitizenPoint> {
     val centerSupported = citizenPacketSupported(world, start, false)
     if (!centerSupported && !citizenWanderLipSupport(world, start, halfWidth)) return emptyList()
     val directions = wander.directions(yaw, allowDiagonal = true)
@@ -188,11 +189,12 @@ internal fun citizenWanderPath(world: World, start: CitizenPoint, walk: CitizenW
     var followStreet = false
     var leavingDeadEnd = false
     val heading = directions.first()
-    val exit = walk.departureBuilding?.entrance?.point()
+    val exit = walk.departureBuilding?.takeIf { walk.onDeparturePlot(floor(start.x).toInt(), floor(start.z).toInt()) }?.entrance?.point()
+    val depthLimit = minOf(maxSteps, 12)
     var attempted = 0
     while (queue.isNotEmpty() && reached.size < WANDER_CELLS && attempted < WANDER_EDGES) {
         val node = queue.removeFirst()
-        if (node.depth == walk.legLimit) continue
+        if (node.depth >= depthLimit) continue
         val at = node.floor.feet
         val next = ArrayList<WanderFloor>(directions.size)
         for ((dx, dz) in directions) {
@@ -212,8 +214,10 @@ internal fun citizenWanderPath(world: World, start: CitizenPoint, walk: CitizenW
         for (floor in next) {
             if (followStreet && !floor.street || !reached.add(floor.feet)) continue
             val candidate = WanderNode(floor, node, node.depth + 1)
-            queue += candidate
             val feet = floor.feet
+            // Explore the forward lane first. Side streets stay in the same bounded queue for bends and exits.
+            if (feet.x - at.x == heading.first.toDouble() && feet.z - at.z == heading.second.toDouble())
+                queue.addFirst(candidate) else queue.addLast(candidate)
             val exited = walk.departureBuilding != null && !walk.onDeparturePlot(floor(feet.x).toInt(), floor(feet.z).toInt())
             val forward = ((feet.x - start.x) * heading.first + (feet.z - start.z) * heading.second).toInt()
             val towardsExit = exit?.let { (start.distanceSquared(it) - feet.distanceSquared(it)).coerceIn(-32.0, 32.0).toInt() } ?: 0

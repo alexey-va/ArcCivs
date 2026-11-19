@@ -1127,7 +1127,8 @@ internal object CivsAutonomousTerraform {
 
     private fun air(data: String) = data.substringBefore('[') in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
     private val DIRECTIONS = arrayOf(0 to 1, 1 to 0, 0 to -1, -1 to 0)
-    private val PARALLEL_OFFSETS = intArrayOf(-2, -1, 1, 2)
+    // Three-wide streets are still neighbours across a one-block grass median.
+    private val PARALLEL_OFFSETS = intArrayOf(-1, 1, -2, 2, -3, 3, -4, 4)
     private val FALLING_GROUND = setOf("minecraft:sand", "minecraft:red_sand", "minecraft:gravel")
 }
 

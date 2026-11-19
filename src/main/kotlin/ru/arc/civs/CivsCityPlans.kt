@@ -225,14 +225,19 @@ internal class CivsCityPlans(
         val before = requireNotNull(tx.upkeep).before(tx.after)
         fun verify(access: CivAutonomousAccess) {
             val shared = CivsGateSharedApproaches.repair(before, upkeep)
-            if (shared != null) {
+            if (upkeep.forkPartner != null) {
+                require(CivsRoadFork.current(before, access, upkeep))
+            } else if (upkeep.preparedCentre) {
+                require(access.routes[upkeep.source.id] == upkeep.route &&
+                    access.sharedRoadCaptures[upkeep.source.id]?.preparedCentres?.contains(upkeep.floor) == true)
+            } else if (shared != null) {
                 require(CivsGateSharedApproaches.current(before, shared, access))
                 upkeep.wallCleanup?.let { cleanup ->
                     require(cleanup.authored in requireNotNull(access.sharedRoadCaptures[upkeep.source.id]).pavement)
                 }
             } else {
                 val proof = requireNotNull(upkeep.hall)
-                require(access.hallWitness == proof && access.hallApproach(before)?.surfaces?.get(upkeep.floor) == upkeep.after)
+                require(access.hallApproach(before, proof)?.surfaces?.get(upkeep.floor) == upkeep.after)
             }
         }
         val generation = store.planGeneration(retainedSources[before.id]?.ids.orEmpty())

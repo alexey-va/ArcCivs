@@ -189,7 +189,8 @@ class CivsService(
     private val supply = CivsSupplyDispatcher(tasks, nativeWork,
         { cityId, retained -> cargoRequests.captureSupply(cityId, retained) },
         { snapshot, plans -> cargoRequests.validateSupply(snapshot, plans) }, supplyExecutor, clock,
-        validateProduction = { snapshot -> cargoRequests.validateProduction(snapshot) })
+        validateProduction = { snapshot -> cargoRequests.validateProduction(snapshot) },
+        onSupplyAccepted = { snapshot -> residentSupplies.issueGarrisonStock(snapshot) })
 
     private val construction: CivsConstructionRuntime = CivsConstructionRuntime(plugin, tasks, world,
         blueprints, store, executor, physics, storage, citizens, footTraffic, { cities }, busy, unhealthy,
@@ -254,7 +255,8 @@ class CivsService(
         { id, action -> afterCityAvailable(id, action) }, { id, action -> afterCityAvailable(id, action) },
         { id, transform -> mutateCity(id, allowDeletion = false, buffered = true, transform = transform) }, clock, residentFoods,
         maintenanceAssignment = roadMaintenance::maintenanceAssignment,
-        maintenanceHeld = roadMaintenance::holdsAssignment)
+        maintenanceHeld = roadMaintenance::holdsAssignment,
+        provisionStaffing = { city -> if (CivsVillageProvisions.enabled(city)) supply.provisionStaffing(city.id) else emptyMap() })
 
     private val placement: CivsPlacementSession
     private val buildingRequests: CivsBuildingRequests
@@ -543,6 +545,8 @@ class CivsService(
         }
 
     private fun changedSettlementSetting(city: Settlement, setting: CivSettlementSetting, enabled: Boolean): Settlement {
+        if (enabled && setting == CivSettlementSetting.GARRISON_SUPPLIES && !CivsVillageProvisions.supported(city))
+            throw CivsRejection("garrison-requires-physical-village")
         val before = city.settings ?: CivSettlementSettings()
         val after = before.with(setting, enabled)
         return if (before == after) city else CivsRules.validate(city.copy(settings = after, revision = Math.addExact(city.revision, 1)))

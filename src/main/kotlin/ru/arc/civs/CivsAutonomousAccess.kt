@@ -36,8 +36,10 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
         }
     }
 
-    fun hallApproach(city: Settlement): CivsTownHallApproach? {
-        val proof = hallWitness ?: return null
+    fun hallApproach(city: Settlement): CivsTownHallApproach? = hallApproach(city, hallWitness)
+
+    fun hallApproach(city: Settlement, proof: CivHallApproach?): CivsTownHallApproach? {
+        if (proof == null || proof !== hallWitness && hallWitness?.copy(sharedLanding = proof.sharedLanding) != proof) return null
         val building = city.building(proof.founding.id) ?: return null
         return CivsTownHallApproach.from(city, building, proof)?.takeIf { it.admitted(city, this) }
     }

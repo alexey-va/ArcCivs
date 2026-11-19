@@ -65,6 +65,18 @@ object CivsLogistics {
         require(city.contains(cargo.sourceEntrance.x, cargo.sourceEntrance.z) && cargo.sourceEntrance.y in -4_096..4_096)
     }.isSuccess
 
+    /** Other outputs with a paid recipe at this physical Auto workplace. */
+    internal fun alternateProducerOutputs(city: Settlement, building: CivBuilding): Set<String> {
+        if (city.autonomy?.paused != false || city.inventory?.mode != CivStorageMode.PHYSICAL) return emptySet()
+        return when {
+            building.type in CivsCarpentry.processors && building.production == null ->
+                CivsProduction.options(city, building).toSet()
+            building.type == BuildingType.BLACKSMITH -> CivsCarpentry.recipes.asSequence()
+                .filter { it.workshop == building.type && it.level <= building.level }.map { it.material }.toSet()
+            else -> emptySet()
+        }
+    }
+
     /** Admission only: a picked-up batch keeps its durable ownership if either endpoint later retires. */
     internal fun directInputAllowed(city: Settlement, cargo: CivCargo): Boolean {
         if (!cargo.directInput || cargo.inventoryBacked || !validCargo(city, cargo)) return false
@@ -78,7 +90,8 @@ object CivsLogistics {
             } == true
         val output = CivsProduction.material(source)
         return source.phase == BuildingPhase.ACTIVE && source.control != null && !CivsRules.isBuilder(city, source) &&
-            output != null && (target.type == BuildingType.BUILDER_HUT || output == cargo.material) && targetAvailable && target.control != null &&
+            output != null && (target.type == BuildingType.BUILDER_HUT || output == cargo.material ||
+                cargo.material in alternateProducerOutputs(city, source)) && targetAvailable && target.control != null &&
             warehouse.type == BuildingType.WAREHOUSE && warehouse.phase == BuildingPhase.ACTIVE && warehouse.control != null &&
             withinRoute(city, source.control, target.control)
     }
@@ -123,6 +136,8 @@ object CivsLogistics {
     }
 
     internal fun desiredStock(city: Settlement, building: CivBuilding): Map<String, Long> {
+        if (building.type == BuildingType.GUARD_TOWER && CivsVillageProvisions.tower(city)?.id == building.id)
+            return CivsVillageProvisions.loads
         if (building.type == BuildingType.TAVERN) return if (building.phase == BuildingPhase.ACTIVE && building.control != null)
             mapOf("BREAD" to CivsResidentFood.tavernStock(city)) else emptyMap()
         if (building.type == BuildingType.UNIVERSITY) return CivsProduction.inputs(city, building)
@@ -245,7 +260,7 @@ object CivsLogistics {
         val inputs = when {
             CivsRules.isBuilder(city, building) -> CivsMaterials.unpaid(city.construction?.materials.orEmpty())
             building.type == BuildingType.SAWMILL -> craftInputs
-            building.type == BuildingType.BLACKSMITH && craftInputs.isNotEmpty() -> craftInputs
+            building.type in CivsCarpentry.workshops && craftInputs.isNotEmpty() -> craftInputs
             else -> CivsProduction.inputs(city, building)
         }
         return inputs + when (building.type) {

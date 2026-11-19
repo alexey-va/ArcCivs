@@ -20,9 +20,17 @@ internal enum class CitizenTransferReaction(path: String, commonLines: Int) {
     }
 }
 
-internal data class CitizenTransferRemark(val key: String, val tick: Int) {
+internal data class CitizenRemark(val key: String, val tick: Int) {
     fun visible(now: Int): String? = key.takeIf { now - tick in 0 until CITIZEN_BUBBLE_TICKS }
 }
+
+internal fun citizenIdleForRemark(actor: CitizenActor, worker: CivWorker): Boolean =
+    actor.cycle.phase == CitizenPhase.IDLE && actor.plan.idleReason in IDLE_REMARK_REASONS &&
+        CivsResidents.hunger(worker) > 14 && worker.cargo == null && worker.pendingStock == null
+
+private val IDLE_REMARK_REASONS = setOf("unassigned", "no-construction", "no-research", "waiting-orders",
+    "waiting-reassignment", "waiting-growth", "storage-surplus")
+private val IDLE_REMARK_LINES = List(12) { "workers.idle-remark.line-$it" }
 
 /** Campfire, conversation and idle-walk admission and interruption. */
 internal class CivsCitizenLeisure(
@@ -53,7 +61,23 @@ internal class CivsCitizenLeisure(
         val tick = Bukkit.getCurrentTick()
         val previous = actor.transferRemark
         if (previous?.visible(tick) != null) return
-        actor.transferRemark = CitizenTransferRemark(reaction.draw(previous?.key), tick)
+        actor.transferRemark = CitizenRemark(reaction.draw(previous?.key), tick)
+    }
+
+    fun remarkWhileIdle(actor: CitizenActor, worker: CivWorker) {
+        if (viewers.isEmpty() || !citizenIdleForRemark(actor, worker)) return
+        val tick = Bukkit.getCurrentTick()
+        val due = actor.nextIdleRemarkTick
+        if (due == null) {
+            actor.nextIdleRemarkTick = tick + Random.nextInt(200, 901)
+            return
+        }
+        if (tick - due < 0) return
+        actor.nextIdleRemarkTick = tick + Random.nextInt(1_200, 2_101)
+        // A returning audience or newly idle group does not replay missed remarks together.
+        if (tick - due > 40 || actor.transferRemark?.visible(tick) != null || !observed(actor)) return
+        val previous = actor.idleRemark?.key
+        actor.idleRemark = CitizenRemark(IDLE_REMARK_LINES.filterNot { it == previous }.random(), tick)
     }
 
     fun releaseUnseen(remaining: List<CitizenViewer>) {
@@ -77,6 +101,7 @@ internal class CivsCitizenLeisure(
         if (actor.idleNap != null) nap.stop(actor)
         val visit = actor.social.visit ?: return
         actor.social.finish(Bukkit.getCurrentTick())
+        actor.nextIdleRemarkTick = null
         CivsDiagnostics.event(if (visit.partnerId == null) "citizen_campfire" else "citizen_meeting",
             "city" to actor.cityId, "worker" to actor.workerId,
             "action" to "end", "reason" to reason, "fire" to visit.fire?.position, "partner" to visit.partnerId, "seat" to visit.seat,
@@ -326,10 +351,19 @@ internal class CivsCitizenLeisure(
         val active = actor.route
         if (active != null) {
             val walk = active.wanderWalk ?: return
-            if (walk.home == home && walk.outsideHome == outsideHome) return
+            if (walk.home == home && walk.outsideHome == outsideHome) {
+                // Four remaining edges normally cover two resident updates. Keep one credit for fresh admissions.
+                if (walk.legLimit < walk.outingLimit && walk.remaining.size <= 4 && runtime.wanderBudget > 1 &&
+                    walk.territory.matches(city) && (actor.nextIdleNapAt?.let { now >= it } != true)) {
+                    runtime.wanderBudget--
+                    citizenRotateAfterAdmission(runtime.actors, actor.workerId)
+                    routes.extendWander(actor, city, active, walk)
+                }
+                return
+            }
             routes.cancelRoute(actor)
         }
-        if (runtime.wanderBudget <= 0 || !actor.wander.ready(now)) return
+        if (!actor.wander.ready(now, spreadStarts = city.workers.size > 1) || runtime.wanderBudget <= 0) return
         runtime.wanderBudget--
         citizenRotateAfterAdmission(runtime.actors, actor.workerId)
         routes.startWander(actor, city, home, outsideHome, now)

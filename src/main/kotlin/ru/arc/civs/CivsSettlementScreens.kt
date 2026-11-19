@@ -127,6 +127,9 @@ internal fun CivsUi.showGuide(player: Player) {
 }
 
 
+private fun CivSettlementSetting.availableIn(city: Settlement): Boolean =
+    this != CivSettlementSetting.GARRISON_SUPPLIES || CivsVillageProvisions.supported(city)
+
 internal fun CivsUi.showManagement(player: Player) {
     val city = city(player) ?: return
     present(player, "civs.management", "management.title", listOfNotNull(
@@ -140,7 +143,7 @@ internal fun CivsUi.showManagement(player: Player) {
         add(button(player, "stock", "stock.open", STOCK) { showStock(player) })
         add(button(player, "upgrades", "upgrades.open", PERSONAL) { showUpgrades(player) })
         add(button(player, "members", "members.open", PEOPLE) { showMembers(player) })
-        if (CivSettlementSetting.entries.any { host.canChangeSettlementSetting(player, it) })
+        if (CivSettlementSetting.entries.any { it.availableIn(city) && host.canChangeSettlementSetting(player, it) })
             add(button(player, "testing_settings", "testing-settings.open", PERSONAL, appearance = Action.SETTINGS) { showTestingSettings(player) })
         if (city.owner == player.uniqueId) add(button(player, "delete_city", "delete.open", DANGER) { showDeleteCity(player, city.id) })
         if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
@@ -150,26 +153,26 @@ internal fun CivsUi.showManagement(player: Player) {
 
 internal fun CivsUi.showTestingSettings(player: Player, error: Component? = null) {
     val city = city(player) ?: return
-    val allowed = CivSettlementSetting.entries.filter { host.canChangeSettlementSetting(player, it) }
+    val (allowed, readOnly) = CivSettlementSetting.entries.filter { it.availableIn(city) }
+        .partition { host.canChangeSettlementSetting(player, it) }
     if (allowed.isEmpty()) return showManagement(player)
     val settings = city.settings ?: CivSettlementSettings()
     fun key(setting: CivSettlementSetting) = "testing-settings.${setting.name.lowercase(Locale.ROOT).replace('_', '-')}"
     present(player, "civs.testing-settings", "testing-settings.title", listOfNotNull(
         body(player, "testing-settings.help"),
-        CivSettlementSetting.entries.filterNot { it in allowed }.takeIf { it.isNotEmpty() }?.let { readOnly ->
-            facts(player, readOnly.map { setting ->
-                val enabled = settings.enabled(setting)
-                tr(player, key(setting)) to tint(tr(player, if (enabled) "testing-settings.enabled" else "testing-settings.disabled"),
-                    if (enabled) COMMIT else WHITE)
-            })
-        }, error?.let(::body),
+        if (readOnly.isEmpty()) null else facts(player, readOnly.map { setting ->
+            val enabled = settings.enabled(setting)
+            tr(player, key(setting)) to tint(tr(player, if (enabled) "testing-settings.enabled" else "testing-settings.disabled"),
+                if (enabled) COMMIT else WHITE)
+        }), error?.let(::body),
     ), allowed.map { setting ->
         val enabled = settings.enabled(setting)
         valueButton(player, setting.name.lowercase(Locale.ROOT), if (enabled) "common.selected" else "testing-settings.choice",
             tr(player, key(setting)), if (enabled) COMMIT else WHITE,
             Component.newline().append(tr(player, "${key(setting)}-help")).append(Component.newline()).append(Component.newline())
                 .append(tr(player, if (enabled) "testing-settings.disable" else "testing-settings.enable")).append(Component.newline())) {
-            if (host.city(player)?.id != city.id || !host.canChangeSettlementSetting(player, setting))
+            val current = host.city(player)
+            if (current?.id != city.id || !setting.availableIn(current) || !host.canChangeSettlementSetting(player, setting))
                 showTestingSettings(player, text.reason(player, "not-authorized"))
             else perform(player, "civs.testing-settings", "testing-settings.title",
                 { host.setSettlementSetting(player, setting, !enabled) },

@@ -130,6 +130,36 @@ class CivsRoadTerracesTest : FunSpec({
             (roadHalfStepWalk(world, final) != null) shouldBe true
             (roadHalfStepWalk(world, final.reversed()) != null) shouldBe true
             for (x in -1..1) for (z in 2..4) world.getBlockAt(x, 64, z).type shouldBe Material.DIRT_PATH
+
+            // A later building level can retain an unfinished centre over a cavity, as at Auto1's forester.
+            // Exchange only the recorded cap when its finished side lane has a natural bearing.
+            val p = CivPosition(0, 64, 6)
+            val originalCap = CivPlanBlock(p, CivsEntrancePath.GRASS, "minecraft:coarse_dirt")
+            val founding = plan.copy(capturedSha256 = "a".repeat(64), terrain = plan.terrain!!.copy(blocks = listOf(originalCap)))
+            city = city.copy(buildings = city.buildings.map { if (it.id == source.id) it.copy(level = 2) else it })
+            fun goal(capture: CivPlacementPlan) = CivsRoadMaintenance.prepare(city, listOf(capture), proposeCuts = false)
+                .targets.single { it.floor == p }
+            val signed = goal(founding)
+            signed.preparedCentre shouldBe true
+            world.getBlockAt(0, 64, 6).type = Material.COARSE_DIRT
+            world.getBlockAt(0, 63, 6).type = Material.AIR
+            world.getBlockAt(0, 62, 6).type = Material.OAK_PLANKS
+            for (x in listOf(-1, 1)) {
+                world.getBlockAt(x, 64, 6).type = Material.DIRT_PATH
+                world.getBlockAt(x, 63, 6).type = Material.AIR
+            }
+            native.captureRoadUpkeep(city, city.workers.single(), signed) shouldBe null
+            world.getBlockAt(-1, 63, 6).type = Material.DIRT
+            native.captureRoadUpkeep(city, city.workers.single(), goal(plan)) shouldBe null
+            val cap = requireNotNull(native.captureRoadUpkeep(city, city.workers.single(), signed))
+            cap.changes shouldBe listOf(CivPlanBlock(p, "minecraft:coarse_dirt", "minecraft:dirt_path"))
+            world.getBlockAt(-1, 63, 6).type = Material.AIR
+            shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, cap) }
+            world.getBlockAt(-1, 63, 6).type = Material.DIRT
+            world.getBlockAt(0, 64, 6).type = Material.DIRT_PATH
+            native.validateRoadUpkeep(city, cap)
+            world.getBlockAt(0, 63, 6).type shouldBe Material.AIR
+            world.getBlockAt(0, 62, 6).type shouldBe Material.OAK_PLANKS
         }
     }
 
@@ -270,7 +300,14 @@ class CivsRoadTerracesTest : FunSpec({
             val supportBefore = support.blockData.clone()
             val head = world.getBlockAt(bank.x, bank.y + 1, bank.z)
             val headBefore = head.blockData.clone()
-            (native.captureRoadUpkeep(city, city.workers.single(), guard) != null) shouldBe true
+            val joined = requireNotNull(native.captureRoadUpkeep(city, city.workers.single(), guard))
+            val hillside = world.getBlockAt(bank.x - 1, bank.y - 1, bank.z)
+            val hillsideBefore = hillside.blockData.clone()
+            hillside.type = Material.AIR
+            native.captureRoadUpkeep(city, city.workers.single(), guard) shouldBe null
+            native.roadUpkeepPending(city, joined) shouldBe false
+            hillside.blockData = hillsideBefore
+            native.roadUpkeepPending(city, joined) shouldBe true
             for (material in listOf(Material.OAK_LOG, Material.OAK_LEAVES, Material.TORCH, Material.BEDROCK, Material.WATER, Material.LAVA)) {
                 bank.type = material
                 native.captureRoadUpkeep(city, city.workers.single(), guard) shouldBe null

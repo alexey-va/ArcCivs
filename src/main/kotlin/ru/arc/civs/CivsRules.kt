@@ -471,51 +471,68 @@ object CivsRules {
         }))
     }
 
-    fun needsAutoAssignment(city: Settlement, canReassign: (UUID) -> Boolean = { true }): Boolean =
-        CivsAutonomy.criticalAssignment(city, canReassign) != null ||
-            city.workers.any { it.assignment == null && !CivsResidents.isChild(it) } &&
-            city.buildings.any { automaticVacancies(city, it) > 0 }
+    fun needsAutoAssignment(city: Settlement, provisionStaffing: Map<UUID, Int> = emptyMap(),
+        canReassign: (UUID) -> Boolean = { true }): Boolean {
+        if (city.autonomy?.paused == true) return false
+        if (CivsAutonomy.criticalAssignment(city, canReassign) != null) return true
+        val idle = city.workers.filter { automaticWorker(city, it, canReassign) }
+        return idle.isNotEmpty() && automaticVacancies(city, provisionStaffing).any { building ->
+            building.type != BuildingType.WAREHOUSE || idle.any { it.pendingStock == null }
+        }
+    }
 
-    private fun automaticVacancies(city: Settlement, building: CivBuilding): Int {
-        val capacity = if (building.type == BuildingType.WAREHOUSE) minOf(1, slots(city, building)) else slots(city, building)
-        return (capacity - city.workers.count { it.assignment == building.id }).coerceAtLeast(0)
+    private fun automaticWorker(city: Settlement, worker: CivWorker, canReassign: (UUID) -> Boolean): Boolean =
+        worker.assignment == null && !CivsResidents.isChild(worker) &&
+            (city.autonomy == null || worker.cargo == null && worker.pendingStock == null && worker.hasCollectedItems != true) &&
+            canReassign(worker.id)
+
+    private fun automaticVacancies(city: Settlement, provisionStaffing: Map<UUID, Int>): List<CivBuilding> {
+        val autonomous = city.autonomy != null
+        val occupied = city.workers.groupingBy(CivWorker::assignment).eachCount()
+        val vacancies = city.buildings.flatMap { building ->
+            val raw = resource(building.type) != null
+            val builder = isBuilder(city, building)
+            val warehouse = building.type == BuildingType.WAREHOUSE
+            val capacity = slots(city, building)
+            val normal = if (warehouse || autonomous && !raw && !builder) 1 else capacity
+            val demand = if (autonomous) provisionStaffing[building.id] ?: 0 else 0
+            val first = (occupied[building.id] ?: 0) + 1
+            (first..minOf(capacity, maxOf(normal, demand))).map { seat ->
+                val priority = if (!autonomous) when {
+                    builder -> 0
+                    warehouse -> 1
+                    building.type == BuildingType.TOWN_HALL -> 3
+                    else -> 2
+                } else when {
+                    seat == 1 && builder -> 0
+                    seat == 1 && building.type == BuildingType.FORESTER -> 1
+                    seat == 1 && building.type == BuildingType.QUARRY -> 2
+                    seat == 1 && building.type == BuildingType.FARM -> 3
+                    seat == 1 && warehouse -> 4
+                    seat <= demand -> 5
+                    seat == 1 -> 6
+                    raw -> 7
+                    else -> 8
+                }
+                priority to building
+            }
+        }
+        return vacancies.sortedBy { it.first }.map { it.second }
     }
 
     /** Personal jobs remain assigned; autonomous towns may recover one idle critical worker. */
-    fun autoAssign(city: Settlement, actor: UUID, now: Long, canReassign: (UUID) -> Boolean = { true }): Settlement {
+    fun autoAssign(city: Settlement, actor: UUID, now: Long, provisionStaffing: Map<UUID, Int> = emptyMap(),
+        canReassign: (UUID) -> Boolean = { true }): Settlement {
         authorized(city, actor)
         check(now >= 0, "invalid-time")
+        if (city.autonomy?.paused == true) return city
         CivsAutonomy.criticalAssignment(city, canReassign)?.let { (worker, building) ->
             return assign(city, actor, worker, building, now)
         }
-        if (!needsAutoAssignment(city, canReassign)) return city
-        val vacancies = if (city.autonomy != null) {
-            val workplaces = city.buildings.sortedBy { when (it.type) {
-                BuildingType.BUILDER_HUT -> 0
-                BuildingType.FORESTER -> 1
-                BuildingType.QUARRY -> 2
-                BuildingType.FARM -> 3
-                BuildingType.WAREHOUSE -> 4
-                else -> 5
-            } }
-            fun vacant(building: CivBuilding, range: IntRange): List<CivBuilding> {
-                val assigned = city.workers.count { it.assignment == building.id }
-                return range.filter { it > assigned && it <= slots(city, building) }.map { building }
-            }
-            // Staff producers and their courier before giving any profession another resident.
-            workplaces.flatMap { vacant(it, 1..1) } +
-                workplaces.filter { resource(it.type) != null }.flatMap { vacant(it, 2..3) } +
-                workplaces.filter { it.type == BuildingType.BUILDER_HUT }.flatMap { vacant(it, 2..3) }
-        } else city.buildings.sortedBy { when {
-            isBuilder(city, it) -> 0
-            it.type == BuildingType.WAREHOUSE -> 1
-            it.type == BuildingType.TOWN_HALL -> 3
-            else -> 2
-        } }.flatMap { building -> List(automaticVacancies(city, building)) { building } }
-        val available = vacancies.toMutableList()
+        val available = automaticVacancies(city, provisionStaffing).toMutableList()
         val workers = city.workers.map { worker ->
             val index = available.indexOfFirst { worker.pendingStock == null || it.type != BuildingType.WAREHOUSE }
-            if (CivsResidents.isChild(worker) || worker.assignment != null || index < 0) worker else {
+            if (index < 0 || !automaticWorker(city, worker, canReassign)) worker else {
                 val building = available.removeAt(index)
                 worker.copy(assignment = building.id,
                     nextDeliveryAt = maxOf(add(worker.nextDeliveryAt, 1),

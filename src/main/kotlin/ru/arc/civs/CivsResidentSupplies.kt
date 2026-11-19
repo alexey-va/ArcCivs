@@ -394,6 +394,41 @@ internal class CivsResidentSupplies(
         }
     }
 
+    /** An accepted supply observation nominates only fully stocked lots at the outpost. */
+    fun issueGarrisonStock(snapshot: CivSupplySnapshot) {
+        val city = records.cities[snapshot.cityId] ?: return
+        val tower = CivsVillageProvisions.tower(city) ?: return
+        if (city.id in records.busy || city.id in records.unhealthy || inventoryJournal.pending(city.id)) return
+        val stock = snapshot.stores[tower.id]?.stock ?: return
+        val at = authority.now()
+        val loads = CivsVillageProvisions.ready(city, stock, at)
+        if (loads.isEmpty()) return
+        runCatching {
+            authority.inventoryMutation(city.id, { current ->
+                if (CivsVillageProvisions.tower(current)?.id != tower.id ||
+                    CivsVillageProvisions.ready(current, stock, at) != loads) return@inventoryMutation null
+                storage.prepareWork(current, tower.id, loads, emptyMap(), emptyList())
+            }, keepViewersOpen = true) { current, inventory ->
+                val settings = requireNotNull(current.settings)
+                current.copy(inventory = inventory, revision = Math.addExact(current.revision, 1),
+                    settings = settings.copy(lastGarrisonIssue = settings.lastGarrisonIssue.orEmpty() + loads.mapValues { at }))
+            }
+        }.onSuccess { receipt ->
+            receipt.whenCompleteSync(tasks) { saved, failure ->
+                if (failure != null) logGarrisonFailure(city, failure)
+                else if (saved?.settings?.lastGarrisonIssue?.let { times -> loads.keys.all { times[it] == at } } == true)
+                    CivsDiagnostics.event("garrison_supplies_issued", "city" to city.id, "building" to tower.id,
+                        "materials" to loads, "revision" to saved.revision)
+            }
+        }.onFailure { logGarrisonFailure(city, it) }
+    }
+
+    private fun logGarrisonFailure(city: Settlement, failure: Throwable) {
+        if (CivsDiagnostics.rejection(failure)?.reason !in setOf("city-busy", "materials-missing", "storage-unavailable",
+                "chunk-unloaded", "chunks-unloaded", "stale-delivery"))
+            authority.log("issue garrison supplies ${city.id}", failure, city.id)
+    }
+
     /** Reuse the accepted bounded capture; no whole-city native read belongs in an Auto top-up pulse. */
     private fun autoSupplyObservation(city: Settlement): CivSupplySnapshot? {
         val snapshot = supply.observation(city.id)

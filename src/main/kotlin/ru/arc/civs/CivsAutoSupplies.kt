@@ -69,8 +69,19 @@ internal class CivsAutoSupplies {
                 ?.let { CivsCarpentry.valid(city, it, job) } == true }
             val craftReserves = linkedMapOf<UUID, MutableMap<String, Long>>()
             val desired = linkedMapOf<UUID, MutableMap<String, Long>>()
+            val garrison = CivsVillageProvisions.tower(city)?.id
+            // Imports may cover goods the village cannot make. Its own suppliers get the orders for their products.
+            val localProducts = if (garrison == null) emptySet() else buildSet {
+                city.buildings.filter { it.id in active && it.control != null }.forEach { building ->
+                    if (building.type == BuildingType.FORESTER) addAll(CivsProduction.options(city, building))
+                    else CivsProduction.material(building)?.let(::add)
+                    addAll(CivsLogistics.alternateProducerOutputs(city, building))
+                    if (building.type == BuildingType.QUARRY) add("COBBLESTONE")
+                }
+                crafts.values.forEach { add(it.material) }
+            }
             fun require(buildingId: UUID, materials: Map<String, Long>) {
-                if (!CivsResearch.automaticGrantAllowed(city, buildingId)) return
+                if (buildingId == garrison || !CivsResearch.automaticGrantAllowed(city, buildingId)) return
                 val target = desired.getOrPut(buildingId, ::linkedMapOf)
                 materials.filterValues { it > 0 }.forEach { (material, count) -> target.merge(material, count, Math::max) }
             }
@@ -162,7 +173,7 @@ internal class CivsAutoSupplies {
                     val required = (count - (incoming[buildingId]?.get(material) ?: 0L) - elsewhere(sources, material, targetRelays))
                         .coerceIn(0, BUFFER_PER_MATERIAL)
                     val shortage = required - (local?.stock?.get(material) ?: 0L) - pending(buildingId, material)
-                    if (shortage <= 0) return@material
+                    if (shortage <= 0 || material in localProducts) return@material
                     // Food enters a real depot; the ordinary tavern request owns its physical courier delivery.
                     val depot = if (building.type == BuildingType.TAVERN && material == "BREAD") targetRelays.filter {
                         CivSupplyRoom(it.capacity, snapshot.stackSizes).fits(material) > 0

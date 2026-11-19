@@ -378,7 +378,9 @@ internal class CivsAutonomousDevelopment(
             deferredInitialPlans.remove(city.id)
             autonomyRequests[city.id] = request
             autonomyProgress[city.id] = CivsAutonomyView("planning", goal.type, goal.targetLevel)
-            runCatching { autonomousPlacement.plan(civsPlanBoardCapture(city), recoverPerimeter = recoverPerimeter) }
+            val laterGrowth = if (!recoverPerimeter && adopted != null && goal.buildingId == null && goal.targetLevel == 1)
+                CivsAutonomy.laterGrowthTypes(city, goal.type) else emptyList()
+            runCatching { autonomousPlacement.plan(civsPlanBoardCapture(city), recoverPerimeter = recoverPerimeter, laterGrowth = laterGrowth) }
                 .getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { plan, failure ->
                 if (autonomyRequests[city.id] != request) return@whenCompleteSync
                 if (failure != null) {
@@ -417,9 +419,12 @@ internal class CivsAutonomousDevelopment(
                             "retry_at" to autonomyPlanRetryAt[city.id])
                     } else autonomyFailed(city.id, goal, failure)
                 } else runCatching { mutateWhenAvailable(city.id) { current ->
+                    val laterHouse = BuildingType.HOUSE in laterGrowth && requireNotNull(plan).plots.any {
+                        it.building.type == BuildingType.HOUSE && city.building(it.building.id) == null
+                    }
                     rejectIf(autonomyRequests[city.id] != request || civsPlanBoardLayoutKey(current) != key ||
-                        current.construction != null || current.constructionQueue.orEmpty().isNotEmpty(),
-                        "stale-development")
+                        current.construction != null || current.constructionQueue.orEmpty().isNotEmpty() ||
+                        laterHouse && !CivsAutonomy.hasHousingShortage(current), "stale-development")
                     CivsRules.validate(current.copy(revision = current.revision + 1,
                         autonomy = requireNotNull(current.autonomy).copy(layoutHalfWidth = requireNotNull(plan).halfWidth,
                             plan = CivsSettlementPlans.detached(plan))))

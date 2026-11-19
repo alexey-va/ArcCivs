@@ -205,6 +205,7 @@ internal class CivsCitizenWork(
                 runtime.statuses[actor.workerId] = it
                 animateWork(actor, city, world, now)
                 leisure.speak(actor, CitizenVoiceEvent.IDLE)
+                leisure.remarkWhileIdle(actor, worker)
                 return
             }
         }

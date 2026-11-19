@@ -204,7 +204,11 @@ private fun replayHall(spec: JsonObject, out: Path) {
                 val p=junction.keys.firstOrNull { it.x==flat.x && it.z==flat.z } ?: flat
                 if (hall.control?.let { it.x == p.x && it.z == p.z } != true) add(p)
             }
-            for (d in 1..feet.lastIndex) if (feet[d] != feet[d-1]) for (s in listOf(axis-2,axis+2)) add(point(s,rowGrades.getValue(d),d))
+            for (d in 1..feet.lastIndex) if (feet[d] != feet[d-1]) for (s in listOf(axis-2,axis+2)) {
+                val previous = point(s,rowGrades.getValue(d),d)
+                val lower = point(s,feet.last()-1,d)
+                add(if (approach.loweredFrom(lower) == previous) lower else previous)
+            }
         }
         val targets = all.filter { target ->
             target.floor in required || spec["includeSeams"]?.asBoolean == true && target.floor in native &&

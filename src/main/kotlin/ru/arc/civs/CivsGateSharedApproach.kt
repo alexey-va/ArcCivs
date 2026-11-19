@@ -57,7 +57,12 @@ data class CivGateSharedApproach(
 
 /** Detached, bounded projection of an existing plan; no schematic blocks or second registry. */
 internal data class CivSharedRoadCapture(val source: CivBuilding, val capture: CivPerimeterCapture,
-    val route: List<CivPosition>, val pavement: List<CivPlanBlock>)
+    val route: List<CivPosition>, val pavement: List<CivPlanBlock>, val sameLevel: Boolean = true) {
+    val preparedCentres by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        val centres = route.mapTo(hashSetOf()) { it.copy(y = it.y - 1) }
+        pavement.filter { it.after == "minecraft:coarse_dirt" && it.position in centres }.mapTo(hashSetOf()) { it.position }
+    }
+}
 
 internal object CivsGateSharedApproaches {
     /** A relocated control does not rewrite the immutable approach. Receipts still pin the full current owner. */
@@ -133,11 +138,18 @@ internal object CivsGateSharedApproaches {
             val plan = plans[source.id] ?: continue
             val capture = CivPerimeterCapture(plan.id, plan.capturedSha256 ?: continue)
             val route = plan.route ?: continue
+            val sameLevel = sameRoadSource(plan.building, source)
+            // A level upgrade can keep the founding street; its marked centre survives at the
+            // same doorway. Only a current-level donor may still license a horizontal gate detour.
+            val old = plan.building
+            val upgraded = !source.type.isInfrastructure && old.id == source.id && old.type == source.type &&
+                old.level in 1 until source.level && old.anchor == source.anchor && old.rotation == source.rotation &&
+                old.bounds == source.bounds && old.entrance == source.entrance && old.transit == source.transit
             if (plan.adminPlacement || plan.id != CivsWarehouseRefit.retainedPlanId(source) || !capture.valid() ||
-                plan.cityId != city.id || plan.worldId != city.worldId || !sameRoadSource(plan.building, source) ||
+                plan.cityId != city.id || plan.worldId != city.worldId || !sameLevel && !upgraded ||
                 route.size !in 4..256 || route.last() != source.entrance) continue
             val pavement = plan.pavement
-            put(source.id, CivSharedRoadCapture(source, capture, route.toList(), pavement.toList()))
+            put(source.id, CivSharedRoadCapture(source, capture, route.toList(), pavement.toList(), sameLevel))
         }
     }
 
@@ -146,9 +158,9 @@ internal object CivsGateSharedApproaches {
         if (!currentOwners(city, repair)) return false
         val source = access.sharedRoadCaptures[proof.source.id] ?: return false
         val donor = access.sharedRoadCaptures[proof.donor.id] ?: return false
-        if (source.capture != proof.sourceCapture || source.route != repair.originalRoute ||
+        if (!source.sameLevel || !donor.sameLevel || source.capture != proof.sourceCapture || source.route != repair.originalRoute ||
             donor.capture != proof.donorCapture || donor.route != proof.donorRoute) return false
-        val hall = access.hallApproach(city)
+        val hall = if (proof.hall == null) access.hallApproach(city) else access.hallApproach(city, proof.hall)
         return hall?.witness == proof.hall && (hall?.travel(donor.route) ?: donor.route) == proof.donorTravel &&
             hall?.surfaces.orEmpty().keys.toSet() == proof.hallFloors.toSet()
     }
@@ -164,7 +176,7 @@ internal object CivsGateSharedApproaches {
                 source.capture.id != source.source.id || !CivsGateRefit.validTransit(source.source) ||
                 city.roadRouteOverrides?.containsKey(source.source.id.toString()) == true) continue
             for (donor in access.sharedRoadCaptures.values) {
-                if (donor.source.type.isInfrastructure || city.roadRouteOverrides?.containsKey(donor.source.id.toString()) == true) continue
+                if (!donor.sameLevel || donor.source.type.isInfrastructure || city.roadRouteOverrides?.containsKey(donor.source.id.toString()) == true) continue
                 val travel = hall?.travel(donor.route) ?: donor.route
                 val route = replacement(source.route, donor.route, travel) ?: continue
                 val proof = CivGateSharedApproach(source.source, source.capture, donor.source, donor.capture, donor.route,

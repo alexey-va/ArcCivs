@@ -294,7 +294,8 @@ internal class CivsInventoryJournal(
             val before = tx.containerRelocation?.before(tx.after) ?: requireNotNull(tx.bufferPickup).before(tx.after)
             if (cities[tx.cityId] != before && cities[tx.cityId] != tx.after) return fail(CivsRejection("stale-city"))
         }
-        if (tx.upkeep?.work?.upkeep?.let { it.hall != null || CivsGateSharedApproaches.repair(tx.after, it) != null } == true && !gateVerified) {
+        if (tx.upkeep?.work?.upkeep?.let { it.hall != null || it.preparedCentre || it.forkPartner != null ||
+                CivsGateSharedApproaches.repair(tx.after, it) != null } == true && !gateVerified) {
             runCatching { verifyHallCaptures(tx) }.getOrElse { CompletableFuture.failedFuture(it) }
                 .whenCompleteSync(tasks) { _, failure ->
                     if (failure != null) fail(failure) else applyInventory(tx, result, gateVerified = true)
@@ -536,7 +537,8 @@ internal class CivsInventoryJournal(
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
                 if (tx.gateRefit != null || tx.warehouseRefit != null || tx.authoredVegetation != null ||
-                    tx.upkeep?.work?.upkeep?.let { it.hall != null || CivsGateSharedApproaches.repair(tx.after, it) != null } == true ||
+                    tx.upkeep?.work?.upkeep?.let { it.hall != null || it.preparedCentre || it.forkPartner != null ||
+                        CivsGateSharedApproaches.repair(tx.after, it) != null } == true ||
                     tx.containerRelocation?.buffer != null || tx.bufferPickup != null) {
                     rejectIf(city != tx.after, "stale-city")
                     applyInventory(tx, null)

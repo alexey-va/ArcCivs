@@ -92,8 +92,10 @@ class CivsBlacksmithInputReserveTest : FunSpec({
         CivsLogistics.workerWorkReserve(carpenterCity, h.worker, batch) shouldBe batch
         val smeltery = h.smith.copy(type = BuildingType.SMELTERY, production = "CHARCOAL")
         val smelterCity = h.city.copy(buildings = h.city.buildings.map { if (it.id == smeltery.id) smeltery else it })
-        CivsLogistics.workerWorkReserve(smelterCity, h.worker, h.job.inputs) shouldBe
+        CivsLogistics.workerWorkReserve(smelterCity, h.worker) shouldBe
             mapOf("OAK_LOG" to 8L, "OAK_PLANKS" to 6L)
+        val glass = mapOf("SAND" to 8L, "CHARCOAL" to 1L)
+        CivsLogistics.workerWorkReserve(smelterCity, h.worker, glass) shouldBe glass
     }
 })
 

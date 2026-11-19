@@ -189,23 +189,27 @@ data class CivMineLevelWitness(val building: CivBuilding, val version: Int?, val
     }
 }
 
-enum class CivSettlementSetting { CHUNK_LOADING, IMMORTAL_RESIDENTS, AUTO_CONSTRUCTION_MATERIALS }
+enum class CivSettlementSetting { CHUNK_LOADING, IMMORTAL_RESIDENTS, AUTO_CONSTRUCTION_MATERIALS, GARRISON_SUPPLIES }
 
 /** Existing towns retain permission-controlled chunk loading; testing never turns on by migration. */
 data class CivSettlementSettings(
     val chunkLoading: Boolean = true,
     val immortalResidents: Boolean = false,
     val autoConstructionMaterials: Boolean = false,
+    val garrisonSupplies: Boolean = false,
+    val lastGarrisonIssue: Map<String, Long>? = null,
 ) {
     fun enabled(setting: CivSettlementSetting): Boolean = when (setting) {
         CivSettlementSetting.CHUNK_LOADING -> chunkLoading
         CivSettlementSetting.IMMORTAL_RESIDENTS -> immortalResidents
         CivSettlementSetting.AUTO_CONSTRUCTION_MATERIALS -> autoConstructionMaterials
+        CivSettlementSetting.GARRISON_SUPPLIES -> garrisonSupplies
     }
     fun with(setting: CivSettlementSetting, enabled: Boolean): CivSettlementSettings = when (setting) {
         CivSettlementSetting.CHUNK_LOADING -> copy(chunkLoading = enabled)
         CivSettlementSetting.IMMORTAL_RESIDENTS -> copy(immortalResidents = enabled)
         CivSettlementSetting.AUTO_CONSTRUCTION_MATERIALS -> copy(autoConstructionMaterials = enabled)
+        CivSettlementSetting.GARRISON_SUPPLIES -> copy(garrisonSupplies = enabled)
     }
 }
 

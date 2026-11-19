@@ -412,7 +412,7 @@ class CivsCommand(
             } }
             val enabled = when (args.getOrNull(3)) { "on" -> true; "off" -> false; else -> null }
             if (args.size != 4 || cityId == null || setting == null || enabled == null) {
-                sender.sendMessage("Usage: civs settings <city UUID> <chunk-loading|immortal-residents|auto-construction-materials> <on|off>")
+                sender.sendMessage("Usage: civs settings <city UUID> <chunk-loading|immortal-residents|auto-construction-materials|garrison-supplies> <on|off>")
             } else configureSetting(cityId, setting, enabled).whenCompleteSync(tasks) { _, failure ->
                 sender.sendMessage("ARCCIVS_SETTING " + Gson().toJson(mapOf("city" to cityId.toString(), "setting" to setting.name,
                     "enabled" to enabled, "committed" to (failure == null), "failure" to failure?.let { CivsDiagnostics.rejection(it)?.reason ?: it.javaClass.simpleName })))

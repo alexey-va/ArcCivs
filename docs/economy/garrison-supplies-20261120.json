@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "title": "Расход гарнизона закрытого Auto1 на Lab, 20 ноября 2026",
+  "assumptions": [
+    "Участник в полях калькулятора означает один город с включённым снабжением. Настройка остальных городов выключена.",
+    "Три допущения о поставках за сутки: за 0,25 активного часа принята одна партия древесного угля, за 1 час по одной партии всех семи видов, за 4 часа по четыре партии каждого вида. Это сценарии, реальная частота ещё не измерена.",
+    "Исходное состояние 0.1.348. Каждая новая операция уничтожает только полную нативную партию в одной обслуживаемой заставе. Несколько готовых видов могут войти в один чек. Курьерский перенос не расходует предмет второй раз.",
+    "Отдельный лимит города на каждый материал вытекает из 300 реальных секунд между успешными списаниями: максимум 288 партий за 24 часа и 2016 за неделю в полуоткрытом окне. Пропущенные интервалы не накапливаются.",
+    "Валюта, опыт игрока, физические изумруды и кристаллы не участвуют. Внутренний опыт профессии и пополнение обычных входов мастерской относятся к фактическому производству."
+  ],
+  "participants": [1, 1, 1],
+  "currencies": {
+    "vault": {"minor_per_unit": 100, "flows": []},
+    "tokens": {"minor_per_unit": 100, "flows": []},
+    "player_xp": {"minor_per_unit": 1, "flows": []},
+    "emerald": {"minor_per_unit": 1, "flows": []},
+    "elitemobs_crystals": {"minor_per_unit": 1, "flows": []},
+    "OAK_LOG": {
+      "minor_per_unit": 1,
+      "flows": [{
+        "id": "garrison_oak_log", "kind": "burn",
+        "source": "CivsVillageProvisions.loads; CivsResidentSupplies.issueGarrisonStock",
+        "basis": "Полная партия OAK_LOG из физического запаса заставы, один расход на принятую партию.",
+        "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "major"}, "events_per_player_day": [0, 0, 0]},
+        "after": {
+          "enabled": true, "amount_per_event": {"value": "16", "unit": "major"},
+          "events_per_player_day": [0, 1, 4],
+          "player_daily_cap": {"value": "4608", "unit": "major"},
+          "network_weekly_cap": {"value": "32256", "unit": "major"}
+        }
+      }]
+    },
+    "WHEAT": {
+      "minor_per_unit": 1,
+      "flows": [{
+        "id": "garrison_wheat", "kind": "burn",
+        "source": "CivsVillageProvisions.loads; CivsResidentSupplies.issueGarrisonStock",
+        "basis": "Полная партия WHEAT из физического запаса заставы, один расход на принятую партию.",
+        "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "major"}, "events_per_player_day": [0, 0, 0]},
+        "after": {
+          "enabled": true, "amount_per_event": {"value": "8", "unit": "major"},
+          "events_per_player_day": [0, 1, 4],
+          "player_daily_cap": {"value": "2304", "unit": "major"},
+          "network_weekly_cap": {"value": "16128", "unit": "major"}
+        }
+      }]
+    },
+    "GRAVEL": {
+      "minor_per_unit": 1,
+      "flows": [{
+        "id": "garrison_gravel", "kind": "burn",
+        "source": "CivsVillageProvisions.loads; CivsResidentSupplies.issueGarrisonStock",
+        "basis": "Полная партия GRAVEL из физического запаса заставы, один расход на принятую партию.",
+        "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "major"}, "events_per_player_day": [0, 0, 0]},
+        "after": {
+          "enabled": true, "amount_per_event": {"value": "8", "unit": "major"},
+          "events_per_player_day": [0, 1, 4],
+          "player_daily_cap": {"value": "2304", "unit": "major"},
+          "network_weekly_cap": {"value": "16128", "unit": "major"}
+        }
+      }]
+    },
+    "GLASS": {
+      "minor_per_unit": 1,
+      "flows": [{
+        "id": "garrison_glass", "kind": "burn",
+        "source": "CivsVillageProvisions.loads; CivsResidentSupplies.issueGarrisonStock",
+        "basis": "Полная партия GLASS из физического запаса заставы, один расход на принятую партию.",
+        "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "major"}, "events_per_player_day": [0, 0, 0]},
+        "after": {
+          "enabled": true, "amount_per_event": {"value": "8", "unit": "major"},
+          "events_per_player_day": [0, 1, 4],
+          "player_daily_cap": {"value": "2304", "unit": "major"},
+          "network_weekly_cap": {"value": "16128", "unit": "major"}
+        }
+      }]
+    },
+    "CHARCOAL": {
+      "minor_per_unit": 1,
+      "flows": [{
+        "id": "garrison_charcoal", "kind": "burn",
+        "source": "CivsVillageProvisions.loads; CivsResidentSupplies.issueGarrisonStock",
+        "basis": "Полная партия CHARCOAL из физического запаса заставы, один расход на принятую партию.",
+        "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "major"}, "events_per_player_day": [0, 0, 0]},
+        "after": {
+          "enabled": true, "amount_per_event": {"value": "8", "unit": "major"},
+          "events_per_player_day": [1, 1, 4],
+          "player_daily_cap": {"value": "2304", "unit": "major"},
+          "network_weekly_cap": {"value": "16128", "unit": "major"}
+        }
+      }]
+    },
+    "IRON_SHOVEL": {
+      "minor_per_unit": 1,
+      "flows": [{
+        "id": "garrison_iron_shovel", "kind": "burn",
+        "source": "CivsVillageProvisions.loads; CivsResidentSupplies.issueGarrisonStock",
+        "basis": "Полная партия IRON_SHOVEL из физического запаса заставы, один расход на принятую партию.",
+        "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "major"}, "events_per_player_day": [0, 0, 0]},
+        "after": {
+          "enabled": true, "amount_per_event": {"value": "3", "unit": "major"},
+          "events_per_player_day": [0, 1, 4],
+          "player_daily_cap": {"value": "864", "unit": "major"},
+          "network_weekly_cap": {"value": "6048", "unit": "major"}
+        }
+      }]
+    },
+    "BOOK": {
+      "minor_per_unit": 1,
+      "flows": [{
+        "id": "garrison_book", "kind": "burn",
+        "source": "CivsVillageProvisions.loads; CivsResidentSupplies.issueGarrisonStock",
+        "basis": "Полная партия BOOK из физического запаса заставы, один расход на принятую партию.",
+        "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "major"}, "events_per_player_day": [0, 0, 0]},
+        "after": {
+          "enabled": true, "amount_per_event": {"value": "4", "unit": "major"},
+          "events_per_player_day": [0, 1, 4],
+          "player_daily_cap": {"value": "1152", "unit": "major"},
+          "network_weekly_cap": {"value": "8064", "unit": "major"}
+        }
+      }]
+    }
+  }
+}

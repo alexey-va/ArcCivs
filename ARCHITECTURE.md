@@ -143,6 +143,17 @@ both modes. Existing food in an eligible building's exact native control barrel
 remains accessible during SITE and CONSTRUCTING. Other indexed holders still
 require ACTIVE, as does tavern service. Native ownership, reach, slot debit and receipt validation remain
 authoritative, without another food grant.
+
+In a physical Auto village the optional `garrison-supplies` setting gives the
+first active, staffed guard tower recurring supply orders. Couriers bring logs,
+wheat, gravel, glass, charcoal, shovels and books to its own stores. Each kind
+can be issued once per five minutes while supplied. The stock observation
+nominates complete lots and the inventory journal debits the actual plain
+items at the tower and records the issue together. The next load can start
+travelling immediately. Missing goods, downtime and re-enabling the setting
+do not accumulate additional issues. Automatic grants skip the outpost and
+goods the village can produce locally. Existing villages default to off.
+
 Population uses the same active-minute ageing and family rules after
 migration, without offline catch-up. Planning submits sites and upgrades through
 the existing schematic, control, queue, builder-credit and placement journals;
@@ -691,10 +702,10 @@ on waking. Support and standing headroom are rechecked during sleep. If the head
 is blocked, the shared recovery budget can select a clear spot in the same home
 through a clear swept sleeping envelope; without room the low pose is retained
 without work or travel. A cramped shelter does not start a sleeping pose.
-Idle residents walk through their settlement in short trips. Each trip starts
-at the resident's current feet. A bounded local search picks a reachable
-destination, favours public paths and supplies the steps for the trip. A new
-trip can continue along the street or take another direction. A resident inside
+Idle residents start at their current feet and favour public paths. On a free
+walk they aim for 24–64 steps, choosing reachable sections with a bounded local
+search. While following one section they can prepare the next from its endpoint.
+Residents start at individually staggered times. A resident inside
 a building can use its exit and continue outdoors.
 If a resident stops with only the edge of a foot on a raised block, the walk
 can start by stepping down to a reachable floor in the same column.
@@ -735,6 +746,9 @@ two to four lines. One packet text display follows the current speaker. Each
 turn lasts at least three seconds. The runtime shuffles 72 conversations and
 uses the whole pool before repeating. A viewer must stay within 24 blocks of
 each participant. Work, hunger, danger or nightfall can end the meeting early.
+Idle adults with a nearby viewer can also speak a short line to themselves.
+Each has its own delay, skips the previous line, and yields the display to a
+conversation or a remark about an item transfer.
 The same overhead display shows short remarks when a resident arrives with
 goods and cannot unload them, or finds their bag full during pickup. A producer
 with goods still in their bag can comment on the full barrel once per episode.

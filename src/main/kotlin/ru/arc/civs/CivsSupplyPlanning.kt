@@ -7,6 +7,7 @@ import java.util.UUID
 internal fun civSupplyInputs(city: Settlement): Any = listOf(
     city.worldId, city.center, city.radius, city.buildings, city.construction, city.pendingDeletion, city.research,
     city.inventory?.mode, city.inventory?.containers, city.inventory?.constructionBuffers, city.autonomy?.paused, city.autonomy?.storage,
+    city.settings?.garrisonSupplies == true,
     city.inventory?.takeIf { it.mode == CivStorageMode.VIRTUAL },
     city.workers.map { listOf(it.id, it.assignment, it.completedCycles, it.inventory, it.items, it.cargo, it.pendingStock, it.childMinutes != null) },
     city.stock.takeIf { city.autonomy != null },
@@ -73,7 +74,8 @@ internal class CivsSupplyPlanning(
                     observed.capacity, building.type,
                     redistributionDepot = city.autonomy?.paused == false && city.inventory?.mode == CivStorageMode.PHYSICAL &&
                         building.phase == BuildingPhase.ACTIVE && building.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) &&
-                        observed.unavailable == 0 && observed.containers in 1..64 && observed.key.upgradingOrder == null, bufferedStock = buffered)
+                        observed.unavailable == 0 && observed.containers in 1..64 && observed.key.upgradingOrder == null,
+                    bufferedStock = buffered, alternateOutputs = CivsLogistics.alternateProducerOutputs(city, building))
             }.toMap()
             requests = CivsLogistics.requests(city) { stores?.get(it)?.stock.orEmpty() }
             // The universe also includes arbitrary plain excess such as gravel and dirt.
@@ -89,8 +91,11 @@ internal class CivsSupplyPlanning(
             val building = worker.assignment?.let(city::building)
             if (worker.cargo == null && !CivsResidents.isChild(worker) && building?.type in CivsCarpentry.workshops && building != null &&
                 CivsRules.productionAvailable(city, building) && building.control != null) {
+                val processor = building.type in CivsCarpentry.processors
                 craftWorkers += CivCraftWorker(worker.id, building.id, worker.completedCycles, building.level,
-                    CivsEquipment.available(worker, emptyMap()).toMap(), CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") == true, building.type)
+                    CivsEquipment.available(worker, emptyMap()).toMap(), CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") == true, building.type,
+                    if (processor) CivsProduction.options(city, building).toSet() else null,
+                    if (!processor) null else building.production ?: CivsProduction.material(building).takeIf { city.autonomy == null })
             }
             if (worker.cargo == null && !unavailable(worker.id) && !CivsResidents.isChild(worker) && building?.type == BuildingType.WAREHOUSE &&
                 building.phase == BuildingPhase.ACTIVE && building.control != null) {

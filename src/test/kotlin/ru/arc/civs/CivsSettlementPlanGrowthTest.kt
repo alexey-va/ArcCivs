@@ -347,6 +347,67 @@ class CivsSettlementPlanGrowthTest : FunSpec({
         }
     }
 
+    test("a geometric expansion refusal yields to needed housing on the same survey and the reservation survives reload") {
+        val prior = requireNotNull(CivsSettlementPlans.current(legacy))
+        val gateBounds = prior.gates.first()
+        val gate = CivSettlementPiece(UUID(94, 902), BuildingType.GATE, gateBounds, gateBounds.min, emptyList())
+        val established = legacy.copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
+            research = CivResearchState(CivResearchId.entries.toSet()),
+            buildings = prior.plots.map { it.building.copy(level = it.building.type.maxLevel, phase = BuildingPhase.ACTIVE) } +
+                CivsInfrastructure.building(gate).copy(phase = BuildingPhase.ACTIVE))
+        val city = established.copy(workers = List(CivsRules.beds(established)) { index ->
+            CivWorker(UUID(94, 1_000L + index), "Resident $index", null)
+        })
+        val access = CivAutonomousAccess(prior.routes.mapKeys { UUID.fromString(it.key) }, listOf(gate))
+        val surface = settlementPlanSurface(city)
+        val templates = settlementPlanTemplates()
+        val profile = CivsSettlementGrowth.profile(city)
+        val primary = profile.last()
+        primary shouldBe BuildingType.WAREHOUSE
+        val attempted = mutableListOf<BuildingType>()
+        var refusal = CivsRejection("autonomy-layout-obstructed", mapOf("stage" to "infrastructure", "protected-terrain" to "1"))
+        mockkObject(CivsSettlementPlans)
+        try {
+            every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                val type = arg<List<BuildingType>>(5).last()
+                if (attempted.lastOrNull() != type) attempted += type
+                arg<CivTerrainSurface>(2) shouldBe surface
+                arg<CivAutonomousAccess>(3) shouldBe access
+                throw refusal
+            }
+            fun plan(current: Settlement = city) =
+                CivsSettlementPlans.prepareDevelopmentGrowth(civsPlanBoardCapture(current), templates, surface, access,
+                    profile, null, CivsAutonomy.laterGrowthTypes(current, primary))
+
+            val grown = plan()
+            val home = grown.plots.single { city.building(it.building.id) == null }
+            home.building.type shouldBe BuildingType.HOUSE
+            attempted shouldBe listOf(primary, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM, BuildingType.HOUSE)
+            grown.deferredPerimeter?.plotId shouldBe home.building.id
+            grown.gates shouldBe prior.gates
+            prior.routes.forEach { (id, route) -> grown.routes[id] shouldBe route }
+
+            val adopted = city.copy(autonomy = requireNotNull(city.autonomy).copy(plan = grown))
+            val gson = Gson()
+            val restarted = gson.fromJson(gson.toJson(adopted), Settlement::class.java)
+            val next = requireNotNull(CivsAutonomy.nextGoal(restarted))
+            next.type shouldBe BuildingType.HOUSE
+            CivsAutonomy.infrastructureDue(restarted, next) shouldBe false
+            CivsSettlementPlans.next(restarted, next.type) shouldBe home
+
+            attempted.clear()
+            shouldThrow<CivsRejection> { plan(city.copy(workers = city.workers.dropLast(1))) }.reason shouldBe refusal.reason
+            attempted shouldBe listOf(primary, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)
+
+            attempted.clear()
+            refusal = CivsRejection("chunks-unloaded")
+            shouldThrow<CivsRejection> { plan() }.reason shouldBe "chunks-unloaded"
+            attempted shouldBe listOf(primary)
+        } finally {
+            unmockkObject(CivsSettlementPlans)
+        }
+    }
+
     test("a surveyed Hall II city can admit its next university without rebuilding a paid perimeter") {
         val old = requireNotNull(CivsSettlementPlans.current(legacy))
         val plots = old.plots.filter { it.building.type in CivsAutonomy.baseProfile }

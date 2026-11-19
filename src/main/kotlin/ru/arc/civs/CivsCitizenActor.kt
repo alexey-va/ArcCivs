@@ -119,6 +119,8 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var sheltering = false
     var returningToWarehouse = false
     val social = CitizenCampRoutine(workerId)
+    var idleRemark: CitizenRemark? = null
+    var nextIdleRemarkTick: Int? = null
     var idleNap: CitizenIdleNap? = null
     var nextIdleNapAt: Long? = null
     var sleeping = false
@@ -137,7 +139,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var outputReturn: UUID? = null
     var outputFullPause: CitizenOutputFullPause? = null
     var supplyFailure: Pair<UUID, String>? = null
-    var transferRemark: CitizenTransferRemark? = null
+    var transferRemark: CitizenRemark? = null
     var lastCourierRemark: Pair<UUID, UUID>? = null
     var supplyRetryAt = 0L
     var collectionCycle: Long? = null

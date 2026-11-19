@@ -3223,6 +3223,52 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("guard outpost supplies appear only in physical Auto towns and honor read only access and stale clicks") {
+        withUi { h ->
+            val setting = CivSettlementSetting.GARRISON_SUPPLIES
+            val manual = settlement(h.player)
+            val auto = manual.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                settings = CivSettlementSettings().with(setting, false))
+            var allowed = setOf(setting)
+            every { h.host.canChangeSettlementSetting(h.player, any()) } answers { secondArg<CivSettlementSetting>() in allowed }
+            every { h.host.setSettlementSetting(h.player, setting, true) } answers {
+                h.city = auto.copy(settings = requireNotNull(auto.settings).with(setting, true))
+                CompletableFuture.completedFuture(Unit)
+            }
+            for (unsupported in listOf(manual, auto.copy(inventory = null))) {
+                h.city = unsupported
+                h.open(); h.click("management")
+                h.screen.buttons.map { it.id.value } shouldNotContain "testing_settings"
+            }
+            h.city = auto
+            for ((locale, label) in listOf("ru" to "Снабжение заставы", "en" to "Guard outpost supplies")) {
+                h.player.setLocale(Locale.forLanguageTag(locale))
+                h.open(); h.click("management"); h.click("testing_settings")
+                val toggle = h.screen.buttons.single()
+                toggle.id.value shouldBe "garrison_supplies"
+                plainText(toggle.label) shouldBe "○ $label"
+                plainText(toggle.tooltip) shouldContain if (locale == "ru") "зерно" else "grain"
+                System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "testing-settings-garrison-$locale", h.screen, listOf(588, 380)) }
+            }
+            val before = h.screen
+            h.city = manual
+            h.click("garrison_supplies", screen = before)
+            h.screen.id shouldBe "civs.management"
+            verify(exactly = 0) { h.host.setSettlementSetting(any(), setting, any()) }
+            h.city = auto
+            h.open(); h.click("management"); h.click("testing_settings"); h.click("garrison_supplies"); h.paper.performTicks(2)
+            plainText(h.screen.buttons.single().label) shouldBe "✔ Guard outpost supplies"
+            verify(exactly = 1) { h.host.setSettlementSetting(h.player, setting, true) }
+            allowed = setOf(CivSettlementSetting.IMMORTAL_RESIDENTS)
+            h.open(); h.click("management"); h.click("testing_settings")
+            h.screen.buttons.map { it.id.value } shouldNotContain "garrison_supplies"
+            h.body() shouldContain "Guard outpost supplies"
+            h.city = manual
+            h.open(); h.click("management"); h.click("testing_settings")
+            h.body().contains("Guard outpost supplies") shouldBe false
+        }
+    }
+
     test("testing toggles retain the page while saving and show only committed state without duplicate history") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru"))

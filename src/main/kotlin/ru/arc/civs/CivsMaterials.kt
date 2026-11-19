@@ -294,27 +294,31 @@ internal object CivsProduction {
         else -> true
     } }
 
-    fun amount(building: CivBuilding): Long = if (building.type == BuildingType.SMELTERY) 8
-        else if (building.type == BuildingType.CRUSHER) 1 else when (material(building)) {
+    fun amount(building: CivBuilding): Long = amount(building.type, material(building)) ?: CivsRules.deliveryAmount(building)
+
+    fun amount(type: BuildingType, material: String?): Long? = if (type == BuildingType.SMELTERY) 8
+        else if (type == BuildingType.CRUSHER) 1 else when (material) {
         "BOOK", "WRITABLE_BOOK", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE", "BREAD", "BUCKET", "SHEARS" -> 1L
         "OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS", "STONE_BRICKS" -> 4L
-        else -> CivsRules.deliveryAmount(building)
+        else -> null
     }
 
     fun inputs(city: Settlement, building: CivBuilding): Map<String, Long> =
         if (building.type == BuildingType.UNIVERSITY) CivsResearch.inputs(city, building) else inputs(building)
 
-    fun inputs(building: CivBuilding): Map<String, Long> = if (building.type == BuildingType.SMELTERY) when (material(building)) {
+    fun inputs(building: CivBuilding): Map<String, Long> = inputs(building.type, material(building))
+
+    fun inputs(type: BuildingType, material: String?): Map<String, Long> = if (type == BuildingType.SMELTERY) when (material) {
         "CHARCOAL" -> mapOf("OAK_LOG" to 8L, "OAK_PLANKS" to 6L)
         "STONE" -> mapOf("COBBLESTONE" to 8L, "CHARCOAL" to 1L)
         "IRON_INGOT" -> mapOf("RAW_IRON" to 8L, "CHARCOAL" to 1L)
         "GLASS" -> mapOf("SAND" to 8L, "CHARCOAL" to 1L)
         else -> emptyMap()
-    } else if (building.type == BuildingType.CRUSHER) when (material(building)) {
+    } else if (type == BuildingType.CRUSHER) when (material) {
         "GRAVEL" -> mapOf("COBBLESTONE" to 2L)
         "SAND" -> mapOf("GRAVEL" to 2L)
         else -> emptyMap()
-    } else when (val material = material(building)) {
+    } else when (material) {
         "BOOK" -> mapOf("PAPER" to 3L, "LEATHER" to 1L)
         "WRITABLE_BOOK" -> mapOf("BOOK" to 1L, "FEATHER" to 1L, "INK_SAC" to 1L)
         "BREAD" -> mapOf("WHEAT" to 3L)

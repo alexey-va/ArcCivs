@@ -164,7 +164,8 @@ internal class CivsCargoRequests(
                 val survey = if (supply.productionReviewDue(cityId, at)) CivsProductionOrders.survey(city, snapshot, at) else null
                 snapshot.copy(requests = snapshot.requests +
                     residentSupplies.upkeepSupplyRequests(city) { id -> snapshot.stores[id]?.stock.orEmpty() },
-                    productionSurvey = survey)
+                    productionSurvey = survey,
+                    provisions = if (itemReceipt == null) CivsVillageProvisions.tower(city)?.let { CivProvisionStaffing(city, it.id) } else null)
             }
         }
     }
@@ -197,7 +198,7 @@ internal class CivsCargoRequests(
         if (observation.inputs != civSupplyInputs(city)) return false
         if (plans.any { (workerId, plan) -> !plan.carrying && citizens.courierUnavailable(city.id, workerId) }) return false
         if (plans.values.any { !it.carrying && it.cargo.sourceWorkerId != null }) return false
-        val buildings = if (snapshot.craftWorkers.isNotEmpty()) snapshot.stores.keys else plans.values.flatMap { plan ->
+        val buildings = if (snapshot.craftWorkers.isNotEmpty() || snapshot.provisions != null) snapshot.stores.keys else plans.values.flatMap { plan ->
             if (plan.carrying || plan.cargo.sourceWorkerId != null) listOf(plan.destinationBuildingId)
             else listOf(plan.cargo.sourceBuildingId, plan.destinationBuildingId)
         }.toSet()

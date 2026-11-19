@@ -25,6 +25,7 @@ internal class CivsResidentLifeRuntime(
     private val foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
     private val maintenanceAssignment: (Settlement, (UUID) -> Boolean) -> Pair<UUID, UUID>? = { _, _ -> null },
     private val maintenanceHeld: (Settlement, UUID) -> Boolean = { _, _ -> false },
+    private val provisionStaffing: (Settlement) -> Map<UUID, Int> = { emptyMap() },
 ) {
     private val cities get() = settlements()
     private val populationMinuteAt = mutableMapOf<UUID, Long>()
@@ -168,20 +169,28 @@ internal class CivsResidentLifeRuntime(
 
     fun pulseAutoAssignments() {
         fun canReassign(city: Settlement, worker: UUID) = citizens.canReassign(city.id, worker) && !maintenanceHeld(city, worker)
-        val city = cities.values.firstOrNull { city ->
-            city.autonomy?.paused != true && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
-                settlementActive(city) && (maintenanceAssignment(city) { citizens.canReassign(city.id, it) } != null ||
-                    CivsRules.needsAutoAssignment(city) { canReassign(city, it) })
+        fun staffing(city: Settlement) = if (city.autonomy?.paused == false &&
+            city.workers.any { it.assignment == null && !CivsResidents.isChild(it) }) provisionStaffing(city) else emptyMap()
+        val (city, extra) = cities.values.asSequence().filter { city ->
+            city.autonomy?.paused != true && city.id !in busy && city.id !in unhealthy &&
+                city.pendingDeletion == null && settlementActive(city)
+        }.map { it to staffing(it) }.firstOrNull { (city, extra) ->
+            maintenanceAssignment(city) { citizens.canReassign(city.id, it) } != null ||
+                CivsRules.needsAutoAssignment(city, extra) { canReassign(city, it) }
         } ?: return
         runCatching { mutate(city.id) { current ->
             val maintenance = maintenanceAssignment(current) { citizens.canReassign(current.id, it) }
             if (maintenance != null) CivsRules.assign(current, current.owner, maintenance.first, maintenance.second, now())
-            else CivsRules.autoAssign(current, current.owner, now()) { canReassign(current, it) }
+            else CivsRules.autoAssign(current, current.owner, now(), if (current === city) extra else staffing(current)) {
+                canReassign(current, it)
+            }
         } }.onSuccess { future ->
             future.whenCompleteSync(tasks) { saved, failure ->
                 if (failure != null) log("auto assign residents ${city.id}", failure, city.id)
-                else CivsDiagnostics.event("workers_auto_assigned", "city" to city.id,
-                    "assigned" to requireNotNull(saved).workers.count { worker -> city.workers.firstOrNull { it.id == worker.id }?.assignment != worker.assignment })
+                else if (saved != city) CivsDiagnostics.event("workers_auto_assigned", "city" to city.id,
+                    "assigned" to requireNotNull(saved).workers.count { worker ->
+                        city.workers.firstOrNull { it.id == worker.id }?.assignment != worker.assignment
+                    })
             }
         }.onFailure { log("auto assign residents ${city.id}", it, city.id) }
     }

@@ -335,10 +335,10 @@ internal class CivsCitizenObservations(
         checkCitizenMainThread()
         if (runtime.closed.get() || workerId in runtime.pendingHarm) return false
         val actor = runtime.actors[workerId] ?: return true
+        if (actor.sleeping || actor.sheltering || actor.alarmSheltering || actor.idleNap != null ||
+            actor.attacker != null || actor.residentYield != null || actor.social.visit != null) return false
         val idleTavernkeeper = actor.plan.type == BuildingType.TAVERN && actor.cycle.phase == CitizenPhase.WORKING &&
-            actor.npc.isValid && !actor.npc.isSeated && !actor.sleeping && !actor.sheltering && !actor.alarmSheltering &&
-            actor.attacker == null && actor.residentYield == null && actor.social.visit == null &&
-            actor.route == null && actor.workDetour == null
+            actor.npc.isValid && !actor.npc.isSeated && actor.route == null && actor.workDetour == null
         return actor.cityId == cityId && (actor.cycle.phase == CitizenPhase.IDLE || idleTavernkeeper) &&
             !life.residentLifePending(actor) && actor.mealVisit == null && actor.mentorVisit == null &&
             actor.plan.worldWork == null && actor.plan.courier == null && actor.plan.autonomousWork == null &&
@@ -412,7 +412,9 @@ internal class CivsCitizenObservations(
         val entity = actor.npc
         val type = if (resident.cargo != null) BuildingType.WAREHOUSE else
             resident.assignment?.let(city::building)?.let { CivsRules.effectiveWorkType(city, it) }
-        val status = activityStatus(actor, city, resident)
+        val intent = activityIntent(actor, city, resident)
+        val status = citizenObservedTravelStatus(intent, actor.route, actor.residentYield != null)
+        val tick = Bukkit.getCurrentTick()
         return CivsNpcHologramSnapshot(resident.id, at.world!!.uid, at.x, at.y, at.z, resident.name,
             "workers.status.$status", CivsResidents.health(resident), CivsResidents.maxHealth(resident),
             actor = entity, profession = if (CivsResidents.isChild(resident)) "child" else type?.let(CivsRules::profession) ?: "unassigned",
@@ -423,9 +425,11 @@ internal class CivsCitizenObservations(
             sleep = sleep,
             statusInputs = if (status == "waiting-inputs") workStatusInputs(city, resident).distinct() else emptyList(),
             speech = when {
-                status == "talking" -> actor.social.visit?.conversation?.bubble(resident.id, Bukkit.getCurrentTick())
+                status == "talking" -> actor.social.visit?.conversation?.bubble(resident.id, tick)
                 actor.sleeping || actor.sheltering -> null
-                else -> actor.transferRemark?.visible(Bukkit.getCurrentTick())
+                else -> actor.transferRemark?.visible(tick) ?: actor.idleRemark?.visible(tick)?.takeIf {
+                    (intent == "wandering" || intent == actor.plan.idleReason) && citizenIdleForRemark(actor, resident)
+                }
             })
     }
 }

@@ -151,14 +151,9 @@ object CivsAutonomy {
                     } ?: continue
                     return goal(building)
                 }
-                for (type in expansionProfile.distinct()) {
-                    if (city.buildings.count { it.type == type } < completeProfile.count { it == type } &&
-                        CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
-                        return goal(city, type, 1, null)
-                }
-                if (city.buildings.count { it.type == BuildingType.HOUSE } < HOUSE_COUNT &&
-                    CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
-                    return goal(city, BuildingType.HOUSE, 1, null)
+                val types = lateGrowthTypes(city)
+                val next = plannedGrowthAlternative(city, types) ?: types.firstOrNull()
+                if (next != null) return goal(city, next, 1, null)
             }
         }
         if (hall.level >= 3 && CivsResearch.has(city, CivResearchId.ENGINEERING) &&
@@ -169,6 +164,35 @@ object CivsAutonomy {
             }
         }
         return null
+    }
+
+    private fun lateGrowthTypes(city: Settlement): List<BuildingType> {
+        if (CivsRules.buildingCount(city) >= CivsRules.MAX_BUILDINGS) return emptyList()
+        return (expansionProfile.distinct() + BuildingType.HOUSE).filter { type ->
+            city.buildings.count { it.type == type } < completeProfile.count { it == type }
+        }
+    }
+
+    internal fun laterGrowthTypes(city: Settlement, primary: BuildingType): List<BuildingType> {
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL || city.level() < 3 ||
+            !CivsResearch.has(city, CivResearchId.ENGINEERING) ||
+            city.buildings.none { it.type == primary } || city.buildings.any { it.phase != BuildingPhase.ACTIVE })
+            return emptyList()
+        val types = lateGrowthTypes(city)
+        if (types.firstOrNull() != primary) return emptyList()
+        return types.drop(1).filter { it != BuildingType.HOUSE || hasHousingShortage(city) }
+    }
+
+    internal fun hasHousingShortage(city: Settlement): Boolean =
+        city.workers.size >= CivsRules.beds(city) && city.workers.size < CivsRules.residentLimit(city)
+
+    private fun plannedGrowthAlternative(city: Settlement, types: List<BuildingType>): BuildingType? {
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL || types.size < 2) return null
+        val plan = city.autonomy?.plan ?: return null
+        val plot = plan.plots.singleOrNull { city.building(it.building.id) == null } ?: return null
+        val type = plot.building.type
+        if (type == types.first() || type !in types || plot.building.level != 1) return null
+        return type.takeIf { CivsSettlementPlans.next(city, type) == plot }
     }
 
     internal fun pendingFortifications(city: Settlement): List<CivSettlementPlot> = CivsSettlementPlans.current(city)?.plots
@@ -234,7 +258,9 @@ object CivsAutonomy {
                     city.buildings.any { it.type == BuildingType.HOUSE && it.phase == BuildingPhase.ACTIVE }
                 else -> false
             }
-            if (housingPriority) return false
+            if (housingPriority || ordinary.buildingId == null && ordinary.targetLevel == 1 &&
+                city.level() >= 3 && CivsResearch.has(city, CivResearchId.ENGINEERING) &&
+                plannedGrowthAlternative(city, lateGrowthTypes(city)) == ordinary.type) return false
         }
         val adopted = CivsSettlementPlans.current(city)
         return pendingFortifications(city).isEmpty() && city.buildings.count { it.type.isInfrastructure } < CivsRules.MAX_INFRASTRUCTURE &&

@@ -1166,7 +1166,8 @@ class CivsCitizensTest : FunSpec({
         wander.ready(400) shouldBe true
         repeat(40) {
             wander.directions(0f).toSet() shouldBe setOf(0 to 1, -1 to 0, 0 to -1, 1 to 0)
-            (wander.legLimit() in 4..6) shouldBe true
+            (wander.legLimit() in 24..64) shouldBe true
+            (wander.legLimit(short = true) in 4..6) shouldBe true
         }
         wander.finish(6_000, true, resumeImmediately = true)
         wander.ready(6_000) shouldBe true

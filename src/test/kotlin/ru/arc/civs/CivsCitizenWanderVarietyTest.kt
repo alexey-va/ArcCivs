@@ -93,7 +93,7 @@ class CivsCitizenWanderVarietyTest : FunSpec({
         }
     }
 
-    test("an idle university worker chains local walks across the settlement beyond the workplace") {
+    test("an idle university worker prepares the next street stretch while walking and crosses it without stopping") {
         residentRuntime(workerId = UUID(0, 42)) { h ->
             val hall = h.city.buildings.single()
             val post = CivPosition(4, 64, 11)
@@ -107,25 +107,75 @@ class CivsCitizenWanderVarietyTest : FunSpec({
             a.npc.teleport(Location(h.world, 4.5, 64.0, 10.5, -90f, 0f))
             val routes = mutableSetOf<CitizenWanderWalk>()
             val visited = mutableSetOf<Int>()
+            var firstLength = 0
+            var extendedWhileMoving = false
             h.holdNavigation = true
             h.navigationNow = 2_000
             val before = h.world.chunkSnapshotCaptures
             for (tick in 0..700) {
                 if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                a.route?.wanderWalk?.let(routes::add)
+                a.route?.wanderWalk?.let { walk ->
+                    routes += walk
+                    if (firstLength == 0) firstLength = walk.legLimit
+                    if (walk.legs < firstLength && walk.legLimit > firstLength) extendedWhileMoving = true
+                }
+                val from = a.npc.location
                 h.navigate()
                 val at = a.npc.location
                 visited += at.blockX
-                if (at.blockX >= 22) break
+                if (from.blockX in 7..24) (at.distance(from) in .000001.. .118251) shouldBe true
+                if (at.blockX >= 25) break
             }
             withClue("visited=$visited episodes=${routes.size}") {
                 a.plan.idleReason shouldBe "no-research"
-                (4..22).all(visited::contains) shouldBe true
-                (routes.size >= 3) shouldBe true
+                (4..25).all(visited::contains) shouldBe true
+                routes.size shouldBe 1
+                extendedWhileMoving shouldBe true
                 h.pendingNavigationWorkers shouldBe 0
                 h.world.chunkSnapshotCaptures shouldBe before
                 h.deliveries shouldBe 0
             }
+            val lastDaylightFeet = a.npc.location.point()
+            h.world.time = 13_000L
+            h.navigate()
+            a.route shouldBe null
+            a.npc.location.point() shouldBe lastDaylightFeet
+        }
+    }
+
+    test("several idle residents start independently on public streets and keep the ordinary planner free") {
+        residentRuntime(workerId = UUID(0, 42)) { h ->
+            val ids = listOf(h.workerId, UUID(0, 43), UUID(0, 44))
+            h.city = h.city.copy(workers = h.city.workers + ids.drop(1).map { CivWorker(it, "Neighbour", null) })
+            h.owner.pulse(1_000)
+            val actors = ids.map(h::actor)
+            val lanes = listOf(4, 8, 12)
+            for (chunk in 0..3) h.world.loadChunk(chunk, 0)
+            actors.zip(lanes).forEach { (actor, z) ->
+                for (x in 4..48) h.world.getBlockAt(x, 63, z).type = Material.DIRT_PATH
+                actor.npc.teleport(Location(h.world, 4.5, 63.9375, z + .5, -90f, 0f))
+            }
+            val starts = mutableMapOf<UUID, Int>()
+            h.holdNavigation = true
+            h.navigationNow = 1_000
+            val captures = h.world.chunkSnapshotCaptures
+            for (tick in 0..190) {
+                if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                h.navigate()
+                actors.zip(lanes).forEach { (actor, z) ->
+                    val at = actor.npc.location
+                    if (at.x > 4.500001) starts.putIfAbsent(actor.workerId, tick)
+                    at.blockZ shouldBe z
+                }
+            }
+            withClue("first moving ticks=$starts") {
+                starts.size shouldBe actors.size
+                (starts.values.toSet().size >= 2) shouldBe true
+                actors.all { it.npc.location.blockX >= 15 } shouldBe true
+            }
+            h.world.chunkSnapshotCaptures shouldBe captures
+            h.pendingNavigationWorkers shouldBe 0
+            h.deliveries shouldBe 0
         }
     }
 

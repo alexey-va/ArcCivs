@@ -611,6 +611,19 @@ ru:
     forest-worker: 'Дополнительный лесоруб рубит и восстанавливает деревья'
     mining: 'Подземных ярусов: <before> → <after>'
   workers:
+    idle-remark:
+      line-0: '<#fff0d5>Дел пока нет. Пройдусь.'
+      line-1: '<#fff0d5>Кому бы помочь?'
+      line-2: '<#fff0d5>Хоть бы дело подвернулось.'
+      line-3: '<#fff0d5>Считаю шаги. Раз, два…'
+      line-4: '<#fff0d5>Тихо нынче. Красота.'
+      line-5: '<#fff0d5>Постой… А куда я спешу?'
+      line-6: '<#fff0d5>Скучно. Хоть учись свистеть.'
+      line-7: '<#fff0d5>Если понадоблюсь, я рядом.'
+      line-8: '<#fff0d5>Дела кончились раньше дня.'
+      line-9: '<#fff0d5>О, минутка для себя.'
+      line-10: '<#fff0d5>Руки-то всё равно чешутся.'
+      line-11: '<#fff0d5>Что бы такое смастерить?'
     transfer:
       full-barrel:
         line-0: '<#fff0d5>Эх. Пускай пока в сумке.'
@@ -1185,7 +1198,7 @@ ru:
     open: 'Настройки тестирования ›'
     title: 'Настройки тестирования'
     choice: '○ <value>'
-    help: 'Проверка жителей и строительства в этом поселении. Нажмите на параметр, чтобы переключить его.'
+    help: 'Нажмите на настройку, чтобы изменить её для этого поселения.'
     enabled: 'Включено'
     disabled: 'Выключено'
     enable: 'Нажмите, чтобы включить.'
@@ -1196,6 +1209,8 @@ ru:
     immortal-residents-help: 'Жители получают урон, но их здоровье не опускается ниже 1.'
     auto-construction-materials: 'Материалы для стройки'
     auto-construction-materials-help: 'Строители автоматически получают недостающие материалы для текущей стройки.'
+    garrison-supplies: 'Снабжение заставы'
+    garrison-supplies-help: 'Грузчики везут на заставу древесину,<newline>зерно и изделия мастерских. Дежурный<newline>страж расходует припасы партиями.'
   control:
     open: 'Перенести блок управления ›'
     title: 'Перенос блока управления'
@@ -1264,6 +1279,7 @@ ru:
     invalid-name: 'Укажите непустое название длиной до 32 символов без управляющих знаков.'
     not-member: 'У вас нет доступа к управлению этим городом.'
     not-authorized: 'У вас нет доступа к этому действию.'
+    garrison-requires-physical-village: 'Для снабжения заставы нужна автономная деревня с физическими складами.'
     autonomy-terrain: 'На этом участке нет безопасной опоры для постройки.'
     autonomy-slope: 'Перепад высоты слишком велик для этой постройки.'
     autonomy-no-path: 'Нет безопасного прохода от деревни к входу в постройку.'
@@ -2376,6 +2392,19 @@ en:
     forest-worker: 'An additional forester cuts and replants trees'
     mining: 'Underground levels: <before> → <after>'
   workers:
+    idle-remark:
+      line-0: '<#fff0d5>No work yet. I’ll take a walk.'
+      line-1: '<#fff0d5>Wonder who could use a hand.'
+      line-2: '<#fff0d5>I could do with an odd job.'
+      line-3: '<#fff0d5>Counting my steps. One, two…'
+      line-4: '<#fff0d5>Lovely and quiet today.'
+      line-5: '<#fff0d5>Wait… What’s my hurry?'
+      line-6: '<#fff0d5>Time to learn to whistle.'
+      line-7: '<#fff0d5>I’ll be around if you need me.'
+      line-8: '<#fff0d5>Still daylight. Out of chores.'
+      line-9: '<#fff0d5>Oh, a minute to myself.'
+      line-10: '<#fff0d5>My hands itch to get busy.'
+      line-11: '<#fff0d5>What could I make, I wonder?'
     transfer:
       full-barrel:
         line-0: '<#fff0d5>Ah well. Back in the bag.'
@@ -2950,7 +2979,7 @@ en:
     open: 'Testing settings ›'
     title: 'Testing settings'
     choice: '○ <value>'
-    help: 'Test residents and construction in this settlement. Click a setting to toggle it.'
+    help: 'Select a setting to change it for this settlement.'
     enabled: 'Enabled'
     disabled: 'Disabled'
     enable: 'Click to enable.'
@@ -2961,6 +2990,8 @@ en:
     immortal-residents-help: 'Residents take damage, but their health never drops below 1.'
     auto-construction-materials: 'Construction materials'
     auto-construction-materials-help: 'Builders automatically receive missing materials for the current construction.'
+    garrison-supplies: 'Guard outpost supplies'
+    garrison-supplies-help: 'Porters bring timber, grain and workshop<newline>goods to a staffed guard tower. The outpost<newline>uses the supplies one batch at a time.'
   control:
     open: 'Relocate control block ›'
     title: 'Relocate control block'
@@ -3029,6 +3060,7 @@ en:
     invalid-name: 'Enter a nonempty name up to 32 characters without control characters.'
     not-member: 'You cannot manage this settlement.'
     not-authorized: 'You do not have access to this action.'
+    garrison-requires-physical-village: 'Guard outpost supplies require an autonomous village with physical storage.'
     autonomy-terrain: 'This site does not provide safe support for the building.'
     autonomy-slope: 'The ground is too uneven for this building.'
     autonomy-no-path: 'There is no safe route from the village to the building entrance.'

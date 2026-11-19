@@ -10,6 +10,7 @@ import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 import java.util.logging.Level
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -361,7 +362,8 @@ internal class CivsCitizenRoutes(
             building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure && building.type != BuildingType.DECORATION &&
                 city.construction?.buildingId != building.id && building.bounds.contains(from.blockX, from.blockY, from.blockZ)
         }
-        val walk = CitizenWanderWalk(home, outsideHome, frame.territory, actor.plan.token, now, actor.wander.legLimit(),
+        val short = actor.outputFullPause != null || offersWanderCargo(actor, city)
+        val walk = CitizenWanderWalk(home, outsideHome, frame.territory, actor.plan.token, now, actor.wander.legLimit(short),
             departure, CivPosition(from.blockX, from.blockY, from.blockZ), frame.roads)
         walk.remaining.addAll(citizenWanderPath(world, from.point(), walk, city.buildings, actor.wander, actor.npc.bodyYaw, .3 * actor.npc.scale) { feet ->
             val to = Location(world, feet.x, feet.y, feet.z)
@@ -376,6 +378,22 @@ internal class CivsCitizenRoutes(
         } else {
             val rescued = goal == null && collisions.recoverDryPit(actor, city, now)
             finishWander(actor, city, walk, now, if (rescued) "pit-rescued" else "target-unavailable")
+        }
+    }
+
+    fun extendWander(actor: CitizenActor, city: Settlement, route: CitizenRoute, walk: CitizenWanderWalk) {
+        val tail = walk.remaining
+        val end = tail.lastOrNull() ?: route.target.point()
+        val previous = tail.getOrNull(tail.size - 2) ?: if (tail.isEmpty()) route.from else route.target.point()
+        val yaw = if (end.x == previous.x && end.z == previous.z) actor.npc.bodyYaw else
+            Math.toDegrees(atan2(previous.x - end.x, end.z - previous.z)).toFloat()
+        // Dynamic bodies and the live floor are checked from the actual feet when each queued leg is admitted.
+        val path = citizenWanderPath(actor.npc.world, end, walk, city.buildings, actor.wander, yaw, .3 * actor.npc.scale,
+            walk.outingLimit - walk.legLimit) { true }
+        if (path.isEmpty()) walk.outingLimit = walk.legLimit
+        else {
+            tail.addAll(path)
+            walk.legLimit += path.size
         }
     }
 
@@ -422,15 +440,17 @@ internal class CivsCitizenRoutes(
 
     fun finishWander(actor: CitizenActor, city: Settlement, walk: CitizenWanderWalk, now: Long, reason: String?) {
         if (actor.route?.wanderWalk === walk) cancelRoute(actor)
-        val offersCargo = reason == null && city.inventory == null &&
-            city.workers.firstOrNull { it.id == actor.workerId && it.assignment != null }
-                ?.let { couriers.sourceOffersCargo(actor, city, it) } == true
+        val offersCargo = reason == null && offersWanderCargo(actor, city)
         actor.wander.finish(now, reason == null, resumeImmediately = !offersCargo)
         CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
             "mode" to walk.mode, "outcome" to (reason ?: "arrived"), "legs" to walk.legs,
             "max_handoff_ms" to walk.maxHandoffMillis, "elapsed_ms" to now - walk.startedAt,
             "actual" to actor.npc.location.point().coordinates())
     }
+
+    private fun offersWanderCargo(actor: CitizenActor, city: Settlement): Boolean =
+        city.inventory == null && city.workers.firstOrNull { it.id == actor.workerId && it.assignment != null }
+            ?.let { couriers.sourceOffersCargo(actor, city, it) } == true
 
     private fun storageStanding(actor: CitizenActor, city: Settlement, world: World, target: CivPosition,
                                 storage: CivBuilding, allowCached: Boolean): CivPosition? {
