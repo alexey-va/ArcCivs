@@ -165,6 +165,26 @@ class CivsNavigationSectionCacheTest : FunSpec({
         }
     }
 
+    test("a detached detour outside its initial seed reuses the city's warm sections before native capture") {
+        SectionHarness().use { h ->
+            for (x in -1..0) for (z in -1..1) h.extract(CitizenSnapshotKey(x, z), setOf(3, 4))
+            for (y in 63..64) {
+                val point = CivPosition(2, y, 2)
+                h.cache.state(h.world, h.world.getBlockAt(point.x, y, point.z).blockData, point)
+            }
+            val copies = h.cache.debug()["chunk_captures"]
+            val policy = CitizenSnapshotPolicy(
+                { p, _ -> p.y == 64 && p.x in 0..8 && p.z in 0..20 && (p.x != 4 || p.z == 18) },
+                { _, _ -> true }, supportCost = { _, _ -> 1.0 }, cityId = h.city.id)
+            val route = h.route(policy = policy)
+            h.finish(route)
+            route.continuation shouldBe false
+            route.endpoint shouldBe CitizenPoint(8.5, 64.0, .5)
+            h.cache.debug()["chunk_captures"] shouldBe copies
+            h.owner.debug()["snapshot_main_requests"] shouldBe 0L
+        }
+    }
+
     test("raw copies are released on extraction and cancellation and are absent from retained section graphs") {
         SectionHarness().use { h ->
             val key = CitizenSnapshotKey(0, 0)

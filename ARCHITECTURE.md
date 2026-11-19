@@ -430,6 +430,12 @@ seed their initial corridor and probe halo from current cached sections. Missing
 sections use the normal bounded capture path. Dynamic shapes and native caller costs
 keep their live checks.
 
+When the worker can build the next set of neighbours entirely from sections
+already used by the search, it can advance A* immediately. It yields after a
+bounded number of batches or time spent, and returns to the owner for missing
+world data, a new walking segment, or a pickup decision. A requested diagnostic
+recording keeps each batch boundary for deterministic replay.
+
 Terrain changes invalidate affected sections for future reads. An active search
 keeps the immutable sections it has already used, so a nearby block edit does
 not discard its explored nodes. The mover checks the next step against the live

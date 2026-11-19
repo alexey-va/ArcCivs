@@ -207,7 +207,7 @@ private class CitizenSnapshotBlocks(
 }
 
 /** Whole chunks are processed on the worker. Main resolves palette exceptions and caller-native costs. */
-internal class CitizenSnapshotCapture(
+internal class CitizenSnapshotCapture @JvmOverloads constructor(
     probes: List<CitizenSearchProbe>,
     private val terrain: CitizenSnapshotTerrain,
     private val policy: CitizenSnapshotPolicy,
@@ -216,6 +216,7 @@ internal class CitizenSnapshotCapture(
     private val maximumBlocks: Int,
     private val maximumProbes: Int,
     private val connectedPrefetch: Boolean,
+    private val cancelled: AtomicBoolean = AtomicBoolean(),
 ) {
     private data class CapturedProbe(val probe: CitizenSearchProbe, val blocks: CitizenSnapshotBlocks,
         val edges: List<CitizenSearchEdge>, val published: CitizenSearchCapture? = null, val deferredGrapple: Boolean = false)
@@ -229,11 +230,13 @@ internal class CitizenSnapshotCapture(
     private var probeStates = arrayOfNulls<CitizenSnapshotState>(3 * 3 * 7)
     private var probePositions = arrayOfNulls<CivPosition>(3 * 3 * 7)
     private var grappleRows: IntRange? = null
-    private val cancelled = AtomicBoolean()
     private val materialAt: (CivPosition) -> Material? = ::material
     private var next = 0
 
     fun cancel() { cancelled.set(true) }
+
+    fun following(probes: List<CitizenSearchProbe>) = CitizenSnapshotCapture(probes, terrain, policy, minimumY,
+        maximumY, maximumBlocks, maximumProbes, connectedPrefetch, cancelled)
 
     /** Called only after this cursor's worker has terminated; no native state is read. */
     internal fun debugCursor() = CitizenNavigationDebugCursor(requestedCount, next, probes.toList())
@@ -455,4 +458,41 @@ internal class CitizenSnapshotCapture(
     }
 
     private fun checkCancelled() { if (cancelled.get()) throw CancellationException("Navigation snapshot retired") }
+}
+
+/** One worker turn on a single job. Return on the first owner decision or newly consumed section. */
+internal class CitizenSnapshotSearchBatch(var cursor: CitizenSnapshotCapture, private val search: CitizenNavigationSearch,
+    private val combine: Boolean) {
+    private var latest: CitizenSearchResult? = null
+    private var searchNanos = 0L
+    var searchReady = false
+        private set
+    var capturedBlocks: Int? = null
+        private set
+    val progress: CitizenSearchResult? get() = latest?.copy(searchNanos = searchNanos)
+
+    fun advance(first: CitizenSnapshotInput): CitizenSnapshotRequest {
+        val started = System.nanoTime()
+        var input = first
+        var rounds = 0
+        while (true) {
+            val request = cursor.advance(input, search::captured)
+            capturedBlocks = request.capturedBlocks
+            val captures = request.captures
+            if (!combine || captures == null) return request
+            val result = search.advance(captures)
+            latest = result
+            searchNanos += result.searchNanos
+            // A single capture/advance pair is indivisible. Between pairs, bound worker occupancy
+            // and give other queued residents their turn, even on a completely warm graph.
+            if (result.probes.isEmpty() || result.earlyWalk != null || result.pickupCandidate != null ||
+                request.sections.isNotEmpty() || request.decoded.isNotEmpty() || ++rounds >= 16 ||
+                System.nanoTime() - started >= 4_000_000L) {
+                searchReady = true
+                return request
+            }
+            cursor = cursor.following(result.probes)
+            input = CitizenSnapshotInput()
+        }
+    }
 }

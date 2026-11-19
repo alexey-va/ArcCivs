@@ -868,11 +868,11 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 allowed, policy.stepAllowed, { 1.0 }, null, policy)
             try {
                 var tick = 0
-                while (!(route.capturedBlocks > 200 && route.preparationPhase == "searching") && tick++ < 150) {
+                while (owner.debug()["used_snapshot_sections"] == 0 && tick++ < 150) {
                     while (workers.isNotEmpty()) workers.removeFirst().run()
                     paper.performTicks(1); owner.pulse()
                 }
-                (route.capturedBlocks > 200 && route.searching) shouldBe true
+                route.searching shouldBe true
                 val edit = CivPosition(5, 64, 5)
                 var edits = 0
                 while (route.searching && tick++ < 350) {
@@ -909,19 +909,40 @@ class CivsNavigationSnapshotsTest : FunSpec({
             val wall = (64..66).map { y -> h.world.getBlockAt(1, y, 0) }
             wall.forEach { it.type = Material.STONE }
             val route = h.request(reuseKey = null)
-            h.prepareUntil { route.capturedBlocks > 0 && route.preparationPhase == "searching" }
+            h.prepareUntil { h.owner.debug()["used_snapshot_sections"] != 0 }
             if (opened) wall.forEach { it.type = Material.AIR }
             val change = if (opened) CivPosition(1, 64, 0) else CivPosition(4, 64, 4)
             h.owner.changed(h.world.uid, change)
             h.prepareUntil { h.owner.debug()["stale_snapshot_restarts"] == 1L }
-            h.prepareUntil { route.preparationPhase == "snapshot-processing" }
-            h.prepareUntil { route.preparationPhase == "searching" }
+            h.prepareUntil { h.owner.debug()["used_snapshot_sections"] != 0 }
             // Make the second verdict stale as well. A genuinely closed passage must still terminate.
             h.owner.changed(h.world.uid, CivPosition(5, 64, 5))
             h.finish(route)
             h.owner.debug()["stale_snapshot_restarts"] shouldBe 1L
             route.failure shouldBe if (opened) null else "no-path"
             if (opened) h.walk(route) shouldBe h.target
+        }
+    }
+
+    test("a warmed detour yields to a short job and its cancelled worker cannot publish more progress") {
+        sharedRouteRuntime(CivsNavigationSettings(searchNodesPerBatch = 1)) { h ->
+            val warmed = h.request(reuseKey = null, surfaceSpeed = h.footTraffic)
+            h.finish(warmed)
+            warmed.cancel()
+            h.allowedZ = 0..8
+            val detour = h.request(reuseKey = null, surfaceSpeed = h.footTraffic,
+                allowedPoint = { it.x != 4 || it.z == 8 })
+            h.prepareUntil { detour.searching && detour.nodeCount > 0 }
+            val nearby = h.request(target = CitizenPoint(2.5, 64.0, .5), reuseKey = null, surfaceSpeed = h.footTraffic)
+            h.finish(nearby)
+            nearby.endpoint shouldBe CitizenPoint(2.5, 64.0, .5)
+            detour.searching shouldBe true
+            val published = detour.nodeCount
+            detour.cancel()
+            h.prepareUntil { h.owner.debug()["jobs"] == 0 }
+            detour.nodeCount shouldBe published
+            detour.endpoint shouldBe null
+            detour.preparationPhase shouldBe "cancelled"
         }
     }
 
@@ -1444,14 +1465,12 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 allowed, policy.stepAllowed, { 1.0 }, null, policy)
             try {
                 var tick = 0
-                while (!(route.capturedBlocks > 400 && route.preparationPhase == "searching") && tick++ < 100) {
+                while (owner.debug()["used_snapshot_sections"] == 0 && tick++ < 100) {
                     while (workers.isNotEmpty()) workers.removeFirst().run()
                     paper.performTicks(1); owner.pulse()
                 }
                 route.searching shouldBe true
-                (route.capturedBlocks > 400) shouldBe true
-                // The next worker result uses the old graph; publish the obstacle before Main can accept it.
-                while (workers.isNotEmpty()) workers.removeFirst().run()
+                // The origin section has already been consumed by this job. Its route must still stop at the new wall.
                 for (y in 64..66) {
                     world.getBlockAt(8, y, 0).type = Material.STONE
                     owner.changed(world.uid, CivPosition(8, y, 0))

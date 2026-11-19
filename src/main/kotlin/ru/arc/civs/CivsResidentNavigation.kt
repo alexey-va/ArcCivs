@@ -605,10 +605,7 @@ internal class CivsResidentNavigation(
                     job.progressTick = tick
                     job.searching = null
                     val result = searching.join() // isDone above; no blocking gameplay-thread wait.
-                    job.route.recordSearch(result)
-                    job.publishedNodes += (result.nodes - job.lastNodes).coerceAtLeast(0)
-                    job.lastNodes = result.nodes
-                    recordDebug(job, result)
+                    recordSearch(job, result)
                     if (result.pickupCandidate != null) {
                         val search = job.search
                         job.capturing = work.submit({ !closed && tasks.isCurrent(epoch) && job.route.searching && job.search === search }) {
@@ -690,11 +687,19 @@ internal class CivsResidentNavigation(
         catch (_: RejectedExecutionException) { CompletableFuture.failedFuture(RejectedExecutionException("Navigation worker is full")) }
     }
 
+    private fun recordSearch(job: Job, result: CitizenSearchResult) {
+        job.route.recordSearch(result)
+        job.publishedNodes += (result.nodes - job.lastNodes).coerceAtLeast(0)
+        job.lastNodes = result.nodes
+        recordDebug(job, result)
+    }
+
     private fun captureSnapshot(job: Job, cursor: CitizenSnapshotCapture, input: CitizenSnapshotInput = CitizenSnapshotInput()) {
         job.route.phase("snapshot-processing")
         job.snapshotInput = input
-        val search = job.search
-        val future = try { CompletableFuture.supplyAsync({ cursor.advance(input, search::captured) }, executor) }
+        // An armed trace records every exact search/capture boundary for deterministic replay.
+        val batch = CitizenSnapshotSearchBatch(cursor, job.search, combine = job.debugTrace == null)
+        val future = try { CompletableFuture.supplyAsync({ batch.advance(input) }, executor) }
         catch (failure: RejectedExecutionException) {
             input.chunks.values.forEach(CitizenSnapshotChunk::releaseSource)
             CompletableFuture.failedFuture(failure)
@@ -705,6 +710,14 @@ internal class CivsResidentNavigation(
             job.snapshotWorker = null
             job.snapshotInput = null
             job.progressTick = Bukkit.getCurrentTick().toLong()
+            job.snapshotCapture = batch.cursor
+            val progress = batch.progress
+            if (progress != null && !batch.searchReady) recordSearch(job, progress)
+            batch.capturedBlocks?.let { count ->
+                job.route.recordSnapshotCapture(count)
+                job.publishedCells += (count - job.lastCells).coerceAtLeast(0)
+                job.lastCells = count
+            }
             if (failure != null) { job.capturing?.completeExceptionally(failure); return@whenCompleteSync }
             val prepared = requireNotNull(request)
             snapshots.publish(job.route.worldId, prepared.decoded.values, job.route.snapshotPolicy?.cityId)
@@ -719,14 +732,24 @@ internal class CivsResidentNavigation(
                 job.capturing?.completeExceptionally(CitizenSnapshotUnavailable())
                 return@whenCompleteSync
             }
-            job.route.recordSnapshotCapture(prepared.capturedBlocks)
-            job.publishedCells += (prepared.capturedBlocks - job.lastCells).coerceAtLeast(0)
-            job.lastCells = prepared.capturedBlocks
             val captures = prepared.captures
-            if (captures != null) {
+            if (batch.searchReady) {
+                job.snapshotCapture = null
+                job.capturing = null
+                job.route.phase("searching")
+                job.searching = CompletableFuture.completedFuture(requireNotNull(progress))
+            } else if (captures != null) {
                 job.snapshotResult = captures
                 job.capturing?.complete(Unit)
-            } else captureSnapshotMain(job, cursor, prepared)
+            } else {
+                // A detached detour can leave the job's initial seed while staying inside the current shared cache.
+                val world = if (prepared.requestedSections.isEmpty()) null else Bukkit.getWorld(job.route.worldId)
+                val cached = world?.let { snapshots.cached(it, prepared.requestedSections, Bukkit.getCurrentTick().toLong(),
+                    job.route.snapshotPolicy?.cityId) }.orEmpty()
+                if (cached.isEmpty()) captureSnapshotMain(job, batch.cursor, prepared)
+                else captureSnapshot(job, batch.cursor, CitizenSnapshotInput(chunks = cached,
+                    states = snapshots.knownStates(cached.values.flatMap(CitizenSnapshotChunk::payloads))))
+            }
         }
     }
 
