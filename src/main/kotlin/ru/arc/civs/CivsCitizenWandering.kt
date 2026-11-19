@@ -49,6 +49,7 @@ internal class CitizenWanderWalk(val home: CivBuilding, val outsideHome: Boolean
     val token: CitizenToken, val startedAt: Long, val legLimit: Int, val departureBuilding: CivBuilding?,
     val anchor: CivPosition = home.entrance, val streets: CivsPaths.RetainedRoads? = null,
     var approachingStreet: CivPosition? = null) {
+    var routingToExit = false
     var legs = 0
     var reachedAt: Long? = null
     var maxHandoffMillis = 0L

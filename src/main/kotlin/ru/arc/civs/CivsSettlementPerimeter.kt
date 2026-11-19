@@ -510,16 +510,19 @@ internal object CivsSettlementPerimeter {
             val selected = IntArray(graph.size)
             val flow = IntArray(graph.size)
             fun spend() = budget.spend()
+            val queue = IntArray(graph.size)
             var total = 0
             while (true) {
                 level.fill(-1); level[source] = 0
-                val queue = ArrayDeque<Int>(); queue += source
-                while (queue.isNotEmpty()) {
-                    val v = queue.removeFirst()
+                var head = 0
+                var tail = 0
+                queue[tail++] = source
+                while (head < tail) {
+                    val v = queue[head++]
                     if (level[sink] >= 0 && level[v] >= level[sink]) break
                     for (edge in graph[v]) {
                         spend()
-                        if (edge.capacity > 0 && level[edge.to] < 0) { level[edge.to] = level[v] + 1; queue += edge.to }
+                        if (edge.capacity > 0 && level[edge.to] < 0) { level[edge.to] = level[v] + 1; queue[tail++] = edge.to }
                     }
                 }
                 if (level[sink] < 0) return BooleanArray(graph.size) { level[it] >= 0 }

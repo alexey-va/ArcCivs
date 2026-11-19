@@ -117,8 +117,23 @@ internal class CivsCitizenMotion(
             val city = runtime.cityById(actor.cityId) ?: continue
             val walk = route.wanderWalk
             if (walk != null) {
-                if (advanceWander(actor, city, route, walk, now, wanderHandoffs > 0)) wanderHandoffs--
-                continue
+                if (actor.plan.token != walk.token || npc.world.uid != city.worldId || city.pendingDeletion != null ||
+                    !walk.territory.matches(city) || npc.world.time in 12_000L..23_000L && actor.plan.type != BuildingType.GUARD_TOWER) {
+                    routes.cancelRoute(actor)
+                    continue
+                }
+                if (!walk.routingToExit) {
+                    if (advanceWander(actor, city, route, walk, now, wanderHandoffs > 0)) wanderHandoffs--
+                    continue
+                }
+                val failure = route.motion.failure ?: route.completion?.cancelReason
+                    ?: if (!route.motion.finished && route.timedOut(now)) "timed-out" else null
+                if (failure != null || route.motion.finished && !route.motion.continuation) {
+                    val arrived = failure == null && npc.location.point().distanceSquared(route.target.point()) <= .000001 &&
+                        routes.arrivalBodyClear(actor)
+                    routes.finishWander(actor, city, walk, now, if (arrived) null else failure ?: "exit-not-reached")
+                    continue
+                }
             }
             routes.observeArrivalWait(actor, route)
             if (route.trip?.validFor(city) == false) {
@@ -216,7 +231,7 @@ internal class CivsCitizenMotion(
             if (motion.finished) {
                 if (route.intermediate || motion.continuation) {
                     routes.cancelForContinuation(actor, city, route)
-                    routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor)
+                    routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor, exitWalk = walk)
                     continue
                 }
                 if (waitForArrivalBody(actor, route)) continue
@@ -304,7 +319,7 @@ internal class CivsCitizenMotion(
             else if (motion.finished) {
                 if (route.intermediate || motion.continuation) {
                     routes.cancelForContinuation(actor, city, route)
-                    routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor)
+                    routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor, exitWalk = walk)
                     continue
                 }
                 if (waitForArrivalBody(actor, route)) continue
@@ -339,12 +354,6 @@ internal class CivsCitizenMotion(
                               now: Long, canContinue: Boolean): Boolean {
         val npc = actor.npc
         val motion = route.motion
-        if (actor.plan.token != walk.token || npc.world.uid != city.worldId ||
-            city.pendingDeletion != null || !walk.territory.matches(city) ||
-            npc.world.time in 12_000L..23_000L && actor.plan.type != BuildingType.GUARD_TOWER) {
-            routes.cancelRoute(actor)
-            return false
-        }
         actor.footsteps.reset()
         if (!route.planningReported) {
             route.planningReported = true

@@ -1,0 +1,86 @@
+package ru.arc.civs
+
+import io.kotest.assertions.withClue
+import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.shouldBe
+import org.bukkit.Location
+import org.bukkit.Material
+import java.util.UUID
+
+class CivsCitizenWanderExitTest : FunSpec({
+    for (blocked in listOf(false, true)) {
+        val scenario = if (blocked) "backs off when a private neighbour seals the detour"
+            else "walks away from the exit first and resumes on the public road"
+        test("an idle resident inside the Auto3 house $scenario") {
+            residentRuntime(workerId = UUID(0, 42)) { h ->
+                // The measured 24-edge floor route relative to the Auto3 forester's feet.
+                // Its west turn around the interior hedge is sqrt(109) blocks from the entrance.
+                val floor = buildSet {
+                    for (x in 14..20) add(x to 10)
+                    for (z in 7..10) add(14 to z)
+                    for (x in 14..16) add(x to 7)
+                    for (x in 16..23) add(x to 6)
+                    add(23 to 7)
+                    for (z in 7..10) add(24 to z)
+                    for (x in 24..30) add(x to 10)
+                }
+                val hall = h.city.buildings.single()
+                val door = CivPosition(24, 64, 10)
+                val house = hall.copy(id = UUID(0, 43), type = BuildingType.HOUSE, anchor = CivPosition(15, 64, 10),
+                    bounds = CivBox(CivPosition(8, 62, 3), CivPosition(23, 70, 16)), entrance = door,
+                    control = CivPosition(16, 64, 9))
+                val job = CivPosition(39, 64, 20)
+                val forester = hall.copy(id = UUID(0, 44), type = BuildingType.FORESTER, anchor = job, entrance = job,
+                    control = job, bounds = CivBox(job, job))
+                val privateCell = CivPosition(14, 64, 8)
+                val neighbour = house.copy(id = UUID(0, 45), bounds = CivBox(privateCell, privateCell.copy(y = 68)),
+                    entrance = privateCell, anchor = privateCell, control = null)
+                h.city = h.city.copy(buildings = listOfNotNull(hall, house, forester, neighbour.takeIf { blocked }),
+                    workers = h.city.workers.map { it.copy(assignment = forester.id) })
+                for (x in -1..3) for (z in -1..2) h.world.loadChunk(x, z)
+                for (x in 7..31) for (z in 2..17) if (x to z !in floor)
+                    for (y in 64..66) h.world.getBlockAt(x, y, z).type = Material.STONE
+                for (x in 25..30) h.world.getBlockAt(x, 63, 10).type = Material.DIRT_PATH
+
+                val actor = h.actor()
+                val origin = Location(h.world, 20.5, 64.0, 10.5)
+                actor.npc.teleport(origin)
+                h.idleReason = "waiting-orders"
+                h.navigationNow = 3_000
+                h.owner.pulse(3_000)
+                actor.plan.idleReason shouldBe "waiting-orders"
+                val exit = requireNotNull(actor.route)
+                exit.authored shouldBe door
+                exit.allowedBuildings shouldBe setOf(house.id)
+
+                val visited = mutableSetOf<Pair<Int, Int>>()
+                for (tick in 1..1_200) {
+                    h.navigate()
+                    val at = actor.npc.location
+                    visited += at.blockX to at.blockZ
+                    if (actor.route == null || (25 to 10) in visited) break
+                }
+                withClue("visited=$visited ${h.navigationState()}") {
+                    if (blocked) {
+                        actor.route shouldBe null
+                        actor.npc.location.point() shouldBe origin.point()
+                        val now = requireNotNull(h.navigationNow)
+                        h.owner.pulse(now + 500)
+                        actor.route shouldBe null
+                        h.owner.pulse(now + 5_000)
+                        actor.route?.authored shouldBe door
+                    } else {
+                        visited.containsAll(listOf(19 to 10, 14 to 7, 24 to 10)) shouldBe true
+                        visited.all { it in floor } shouldBe true
+                        h.owner.pulse(requireNotNull(h.navigationNow) + 500)
+                        actor.route?.motion?.preparationPhase shouldBe "local"
+                        actor.route?.authored shouldBe CivPosition(25, 63, 10)
+                        repeat(30) { if (actor.npc.location.blockX < 25) h.navigate() }
+                        actor.npc.location.blockX shouldBe 25
+                    }
+                    h.deliveries shouldBe 0
+                }
+            }
+        }
+    }
+})

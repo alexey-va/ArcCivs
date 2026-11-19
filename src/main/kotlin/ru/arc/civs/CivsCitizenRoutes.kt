@@ -89,7 +89,8 @@ internal class CivsCitizenRoutes(
     }
 
     fun startRoute(actor: CitizenActor, world: World, target: CivPosition, now: Long, idleAnchor: CivPosition? = null,
-                   storageStandingOverride: CivPosition? = null): Boolean {
+                   storageStandingOverride: CivPosition? = null, exitWalk: CitizenWanderWalk? = null): Boolean {
+        val departure = exitWalk?.departureBuilding
         if (actor.idleNap != null && !leisure.nap.stop(actor)) return false
         actor.pendingChunkTarget = null
         if (!shelter.wake(actor)) return false
@@ -120,7 +121,7 @@ internal class CivsCitizenRoutes(
             return true
         }
         // The return must physically reach its original standing before the reserve session resumes.
-        val storage = if (visit != null) null else storageForTarget(actor, city, target)
+        val storage = if (visit != null || departure != null) null else storageForTarget(actor, city, target)
         if (storage != null) {
             val standing = storageStandingOverride ?: storageStanding(actor, city, world, target, storage, idleAnchor == null)
             if (standing == null) {
@@ -143,7 +144,7 @@ internal class CivsCitizenRoutes(
                 city.minePlans?.get(building.id.toString()), work?.miningAccessSections)
         }
         val entrance = workMine?.let { citizenMineEntranceWaypoint(it, from.point(), resolved, requireNotNull(minePassage)) }
-        val waypoint = entrance ?: citizenMineWaypoint(city, world, from, resolved)
+        val waypoint = if (departure != null) null else entrance ?: citizenMineWaypoint(city, world, from, resolved)
         val readyStorage = storage != null &&
             storage.control?.let { citizenStorageReady(world, it) } == true
         val nightFeet = if (actor.sheltering && target == actor.shelter && waypoint == null)
@@ -160,7 +161,10 @@ internal class CivsCitizenRoutes(
             actor.foodSource == it.buildingId && target == it.standing }
         val finalFoodFeet = if (nightFeet == null && foodTarget != null)
             storageFeet(world, resolved) ?: return false else null
-        val to = nightFeet ?: waypoint?.location(world) ?: finalStorageFeet ?: finalFoodFeet ?: resolved.location(world)
+        val exitFeet = if (departure == null) null else citizenWanderFeet(world, target.x, target.z, target.y.toDouble())
+            ?.takeIf { abs(it.y - target.y) <= .5 && citizenPacketBodyClear(world, it, false) }?.let { Location(world, it.x, it.y, it.z) }
+            ?: return false
+        val to = exitFeet ?: nightFeet ?: waypoint?.location(world) ?: finalStorageFeet ?: finalFoodFeet ?: resolved.location(world)
         if (idleAnchor != null && !collisions.idleDestinationFree(actor, to)) return false
         val distance = from.distance(to)
         if (!citizenRouteWithinReach(from.point(), to.point(), CivsLogistics.maximumTransferDistance(city))) {
@@ -173,7 +177,7 @@ internal class CivsCitizenRoutes(
             return true
         }
         val containerFeet = finalStorageFeet ?: finalFoodFeet
-        val standable = if (nightFeet != null) true else if (containerFeet != null)
+        val standable = if (nightFeet != null || exitFeet != null) true else if (containerFeet != null)
             storagePointClear(actor, city, world, resolved, containerFeet)
         else citizenStandable(world, resolved)
         if (!citizenControlClear(city, resolved) || !standable ||
@@ -191,12 +195,16 @@ internal class CivsCitizenRoutes(
             physicalFoodTrip && !actor.sheltering && actor.tavernService == null
         }
         val outsideWaitingMine = waitingMine != null && outside(waitingMine, from.blockX, from.blockZ)
-        val allowed = (citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
+        val allowed = if (departure != null) setOf(departure.id) else (citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
             listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id }, visit?.key?.building?.id,
                 pickupFoodTarget?.buildingId)).let {
                 if (outsideWaitingMine) it - requireNotNull(waitingMine).id else it
             }
-        val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
+        val exitBounds = departure?.bounds?.let { box ->
+            CivBox(CivPosition(minOf(box.min.x, target.x), minOf(box.min.y, target.y - 1), minOf(box.min.z, target.z)),
+                CivPosition(maxOf(box.max.x, target.x), maxOf(box.max.y, target.y), maxOf(box.max.z, target.z)))
+        }
+        val idleTransit = exitBounds == null && idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
         val mealTarget = actor.mealVisit?.target?.takeIf { it == target }
         val preferCourierRoads = idleAnchor == null && waypoint == null && actor.plan.type == BuildingType.WAREHOUSE &&
             city.inventory?.mode == CivStorageMode.PHYSICAL && actor.attacker == null && actor.combatDestination == null &&
@@ -243,7 +251,8 @@ internal class CivsCitizenRoutes(
         val policy = CitizenSnapshotPolicy({ point, material ->
             territory.allows(point, allowed, mineBottom) && controls.clear(point) &&
                 (!outsideWaitingMine || outsideSnapshot(requireNotNull(waitingMine), point.x, point.z)) &&
-                (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, origin, point, mealTarget) &&
+                (idleAnchor == null || idleTransit ||
+                    (exitBounds?.contains(point.x, point.y, point.z) ?: citizenIdleRouteAllowed(idleAnchor, origin, point, mealTarget)) &&
                     citizenIdleTerrain(point, minimumY, maximumY, city.buildings, material, climbable, leaves, logs))
         }, { first, second -> controls.stepClear(first, second) &&
             (waitingMine == null || !outsideSnapshot(waitingMine, kotlin.math.floor(first.x).toInt(), kotlin.math.floor(first.z).toInt()) ||
@@ -276,7 +285,7 @@ internal class CivsCitizenRoutes(
         }
         val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = CitizenRoute(from.point(), to, chunks, now, timeout,
-            allowed, motion, trip, target, waypoint != null, idleAnchor)
+            allowed, motion, trip, target, waypoint != null, idleAnchor, exitWalk)
         workRuntime.bindMineAccess(actor, city, requireNotNull(actor.route))
         actor.route?.progressTick = runtime.navigationTick
         val storageReason = when {
@@ -323,6 +332,13 @@ internal class CivsCitizenRoutes(
         if (nextWanderLeg(actor, city, walk, now)) {
             CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
                 "mode" to "local", "outcome" to "started", "target" to actor.route?.authored)
+        } else if (localStroll && departure != null && departure.type != BuildingType.TOWN_HALL &&
+            frame.territory.allows(departure.entrance, setOf(departure.id), null) &&
+            CitizenChunks.between(at.blockX, at.blockZ, departure.entrance.x, departure.entrance.z).ready(actor.npc.world) &&
+            startRoute(actor, actor.npc.world, departure.entrance, now, idleAnchor = departure.entrance, exitWalk = walk)) {
+            walk.routingToExit = true
+            CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
+                "mode" to "building-exit", "outcome" to "started", "building" to departure.id, "target" to departure.entrance)
         } else finishWander(actor, city, walk, now, "target-unavailable")
     }
 
@@ -440,7 +456,7 @@ internal class CivsCitizenRoutes(
                 ?.let { couriers.sourceOffersCargo(actor, city, it) } == true
         actor.wander.finish(now, reason == null, resumeImmediately = !offersCargo)
         CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
-            "mode" to "local", "outcome" to (reason ?: "arrived"), "legs" to walk.legs,
+            "mode" to (if (walk.routingToExit) "building-exit" else "local"), "outcome" to (reason ?: "arrived"), "legs" to walk.legs,
             "max_handoff_ms" to walk.maxHandoffMillis, "elapsed_ms" to now - walk.startedAt,
             "actual" to actor.npc.location.point().coordinates())
     }
