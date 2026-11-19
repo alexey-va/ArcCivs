@@ -111,6 +111,8 @@ internal object CivsProductionOrders {
         snapshot.stockTargets.filterKeys(::observed).values.forEach { targets ->
             targets.forEach { (material, count) -> add(required, material, count) }
         }
+        // The receipt proves this exact deficit independently of old stock or an unrelated missing holder.
+        val replacement = city.settings?.garrisonReplacement.orEmpty().takeIf { CivsVillageProvisions.enabled(city) }.orEmpty()
         val buildings = city.buildings.associateBy(CivBuilding::id)
         val workers = city.workers.filter { worker ->
             val building = buildings[worker.assignment]
@@ -150,7 +152,8 @@ internal object CivsProductionOrders {
             val building = buildings.getValue(requireNotNull(worker.assignment))
             if (id !in jobs && batch.matches(worker) && batch.matches(building)) {
                 // A new family shortage also admits local timber while the original species remains outstanding.
-                val local = building.type == BuildingType.FORESTER && !batch.anyTimber && familyNeed > 0 && observed(building.id)
+                val local = building.type == BuildingType.FORESTER && !batch.anyTimber && batch.material !in replacement &&
+                    familyNeed > 0 && observed(building.id)
                 reserve(worker, if (local) batch.copy(anyTimber = true) else batch)
             }
         }
@@ -172,7 +175,9 @@ internal object CivsProductionOrders {
             val anyTimber: Boolean
             if (forest) {
                 if (building.id.toString() in city.forestryJobs.orEmpty()) continue
-                anyTimber = familyNeed > 0
+                val spent = replacement.keys.firstOrNull { CivsCarpentry.timberFamily(it) &&
+                    replacement.getValue(it) > (promised[it] ?: 0L) }
+                anyTimber = familyNeed > 0 && spent == null
                 if (anyTimber) {
                     material = configured
                     need = familyNeed
@@ -181,7 +186,7 @@ internal object CivsProductionOrders {
                         (timber.neededUnits[it] ?: 0L) > (promised[it] ?: 0L) ||
                             CivsCarpentry.timberSpecies(it) in timber.uncertainSpecies && (promised[it] ?: 0L) == 0L
                     }
-                    material = configured.takeIf { it in species } ?: species.firstOrNull() ?: continue
+                    material = spent ?: configured.takeIf { it in species } ?: species.firstOrNull() ?: continue
                     need = (timber.neededUnits[material] ?: 1L) - (promised[material] ?: 0L)
                 }
             } else if (building.type == BuildingType.QUARRY) {
@@ -198,8 +203,9 @@ internal object CivsProductionOrders {
                 val reserve = if (building.type.isWorldWork) rawReserve else amount
                 need = maxOf(required[material] ?: 0L, reserve) - (holdings[material] ?: 0L) - (promised[material] ?: 0L)
             }
-            if (need <= 0) continue
-            val cycles = minOf(if (forest) 1L else MAX_CYCLES, (need - 1) / amount + 1,
+            val missing = maxOf(need, (replacement[material] ?: 0L) - (promised[material] ?: 0L))
+            if (missing <= 0) continue
+            val cycles = minOf(if (forest) 1L else MAX_CYCLES, (missing - 1) / amount + 1,
                 Long.MAX_VALUE - worker.completedCycles)
             if (cycles == 0L) continue
             reserve(worker, CivProductionOrder(building.id, configured, material, worker.completedCycles,

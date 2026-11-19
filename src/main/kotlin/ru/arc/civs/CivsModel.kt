@@ -198,6 +198,8 @@ data class CivSettlementSettings(
     val autoConstructionMaterials: Boolean = false,
     val garrisonSupplies: Boolean = false,
     val lastGarrisonIssue: Map<String, Long>? = null,
+    /** One spent native lot at most; only a paid world-work output retires it. */
+    val garrisonReplacement: Map<String, Long>? = null,
 ) {
     fun enabled(setting: CivSettlementSetting): Boolean = when (setting) {
         CivSettlementSetting.CHUNK_LOADING -> chunkLoading
@@ -209,7 +211,8 @@ data class CivSettlementSettings(
         CivSettlementSetting.CHUNK_LOADING -> copy(chunkLoading = enabled)
         CivSettlementSetting.IMMORTAL_RESIDENTS -> copy(immortalResidents = enabled)
         CivSettlementSetting.AUTO_CONSTRUCTION_MATERIALS -> copy(autoConstructionMaterials = enabled)
-        CivSettlementSetting.GARRISON_SUPPLIES -> copy(garrisonSupplies = enabled)
+        CivSettlementSetting.GARRISON_SUPPLIES -> copy(garrisonSupplies = enabled,
+            garrisonReplacement = garrisonReplacement.takeIf { enabled })
     }
 }
 

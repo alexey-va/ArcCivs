@@ -103,6 +103,7 @@ internal class CivsAutonomousDevelopment(
     private val storageCapacityPressure: (Settlement) -> Boolean = { false },
     private val developmentAdmission: (Settlement) -> Boolean = { true },
     private val acceleratedCity: () -> UUID? = { null },
+    private val planningAdmission: (Settlement) -> Boolean = developmentAdmission,
 ) {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -368,7 +369,7 @@ internal class CivsAutonomousDevelopment(
             (adopted == null || CivsSettlementPlans.next(city, goal.type) == null && CivsSettlementPlans.needsExtension(city))
         if (extendPlan && now() < (autonomyPlanRetryAt[city.id] ?: 0L) && city.id !in deferredInitialPlans) return
         if (extendPlan && now() >= (autonomyPlanRetryAt[city.id] ?: 0L)) {
-            if (!developmentAdmission(city)) {
+            if (!planningAdmission(city)) {
                 autonomyFailed(city.id, goal, CivsRejection("city-busy"))
                 return
             }
@@ -467,7 +468,7 @@ internal class CivsAutonomousDevelopment(
             occupiedUpgrades.remove(city.id)
         }
         if (recovery != null && now() < (autonomyPlanRetryAt[city.id] ?: 0L)) return
-        if (!developmentAdmission(city)) {
+        if (!planningAdmission(city)) {
             autonomyFailed(city.id, goal, CivsRejection("city-busy"))
             return
         }

@@ -358,7 +358,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     // Surface discovery must not skip a column that a builder has not selected.
     private val surfaceCursors = mutableMapOf<UUID, Int>()
     private data class Selection(val work: CivWorldWork, val rejectedStandings: Set<CivPosition> = emptySet(),
-        val temporaryUntil: Map<CivPosition, Int> = emptyMap(), val retryAt: Int? = null) {
+        val temporaryUntil: Map<CivPosition, Int> = emptyMap(), val retryAt: Int? = null, val carriedOnly: Boolean = false) {
         fun withoutExpiredOccupancy(now: Int): Selection {
             if (temporaryUntil.isEmpty()) return this
             val expired = temporaryUntil.filterValues { now >= it }.keys
@@ -376,6 +376,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     private val staffingProbeAt = mutableMapOf<UUID, Int>()
     private val gradeChecks = mutableMapOf<UUID, ArrayDeque<CivRoadUpkeep>>()
     private val developmentWaiting = mutableSetOf<UUID>()
+    private val planningBuilders = mutableMapOf<UUID, UUID>()
     private data class GradeNetworkWait(val token: Long, val beforeGeneration: Long?, val buildings: List<CivBuilding>,
         val overrides: Map<String, CivRoadRouteOverride>?)
     private val awaitingGradeNetwork = mutableMapOf<UUID, GradeNetworkWait>()
@@ -412,10 +413,11 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     mapOf("index" to index, "floor" to point(target.floor), "plan" to target.planId.toString()) },
                 "generation" to networkGenerations[id], "work_cursor" to cursors[id], "surface_cursor" to surfaceCursors[id],
                 "development_waiting" to (id in developmentWaiting), "grade_pending" to (gradeChecks[id]?.size ?: 0),
+                "planning_builder" to planningBuilders[id]?.toString(),
                 "awaiting_grade" to (id in awaitingGradeNetwork),
                 "selected" to sample(selections) { (worker, selection) -> mapOf(
                     "worker" to worker.toString(), "floor" to selection.work.upkeep?.floor?.let(::point),
-                    "rejected_standings" to selection.rejectedStandings.size) },
+                    "rejected_standings" to selection.rejectedStandings.size, "carried_only" to selection.carriedOnly) },
                 "builder_claim" to claim?.let { mapOf("worker" to it.workerId.toString(), "floor" to point(it.target.floor)) },
                 "prepared_finish" to finish?.let { mapOf("worker" to it.workerId.toString(), "floor" to point(it.target.floor)) })
         }
@@ -500,7 +502,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             val selection = saved.withoutExpiredOccupancy(currentTick())
             if (selection !== saved) selected[worker.id] = selection
             val work = selection.work
-            val current = work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city, work)
+            val current = work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city, work) &&
+                (!selection.carriedOnly || city.constructionQueue.isNullOrEmpty() && CivsEquipment.inputsReady(worker, work.inputs, emptyMap()))
             if (current && selection.retryAt?.let { currentTick() < it } == true) return null
             if (current && !budget(worker.id)) return work.takeIf { it.standing !in selection.rejectedStandings }
             if (current) {
@@ -510,11 +513,13 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     selection.rejectedStandings))
                     ?.takeIf { claim?.preparedFinishAt == null || it.isPreparedCenterFinish() }
                     ?.let { it.copy(inputs = inputs(city, it)) }
+                    ?.takeIf { !selection.carriedOnly || CivsEquipment.inputsReady(worker, it.inputs, emptyMap()) }
                 if (refreshed != null) {
                     val sameChanges = refreshed.changes == work.changes
                     val retained = if (sameChanges && work.standing !in selection.rejectedStandings) work else refreshed
-                    selected[worker.id] = Selection(retained, if (sameChanges) selection.rejectedStandings else emptySet(),
-                        if (sameChanges) selection.temporaryUntil else emptyMap())
+                    selected[worker.id] = selection.copy(work = retained,
+                        rejectedStandings = if (sameChanges) selection.rejectedStandings else emptySet(),
+                        temporaryUntil = if (sameChanges) selection.temporaryUntil else emptyMap(), retryAt = null)
                     return retained
                 }
                 if (selection.temporaryUntil.isNotEmpty()) {
@@ -555,7 +560,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         return null
     }
 
-    /** Observe road surfaces after resident work. Development may admit one observed center separately. */
+    /** Observe surfaces after resident work. Development may admit one observed column for a free builder. */
     fun backfillSurfaces(city: Settlement, canReassign: (UUID) -> Boolean = { true }) {
         val retainedClaim = currentClaim(city)
         if (city.autonomy?.paused != false || city.pendingDeletion != null) return
@@ -580,8 +585,10 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                 CivsEquipment.usableCount(it, "COBBLESTONE") > 0 &&
                 preparedFinishes[city.id]?.preparedFinishAt?.let(::freshPreparedFinish) != true
         }
+        val opportunity = planningBuilders[city.id]?.takeIf { eligible(city) && city.constructionQueue.isNullOrEmpty() }
+        val spare = opportunity?.let { id -> city.workers.firstOrNull { it.id == id && spareBuilder(city, it, canReassign) } }
         if (assigned != null && finishBuilder == null && registerSurface == null && gradeChecks[city.id].isNullOrEmpty()) return
-        val worker = assigned ?: city.workers.first { it.id == requireNotNull(prospective).first }
+        val worker = spare ?: assigned ?: city.workers.first { it.id == requireNotNull(prospective).first }
             .copy(assignment = requireNotNull(prospective).second)
         repeat(minOf(SCAN_COLUMNS, network.targets.size)) {
             if (!budget(worker.id)) return
@@ -591,6 +598,16 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             // A damaged candidate stays unselected while its grade remains in the finite observation pass.
             val captured = world.captureRoadUpkeep(city, worker, target, registerSurface)
             if (grade != null && captured != null) gradeChecks.getValue(city.id).addLast(grade)
+            if (spare != null && grade == null && captured != null && target.routeOverride == null &&
+                target.junction == null && target.wallCleanup == null) {
+                val work = captured.copy(inputs = inputs(city, captured))
+                if (CivsEquipment.inputsReady(spare, work.inputs, emptyMap()) &&
+                    city.workers.any { it.id != spare.id && spareBuilder(city, it, canReassign) }) {
+                    selected[spare.id] = Selection(work, carriedOnly = true)
+                    planningBuilders.remove(city.id)
+                    return
+                }
+            }
             if (prospective != null && captured != null) {
                 val original = city.workers.first { it.id == worker.id }
                 builderClaims[city.id] = BuilderClaim(city.owner, network, worker.id, worker.completedCycles,
@@ -677,6 +694,12 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
 
     /** An ordinary order may yield once to a prepared center, besides already admitted work and grade checks. */
     fun admitDevelopment(city: Settlement): Boolean {
+        planningBuilders.remove(city.id)
+        for (worker in city.workers) if (selected[worker.id]?.carriedOnly == true) selected.remove(worker.id)
+        return admit(city)
+    }
+
+    private fun admit(city: Settlement): Boolean {
         val firstAttempt = developmentWaiting.add(city.id)
         val finish = if (firstAttempt) preparedFinishes.remove(city.id) else null
         if (!eligible(city)) return true
@@ -700,7 +723,28 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         return currentClaim(city) == null
     }
 
-    fun developmentFinished(cityId: UUID) { developmentWaiting.remove(cityId) }
+    /** During a site search one spare builder may spend carried material on a column observed by the normal scan. */
+    fun admitPlanning(city: Settlement, available: (UUID) -> Boolean): Boolean {
+        if (!admit(city)) return false
+        if (city.inventory?.mode == CivStorageMode.PHYSICAL && eligible(city) && city.constructionQueue.isNullOrEmpty()) {
+            val builders = city.workers.filter { spareBuilder(city, it, available) }
+            if (builders.size >= 2) builders.firstOrNull { CivsEquipment.usableCount(it, "COBBLESTONE") > 0 }?.let {
+                planningBuilders[city.id] = it.id
+            }
+        }
+        return true
+    }
+
+    private fun spareBuilder(city: Settlement, worker: CivWorker, available: (UUID) -> Boolean) =
+        worker.id !in selected && !CivsResidents.isChild(worker) && worker.cargo == null && worker.pendingStock == null &&
+            worker.hasCollectedItems != true && worker.assignment?.let(city::building)?.let {
+                it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE
+            } == true && available(worker.id)
+
+    fun developmentFinished(cityId: UUID) {
+        planningBuilders.remove(cityId)
+        developmentWaiting.remove(cityId)
+    }
     fun awaitGradeNetwork(city: Settlement): Long {
         val token = ++generation
         awaitingGradeNetwork[city.id] = GradeNetworkWait(token, networkGenerations[city.id], city.buildings.toList(),
@@ -745,14 +789,14 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
     }
     fun clear() {
         networks.clear(); cursors.clear(); surfaceCursors.clear(); selected.clear(); waiting.clear()
-        gradeChecks.clear(); developmentWaiting.clear(); awaitingGradeNetwork.clear(); networkGenerations.clear()
+        gradeChecks.clear(); developmentWaiting.clear(); planningBuilders.clear(); awaitingGradeNetwork.clear(); networkGenerations.clear()
         builderClaims.clear(); preparedFinishes.clear(); staffingProbeAt.clear()
     }
 
     /** Only an observed damaged column creates a request; healthy roads never reserve or receive supplies. */
     fun requirements(city: Settlement): Map<UUID, Map<String, Long>> = if (!eligible(city) ||
         city.inventory?.mode != CivStorageMode.PHYSICAL) emptyMap() else city.workers.mapNotNull { worker ->
-        selected[worker.id]?.work?.takeIf { work -> work.cycle == worker.completedCycles && work.buildingId == worker.assignment &&
+        selected[worker.id]?.takeUnless { it.carriedOnly }?.work?.takeIf { work -> work.cycle == worker.completedCycles && work.buildingId == worker.assignment &&
             work.inputs == inputs(city, work) && worker.cargo == null && !CivsResidents.isChild(worker) &&
             city.building(work.buildingId)?.let { it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE } == true
         }?.let { worker.id to it.inputs }

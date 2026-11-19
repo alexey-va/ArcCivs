@@ -26,7 +26,9 @@ class CivsPhysicalWorkTest : FunSpec({
             val city = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Farm", world.uid, CivPosition(0, 64, 0),
                 48, "medievaloak", Stock(), listOf(farm, farm.copy(id = UUID.randomUUID(), type = BuildingType.TOWN_HALL,
                     schematicId = "test", bounds = CivBox(CivPosition(-10, 63, 1), CivPosition(-4, 70, 6)),
-                    entrance = CivPosition(-5, 64, 0), control = CivPosition(-5, 64, 2), production = null)), listOf(worker), inventory = CivInventory(CivStorageMode.VIRTUAL))
+                    entrance = CivPosition(-5, 64, 0), control = CivPosition(-5, 64, 2), production = null)), listOf(worker),
+                inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy(),
+                settings = CivSettlementSettings(garrisonSupplies = true, garrisonReplacement = mapOf("WHEAT" to 8L)))
             val plots = CivsWorksiteLayouts.field(farm)
             plots.size shouldBe 72
             val water = CivsWorksiteLayouts.irrigation(farm)
@@ -62,6 +64,7 @@ class CivsPhysicalWorkTest : FunSpec({
                 plant.inputs shouldBe mapOf("WHEAT_SEEDS" to 1L)
                 plant.storageInputs(worker) shouldBe emptyMap()
                 val plantedCity = CivsRules.finishWorldWork(city, plant, 10_000)
+                plantedCity.settings?.garrisonReplacement shouldBe mapOf("WHEAT" to 8L)
                 CivsEquipment.plainCount(plantedCity.workers.single(), "WHEAT_SEEDS") shouldBe 63
                 shouldThrow<CivsRejection> { CivsRules.finishWorldWork(plantedCity, plant, 10_001) }
                 runtime.requirement(city, worker) shouldBe ("WHEAT_SEEDS" to 64L)
@@ -94,6 +97,7 @@ class CivsPhysicalWorkTest : FunSpec({
                 harvest.changes.single().position shouldBe p
                 water.forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.WATER }
                 val changed = CivsRules.finishWorldWork(city, harvest, 20_000)
+                changed.settings?.garrisonReplacement shouldBe mapOf("WHEAT" to 8L - harvest.outputs.getValue("WHEAT"))
                 changed.workers.single().completedCycles shouldBe 1
                 CivsEquipment.plainCount(changed.workers.single(), "WHEAT").toLong() shouldBe harvest.outputs.getValue("WHEAT")
                 changed.inventory!!.buildingStock(farm.id) shouldBe emptyMap()

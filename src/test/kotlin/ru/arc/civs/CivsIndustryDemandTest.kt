@@ -105,11 +105,18 @@ class CivsIndustryDemandTest : FunSpec({
         for (x in -1..3) for (z in -1..1) world.loadChunk(x, z)
         val plugin = paper.createSimplePlugin("IndustryDemand")
         CivsStorage(plugin) { emptyArray() }.use { storage ->
-            for ((material, input) in listOf("GLASS" to "SAND", "IRON_INGOT" to "RAW_IRON", "STONE" to "COBBLESTONE")) {
-                val base = industryDemandCity().copy(worldId = world.uid)
-                val job = industryJobs(industryDemand(base, mapOf(input to 8L, "CHARCOAL" to 1L), material, 8)).values.single()
-                job.inputs shouldBe mapOf(input to 8L, "CHARCOAL" to 1L)
+            for ((material, input) in listOf("GLASS" to "SAND", "IRON_INGOT" to "RAW_IRON", "STONE" to "COBBLESTONE",
+                "GRAVEL" to "COBBLESTONE", "SAND" to "GRAVEL")) {
+                val base = industryDemandCity().copy(worldId = world.uid, settings = CivSettlementSettings(garrisonSupplies = true))
+                val job = industryJobs(industryDemand(base, mapOf(input to if (material == "SAND") 16L else 8L,
+                    "CHARCOAL" to 1L), material, 8)).values.single()
+                job.material shouldBe material
+                job.inputs shouldBe if (material in listOf("GRAVEL", "SAND")) mapOf(input to 2L) else mapOf(input to 8L, "CHARCOAL" to 1L)
                 val building = base.building(job.buildingId)!!
+                val unpaid = base.workers.single { it.id == job.workerId }
+                shouldThrow<CivsRejection> { CivsRules.deliver(base, base.owner, unpaid.id, building.id,
+                    unpaid.completedCycles, unpaid.nextDeliveryAt, 60_000, outputHandled = true, craftJob = job) }.reason shouldBe "materials-missing"
+                base.settings?.garrisonReplacement shouldBe null
                 val point = requireNotNull(building.control)
                 world.getBlockAt(point.x, point.y, point.z).type = Material.BARREL
                 val barrel = (world.getBlockAt(point.x, point.y, point.z).state as Barrel).inventory
@@ -122,13 +129,14 @@ class CivsIndustryDemandTest : FunSpec({
                 val plan = storage.prepareProduction(city, building, worker, job)
                 val after = CivsRules.deliver(city, city.owner, worker.id, building.id, worker.completedCycles,
                     worker.nextDeliveryAt, 60_000, outputHandled = true, craftJob = job)
+                after.settings?.garrisonReplacement shouldBe if (material == "GRAVEL") mapOf("COBBLESTONE" to 2L) else null
                 job.inputs.keys.forEach { CivsEquipment.plainCount(after.workers.single { it.id == worker.id }, it) shouldBe 0 }
                 val receipt = CivInventoryTransaction(id, city.id, city.revision, after.copy(inventory = plan.inventoryAfter), plan.changes)
                 storage.seal(receipt)
                 barrel.isEmpty shouldBe true
                 storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
                 storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
-                barrel.storageContents.filterNotNull() shouldBe listOf(ItemStack(Material.valueOf(material), 8))
+                barrel.storageContents.filterNotNull() shouldBe listOf(ItemStack(Material.valueOf(material), job.amount.toInt()))
                 storage.unlock(id)
                 shouldThrow<CivsRejection> { CivsRules.deliver(after, city.owner, worker.id, building.id,
                     worker.completedCycles, worker.nextDeliveryAt, 60_001, outputHandled = true, craftJob = job) }.reason shouldBe "stale-delivery"

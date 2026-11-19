@@ -7,6 +7,97 @@ import io.mockk.mockk
 import java.util.UUID
 
 class CivsRoadAdmissionTest : FunSpec({
+    test("a spare builder can finish one personally funded repair while a project is only being designed") {
+        val city = roadPlanningCity()
+        val (other, builder) = city.workers
+        val network = roadAdmissionNetwork(city)
+        val native = mockk<CivsWorld>()
+        every { native.captureRoadUpkeep(any(), any(), any(), any()) } answers {
+            roadAdmissionWork(city.copy(workers = listOf(secondArg())), thirdArg())
+        }
+        var tick = 0
+        val maintenance = CivsRoadMaintenance(native, registerSurface = { _, _ -> }) { tick }
+        maintenance.publish(city, network)
+        maintenance.admitPlanning(city) { true } shouldBe true
+        maintenance.backfillSurfaces(city)
+        tick++
+        val work = requireNotNull(maintenance.plan(city, builder))
+        work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+        maintenance.requirements(city) shouldBe emptyMap()
+        maintenance.plan(city, other) shouldBe null
+        val after = CivsRoadMaintenance.complete(city, work, 3_000)
+        CivRoadUpkeepReceipt(builder, city.stock, work, 3_000).validated(after)
+        maintenance.upkeepRetired(after, requireNotNull(work.upkeep))
+        tick++
+        maintenance.backfillSurfaces(after)
+        maintenance.plan(after, after.workers.last()) shouldBe null
+        maintenance.admitDevelopment(after) shouldBe true
+        CivsEquipment.usableCount(after.workers.last(), "COBBLESTONE") shouldBe 63
+        after.workers.first() shouldBe other
+    }
+
+    test("a real order preempts only the unsealed draft selection and cannot take materials") {
+        val city = roadPlanningCity()
+        val (other, builder) = city.workers
+        val network = roadAdmissionNetwork(city)
+        val native = mockk<CivsWorld>()
+        every { native.captureRoadUpkeep(any(), any(), any(), any()) } answers {
+            roadAdmissionWork(city.copy(workers = listOf(secondArg())), thirdArg())
+        }
+        var tick = 0
+        val maintenance = CivsRoadMaintenance(native, registerSurface = { _, _ -> }) { tick }
+        maintenance.publish(city, network)
+        maintenance.admitPlanning(city) { true } shouldBe true
+        maintenance.backfillSurfaces(city)
+        tick++
+        requireNotNull(maintenance.plan(city, builder))
+        val queued = city.copy(constructionQueue = listOf(city.buildings.first().id))
+        maintenance.admitDevelopment(queued) shouldBe true
+        tick++
+        maintenance.plan(queued, builder) shouldBe null
+        maintenance.requirements(queued) shouldBe emptyMap()
+        CivsEquipment.usableCount(builder, "COBBLESTONE") shouldBe 64
+
+        val unfunded = city.copy(workers = city.workers.map { it.copy(items = null) })
+        for ((state, idle) in listOf(city to setOf(builder.id), unfunded to setOf(builder.id, other.id),
+                queued to setOf(builder.id, other.id))) {
+            maintenance.developmentFinished(city.id)
+            tick++
+            maintenance.admitPlanning(state) { it in idle } shouldBe true
+            maintenance.backfillSurfaces(state) { it in idle }
+            state.workers.forEach { maintenance.plan(state, it) shouldBe null }
+            maintenance.requirements(state) shouldBe emptyMap()
+        }
+    }
+
+    test("a draft repair releases a changed bill that the builder cannot pay from the bag") {
+        val base = roadPlanningCity()
+        val builder = CivsEquipment.consume(base.workers.last(), "COBBLESTONE", 63)
+        val city = base.copy(workers = listOf(base.workers.first(), builder))
+        val network = roadAdmissionNetwork(city)
+        val native = mockk<CivsWorld>()
+        var foundation = false
+        every { native.captureRoadUpkeep(any(), any(), any(), any()) } answers {
+            val target = thirdArg<CivRoadUpkeep>()
+            val work = roadAdmissionWork(city.copy(workers = listOf(secondArg())), target)
+            if (foundation) work.copy(changes = listOf(CivPlanBlock(target.floor.copy(y = target.floor.y - 1),
+                "minecraft:air", "minecraft:dirt")) + work.changes) else work
+        }
+        var tick = 0
+        val maintenance = CivsRoadMaintenance(native, registerSurface = { _, _ -> }) { tick }
+        maintenance.publish(city, network)
+        maintenance.admitPlanning(city) { true } shouldBe true
+        maintenance.backfillSurfaces(city)
+        tick++
+        requireNotNull(maintenance.plan(city, builder)).inputs shouldBe mapOf("COBBLESTONE" to 1L)
+        foundation = true
+        tick++
+        maintenance.plan(city, builder) shouldBe null
+        maintenance.requirements(city) shouldBe emptyMap()
+        CivsEquipment.usableCount(builder, "COBBLESTONE") shouldBe 1
+        maintenance.admitDevelopment(city) shouldBe true
+    }
+
     test("growth preserves one admitted ordinary standing then yields the unrelated backlog until its attempt ends") {
         val city = roadAdmissionCity()
         val network = roadAdmissionNetwork(city)
@@ -240,6 +331,15 @@ class CivsRoadAdmissionTest : FunSpec({
         maintenance.admitDevelopment(city.copy(inventory = null, stock = Stock())) shouldBe true
     }
 })
+
+private fun roadPlanningCity(): Settlement {
+    val base = roadAdmissionCity()
+    val builder = base.workers.single()
+    val other = builder.copy(id = UUID(0, 40), name = "Other", items = null)
+    return CivsRules.validate(base.copy(buildings = base.buildings.map {
+        if (it.type == BuildingType.BUILDER_HUT || it.type == BuildingType.TOWN_HALL) it.copy(level = 2) else it
+    }, workers = listOf(other, builder)))
+}
 
 private fun roadAdmissionHill(): Pair<Settlement, List<CivPlacementPlan>> {
     val base = roadAdmissionCity()

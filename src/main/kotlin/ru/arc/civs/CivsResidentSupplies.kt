@@ -409,7 +409,7 @@ internal class CivsResidentSupplies(
                     CivsVillageProvisions.ready(current, stock, at) != loads) return@inventoryMutation null
                 storage.prepareWork(current, tower.id, loads, emptyMap(), emptyList())
             }, keepViewersOpen = true) { current, inventory ->
-                val settings = requireNotNull(current.settings)
+                val settings = requireNotNull(CivsVillageProvisions.replacementAfter(current, debited = loads))
                 current.copy(inventory = inventory, revision = Math.addExact(current.revision, 1),
                     settings = settings.copy(lastGarrisonIssue = settings.lastGarrisonIssue.orEmpty() + loads.mapValues { at }))
             }

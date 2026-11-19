@@ -12,6 +12,11 @@ internal object CivsSnapshotValidation {
             city.settings?.lastGarrisonIssue?.let { times ->
                 snapshot(times.all { (material, time) -> material in CivsVillageProvisions.loads && time >= 0 })
             }
+            city.settings?.garrisonReplacement?.let { remaining ->
+                snapshot(CivsVillageProvisions.supported(city) && remaining.isNotEmpty() && remaining.all { (material, count) ->
+                    count in 1..(CivsVillageProvisions.replacementLimits[material] ?: 0L)
+                })
+            }
             city.autonomy?.let { autonomy ->
                 snapshot((city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) && city.members.isEmpty() &&
                     autonomy.recruitmentMinutes in 0..CivsAutonomy.RECRUITMENT_MINUTES)

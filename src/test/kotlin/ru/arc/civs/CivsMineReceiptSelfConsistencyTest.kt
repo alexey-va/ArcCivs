@@ -244,7 +244,12 @@ private fun landingDependencyReceipts(paper: MockBukkitTestRuntime, plugin: Plug
                         paper.performTicks(1)
                         val city = current()
                         runtime.pulse(listOf(city))
-                        runtime.plan(city, city.workers.single())?.let { return it }
+                        if (runtime.plan(city, city.workers.single()) == null) return@repeat
+                        // Opening maintenance may still own the city's write lane after a worksite is selected.
+                        await(authority.afterCityAvailable(city.id) {
+                            val fresh = current()
+                            CompletableFuture.completedFuture(runtime.plan(fresh, fresh.workers.single()))
+                        })?.let { return it }
                     }
                 } catch (failure: CivsRejection) {
                     throw IllegalStateException("landing dependency selection rejected: ${failure.reason} " +

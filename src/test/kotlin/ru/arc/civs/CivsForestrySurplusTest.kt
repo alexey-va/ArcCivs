@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import com.google.gson.Gson
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
@@ -74,6 +75,45 @@ class CivsForestrySurplusTest : FunSpec({
         val finished = city.copy(workers = listOf(worker.copy(completedCycles = 1L), city.workers.last()))
         finished.review(full, first).orders shouldBe emptyMap()
         finished.review(full).orders shouldBe emptyMap()
+    }
+
+    test("one spent lot shares exact raw orders across workers despite old stock or an unrelated missing holder") {
+        val base = surplusCity()
+        val forest = base.buildings.last().copy(level = 3, production = "OAK_LOG")
+        val farm = forest.copy(id = UUID(0, 20), type = BuildingType.FARM, production = "WHEAT")
+        val quarry = forest.copy(id = UUID(0, 21), type = BuildingType.QUARRY, production = "STONE")
+        val workers = listOf(forest, farm, quarry).flatMapIndexed { index, building ->
+            List(if (index == 2) 1 else 3) { n -> base.workers.single().copy(id = UUID(index + 1L, n + 1L), assignment = building.id) }
+        }
+        val city = base.copy(buildings = listOf(base.buildings.first(), forest, farm, quarry), workers = workers,
+            autonomy = CivAutonomy(), settings = CivSettlementSettings(garrisonSupplies = true,
+                garrisonReplacement = mapOf("OAK_LOG" to 16L, "WHEAT" to 8L, "COBBLESTONE" to 2L)))
+        // Level 3, staffing and the 499 family/latch mirror Auto1; the complete item split is declared here.
+        val held = mapOf("OAK_LOG" to 499L, "WHEAT" to 128L, "COBBLESTONE" to 128L)
+        val paused = CivProductionBoard(timber = CivsForestrySurplus.decide(held, emptyMap(), true, true))
+        city.copy(settings = CivSettlementSettings(garrisonSupplies = true)).review(held, paused).orders shouldBe emptyMap()
+        val first = city.review(held, paused)
+        first.timber?.paused shouldBe true
+        first.orders.values.filter { it.buildingId == forest.id }.all { it.material == "OAK_LOG" && !it.anyTimber } shouldBe true
+        first.orders.values.groupBy { it.material }.mapValues { (_, lots) -> lots.sumOf { (it.untilCycle - it.fromCycle) * it.unitsPerCycle } } shouldBe
+            mapOf("OAK_LOG" to 24L, "WHEAT" to 8L, "COBBLESTONE" to 2L) // Two estimated 12-log trees; native drops retire only 16.
+        city.review(held, first).orders shouldBe first.orders
+        val snapshot = surplusSnapshot(city, held)
+        val evidence = snapshot.inputKey as CivSupplyObservation
+        val partial = snapshot.copy(inputKey = evidence.copy(capture = evidence.capture.copy(complete = false)))
+        CivsProductionOrders.allocate(CivsProductionOrders.survey(city, partial, SURPLUS_NOW), partial,
+            emptyMap(), paused, SURPLUS_NOW).orders shouldBe first.orders
+        val hidden = partial.copy(inputKey = evidence.copy(capture = evidence.capture.copy(complete = false,
+            stores = evidence.capture.stores.mapValues { (id, store) -> if (id == farm.id) store.copy(unavailable = 1) else store })))
+        CivsProductionOrders.allocate(CivsProductionOrders.survey(city, hidden, SURPLUS_NOW), hidden,
+            emptyMap(), paused, SURPLUS_NOW).orders.values.none { it.buildingId == farm.id } shouldBe true
+        val disabled = city.copy(settings = city.settings!!.with(CivSettlementSetting.GARRISON_SUPPLIES, false))
+        disabled.review(held, paused).orders shouldBe emptyMap()
+        disabled.review(held, first).orders shouldBe first.orders
+        val completed = disabled.copy(workers = workers.map { worker ->
+            worker.copy(completedCycles = first.orders[worker.id]?.untilCycle ?: worker.completedCycles)
+        })
+        completed.review(held, first).orders shouldBe emptyMap()
     }
 
     test("a local timber shortage permits another tree without paying an outstanding spruce bill with oak") {
@@ -262,7 +302,8 @@ class CivsForestrySurplusTest : FunSpec({
 
     test("a published tree order admits a fresh tree and its selected action survives withdrawal") {
         forestryWorksite("forestry-surplus-selected", autonomous = false, strict = true) { world, runtime, initial ->
-            val city = initial.copy(inventory = CivInventory(CivStorageMode.PHYSICAL), workers = initial.workers.map {
+            val city = initial.copy(inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy(),
+                settings = CivSettlementSettings(garrisonSupplies = true, garrisonReplacement = mapOf("OAK_LOG" to 1L)), workers = initial.workers.map {
                 CivsEquipment.collectSupplies(it, mapOf("OAK_SAPLING" to 1L))
             })
             val worker = city.workers.single()
@@ -284,6 +325,8 @@ class CivsForestrySurplusTest : FunSpec({
             runtime.plan(city, worker) shouldBe selected
             runtime.validate(city, selected)
             val after = CivsRules.finishWorldWork(city, selected, 10_000)
+            after.settings?.garrisonReplacement shouldBe null
+            CivsEquipment.plainCount(after.workers.single(), "OAK_LOG") shouldBe 3
             val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(),
                 worldChanges = selected.changes)
             Gson().fromJson(Gson().toJson(receipt), CivInventoryTransaction::class.java).validated() shouldBe receipt
@@ -293,7 +336,8 @@ class CivsForestrySurplusTest : FunSpec({
 
     test("a paid multi-batch tree completes without another order or a new cursor") {
         forestryWorksite("forestry-surplus-paid-tree", autonomous = false, strict = true) { world, runtime, initial ->
-            var city = initial.copy(inventory = CivInventory(CivStorageMode.PHYSICAL), workers = initial.workers.map {
+            var city = initial.copy(inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy(),
+                settings = CivSettlementSettings(garrisonSupplies = true, garrisonReplacement = mapOf("OAK_LOG" to 1L)), workers = initial.workers.map {
                 CivsEquipment.collectSupplies(it, mapOf("OAK_SAPLING" to 1L))
             })
             val root = CivPosition(10, 64, 10)
@@ -305,8 +349,23 @@ class CivsForestrySurplusTest : FunSpec({
             val first = requireNotNull(runtime.plan(city, worker)) { runtime.debug().toString() }
             val job = requireNotNull(first.forestry).job
             (first.forestry!!.next < job.cells.size) shouldBe true
+            first.outputs["OAK_LOG"] shouldBe null // Crown clearance is work, but not a replacement log.
+            val before = city
+            val cell = first.changes.first()
+            world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).type = Material.STONE
+            shouldThrow<CivsRejection> { runtime.validate(city, first) }.reason shouldBe "stale-worksite"
+            city.settings?.garrisonReplacement shouldBe mapOf("OAK_LOG" to 1L)
+            world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.before)
+            runtime.validate(city, first)
             first.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after) }
             city = CivsRules.finishWorldWork(city, first, 10_000)
+            city.settings?.garrisonReplacement shouldBe mapOf("OAK_LOG" to 1L)
+            CivsEquipment.plainCount(city.workers.single(), "OAK_LOG") shouldBe 0
+            shouldThrow<CivsRejection> { CivsRules.finishWorldWork(city, first, 10_001) }.reason shouldBe "stale-delivery"
+            before.settings?.garrisonReplacement shouldBe mapOf("OAK_LOG" to 1L)
+            city = Gson().fromJson(Gson().toJson(city), Settlement::class.java)
+            city.settings?.garrisonReplacement shouldBe mapOf("OAK_LOG" to 1L)
+            city = city.copy(settings = city.settings!!.with(CivSettlementSetting.GARRISON_SUPPLIES, false))
             runtime.invalidate(worker.id, first)
             worker = city.workers.single()
             val saved = requireNotNull(city.forestryJobs)[jobKey(first)]
@@ -318,7 +377,10 @@ class CivsForestrySurplusTest : FunSpec({
             city.forestryJobs?.get(jobKey(first)) shouldBe saved
             next.forestry!!.next shouldBe requireNotNull(saved).cells.size
             next.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after) }
-            CivsRules.finishWorldWork(city, next, 20_000).forestryJobs shouldBe null
+            val finished = CivsRules.finishWorldWork(city, next, 20_000)
+            finished.forestryJobs shouldBe null
+            finished.settings?.garrisonReplacement shouldBe null
+            CivsEquipment.plainCount(finished.workers.single(), "OAK_LOG") shouldBe 3
         }
     }
 })

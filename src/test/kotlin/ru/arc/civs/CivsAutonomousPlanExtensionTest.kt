@@ -19,7 +19,7 @@ class CivsAutonomousPlanExtensionTest : FunSpec({
     test("missing late service extends the old plan instead of requesting an absent reserved site and backs off on failure") {
         ExtensionHarness(old).use { h ->
             h.startExtension()
-            verify(exactly = 1) { h.placement.plan(any()) }
+            verify(exactly = 1) { h.placement.plan(any(), laterGrowth = h.laterProjects) }
             verify(exactly = 0) { h.placement.reserved(any(), any()) }
             val before = h.city
             h.planned.completeExceptionally(CivsRejection("autonomy-no-site"))
@@ -29,7 +29,7 @@ class CivsAutonomousPlanExtensionTest : FunSpec({
             h.development.progress(before.id)?.reason shouldBe "autonomy-no-site"
             h.time += 30_001
             h.development.pulse(); h.drain()
-            verify(exactly = 1) { h.placement.plan(any()) }
+            verify(exactly = 1) { h.placement.plan(any(), laterGrowth = h.laterProjects) }
             verify(exactly = 0) { h.placement.reserved(any(), any()) }
         }
     }
@@ -37,7 +37,7 @@ class CivsAutonomousPlanExtensionTest : FunSpec({
     test("FIFO admitted while an extension is computing prevents publication of its late result") {
         ExtensionHarness(old).use { h ->
             h.startExtension()
-            verify(exactly = 1) { h.placement.plan(any()) }
+            verify(exactly = 1) { h.placement.plan(any(), laterGrowth = h.laterProjects) }
             val queued = CivsSettlementPlans.at(settlementPlanTemplates().getValue(BuildingType.HOUSE).first,
                 CivPosition(40, 64, 40), 180, UUID(140, 999))
             h.city = CivsRules.placeSite(h.city, h.city.owner, queued)
@@ -111,6 +111,7 @@ private class ExtensionHarness(old: Settlement) : AutoCloseable {
     val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler)
     val placement = mockk<CivsAutonomousPlacement>()
+    val laterProjects = listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)
     val planned = CompletableFuture<CivSettlementPlan>()
     val blueprints = mockk<CivsBlueprints>()
     private val plugin = mockk<Plugin>()
@@ -123,7 +124,7 @@ private class ExtensionHarness(old: Settlement) : AutoCloseable {
         every { plugin.logger } returns Logger.getLogger("CivsPlanExtensionTest")
         every { blueprints.maximumLevel(any()) } answers { firstArg<CivBuilding>().type.maxLevel }
         every { placement.infrastructure(any()) } returns CompletableFuture.failedFuture(CivsRejection("autonomy-layout-complete"))
-        every { placement.plan(any()) } returns planned
+        every { placement.plan(any(), laterGrowth = laterProjects) } returns planned
         every { placement.debug(any()) } returns emptyMap()
     }
     val development = CivsAutonomousDevelopment(plugin, tasks, mockk(), blueprints, placement, Executor(Runnable::run),

@@ -84,6 +84,7 @@ class CivsService(
         developmentFinished = roadMaintenance::developmentFinished,
         storageCapacityPressure = ::storageCapacityPressure,
         developmentAdmission = roadMaintenance::admitDevelopment,
+        planningAdmission = { city -> roadMaintenance.admitPlanning(city) { citizens.canReassign(city.id, it) } },
         acceleratedCity = { labGrowth.cityId()?.let(cities::get)?.takeIf(::labGrowthActive)?.id })
     private val physics = CivsPhysics(plugin, tasks)
     private val controlCleanup = CivsControlCleanup(plugin) { owner, block -> world.canModify(owner, block) }

@@ -479,9 +479,11 @@ internal class CivsStoragePlanner(
         validateAmounts(outputs)
         val mine = work?.takeIf { it.miningSections != null || CivsMineFallback.matches(it) }?.let {
             require(it.buildingId == buildingId && it.changes == worldChanges && !CivsAutonomy.legacyStock(city))
+            val fallback = CivsMineFallback.matches(it)
             CivMineReceipt(building, city.minePlans?.get(buildingId.toString()),
                 city.mineProgress?.get(buildingId.toString()), it,
-                workerBefore = if (CivsMineFallback.matches(it)) city.workers.single { worker -> worker.id == it.workerId } else null).detached()
+                workerBefore = if (fallback) city.workers.single { worker -> worker.id == it.workerId } else null,
+                cobblestoneReplacementBefore = if (fallback) city.settings?.garrisonReplacement?.get("COBBLESTONE") else null).detached()
         }
         val inventory = requireNotNull(city.inventory)
         if (inventory.mode == CivStorageMode.VIRTUAL) {

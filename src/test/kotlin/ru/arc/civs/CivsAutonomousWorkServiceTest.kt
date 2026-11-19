@@ -578,7 +578,7 @@ class CivsQuarryStaffingRecoveryTest : FunSpec({
 class CivsMineFallbackAuthorityTest : FunSpec({
     test("fallback Lands revoked while its journal ACK is pending prevents the item and tool transition") {
         serviceScenario(nativeGeometry = true) { h ->
-            val fixture = ServiceMineFallback(h)
+            val fixture = ServiceMineFallback(h, replacement = true)
             val ack = CompletableFuture<CivInventoryTransaction>()
             var tx: CivInventoryTransaction? = null
             every { h.store.saveInventoryTransaction(any()) } answers { tx = firstArg(); ack }
@@ -597,7 +597,7 @@ class CivsMineFallbackAuthorityTest : FunSpec({
 
     test("allowed fallback ACK publishes its frozen output and one tool use exactly once") {
         serviceScenario(nativeGeometry = true) { h ->
-            val fixture = ServiceMineFallback(h)
+            val fixture = ServiceMineFallback(h, replacement = true)
             var tx: CivInventoryTransaction? = null
             every { h.store.saveInventoryTransaction(any()) } answers { tx = firstArg(); CompletableFuture.completedFuture(firstArg()) }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
@@ -608,6 +608,9 @@ class CivsMineFallbackAuthorityTest : FunSpec({
             val accepted = requireNotNull(tx)
             accepted.mine!!.workerBefore shouldBe fixture.worker
             accepted.mine.before(accepted.after) shouldBe fixture.city
+            shouldThrow<IllegalArgumentException> {
+                accepted.copy(mine = accepted.mine.copy(cobblestoneReplacementBefore = null)).validated()
+            }
             accepted.changes shouldBe emptyList()
             accepted.worldChanges.orEmpty() shouldBe emptyList()
             val directory = java.nio.file.Files.createTempDirectory("fallback-proof-codec-")
@@ -617,6 +620,7 @@ class CivsMineFallbackAuthorityTest : FunSpec({
             } finally { directory.toFile().deleteRecursively() }
             h.commit()
             val after = result.join()
+            after.settings?.garrisonReplacement shouldBe mapOf("COBBLESTONE" to 1L)
             after.minePlans shouldBe fixture.city.minePlans
             after.mineProgress shouldBe fixture.city.mineProgress
             after.stock shouldBe Stock()
@@ -629,7 +633,7 @@ class CivsMineFallbackAuthorityTest : FunSpec({
 
     for (persisted in listOf(false, true)) test("fallback recovery after city persisted=$persisted needs no actor cache and never credits twice") {
         serviceScenario(nativeGeometry = true) { h ->
-            val fixture = ServiceMineFallback(h)
+            val fixture = ServiceMineFallback(h, replacement = true)
             val receipt = fixture.receipt()
             every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(if (persisted) receipt.after else fixture.city))
@@ -711,11 +715,12 @@ class CivsMineFallbackAuthorityTest : FunSpec({
     }
 })
 
-private class ServiceMineFallback(private val h: ServiceScenario) {
+private class ServiceMineFallback(private val h: ServiceScenario, replacement: Boolean = false) {
     val mine = h.city.buildings.last().copy(type = BuildingType.QUARRY, control = CivPosition(10, 64, 0))
     val worker = h.city.workers.first().copy(assignment = mine.id, nextDeliveryAt = 1,
         items = List(CivsEquipment.SLOTS) { if (it == 4) CivResidentItem("IRON_PICKAXE", 1) else null })
     val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+        settings = if (replacement) CivSettlementSettings(garrisonSupplies = true, garrisonReplacement = mapOf("COBBLESTONE" to 2L)) else h.city.settings,
         stock = Stock(), buildings = listOf(h.city.buildings.first(), mine), workers = listOf(worker)))
     val work = CivWorldWork(worker.id, worker.completedCycles, mine.id, CivPosition(9, 64, 0), emptyList(),
         outputs = mapOf("COBBLESTONE" to 1L), durationMillis = CivsMineFallback.DURATION_MILLIS, status = "digging-mine",
@@ -751,7 +756,8 @@ private class ServiceMineFallback(private val h: ServiceScenario) {
     fun receipt(): CivInventoryTransaction {
         val after = CivsRules.finishWorldWork(city, work, h.time)
         val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(),
-            mine = CivMineReceipt(mine, null, null, work, workerBefore = worker))
+            mine = CivMineReceipt(mine, null, null, work, workerBefore = worker,
+                cobblestoneReplacementBefore = city.settings?.garrisonReplacement?.get("COBBLESTONE")))
         return com.google.gson.Gson().fromJson(com.google.gson.Gson().toJson(tx), CivInventoryTransaction::class.java).validated()
     }
 }

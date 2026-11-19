@@ -643,6 +643,8 @@ object CivsRules {
         val updated = CivsResidents.trained(supplied.copy(pendingStock = pendingStock, completedCycles = add(worker.completedCycles, 1),
             nextDeliveryAt = add(now, interval)), effectiveWorkType(city, building), city)
         return changed(city, city.copy(stock = stock, construction = construction,
+            settings = if (outputHandled && building.type == BuildingType.CRUSHER)
+                CivsVillageProvisions.replacementAfter(city, debited = productionInputs) else city.settings,
             workers = city.workers.map { if (it.id == workerId) updated else it }))
     }
 
@@ -684,6 +686,7 @@ object CivsRules {
             city.forestrySeeded.orEmpty() + building.id.toString() else city.forestrySeeded
         val (progress, plans) = miningProgressAfter(city, building, work)
         return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) completed else it },
+            settings = CivsVillageProvisions.replacementAfter(city, produced = work.outputs),
             mineProgress = progress, minePlans = plans, stock = stock, forestryJobs = forestryJobs, forestrySeeded = forestrySeeded))
     }
 

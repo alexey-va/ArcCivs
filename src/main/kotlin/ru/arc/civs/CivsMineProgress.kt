@@ -222,7 +222,9 @@ internal object CivsMineProgress {
 data class CivMineReceipt(val buildingBefore: CivBuilding, val planBefore: CivMinePlanState?,
     val legacyBefore: Long?, val work: CivWorldWork,
     /** Null is the original paid excavation proof; a fallback must retain its exact item/tool owner. */
-    val workerBefore: CivWorker? = null) {
+    val workerBefore: CivWorker? = null,
+    /** A fallback's one real cobblestone may retire part of an existing replacement lot. */
+    val cobblestoneReplacementBefore: Long? = null) {
     fun before(after: Settlement): Settlement {
         val key = buildingBefore.id.toString()
         val before = after.copy(minePlans = if (planBefore == null) after.minePlans?.minus(key)
@@ -230,10 +232,14 @@ data class CivMineReceipt(val buildingBefore: CivBuilding, val planBefore: CivMi
             mineProgress = if (legacyBefore == null) after.mineProgress?.minus(key)
             else after.mineProgress.orEmpty() + (key to legacyBefore))
         return workerBefore?.let { worker -> before.copy(
+            settings = cobblestoneReplacementBefore?.let { count -> requireNotNull(before.settings).copy(
+                garrisonReplacement = before.settings.garrisonReplacement.orEmpty() + ("COBBLESTONE" to count)) } ?: before.settings,
             workers = before.workers.map { if (it.id == worker.id) worker else it }, revision = after.revision - 1) } ?: before
     }
 
     fun validated(after: Settlement) {
+        cobblestoneReplacementBefore?.let { require(workerBefore != null &&
+            it in 1..CivsVillageProvisions.replacementLimits.getValue("COBBLESTONE")) }
         workerBefore?.let { worker ->
             val before = before(after)
             require(after.building(buildingBefore.id) == buildingBefore && worker.id == work.workerId &&

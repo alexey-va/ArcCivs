@@ -25,6 +25,7 @@ class CivsVillageProvisionsServiceTest : FunSpec({
             layout.towerStock.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 16)
             disk.store.flush().join()
             disk.checkpointed().settings?.lastGarrisonIssue shouldBe null
+            disk.checkpointed().settings?.garrisonReplacement shouldBe null
         }
     }
 
@@ -57,6 +58,8 @@ class CivsVillageProvisionsServiceTest : FunSpec({
             disk.store.flush().join()
             val issued = requireNotNull(disk.checkpointed().settings?.lastGarrisonIssue)
             issued.keys shouldBe first
+            val replacement = mapOf("OAK_LOG" to 16L, "WHEAT" to 8L)
+            disk.checkpointed().settings?.garrisonReplacement shouldBe replacement
 
             // The next order can refill one lot during the cooldown.
             layout.warehouseStock.setItem(0, ItemStack(Material.OAK_LOG, 31))
@@ -71,6 +74,7 @@ class CivsVillageProvisionsServiceTest : FunSpec({
             repeat(4) { h.tick() }
             layout.towerStock.plain(Material.OAK_LOG) shouldBe 16
             h.service.settlements().single().settings?.lastGarrisonIssue shouldBe issued
+            h.service.settlements().single().settings?.garrisonReplacement shouldBe replacement
 
             h.time += 1
             layout.reload()
@@ -80,10 +84,15 @@ class CivsVillageProvisionsServiceTest : FunSpec({
             }
             disk.store.flush().join()
             disk.checkpointed().settings?.lastGarrisonIssue shouldBe issued + ("OAK_LOG" to h.time)
+            disk.checkpointed().settings?.garrisonReplacement shouldBe replacement
             layout.warehouseStock.plain(Material.OAK_LOG) shouldBe 15
             layout.towerStock.getItem(20) shouldBe logs
             layout.towerStock.getItem(21) shouldBe glass
             layout.hallStock.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 53)
+            val disable = h.service.configureSettlementSetting(layout.city.id, CivSettlementSetting.GARRISON_SUPPLIES, false)
+            h.await(disable)
+            h.service.settlements().single().settings?.garrisonReplacement shouldBe null
+            h.service.settlements().single().settings?.lastGarrisonIssue shouldBe issued + ("OAK_LOG" to h.time)
         }
     }
 
