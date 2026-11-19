@@ -399,6 +399,11 @@ A trip across a completed town wall can use the far side of a public gate as
 an intermediate destination. The ordinary pathfinder finds the crossing and
 then continues to the original destination. Passing the gate grants no arrival
 credit. The movement controller checks each crossing against the actual blocks.
+On a long public trip the resident can start walking while A* is still looking
+for the destination. As the same search checks more ground along that branch,
+the movement controller can append steps without interrupting the current one.
+These steps grant no arrival or work credit. If the completed route diverges
+from the part already walked, the next search starts at the resident's actual feet.
 A per-job heuristic weight preserves ordinary cost ordering for trips up to
 32 blocks, then rises linearly to two at 64 blocks. This retains local road
 preferences and follows MineColonies' bounded search approach for longer trips;
@@ -425,8 +430,13 @@ seed their initial corridor and probe halo from current cached sections. Missing
 sections use the normal bounded capture path. Dynamic shapes and native caller costs
 keep their live checks.
 
-Terrain changes invalidate affected sections. TTL expiry uses `navigation.terrain-refresh-ticks`
-and recaptures on demand. Chunk and world unload discard the associated cache entries.
+Terrain changes invalidate affected sections for future reads. An active search
+keeps the immutable sections it has already used, so a nearby block edit does
+not discard its explored nodes. The mover checks the next step against the live
+world. A blocked step triggers replanning from the resident's current position.
+An exhausted search can recheck a stale no-path result once in case a passage
+has opened. TTL expiry uses `navigation.terrain-refresh-ticks` and recaptures
+on demand. Chunk and world unload discard the associated cache entries.
 An unannounced physical blockage refreshes at most 64 observed obstruction cells.
 `snapshot_cache` and `snapshot_warmup` report cache membership, capacity and warming
 progress. Cache and active-job byte and MiB fields measure exact primitive section-index

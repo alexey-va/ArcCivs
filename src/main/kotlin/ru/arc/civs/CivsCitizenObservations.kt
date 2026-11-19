@@ -234,7 +234,7 @@ internal class CivsCitizenObservations(
                             "started_at" to it.startedAt, "navigating" to it.motion.navigating,
                             "failure" to it.motion.failure, "legs" to walk.legs)
                         mapOf("from" to it.from, "target" to it.target.point(), "authored" to it.authored,
-                        "started_at" to it.startedAt, "intermediate" to it.intermediate,
+                        "started_at" to it.startedAt, "first_step_ms" to it.firstStepMillis, "intermediate" to it.intermediate,
                         "state" to it.motion.preparationPhase, "searching" to it.motion.searching, "navigating" to it.motion.navigating,
                         "continuation" to it.motion.continuation,
                         "failure" to it.motion.failure, "completion" to it.completion?.cancelReason,

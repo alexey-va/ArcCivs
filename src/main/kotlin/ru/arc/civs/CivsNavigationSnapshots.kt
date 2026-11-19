@@ -26,6 +26,7 @@ internal data class CitizenSnapshotPolicy(
     val roadCorridor: CitizenRoadLookup? = null,
     val specialTraversal: Boolean = false,
     val traversalAllowed: (CivPosition) -> Boolean = { true },
+    val earlyMovement: Boolean = false,
 )
 
 /** Explicit trip cost identity; arbitrary caller closures never become cache keys. */
@@ -125,7 +126,9 @@ internal class CitizenSnapshotChunk private constructor(val key: CitizenSnapshot
     fun available(y: Int): Boolean = sections.containsKey(y) || source != null
     fun stamp(y: Int): Long = section(y).revision
     fun merge(other: CitizenSnapshotChunk): CitizenSnapshotChunk {
-        sections.putAll(other.sections)
+        // A later handoff can fill a newly requested height. Published cells and
+        // newly read neighbours in this job must still agree on every existing section.
+        for ((y, section) in other.sections) sections.putIfAbsent(y, section)
         palettes.clear()
         return this
     }
@@ -365,6 +368,10 @@ internal class CivsNavigationSnapshots(
     fun state(world: World, data: BlockData, sample: CivPosition): CitizenSnapshotState {
         checkOwner()
         return palette.getOrPut(data) {
+            val liquid = CitizenNativeShapeCache.liquid(data) ?: world.getBlockAt(sample.x, sample.y, sample.z).let { block ->
+                if (block.blockData != data) throw CitizenSnapshotStateChanged()
+                block.isLiquid
+            }
             val passage = citizenRouteOpenable(data)
             val closedPassage = passage?.isOpen == false
             val constant = closedPassage || contextFree(data)
@@ -372,10 +379,6 @@ internal class CivsNavigationSnapshots(
                 paletteReads++
                 boxes(data, world, sample)
             } else emptyList()
-            val liquid = CitizenNativeShapeCache.liquid(data) ?: world.getBlockAt(sample.x, sample.y, sample.z).let { block ->
-                if (block.blockData != data) throw CitizenSnapshotUnavailable()
-                block.isLiquid
-            }
             CitizenSnapshotState(CitizenTerrainShape(liquid,
                 passage != null, Tag.CLIMBABLE.isTagged(data.material),
                 data.material in setOf(Material.CAMPFIRE, Material.SOUL_CAMPFIRE) && (data as? Lightable)?.isLit == true,

@@ -80,6 +80,7 @@ internal data class CitizenSearchProbe(val node: CitizenSearchNode, val from: Ci
     val specialTraversal: Boolean = false, val refiningGrapple: Boolean = false)
 internal data class CitizenSearchEdge(val node: CitizenSearchNode, val action: CitizenRouteAction, val permitted: Boolean)
 internal data class CitizenPlannedStep(val point: CitizenPoint, val action: CitizenRouteAction)
+internal data class CitizenEarlyWalk(val from: CitizenPoint, val steps: List<CitizenPlannedStep>)
 internal data class CitizenSearchCapture(val probe: CitizenSearchProbe,
     val blocks: Map<CivPosition, CitizenTerrainBlock>, val edges: List<CitizenSearchEdge>, val deferredGrapple: Boolean = false)
 internal data class CitizenSearchResult(val probes: List<CitizenSearchProbe>, val nodes: Int,
@@ -87,7 +88,7 @@ internal data class CitizenSearchResult(val probes: List<CitizenSearchProbe>, va
     val continuation: Boolean = false, val blockedPositions: List<CivPosition> = emptyList(),
     val continuationReason: String? = null, val roadRouting: CitizenRoadRouting? = null,
     val pickupCandidate: CitizenPoint? = null, val searchStop: String? = null,
-    val firstUnavailableBlock: CivPosition? = null)
+    val firstUnavailableBlock: CivPosition? = null, val earlyWalk: CitizenEarlyWalk? = null)
 
 /**
  * One worker owns this A* state. A slice asks for a configured batch of small neighbourhoods; native capture
@@ -108,6 +109,7 @@ internal class CitizenNavigationSearch(
     private val pickupContainer: CivPosition? = null,
     private val specialTraversal: Boolean = false,
     private val traversalAllowed: (CivPosition) -> Boolean = { true },
+    earlyMovement: Boolean = false,
 ) {
     private data class Entry(val node: CitizenSearchNode, val cost: Double, val score: Double, val order: Int,
                              val special: Boolean = false)
@@ -121,6 +123,11 @@ internal class CitizenNavigationSearch(
         ((sqrt(origin.distanceSquared(target)) - LOCAL_ROUTE_DISTANCE) /
             (WEIGHTED_ROUTE_DISTANCE - LOCAL_ROUTE_DISTANCE)).coerceIn(0.0, 1.0)
     private val gateRequests = origin.distanceSquared(target) > settings.closeRouteDistance * settings.closeRouteDistance
+    // Start after eight blocks of connected progress and extend the same branch in four-block batches.
+    private var earlyThreshold = if (earlyMovement && gateRequests && avoiding.isEmpty() &&
+        origin.distanceSquared(target) >= 16.0 * 16.0) sqrt(origin.distanceSquared(target)) - 8.0 else -1.0
+    private var earlyTip = start
+    private var earlyFeet: MutableSet<CitizenPoint>? = null
     private val open = PriorityQueue<Entry>(compareBy<Entry> { it.score }.thenBy { it.order })
     private val deferred = mutableListOf<Entry>()
     private val costs = hashMapOf(start to 0.0)
@@ -166,11 +173,12 @@ internal class CitizenNavigationSearch(
         val began = System.nanoTime()
         fun result(probes: List<CitizenSearchProbe> = emptyList(), path: List<CitizenPlannedStep>? = null,
                    failure: String? = null, continuation: Boolean = false,
-                   continuationReason: String? = null, pickupCandidate: CitizenPoint? = null) = CitizenSearchResult(probes, visited, path, failure,
+                   continuationReason: String? = null, pickupCandidate: CitizenPoint? = null,
+                   earlyWalk: CitizenEarlyWalk? = null) = CitizenSearchResult(probes, visited, path, failure,
             System.nanoTime() - began, continuation,
             blockedPositions = if (failure == "no-path" || continuationReason == "no-path") blockedPositions.toList() else emptyList(),
             continuationReason = continuationReason, roadRouting = roadRouting, pickupCandidate = pickupCandidate,
-            searchStop = failure ?: continuationReason, firstUnavailableBlock = firstUnavailableBlock)
+            searchStop = failure ?: continuationReason, firstUnavailableBlock = firstUnavailableBlock, earlyWalk = earlyWalk)
         if (cancelled.get()) return result(failure = "cancelled")
         checkingPickup?.let { entry ->
             checkingPickup = null
@@ -299,7 +307,7 @@ internal class CitizenNavigationSearch(
                 add(CitizenSearchProbe(CitizenSearchNode(floor(target.x).toInt(), target.y, floor(target.z).toInt()), target,
                     incoming = true, specialTraversal = specialTraversal))
             }
-        })
+        }, earlyWalk = extendEarlyWalk(requested))
         val found = goal ?: return when {
             unknownTerrain -> partial("chunk-unloaded", MINIMUM_PARTIAL_GAIN, "frontier-exhausted")
             clipped && isolatedGoalDistance == null -> finishAtBudget("search-budget", "search-boundary")
@@ -307,6 +315,47 @@ internal class CitizenNavigationSearch(
         }
         val path = pathTo(found.node) ?: return result(failure = if (cancelled.get()) "cancelled" else "broken-path")
         return result(path = path)
+    }
+
+    private fun extendEarlyWalk(frontier: Map<CitizenSearchNode, Entry>): CitizenEarlyWalk? {
+        if (earlyThreshold < 0.0 || goal != null ||
+            closestDistanceSquared > earlyThreshold * earlyThreshold) return null
+        val witness = frontier.keys.minByOrNull { it.point().distanceSquared(target) } ?: return null
+        val left = sqrt(witness.point().distanceSquared(target))
+        if (left > earlyThreshold) return null
+        earlyThreshold = left - 4.0
+        // Walk parent links only as far as the previous offer. An unrelated branch cannot rewrite a moving leg.
+        val next = ArrayDeque<CitizenSearchNode>()
+        var node = witness
+        while (node != earlyTip && next.size < 32) {
+            next.addFirst(node)
+            node = parents[node]?.node ?: return null
+        }
+        if (node != earlyTip || next.size < 4) return null
+        val from = if (earlyTip == start) origin else earlyTip.point()
+        var closest = sqrt(from.distanceSquared(target))
+        var last = earlyTip
+        val steps = ArrayList<CitizenPlannedStep>(next.size - 2)
+        for ((index, candidate) in next.withIndex()) {
+            val point = candidate.point()
+            val action = parents.getValue(candidate).action
+            val distance = sqrt(point.distanceSquared(target))
+            // Streets can turn or climb. A branch that already needs to double back waits for the full route.
+            if (!action.isGroundStep || distance > closest + 1.0 || earlyFeet?.contains(point) == true) return null
+            closest = minOf(closest, distance)
+            if (index < next.size - 2) {
+                // Leave the final interaction area to the complete search and its live endpoint owner.
+                if (distanceToTargetSquared(candidate) <= 16.0) break
+                steps += CitizenPlannedStep(point, action)
+                last = candidate
+            }
+        }
+        if (steps.isEmpty()) return null
+        // A later cheaper parent can point back through feet that the resident has already been offered.
+        val published = earlyFeet ?: hashSetOf(from).also { earlyFeet = it }
+        for (step in steps) published += step.point
+        earlyTip = last
+        return CitizenEarlyWalk(from, steps)
     }
 
     /** Keep useful, already validated progress when a finite search fills its memory allowance.

@@ -155,7 +155,9 @@ internal class CivsCitizenMotion(
                 routes.cancelForContinuation(actor, city, route)
                 continue
             }
-            if (route.motion.searching) {
+            val waitingForSteps = route.motion.searching && route.motion.remainingNodes == 0
+            route.observeStepWait(now, waitingForSteps)
+            if (waitingForSteps) {
                 if (routes.recoverNavigation(actor, route.target, now, timedOnly = true)) continue
                 if (now >= route.preparationReportAfter) {
                     route.preparationReportAfter = now + 10_000
@@ -163,6 +165,7 @@ internal class CivsCitizenMotion(
                         "worker" to actor.workerId, "cycle" to actor.plan.token.completedCycles,
                         "phase" to actor.cycle.phase, "state" to route.motion.preparationPhase,
                         "elapsed_ms" to route.timing.preparationElapsed(now),
+                        "first_step_ms" to route.firstStepMillis, "max_step_wait_ms" to route.longestStepWaitMillis(now),
                         "path_nodes" to route.motion.nodeCount, "captured_blocks" to route.motion.capturedBlocks, "native_shape_reads" to route.motion.nativeShapeReads,
                         "actual" to npc.location.point().coordinates(), "target" to route.target.point().coordinates())
                 }
@@ -197,7 +200,7 @@ internal class CivsCitizenMotion(
             val physicalFood = actor.foodPickupSource?.takeIf {
                 actor.combatDestination == null && actor.foodSource == it.buildingId
             }
-            if (travelTarget != null && !actor.sheltering && actor.mealVisit == null && actor.tavernService == null && actor.collectionSeek == null && actor.collectionHome == null &&
+            if (!motion.searching && travelTarget != null && !actor.sheltering && actor.mealVisit == null && actor.tavernService == null && actor.collectionSeek == null && actor.collectionHome == null &&
                 (actor.returningToWarehouse || actor.plan.idleReason in listOf(null, "placing")) &&
                 (physicalFood?.let { routes.arrivalBodyClear(actor) && actor.canReachSelectedFood(city, it) }
                     ?: routes.arrivedAt(actor, city, npc.world, travelTarget))) {
@@ -209,7 +212,7 @@ internal class CivsCitizenMotion(
                 actor.arrivalWait = null
                 continue
             }
-            if (!route.planningReported) {
+            if (!motion.searching && !route.planningReported) {
                 route.planningReported = true
                 // Shared A* admission can wait many frames. Only frames with a ready
                 // route are movement opportunities; its first turn is not a stall.
@@ -230,6 +233,7 @@ internal class CivsCitizenMotion(
                         "worker" to actor.workerId, "route_started_at" to route.startedAt,
                         "reason" to route.storageReason, "source" to route.storageBuilding,
                         "phase" to actor.cycle.phase, "state" to state,
+                        "first_step_ms" to route.firstStepMillis, "max_step_wait_ms" to route.longestStepWaitMillis(now),
                         "elapsed_ms" to elapsed, "path_nodes" to motion.nodeCount, "failure" to failure,
                         "intermediate" to route.intermediate, "corridor_hint" to motion.hasCourierCorridorHint)
                 }
@@ -278,6 +282,8 @@ internal class CivsCitizenMotion(
             }
             if (next != null) {
                 val actual = applyMove(npc, motion, before, next)
+                if (route.firstStepMillis == null && (actual.x != before.x || actual.y != before.y || actual.z != before.z))
+                    route.firstStepMillis = (now - route.startedAt).coerceAtLeast(0)
                 val forward = (motion.forwardProgress - route.observedProgress).coerceAtLeast(0.0)
                 if (forward > .000001) {
                     actor.arrivalWait = null
@@ -365,7 +371,7 @@ internal class CivsCitizenMotion(
                 route.trip?.let { paths.complete(city, it) }
                 route.completion = CitizenNavigationCompletion(null)
             }
-            else if (runtime.navigationTick - route.progressTick >= 40) {
+            else if (!motion.searching && runtime.navigationTick - route.progressTick >= 40) {
                 val residentBlocked = runtime.entityCollisions && motion.waitingForCollision && actor.collisionResident != null
                 // Dynamic-body work uses the same four admitted actors; do not reset a job or move its neighbour.
                 if (runtime.entityCollisions && route.bodyBlockedSince != null) continue

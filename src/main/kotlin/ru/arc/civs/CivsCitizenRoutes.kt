@@ -288,7 +288,8 @@ internal class CivsCitizenRoutes(
             roadCorridor = if (idleAnchor == null && corridor == null && routeMine == null && waitingMine == null &&
                 actor.attacker == null && actor.combatDestination == null) routeCosts.weights.roads::corridor else null,
             specialTraversal = specialTraversal,
-            traversalAllowed = { point -> territory.allows(point, emptySet(), null, wallCrossing = specialTraversal) && controls.clear(point) })
+            traversalAllowed = { point -> territory.allows(point, emptySet(), null, wallCrossing = specialTraversal) && controls.clear(point) },
+            earlyMovement = publicTrip && routeMine == null)
         val pickup = pickupFoodTarget?.let { source ->
             CitizenContainerRouteGoal(source.container) { point -> foodPickupPointAllowed(actor, source, origin, allowed, point) }
         } ?: dropoff?.takeIf { waypoint == null }?.let { building ->
@@ -631,6 +632,7 @@ internal class CivsCitizenRoutes(
         if (route.motion.continuation && route.motion.finished && route.motion.failure == null)
             CivsDiagnostics.event("citizen_route_partial", "city" to actor.cityId, "worker" to actor.workerId,
                 "cycle" to actor.plan.token.completedCycles, "phase" to actor.cycle.phase,
+                "route_started_at" to route.startedAt, "first_step_ms" to route.firstStepMillis,
                 "reason" to route.motion.continuationReason, "from" to route.from.coordinates(),
                 "actual" to actor.npc.location.point().coordinates(), "endpoint" to route.path?.end?.coordinates(),
                 "authored_goal" to route.authored, "target" to route.target.point().coordinates(),
@@ -1142,7 +1144,7 @@ internal class CivsCitizenRoutes(
 
     /** A fresh arrival must have a clear body even when contact occurred before its first movement sweep. */
     fun arrivalBodyClear(actor: CitizenActor): Boolean {
-        if (actor.traversal != null) return false
+        if (actor.traversal != null || actor.route?.motion?.earlyStartPending == true) return false
         // arriveForWork retires its route before accepting work/transfer. Later player occupancy cannot revoke that receipt.
         val supplyArrival = actor.supplyPickup == null && (actor.foodSource != null || actor.outputReturn != null)
         if (actor.route == null && !supplyArrival && actor.cycle.phase !in

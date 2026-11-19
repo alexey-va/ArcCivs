@@ -477,6 +477,10 @@ internal class CitizenRoute(val from: CitizenPoint, val target: Location, val ch
     var deferredGate: CivPosition? = null
     var triedGates: Set<UUID> = emptySet()
     var planningReported = false
+    var firstStepMillis: Long? = null
+    private var waitingForMoreStepsSince = -1L
+    private var longestStepWait = 0L
+
     var mineFailureReported = false
     var storageReason: String? = null
     var storageBuilding: UUID? = null
@@ -500,6 +504,18 @@ internal class CitizenRoute(val from: CitizenPoint, val target: Location, val ch
     var bodyDetourFailed = false
     var bodyPassUntil = 0L
     var bodyContactTick = 0L
+
+    fun observeStepWait(now: Long, waiting: Boolean) {
+        if (waiting) {
+            if (firstStepMillis != null && waitingForMoreStepsSince < 0) waitingForMoreStepsSince = now
+        } else if (waitingForMoreStepsSince >= 0) {
+            longestStepWait = longestStepWaitMillis(now)
+            waitingForMoreStepsSince = -1
+        }
+    }
+
+    fun longestStepWaitMillis(now: Long): Long = if (waitingForMoreStepsSince < 0) longestStepWait
+        else maxOf(longestStepWait, now - waitingForMoreStepsSince)
 
     fun motionReady(tick: Long, now: Long) {
         timing.ready(now)

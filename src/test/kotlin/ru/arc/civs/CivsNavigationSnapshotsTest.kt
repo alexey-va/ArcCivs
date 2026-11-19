@@ -848,14 +848,20 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
-    test("a consumed surface edit restarts the search and cannot reuse its previous open neighbourhoods") {
+    test("a warmed search keeps its progress through repeated unrelated edits in its own section") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("snapshot-reuse-restart").also(paper.server::addWorld)
             for (x in -1..2) for (z in -1..1) world.loadChunk(x, z)
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("ReuseRestart")))
             val workers = ArrayDeque<Runnable>()
+            val snapshots = CivsNavigationSnapshots(131072, 6000, tasks, contextFree = { true })
             val owner = CivsResidentNavigation(tasks, executor = Executor { workers.addLast(it) },
-                settings = CivsNavigationSettings(searchNodesPerBatch = 2), snapshotContextFree = { true })
+                settings = CivsNavigationSettings(searchNodesPerBatch = 2), snapshotCache = snapshots)
+            val key = CitizenSnapshotKey(0, 0)
+            val warm = requireNotNull(snapshots.capture(world, key, 0, setOf(3, 4)))
+            warm.prepare()
+            warm.releaseSource()
+            snapshots.publish(world.uid, warm.payloads())
             val allowed: (CivPosition) -> Boolean = { it.x in 0..20 && it.y == 64 && it.z == 0 }
             val policy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> true })
             val route = owner.request(world, Location(world, .5, 64.0, .5), Location(world, 20.5, 64.0, .5),
@@ -867,29 +873,55 @@ class CivsNavigationSnapshotsTest : FunSpec({
                     paper.performTicks(1); owner.pulse()
                 }
                 (route.capturedBlocks > 200 && route.searching) shouldBe true
-                val oldNodes = route.nodeCount
-                val oldCells = route.capturedBlocks
-                for (y in 64..66) {
-                    world.getBlockAt(5, y, 0).type = Material.STONE
-                    owner.changed(world.uid, CivPosition(5, y, 0))
-                }
-                owner.pulse()
-                owner.debug()["stale_snapshot_restarts"] shouldBe 1L
+                val edit = CivPosition(5, 64, 5)
+                var edits = 0
                 while (route.searching && tick++ < 350) {
+                    world.getBlockAt(edit.x, edit.y, edit.z).type = if (edits++ % 2 == 0) Material.STONE else Material.COBBLESTONE
+                    owner.changed(world.uid, edit)
                     while (workers.isNotEmpty()) workers.removeFirst().run()
                     paper.performTicks(1); owner.pulse()
                 }
+                (edits > 2) shouldBe true
                 route.searching shouldBe false
                 route.failure shouldBe null
-                route.continuation shouldBe true
-                route.endpoint shouldBe CitizenPoint(4.5, 64.0, .5)
-                owner.debug()["stale_snapshot_restarts"] shouldBe 1L
+                route.continuation shouldBe false
+                route.endpoint shouldBe CitizenPoint(20.5, 64.0, .5)
+                owner.debug()["stale_snapshot_restarts"] shouldBe 0L
                 val totals = (owner.debug()["preparation_lifetime"] as Map<*, *>)["published_work"] as Map<*, *>
                 val ready = totals["ready"] as Map<*, *>
-                ready["nodes"] shouldBe oldNodes.toLong() + route.nodeCount
-                ready["captured_cells"] shouldBe oldCells.toLong() + route.capturedBlocks
+                ready["nodes"] shouldBe route.nodeCount.toLong()
+                ready["captured_cells"] shouldBe route.capturedBlocks.toLong()
                 ready["search_nanos"] shouldBe route.searchNanos
+                paper.performTicks(3)
+                val wanted = CitizenSnapshotSectionKey(0, 4, 0)
+                snapshots.publish(world.uid, warm.payloads())
+                snapshots.cached(world, listOf(wanted), org.bukkit.Bukkit.getCurrentTick().toLong()).isEmpty() shouldBe true
+                val fresh = requireNotNull(snapshots.capture(world, key, org.bukkit.Bukkit.getCurrentTick().toLong(), setOf(4)))
+                fresh.prepare()
+                fresh.releaseSource()
+                fresh.data(edit).material shouldBe world.getBlockAt(edit.x, edit.y, edit.z).type
             } finally { owner.clear(); tasks.close() }
+        }
+    }
+
+    test("an exhausted stale search retries once and finds a passage only if it has opened") {
+        for (opened in listOf(true, false)) sharedRouteRuntime { h ->
+            val wall = (64..66).map { y -> h.world.getBlockAt(1, y, 0) }
+            wall.forEach { it.type = Material.STONE }
+            val route = h.request(reuseKey = null)
+            h.prepareUntil { route.capturedBlocks > 0 && route.preparationPhase == "searching" }
+            if (opened) wall.forEach { it.type = Material.AIR }
+            val change = if (opened) CivPosition(1, 64, 0) else CivPosition(4, 64, 4)
+            h.owner.changed(h.world.uid, change)
+            h.prepareUntil { h.owner.debug()["stale_snapshot_restarts"] == 1L }
+            h.prepareUntil { route.preparationPhase == "snapshot-processing" }
+            h.prepareUntil { route.preparationPhase == "searching" }
+            // Make the second verdict stale as well. A genuinely closed passage must still terminate.
+            h.owner.changed(h.world.uid, CivPosition(5, 64, 5))
+            h.finish(route)
+            h.owner.debug()["stale_snapshot_restarts"] shouldBe 1L
+            route.failure shouldBe if (opened) null else "no-path"
+            if (opened) h.walk(route) shouldBe h.target
         }
     }
 
@@ -1134,7 +1166,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
-    test("a replacement palette is fully resolved in bounded batches before the pending probe resumes") {
+    test("a pending probe pins its palette and a new search resolves the replacement in bounded batches") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val snow = paper.server.createBlockData(Material.SNOW)
             val at = CivPosition(2, 64, 2)
@@ -1143,9 +1175,10 @@ class CivsNavigationSnapshotsTest : FunSpec({
             val original = terrain.chunks.getValue(key).snapshot
             val node = CitizenSearchNode(at.x, at.y.toDouble(), at.z)
             val policy = CitizenSnapshotPolicy({ p, _ -> p.y == at.y }, { _, _ -> true })
-            val capture = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())), terrain,
-                policy, -64, 320, 63, 1, false)
-            capture.advance(CitizenSnapshotInput()).dynamics shouldBe mapOf(at to snow)
+            fun cursor(view: CitizenSnapshotTerrain) = CitizenSnapshotCapture(listOf(CitizenSearchProbe(node, node.point())),
+                view, policy, -64, 320, 63, 1, false)
+            val pending = cursor(terrain)
+            pending.advance(CitizenSnapshotInput()).dynamics shouldBe mapOf(at to snow)
 
             // These extra states are in the same immutable section, outside the probe's 63 cells.
             val extra = List(257) { mockk<BlockData>() }
@@ -1153,7 +1186,12 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 override fun getBlockData(x: Int, y: Int, z: Int): BlockData =
                     extra.getOrNull((y - 70) * 256 + z * 16 + x) ?: original.getBlockData(x, y, z)
             }
-            var request = capture.advance(CitizenSnapshotInput(chunks = mapOf(key to CitizenSnapshotChunk(replacement, -64, 320))))
+            fun updated() = CitizenSnapshotInput(chunks = mapOf(key to CitizenSnapshotChunk(replacement, -64, 320)))
+            val pinned = pending.advance(updated())
+            pinned.states.isEmpty() shouldBe true
+            pinned.dynamics shouldBe mapOf(at to snow)
+            val capture = cursor(CitizenSnapshotTerrain().also { it.states.putAll(terrain.states) })
+            var request = capture.advance(updated())
             request.states.keys.toList() shouldBe extra.take(256)
             val state = terrain.states.getValue(paper.server.createBlockData(Material.AIR))
             request = capture.advance(CitizenSnapshotInput(states = request.states.keys.associateWith { state }))
@@ -1392,7 +1430,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
         }
     }
 
-    test("a block change between async solving and Main acceptance rejects the stale path") {
+    test("a new wall stops the native mover and replans from its actual position") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("snapshot-stale-route").also(paper.server::addWorld)
             for (x in -1..2) for (z in -1..1) world.loadChunk(x, z)
@@ -1419,7 +1457,7 @@ class CivsNavigationSnapshotsTest : FunSpec({
                     owner.changed(world.uid, CivPosition(8, y, 0))
                 }
                 owner.pulse()
-                owner.debug()["stale_snapshot_restarts"] shouldBe 1L
+                owner.debug()["stale_snapshot_restarts"] shouldBe 0L
                 while (route.searching && tick++ < 250) {
                     while (workers.isNotEmpty()) workers.removeFirst().run()
                     paper.performTicks(1); owner.pulse()
@@ -1427,9 +1465,22 @@ class CivsNavigationSnapshotsTest : FunSpec({
                 withClue("${owner.debug()} phase=${route.preparationPhase}") {
                     route.searching shouldBe false
                     route.failure shouldBe null
-                    route.continuationReason shouldBe "no-path"
-                    route.endpoint shouldBe CitizenPoint(7.5, 64.0, .5)
+                    route.continuation shouldBe false
+                    route.endpoint shouldBe CitizenPoint(20.5, 64.0, .5)
                 }
+                var actual = Location(world, .5, 64.0, .5, -90f, 0f)
+                repeat(100) {
+                    route.move(actual, 1.0) { true }?.let { actual = it }
+                    (actual.x + .299 <= 8.000001) shouldBe true
+                }
+                (actual.x > 6.0) shouldBe true
+                (route.failure in setOf("path-changed", "movement-blocked")) shouldBe true
+                val replan = owner.replan(route, actual)
+                while (replan.searching && tick++ < 400) {
+                    while (workers.isNotEmpty()) workers.removeFirst().run()
+                    paper.performTicks(1); owner.pulse()
+                }
+                replan.failure shouldBe "no-path"
                 snapshots.changed(world.uid, CivPosition(0, 64, 0))
                 owner.clear()
                 paper.performTicks(3)

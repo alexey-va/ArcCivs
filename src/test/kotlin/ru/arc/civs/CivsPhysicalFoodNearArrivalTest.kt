@@ -55,9 +55,12 @@ class CivsPhysicalFoodNearArrivalTest : FunSpec({
         }
     }
 
-    test("a distant resident walks around a wall to food even when all four adjacent stances are blocked") {
+    for ((startX, name) in listOf(
+        6 to "a distant resident walks around a wall to food even when all four adjacent stances are blocked",
+        24 to "a long food approach walks during search and transfers only after reaching the confirmed stance",
+    )) test(name) {
         residentRuntime(server = CivsWorksiteServerFixture()) { h ->
-            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            for (x in -2..2) for (z in -2..1) h.world.loadChunk(x, z)
             val container = CivPosition(0, 64, 0)
             val hall = h.city.buildings.single().copy(control = container)
             h.city = h.city.copy(buildings = listOf(hall), inventory = CivInventory(CivStorageMode.PHYSICAL),
@@ -67,16 +70,16 @@ class CivsPhysicalFoodNearArrivalTest : FunSpec({
             food.setItem(0, ItemStack(Material.BREAD, 8))
 
             // The only walkable route bends south then west. The far end is within food reach through stone.
-            val corridor = (2..6).map { it to 2 }.toSet() + setOf(6 to 0, 6 to 1)
+            val corridor = (2..startX).map { it to 2 }.toSet() + setOf(startX to 0, startX to 1)
             // This closer stance is usable for pickup but cannot be reached from the corridor.
             val isolated = CivPosition(-1, 64, 1)
-            for (x in -1..7) for (z in -1..3) {
+            for (x in -1..(startX + 1)) for (z in -1..3) {
                 if (x == 0 && z == 0 || (x to z) in corridor || x == isolated.x && z == isolated.z) continue
                 for (y in 64..66) h.world.getBlockAt(x, y, z).type = Material.STONE
             }
             citizenCollectedHomeTarget(h.city, hall, h.world, container) shouldBe null
             civsCanReachContainer(isolated.location(h.world), container, nearbyFoodPickup = true) shouldBe true
-            val start = Location(h.world, 6.5, 64.0, .5)
+            val start = Location(h.world, startX + .5, 64.0, .5)
             val actor = h.actor()
             actor.npc.teleport(start)
             civsWithinContainerReach(start, container) shouldBe false
@@ -104,6 +107,7 @@ class CivsPhysicalFoodNearArrivalTest : FunSpec({
                 h.owner.pulse(2_000)
                 val approach = withClue(h.navigationState()) { requireNotNull(actor.route) }
                 pickups shouldBe 0
+                var walkedBeforePickupConfirmation = false
                 for (tick in 1..400) {
                     val before = actor.npc.location
                     h.navigate()
@@ -111,10 +115,16 @@ class CivsPhysicalFoodNearArrivalTest : FunSpec({
                     (feet.distance(before) <= .215001) shouldBe true
                     ((feet.blockX to feet.blockZ) in corridor) shouldBe true
                     citizenPacketBodyClear(h.world, feet.point(), false) shouldBe true
+                    if (approach.motion.searching && approach.motion.pickupEndpoint == null && feet.distanceSquared(before) > 0) {
+                        approach.motion.reservedDestination(approach.target) shouldBe null
+                        food.getItem(0) shouldBe ItemStack(Material.BREAD, 8)
+                        walkedBeforePickupConfirmation = true
+                    }
                     if (tick % 5 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
                     if (pickups != 0) break
                     (actor.route === approach) shouldBe true
                 }
+                if (startX == 24) walkedBeforePickupConfirmation shouldBe true
                 withClue(h.navigationState()) { pickups shouldBe 1 }
                 food.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
                 CivsEquipment.usableCount(h.city.workers.single(), "BREAD") shouldBe 4

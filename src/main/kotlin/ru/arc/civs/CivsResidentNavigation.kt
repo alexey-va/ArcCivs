@@ -55,6 +55,9 @@ internal class CivsResidentNavigation(
         var seededInitial = false
         var publishedPayloads = emptyList<CitizenSnapshotSection>()
         var snapshotNative: CompletableFuture<Unit>? = null
+        var snapshotInput: CitizenSnapshotInput? = null
+        var unloadedSeeds: MutableSet<CitizenSnapshotKey>? = null
+        var retriedStaleNoPath = false
         val snapshotRevisions = hashMapOf<CitizenSnapshotSectionKey, Long>()
         var reuse: ReuseAttempt? = null
         var debugTrace: DebugTrace? = null
@@ -549,11 +552,6 @@ internal class CivsResidentNavigation(
         for (job in jobs.values.toList()) {
             if (!job.route.searching) continue
             val tick = Bukkit.getCurrentTick().toLong()
-            if (job.route.snapshotPolicy != null && !snapshots.currentSections(job.route.worldId, job.snapshotRevisions)) {
-                rejectedSnapshotSections++
-                restartSnapshot(job)
-                continue
-            }
             job.snapshotPending?.let { pending ->
                 if (!snapshots.pending(job.route.worldId, pending.chunks)) {
                     job.snapshotPending = null
@@ -618,6 +616,14 @@ internal class CivsResidentNavigation(
                             true
                         }
                     } else if (result.probes.isEmpty()) {
+                        // The mover checks every positive edge against the live world. An exhausted
+                        // old component cannot prove a passage is still closed, so refresh that verdict once.
+                        if ((result.failure == "no-path" || result.continuationReason == "no-path") &&
+                            !job.retriedStaleNoPath && !snapshots.currentSections(job.route.worldId, job.snapshotRevisions)) {
+                            if (job.route.forwardProgress > 0.0) job.route.planningFailed("path-changed")
+                            else restartStaleNoPath(job)
+                            continue
+                        }
                         finishDebug(job, result)
                         job.route.acceptSearch(result)
                     } else {
@@ -686,6 +692,7 @@ internal class CivsResidentNavigation(
 
     private fun captureSnapshot(job: Job, cursor: CitizenSnapshotCapture, input: CitizenSnapshotInput = CitizenSnapshotInput()) {
         job.route.phase("snapshot-processing")
+        job.snapshotInput = input
         val search = job.search
         val future = try { CompletableFuture.supplyAsync({ cursor.advance(input, search::captured) }, executor) }
         catch (failure: RejectedExecutionException) {
@@ -696,6 +703,7 @@ internal class CivsResidentNavigation(
         future.whenCompleteSync(tasks) { request, failure ->
             if (closed || !tasks.isCurrent(epoch) || !job.route.searching || job.snapshotCapture !== cursor) return@whenCompleteSync
             job.snapshotWorker = null
+            job.snapshotInput = null
             job.progressTick = Bukkit.getCurrentTick().toLong()
             if (failure != null) { job.capturing?.completeExceptionally(failure); return@whenCompleteSync }
             val prepared = requireNotNull(request)
@@ -703,9 +711,12 @@ internal class CivsResidentNavigation(
             job.publishedPayloads = prepared.payloads
             job.snapshotRevisions.putAll(prepared.sections)
             snapshots.touched(job.route.worldId, prepared.sections, job.route.snapshotPolicy?.cityId)
-            if (!snapshots.currentSections(job.route.worldId, job.snapshotRevisions)) {
-                rejectedSnapshotSections++
-                restartSnapshot(job)
+            val unloaded = job.unloadedSeeds
+            if (unloaded != null && prepared.sections.any { (section, revision) ->
+                    CitizenSnapshotKey(section.x, section.z) in unloaded &&
+                        !snapshots.currentSections(job.route.worldId, mapOf(section to revision))
+                }) {
+                job.capturing?.completeExceptionally(CitizenSnapshotUnavailable())
                 return@whenCompleteSync
             }
             job.route.recordSnapshotCapture(prepared.capturedBlocks)
@@ -726,6 +737,7 @@ internal class CivsResidentNavigation(
         job.snapshotNative = work.submit({ !closed && tasks.isCurrent(epoch) && job.route.searching && job.snapshotCapture === cursor }) {
             val before = snapshots.shapeReads
             input = job.route.captureSnapshots(request, snapshots)
+            job.snapshotInput = input
             job.route.recordSnapshotNativeReads((snapshots.shapeReads - before).toInt())
             true
         }.also { native -> native.whenCompleteSync(tasks) { _, failure ->
@@ -743,20 +755,12 @@ internal class CivsResidentNavigation(
         } }
     }
 
-    /** Never let an old worker graph reach movement after an observed native block change. */
-    private fun restartSnapshot(job: Job) {
+    /** Called after the worker has finished and before handing its stale negative verdict to the route. */
+    private fun restartStaleNoPath(job: Job) {
         if (debugRequest?.job === job) failDebug("navigation-snapshot-restarted")
         job.search.cancel()
-        job.snapshotCapture?.cancel()
-        job.snapshotNative?.cancel(false)
-        job.searching?.cancel(false)
-        job.capturing?.cancel(false)
-        job.snapshotCapture = null
-        job.snapshotWorker = null
-        job.snapshotResult = null
-        job.snapshotPending = null
-        job.capturing = null
-        job.pickupAnswer = null
+        job.retriedStaleNoPath = true
+        job.unloadedSeeds = null
         job.snapshotTerrain = CitizenSnapshotTerrain()
         job.seededInitial = false
         job.publishedPayloads = emptyList()
@@ -766,6 +770,7 @@ internal class CivsResidentNavigation(
         job.lastCells = 0
         job.progressTick = Bukkit.getCurrentTick().toLong()
         staleSnapshotRestarts++
+        rejectedSnapshotSections++
         dispatch(job, emptyList())
     }
 
@@ -840,12 +845,25 @@ internal class CivsResidentNavigation(
     }
     fun removeChunk(world: UUID, x: Int, z: Int) {
         checkOwner()
+        val key = CitizenSnapshotKey(x, z)
+        for (job in jobs.values) {
+            if (job.route.worldId != world || !job.route.searching || job.route.snapshotPolicy == null) continue
+            if (job.snapshotRevisions.keys.any { it.x == x && it.z == z }) {
+                job.route.planningFailed("chunk-unloaded")
+            } else if (job.snapshotInput?.chunks?.containsKey(key) == true ||
+                job.snapshotInput?.seeded?.any { it.key.x == x && it.key.z == z } == true ||
+                job.publishedPayloads.any { it.key.x == x && it.key.z == z }) {
+                // A warmed section may never be used; retire the job only if its worker consumes it.
+                (job.unloadedSeeds ?: hashSetOf<CitizenSnapshotKey>().also { job.unloadedSeeds = it }).add(key)
+            }
+        }
         sharedRoutes.entries.filter { it.key.world == world && it.value.sections.any { s -> s.x == x && s.z == z } }
             .map { it.key }.forEach { removeShared(it, SharedRouteCounter.REMOVED_UNLOAD) }
         terrain.removeChunk(world, x, z); snapshots.removeChunk(world, x, z)
     }
     fun removeWorld(world: UUID) {
         checkOwner()
+        jobs.values.filter { it.route.worldId == world }.forEach { it.route.planningFailed("chunk-unloaded") }
         sharedRoutes.keys.filter { it.world == world }.forEach { removeShared(it, SharedRouteCounter.REMOVED_UNLOAD) }
         terrain.removeWorld(world); snapshots.removeWorld(world)
     }
@@ -858,6 +876,7 @@ internal class CivsResidentNavigation(
         return when (cause) {
             is CitizenNavigationCaptureLimit -> "capture-budget"
             is CitizenSnapshotUnavailable -> "chunk-unloaded"
+            is CitizenSnapshotStateChanged -> "path-changed"
             is CancellationException -> "cancelled"
             is RejectedExecutionException -> "planner-busy"
             else -> "planner-error"
@@ -876,6 +895,7 @@ internal class CivsResidentNavigation(
 
 internal class CitizenNavigationCaptureLimit : RuntimeException()
 internal class CitizenSnapshotUnavailable : RuntimeException()
+internal class CitizenSnapshotStateChanged : RuntimeException()
 internal class CitizenSnapshotPending : RuntimeException()
 
 /**

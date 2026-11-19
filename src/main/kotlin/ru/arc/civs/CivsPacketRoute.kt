@@ -65,6 +65,8 @@ internal class CitizenPacketRoute(
     private val minimumY = world.minHeight
     private val maximumY = world.maxHeight
     private val path = ArrayDeque<Waypoint>()
+    private var earlySteps: MutableList<CitizenPlannedStep>? = null
+    private var allowEarlyMovement = true
     private var visited = 0
     private var asyncCancellation: (() -> Unit)? = null
     private var directSearch: CitizenNavigationSearch? = null
@@ -118,7 +120,8 @@ internal class CitizenPacketRoute(
     val navigating: Boolean get() = searching || failure == null && !finished
     val destination: Location? get() = path.firstOrNull()?.point?.let { Location(world, it.x, it.y, it.z) }
     val nodeCount: Int get() = visited
-    val endpoint: CitizenPoint? get() = path.lastOrNull()?.point
+    val endpoint: CitizenPoint? get() = if (searching) null else path.lastOrNull()?.point
+    val earlyStartPending: Boolean get() = searching && earlySteps != null
     internal var pickupEndpoint: CitizenPoint? = null
     internal val hasContainerGoal: Boolean get() = pickup != null
     internal fun reservedDestination(authored: Location): Location? =
@@ -214,7 +217,7 @@ internal class CitizenPacketRoute(
 
     /** A raised foot may use only the exact native stair profile that admitted its current point. */
     internal fun stairProfileSupports(at: CitizenPoint): List<Triple<CivPosition, CitizenCollisionSnapshot, Double>> {
-        if (searching || finished || failure != null) return emptyList()
+        if (finished || failure != null) return emptyList()
         val entry = path.firstOrNull() ?: return emptyList()
         val profile = entry.profileTerrain?.takeIf { cells -> cells.values.any { it.bottomStair } } ?: return emptyList()
         val dx = entry.point.x - entry.start.x
@@ -259,6 +262,7 @@ internal class CitizenPacketRoute(
     fun replan(from: Location, bodies: List<BoundingBox>, destination: Location? = null): CitizenPacketRoute =
         CitizenPacketRoute(world, from, destination ?: target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings,
             snapshotPolicy = snapshotPolicy, pickup = pickup.takeIf { destination == null || destination.point() == target.point() })
+            .also { it.allowEarlyMovement = false }
 
     private fun permits(from: CitizenPoint, to: CitizenPoint, height: Double = 1.8): Boolean = stepAllowed(from, to) &&
         (bodyContactAllowed || citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
@@ -296,13 +300,18 @@ internal class CitizenPacketRoute(
 
     internal fun newWorkerSearch(): CitizenNavigationSearch {
         pickupEndpoint = null
+        if (earlySteps != null) {
+            path.clear()
+            earlySteps = null
+        }
         return newSearch(snapshotPolicy?.roadCorridor?.takeIf { avoiding.isEmpty() })
     }
 
     internal fun newSearch(roadLookup: CitizenRoadLookup? = null) = CitizenNavigationSearch(origin, pickup?.container?.point() ?: target.point(),
         minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) },
         settings, corridor, roadLookup, pickup?.container, specialTraversal = snapshotPolicy?.specialTraversal == true,
-        traversalAllowed = snapshotPolicy?.traversalAllowed ?: { true })
+        traversalAllowed = snapshotPolicy?.traversalAllowed ?: { true },
+        earlyMovement = allowEarlyMovement && snapshotPolicy?.earlyMovement == true)
 
     internal fun attachAsync(cancel: () -> Unit) {
         check(directSearch == null) { "A direct route cannot be submitted after search started" }
@@ -315,6 +324,23 @@ internal class CitizenPacketRoute(
         visited = result.nodes
         searchNanos += result.searchNanos
         roadRouting = result.roadRouting
+        val offered = result.earlyWalk ?: return
+        val published = earlySteps
+        if (!searching || offered.from != (published?.lastOrNull()?.point ?: origin)) return
+        val steps = if (published == null) {
+            offered.steps.toMutableList().also {
+                prepareOriginSteps(it)
+                earlySteps = it
+            }
+        } else {
+            published.addAll(offered.steps)
+            offered.steps
+        }
+        var previous = offered.from
+        for (step in steps) {
+            path.addLast(Waypoint(previous, step.point, action = step.action))
+            previous = step.point
+        }
     }
     internal fun planningFailed(reason: String) { if (searching) fail(reason) }
     internal fun captureLimits() = minimumY to maximumY
@@ -418,14 +444,7 @@ internal class CitizenPacketRoute(
     internal fun recordSnapshotCapture(blocks: Int) { capturedBlocks = blocks }
     internal fun recordSnapshotNativeReads(reads: Int) { nativeShapeReads += reads }
 
-    internal fun acceptSearch(result: CitizenSearchResult) {
-        if (!searching) return
-        roadRouting = result.roadRouting
-        blockedPositions = result.blockedPositions
-        searchStop = result.searchStop
-        firstUnavailableBlock = result.firstUnavailableBlock
-        result.failure?.let { fail(it); return }
-        val steps = result.path?.toMutableList() ?: return
+    private fun prepareOriginSteps(steps: MutableList<CitizenPlannedStep>) {
         // A nudge must not introduce a needless centre-and-reverse segment. The shortcut is
         // checked against current native geometry on this owner thread before accepting it.
         if (steps.size > 1 && !steps[0].action.isSpecialTraversal && !steps[1].action.isSpecialTraversal && steps.first().point.let {
@@ -452,8 +471,42 @@ internal class CitizenPacketRoute(
                 citizenPacketStepClear(world, centre, first.point, opening))
                 steps.add(0, CitizenPlannedStep(centre, CitizenRouteAction.WALK))
         }
-        var previous = origin
-        for (step in steps) {
+    }
+
+    internal fun acceptSearch(result: CitizenSearchResult) {
+        if (!searching) return
+        roadRouting = result.roadRouting
+        blockedPositions = result.blockedPositions
+        searchStop = result.searchStop
+        firstUnavailableBlock = result.firstUnavailableBlock
+        result.failure?.let { fail(it); return }
+        val steps = result.path?.toMutableList() ?: return
+        prepareOriginSteps(steps)
+        val walked = earlySteps?.takeIf { forwardProgress > .000001 }
+        earlySteps = null
+        var common = 0
+        if (walked != null) {
+            while (common < walked.size && common < steps.size && walked[common] == steps[common]) common++
+            val discard = walked.size - common
+            if (discard > 0) {
+                // Only replace untouched trailing graph steps. Keep the actual in-flight waypoint and its stair profile.
+                val retained = path.size - discard
+                val tail = path.descendingIterator()
+                if (retained <= 0 || (walked.lastIndex downTo common).any { index ->
+                        val queued = tail.next()
+                        !queued.corner || queued.action != walked[index].action || queued.point != walked[index].point ||
+                            queued.start != (walked.getOrNull(index - 1)?.point ?: origin)
+                    }) {
+                    fail("path-changed")
+                    return
+                }
+                repeat(discard) { path.removeLast() }
+            }
+        } else {
+            path.clear()
+        }
+        var previous = steps.getOrNull(common - 1)?.point ?: origin
+        for (step in steps.subList(common, steps.size)) {
             path.addLast(Waypoint(previous, step.point, action = step.action))
             // These actions use fixed travel speeds irrespective of the surface below the packet body.
             if (step.action == CitizenRouteAction.CRAWL)
@@ -485,7 +538,7 @@ internal class CitizenPacketRoute(
              openDoor: (Location) -> Boolean): Location? {
         waitingForCollision = false
         turning = false
-        if (searching || failure != null || finished) return null
+        if (searching && path.isEmpty() || failure != null || finished) return null
         val observed = CitizenPoint(from.x, from.y, from.z)
         path.firstOrNull()?.observe(observed)
         if (nextTraversal != null) return moveTraversal(from, path.first, movementAllowed)
@@ -518,6 +571,7 @@ internal class CitizenPacketRoute(
         var moved = false
         var earned = 0.0
         fun finishSegment() {
+            if (searching) return
             if (continuation && forwardProgress + earned <= .000001) fail("no-progress")
             else finished = true
         }

@@ -355,12 +355,18 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
             val npc = actor.npc
             h.owner.pulse(2_000)
             var walkingStartedAt: Long? = null
+            var walkedDuringSearch = false
             for (tick in 1..1_000) {
                 val from = npc.location
                 h.navigate()
                 val step = from.distance(npc.location)
                 if (walkingStartedAt == null && step > 0.0 && (actor.route?.motion?.forwardProgress ?: 0.0) > 0.0)
                     walkingStartedAt = h.recoveryMillis
+                if (step > 0.0 && actor.route?.motion?.searching == true) {
+                    walkedDuringSearch = true
+                    actor.route?.motion?.pickupEndpoint shouldBe null
+                    h.unloads shouldBe 0
+                }
                 // Simulate slow frames once navigation has accepted a real step.
                 if (walkingStartedAt != null) h.recoveryMillis += 950
                 if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
@@ -370,9 +376,54 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
                 if (h.unloads > 0) break
             }
             (h.recoveryMillis - requireNotNull(walkingStartedAt) > 60_000L) shouldBe true
+            walkedDuringSearch shouldBe true
             h.unloads shouldBe 1
             h.city.workers.single().cargo shouldBe cargo
             h.pendingUnload.isDone shouldBe false
+        }
+    }
+
+    test("a blocked early street step replans from the courier's actual feet with its cargo intact") {
+        residentRuntime { h ->
+            val cargo = carryingCourier(h)
+            h.world.getBlockAt(10, 64, 0).type = Material.AIR
+            val actor = h.actor()
+            h.owner.pulse(2_000)
+            for (tick in 1..400) {
+                h.navigate()
+                if (actor.npc.location.x > .5 && actor.route?.motion?.searching == true) break
+            }
+            val original = requireNotNull(actor.route).motion
+            original.earlyStartPending shouldBe true
+            (actor.npc.location.x > .5) shouldBe true
+            h.holdNavigation = true
+            for (y in 64..65) {
+                h.world.getBlockAt(2, y, 0).type = Material.STONE
+                for (x in 0..5) h.world.getBlockAt(x, y, 1).type = Material.AIR
+            }
+            for (tick in 1..80) {
+                h.navigate()
+                if (actor.route?.motion !== original) break
+            }
+            val replacement = requireNotNull(actor.route).motion
+            (replacement !== original) shouldBe true
+            replacement.reuseOrigin shouldBe actor.npc.location.point()
+            original.failure shouldBe "movement-blocked"
+            (actor.npc.location.x < 2.0) shouldBe true
+            h.unloads shouldBe 0
+            h.releaseNavigation()
+            var walkedAround = false
+            for (tick in 1..1_000) {
+                val before = actor.npc.location
+                h.navigate()
+                (before.distance(actor.npc.location) <= .172001) shouldBe true
+                if (actor.npc.location.blockX == 2 && actor.npc.location.blockZ != 0) walkedAround = true
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (h.unloads > 0) break
+            }
+            walkedAround shouldBe true
+            h.unloads shouldBe 1
+            h.city.workers.single().cargo shouldBe cargo
         }
     }
 

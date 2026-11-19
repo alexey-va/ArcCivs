@@ -146,6 +146,25 @@ class CivsNavigationSectionCacheTest : FunSpec({
         }
     }
 
+    test("pending searches only retire if they consume a warmed chunk that unloaded during their handoff") {
+        for (x in listOf(1, 0)) SectionHarness().use { h ->
+            h.extract(CitizenSnapshotKey(x, 0), setOf(3, 4))
+            val route = h.route(from = 13.5, to = 12.5)
+            h.tick()
+            route.preparationPhase shouldBe "snapshot-processing"
+            h.world.unloadChunk(x, 0)
+            h.owner.removeChunk(h.world.uid, x, 0)
+            route.searching shouldBe true // Only the immutable warm input has been submitted so far.
+            if (x == 0) {
+                repeat(100) { if (route.searching) h.tick() }
+                route.failure shouldBe "chunk-unloaded"
+            } else {
+                h.finish(route)
+                route.endpoint shouldBe CitizenPoint(12.5, 64.0, .5)
+            }
+        }
+    }
+
     test("raw copies are released on extraction and cancellation and are absent from retained section graphs") {
         SectionHarness().use { h ->
             val key = CitizenSnapshotKey(0, 0)

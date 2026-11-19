@@ -13,6 +13,76 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.concurrent.Executor
 
 class CivsResidentJourneyNavigationTest : FunSpec({
+    test("the early approach to a distant gate climbs its slab and follows the turn past a blind alley") {
+        residentRuntime(server = CivsWorksiteServerFixture()) { h ->
+            val gate = CivPosition(24, 64, 0)
+            fun street(x: Int, z: Int) = x == 0 && z in 0..4 || x in 0..24 && z == 4 ||
+                x == 24 && z in 0..4 || x in 0..5 && z == 0
+            for (x in -1..25) for (z in -1..5) {
+                if (!street(x, z)) for (y in 64..66) h.world.getBlockAt(x, y, z).type = Material.STONE
+            }
+            h.world.getBlockAt(0, 64, 1).blockData = Bukkit.createBlockData("minecraft:oak_slab[type=bottom,waterlogged=false]")
+            h.world.getBlockAt(gate.x, gate.y, gate.z).blockData =
+                Bukkit.createBlockData("minecraft:oak_fence_gate[facing=north,in_wall=false,open=true,powered=false]")
+            val allowed: (CivPosition) -> Boolean = { street(it.x, it.z) && it.y in 64..65 }
+            var at = Location(h.world, .5, 64.0, .5)
+            val route = CitizenPacketRoute(h.world, at, gate.location(h.world), allowed, { _, _ -> true }, { 1.0 },
+                settings = CivsNavigationSettings(searchNodesPerBatch = 4),
+                snapshotPolicy = CitizenSnapshotPolicy({ p, _ -> allowed(p) }, { _, _ -> true }, earlyMovement = true))
+            var earlyClimb = false
+            var extendedWhileWalking = false
+            var passedTurn = false
+            for (tick in 1..2_000) {
+                val previousSteps = route.remainingNodes
+                repeat(16) { if (route.searching) route.expand() }
+                if (route.searching && route.forwardProgress > 0 && route.remainingNodes > previousSteps) extendedWhileWalking = true
+                route.move(at, 1.0) { true }?.let { at = it }
+                if (route.searching && at.y > 64.0) earlyClimb = true
+                if (at.blockZ == 4) passedTurn = true
+                if (!passedTurn) (at.x < 1.0) shouldBe true
+                if (route.finished || route.failure != null) break
+            }
+            route.failure shouldBe null
+            earlyClimb shouldBe true
+            extendedWhileWalking shouldBe true
+            passedTurn shouldBe true
+            at.point() shouldBe gate.point()
+        }
+    }
+
+    for (pastJunction in listOf(false, true)) test("a final branch replaces only unused early steps pastJunction=$pastJunction") {
+        residentRuntime { h ->
+            var at = Location(h.world, .5, 64.0, .5, -90f, 0f)
+            val origin = at.point()
+            fun step(x: Int, z: Int) = CitizenPlannedStep(CitizenPoint(x + .5, 64.0, z + .5), CitizenRouteAction.WALK)
+            val offered = (1..6).map { step(it, 0) }
+            val terminal = offered.take(2) + listOf(step(2, 1), step(3, 1), step(4, 1))
+            val end = terminal.last().point
+            val route = CitizenPacketRoute(h.world, at, Location(h.world, end.x, end.y, end.z),
+                { true }, { _, _ -> true }, { CivsPaths.ORDINARY_COST })
+            route.recordSearch(CitizenSearchResult(emptyList(), 10, earlyWalk = CitizenEarlyWalk(origin, offered.take(3))))
+            route.move(at, 1.0) { true }?.let { at = it }
+            route.recordSearch(CitizenSearchResult(emptyList(), 14, earlyWalk = CitizenEarlyWalk(offered[2].point, offered.drop(3))))
+            if (pastJunction) while (at.x < 3.0) at = requireNotNull(route.move(at, 1.0) { true })
+            val progress = route.forwardProgress
+            route.acceptSearch(CitizenSearchResult(emptyList(), 30, path = terminal))
+            route.forwardProgress shouldBe progress
+            if (pastJunction) {
+                route.failure shouldBe "path-changed"
+                route.endpoint shouldBe null
+            } else {
+                route.failure shouldBe null
+                for (tick in 1..80) {
+                    val before = at
+                    route.move(at, 1.0) { true }?.let { at = it }
+                    (at.x >= before.x && at.distance(before) <= .215001) shouldBe true
+                    if (route.finished) break
+                }
+                at.point() shouldBe end
+            }
+        }
+    }
+
     for (direction in listOf(1, -1))
     test("a resident stops before an unloaded chunk mid-journey and replans after reload direction=$direction") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
