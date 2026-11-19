@@ -45,6 +45,7 @@ internal class CivsInventoryJournal(
     private val inventoryRetryAt = mutableMapOf<UUID, Long>()
     private val blockedRecovery = mutableSetOf<UUID>()
     private val activeRamReceipts = mutableSetOf<UUID>()
+    private val localReceipts = mutableSetOf<UUID>()
     val pendingCount: Int get() = inventoryRecovery.size
     val blockedCount: Int get() = blockedRecovery.size
     fun pending(cityId: UUID): Boolean = cityId in inventoryRecovery
@@ -80,12 +81,12 @@ internal class CivsInventoryJournal(
     }
 
     /** An evacuation owns the city and its exact source before asynchronous native persistence starts. */
-    fun submitCargoPickup(city: Settlement, tx: CivInventoryTransaction,
+    fun submitCargoPickup(city: Settlement, tx: CivInventoryTransaction, local: Boolean = false,
         freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
         require((tx.cargoPickup != null || tx.mixedBufferPickup()) && tx.cityId == city.id)
         rejectIf(city.id in busy || city.id in unhealthy || cities[city.id] != city, "city-busy")
         busy += city.id
-        return submitNative(city, tx, freshAdmission)
+        return submitNative(city, tx, local, freshAdmission)
     }
 
     fun submitTrade(city: Settlement, tx: CivInventoryTransaction,
@@ -93,20 +94,37 @@ internal class CivsInventoryJournal(
         require(tx.trade != null && tx.cityId == city.id)
         rejectIf(city.id in busy || city.id in unhealthy || cities[city.id] != city, "city-busy")
         busy += city.id
-        return submitNative(city, tx, freshAdmission)
+        return submitNative(city, tx, freshAdmission = freshAdmission)
     }
 
     fun submitRelocation(city: Settlement, tx: CivInventoryTransaction,
         freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
         require(tx.containerRelocation != null)
-        return submitNative(city, tx, freshAdmission)
+        return submitNative(city, tx, freshAdmission = freshAdmission)
     }
 
     /** Submit a sealed native receipt while its caller holds the city reservation. */
-    fun submitNative(city: Settlement, tx: CivInventoryTransaction,
+    fun submitNative(city: Settlement, tx: CivInventoryTransaction, local: Boolean = false,
         freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
         val id = tx.id
         val cityId = city.id
+        inventoryRecovery[cityId]?.let { pending ->
+            if (pending.id != id) storage.unlock(id)
+            return CompletableFuture.failedFuture(CivsRejection("city-busy"))
+        }
+        if (local && storage.localInventory(city, tx, null)) {
+            try {
+                rejectIf(closed, "not-ready")
+                rejectIf(cities[cityId] !== city, "stale-delivery")
+                freshAdmission()
+            } catch (failure: Exception) {
+                storage.unlock(id)
+                busy -= cityId
+                updateHealth()
+                return CompletableFuture.failedFuture(failure)
+            }
+            return submitLocal(city, tx, cityReserved = true)
+        }
         val result = tracked<Settlement>()
         fun abort(failure: Throwable) {
             storage.unlock(id)
@@ -191,7 +209,8 @@ internal class CivsInventoryJournal(
         }
     }
 
-    fun submit(tx: CivInventoryTransaction): CompletableFuture<Settlement> {
+    fun submit(tx: CivInventoryTransaction, before: Settlement? = null, fieldWork: CivWorldWork? = null): CompletableFuture<Settlement> {
+        if (before != null && storage.localInventory(before, tx, fieldWork)) return submitLocal(before, tx)
         val cityId = tx.cityId
         val id = tx.id
         busy += cityId
@@ -223,10 +242,41 @@ internal class CivsInventoryJournal(
         return result
     }
 
+    private fun submitLocal(before: Settlement, tx: CivInventoryTransaction, cityReserved: Boolean = false): CompletableFuture<Settlement> {
+        val id = tx.cityId
+        val pending = inventoryRecovery[id]
+        if (pending != null || !cityReserved && id in busy) {
+            if (pending?.id != tx.id) storage.unlock(tx.id)
+            return CompletableFuture.failedFuture(CivsRejection("city-busy"))
+        }
+        try {
+            rejectIf(closed, "not-ready")
+            rejectIf(id in unhealthy, "city-busy")
+            rejectIf(cities[id] !== before, "stale-city")
+            store.beginLocalInventory(before, tx)
+        } catch (failure: Exception) {
+            storage.unlock(tx.id)
+            if (cityReserved) busy -= id
+            updateHealth()
+            return CompletableFuture.failedFuture(failure)
+        }
+        val result = tracked<Settlement>()
+        busy += id
+        inventoryRecovery[id] = tx
+        activeRamReceipts += tx.id
+        localReceipts += tx.id
+        applyInventory(tx, result)
+        return result
+    }
+
     /** One immutable receipt covers native slots and the exact next city revision. */
     private fun applyInventory(tx: CivInventoryTransaction, result: CompletableFuture<Settlement>?, gateVerified: Boolean = false) {
         if (closed) { result?.completeExceptionally(CivsRejection("not-ready")); return }
+        val local = tx.id in localReceipts
+        val freshLocal = local && result != null
+        var nativeStarted = !freshLocal
         fun fail(error: Throwable, retry: Boolean = false) {
+            if (!nativeStarted) return abortUntouchedInventory(tx, result, error)
             busy -= tx.cityId
             unhealthy += tx.cityId
             if (retry) deferNativeRecovery(tx)
@@ -278,7 +328,7 @@ internal class CivsInventoryJournal(
                     if (tx.collected?.food != null) {
                         val state = storage.collectedBeforeState(tx)
                         if (state is CivInventoryApplyResult.Retry)
-                            return fail(CivsRejection("inventory-recovery", state.values), retry = true)
+                            return fail(CivsRejection(if (freshLocal) "storage-unavailable" else "inventory-recovery", state.values), retry = true)
                     }
                     // This invocation has not written any native endpoint yet; fresh absence is never our own debit.
                     val failure = runCatching { requireFreshNative(tx) }.exceptionOrNull()
@@ -299,11 +349,15 @@ internal class CivsInventoryJournal(
                     }
                 }
             }
-            when (val applied = storage.reconcile(tx, persistPlayer = tx.id !in activeRamReceipts)) {
-                is CivInventoryApplyResult.Retry -> return fail(CivsRejection("inventory-recovery", applied.values), retry = true)
+            val applied = if (freshLocal) storage.applyFreshLocal(tx) { nativeStarted = true }
+                else storage.reconcile(tx, persistPlayer = tx.id !in activeRamReceipts)
+            when (applied) {
+                is CivInventoryApplyResult.Retry -> return fail(CivsRejection(
+                    if (nativeStarted) "inventory-recovery" else "storage-unavailable", applied.values), retry = true)
                 is CivInventoryApplyResult.Conflict -> return fail(CivsRejection("inventory-conflict", applied.values))
                 CivInventoryApplyResult.Applied -> Unit
             }
+            nativeStarted = true
             CivsDiagnostics.event("inventory_applied", "city" to tx.cityId, "transaction" to tx.id,
                 "revision" to tx.after.revision, "slots" to tx.changes.size)
             fun commit() {
@@ -336,6 +390,16 @@ internal class CivsInventoryJournal(
                     }
                 }
                 if (changedHolders.isNotEmpty()) storage.invalidateSupplyPositions(tx.after.worldId, changedHolders)
+                if (local) {
+                    val accepted = store.completeLocalInventory(tx)
+                    val publication = publish(accepted)
+                    fun published(failure: Throwable?) {
+                        if (failure != null) fail(failure) else finishInventory(tx, result)
+                    }
+                    if (publication.isDone) publication.whenComplete { _, failure -> published(failure) }
+                    else publication.whenCompleteSync(tasks) { _, failure -> published(failure) }
+                    return
+                }
                 val completion = store.completeInventoryTransaction(tx)
                 // Both submissions happen in this Main turn. DRAIN is queued after the accepted city and UUID state,
                 // even if shutdown prevents the later publication callback from running.
@@ -389,16 +453,17 @@ internal class CivsInventoryJournal(
         generateSequence(failure) { it.cause }.take(8).any { it is CivsNativePersistenceRetry }
 
     private fun deferNativeRecovery(tx: CivInventoryTransaction) {
-        if (tx.hasNativeItemFence()) inventoryRetryAt[tx.id] = now() + 5_000
+        if (tx.hasNativeItemFence() || tx.id in localReceipts) inventoryRetryAt[tx.id] = now() + 5_000
     }
 
     /** Untouched native endpoints can cancel safely; uncertain journal deletion retains the recovery lock. */
     private fun abortUntouchedInventory(tx: CivInventoryTransaction, result: CompletableFuture<Settlement>?, reason: Throwable) {
-        store.deleteInventoryTransaction(tx.id).whenCompleteSync(tasks) { _, failure ->
+        fun retired(failure: Throwable?) {
             busy -= tx.cityId
             if (failure == null) {
                 inventoryRecovery.remove(tx.cityId)
                 activeRamReceipts -= tx.id
+                localReceipts -= tx.id
                 unhealthy -= tx.cityId
                 blockedRecovery -= tx.cityId
                 storage.unlock(tx.id)
@@ -411,10 +476,12 @@ internal class CivsInventoryJournal(
             }
             updateHealth()
         }
+        if (tx.id in localReceipts) retired(runCatching { store.cancelLocalInventory(tx) }.exceptionOrNull())
+        else store.deleteInventoryTransaction(tx.id).whenCompleteSync(tasks) { _, failure -> retired(failure) }
     }
 
     private fun finishInventory(tx: CivInventoryTransaction, result: CompletableFuture<Settlement>?) {
-        store.deleteInventoryTransaction(tx.id).whenCompleteSync(tasks) { _, failure ->
+        fun retired(failure: Throwable?) {
             busy -= tx.cityId
             if (failure != null) {
                 unhealthy += tx.cityId
@@ -424,6 +491,7 @@ internal class CivsInventoryJournal(
             } else {
                 inventoryRecovery.remove(tx.cityId)
                 activeRamReceipts -= tx.id
+                localReceipts -= tx.id
                 unhealthy -= tx.cityId
                 blockedRecovery -= tx.cityId
                 storage.unlock(tx.id)
@@ -448,6 +516,8 @@ internal class CivsInventoryJournal(
             }
             updateHealth()
         }
+        if (tx.id in localReceipts) retired(null)
+        else store.deleteInventoryTransaction(tx.id).whenCompleteSync(tasks) { _, failure -> retired(failure) }
     }
 
     fun recover() {
@@ -537,6 +607,11 @@ internal class CivsInventoryJournal(
                         val retainedIds = retained.mapTo(hashSetOf()) { it.id }
                         inventoryRetryAt.keys.retainAll(retainedIds)
                         activeRamReceipts.retainAll(retainedIds)
+                        localReceipts.clear()
+                        retained.filter { it.localInventoryEndpoints() && store.hasLocalInventory(it) }.forEach {
+                            localReceipts += it.id
+                            activeRamReceipts += it.id
+                        }
                         storage.completeReceiptBootstrap(retained, consumed)
                         cosmetic.forEach { tx ->
                             CivsDiagnostics.event("autonomous_visual_journal_retired", "city" to tx.cityId,

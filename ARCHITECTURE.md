@@ -507,9 +507,10 @@ operation locks. It performs no receipt/head JSON serialization, full city check
 or forced native inventory save. Immutable construction-buffer proofs may still be read
 for transfers that consume those buffers. Native application still checks actual slots; completion
 publishes the accepted city in RAM and marks it dirty before retiring the active intent
-and its locks. Within a city, the next transfer can use the new balances as soon
-as the previous transfer finishes. Other cities in the same world can transfer
-items independently. A transient native failure delays recovery of its own receipt.
+and its locks. An ordinary NPC withdrawal, return to a physical building, or crop
+harvest completes in the same server turn. The next resident sees the new balance
+even while a checkpoint is waiting on disk. A stale slot or plot cancels untouched
+work. An uncertain native write keeps its receipt for reconciliation.
 Completed receipt graphs do not accumulate. Newly consumed ground-item
 UUIDs also accumulate in RAM and flush with checkpoints, rather than writing a bucket
 for every pickup. Ordinary Minecraft world/player autosave remains unchanged.
@@ -531,8 +532,9 @@ pending intents retain their native persistence/recovery fences until their one-
 completion. New RAM operations never become historical disk intents. Cleanup follows
 acknowledged city state so interruption cannot resurrect an old operation or city.
 Files still use the existing bounded Core AtomicFileStore; there is no new storage
-format or parallel journal. After native success, RAM completion is submitted before
-deferring publication to Main, so shutdown drains it before the final checkpoint.
+format or parallel journal. Ordinary NPC transfers publish their RAM revision inline.
+For receipts using the storage executor, native success queues RAM completion before
+deferring publication to Main. Shutdown drains accepted changes before the final checkpoint.
 An unresolved partial RAM intent makes drain fail explicitly; it is not reported as
 a clean save. No stopped Main callback is awaited. Do not delete historical heads or receipts to bypass recovery or downgrade
 to a binary that cannot read the retained state.
@@ -679,6 +681,11 @@ two to four lines. One packet text display follows the current speaker. Each
 turn lasts at least three seconds. The runtime shuffles 72 conversations and
 uses the whole pool before repeating. A viewer must stay within 24 blocks of
 each participant. Work, hunger, danger or nightfall can end the meeting early.
+The same overhead display shows short remarks when a resident arrives with
+goods and cannot unload them, or finds their bag full during pickup. A producer
+with goods still in their bag can comment on the full barrel once per episode.
+Couriers carrying undelivered goods have separate lines. Remarks last 55 ticks
+and require a nearby viewer.
 All route segments, safe endpoints and collision nudges reject lit campfire
 cells touching the resident's body or support. Execution rechecks live heat;
 a resident already touching fire may leave it. Fire damage remains active.
@@ -805,7 +812,10 @@ then the common initial/legacy reserve. No direct player-inventory automation.
 Scribes and the four processors remain observed 60-second work sessions with
 real ingredients and outputs. FARM, FORESTER and QUARRY are physical worksites,
 not timed item grants: FARM tills real soil, plants and waits for mature crops
-before harvesting native drops (1.5 seconds per action). No new bread-baking jobs
+before harvesting native drops (1.5 seconds per action). A farmer picks the wheat
+up into their own inventory. After walking back to the farm they unload it into
+the farm's storage. A full barrel leaves the wheat in their bag for a later trip.
+No new bread-baking jobs
 are created; a legacy BREAD selection resolves to wheat harvesting.
 When a complete bounded field pass finds no harvest or field preparation job, FARM tends an
 unripe crop for four seconds. Watering maintains soil moisture and advances any
@@ -814,8 +824,9 @@ same one-stage advance at any immature stage.
 Care requires an actual soil or growth change. Each farmer indexes the whole field in
 16-cell slices, including while walking or working, and retains known targets across
 receipts. Harvest outranks care, selects a nearby known ripe crop, and reserves its
-target against other farmers; new maturity can replace unfinished care without
-reusing its work timer. Each selected target is rechecked live before the existing
+target against other farmers. New maturity can replace unfinished care until the
+resident submits the completed action. A submitted action keeps its original plot
+and work cycle until accepted or rejected. Each selected target is rechecked live before the existing
 receipt validation. Care cycles through authored plots rather than repeatedly
 boosting one plant. Exposed rain suppresses manual watering; supplied fertilizer
 can still work, and covered plots may still need watering. Native Auto scenery

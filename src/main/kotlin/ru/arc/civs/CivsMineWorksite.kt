@@ -201,11 +201,15 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 } == true
             }
         }
-        mineSafety[workerId]?.let { scan ->
-            val index = scan.frontier.indexOfFirst { task ->
-                point == CivsWorksiteLayouts.point(building, task.block) || point == CivsWorksiteLayouts.point(building, task.exposed)
+        val scan = mineSafety[workerId] ?: return
+        if (scan.next == 0) return
+        val local = CivsMinePlan.localPoint(building, point)
+        for (index in 0 until scan.next) {
+            val task = scan.frontier[index]
+            if (task.block == local || task.exposed == local) {
+                scan.next = index
+                break
             }
-            if (index >= 0) scan.next = minOf(scan.next, index)
         }
     }
     override fun protectionChanged(workerId: UUID, building: CivBuilding?, affected: (CivPosition, Int) -> Boolean) {

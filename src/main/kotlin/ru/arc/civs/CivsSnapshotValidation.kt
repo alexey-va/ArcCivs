@@ -31,7 +31,12 @@ internal object CivsSnapshotValidation {
             snapshot(city.buildings.count { it.type == BuildingType.TOWN_HALL } == 1)
             snapshot(city.buildings.all { validBuilding(city, it) })
             snapshot(city.buildings.all { it.type == BuildingType.TOWN_HALL || it.level <= city.level() })
-            snapshot(city.buildings.withIndex().all { (index, building) -> city.buildings.drop(index + 1).none { it.bounds.overlaps(building.bounds) } })
+            for (index in city.buildings.indices) {
+                val bounds = city.buildings[index].bounds
+                for (other in index + 1 until city.buildings.size) {
+                    if (city.buildings[other].bounds.overlaps(bounds)) CivsRules.reject("invalid-state")
+                }
+            }
             val orders = city.constructionOrders()
             val deferred = city.deferredConstruction.orEmpty()
             if (deferred.isNotEmpty()) {

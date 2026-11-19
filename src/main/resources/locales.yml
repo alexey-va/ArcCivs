@@ -611,6 +611,24 @@ ru:
     forest-worker: 'Дополнительный лесоруб рубит и восстанавливает деревья'
     mining: 'Подземных ярусов: <before> → <after>'
   workers:
+    transfer:
+      full-barrel:
+        line-0: '<#fff0d5>Эх. Пускай пока в сумке.'
+        line-1: '<#fff0d5>А если боком?.. Нет.'
+        line-2: '<#fff0d5>Тут даже пауку тесно.'
+        line-3: '<#fff0d5>«Авось пригодится», ага.'
+        line-4: '<#fff0d5>Ещё щепку — и крышка в лоб.'
+        line-5: '<#fff0d5>Зато внутри ничего не гремит.'
+        line-6: '<#fff0d5>Куда б ещё одну бочку…'
+        outburst: '<#fff0d5>Бля, кто набил бочку говном?<newline>А, так это же я…'
+      full-bag:
+        line-0: '<#fff0d5>Карманы тоже кончились.'
+        line-1: '<#fff0d5>Разве что в зубах унести.'
+        line-2: '<#fff0d5>Сумка, ты хоть выдохни.'
+      undelivered:
+        line-0: '<#fff0d5>Ну что, груз, ещё погуляем?'
+        line-1: '<#fff0d5>А дома чай остывает…'
+        line-2: '<#fff0d5>Так и стоим. Я и тюк.'
     conversation:
       topic-0:
         line-0: '<#fff0d5>В распутицу где посуше?'
@@ -2358,6 +2376,24 @@ en:
     forest-worker: 'An additional forester cuts and replants trees'
     mining: 'Underground levels: <before> → <after>'
   workers:
+    transfer:
+      full-barrel:
+        line-0: '<#fff0d5>Ah well. Back in the bag.'
+        line-1: '<#fff0d5>What about sideways? ...No.'
+        line-2: '<#fff0d5>Even a spider would be snug.'
+        line-3: '<#fff0d5>“Might come in handy.” Sure.'
+        line-4: '<#fff0d5>One more twig and that lid<newline>will take my nose off.'
+        line-5: '<#fff0d5>Well, nothing rattles in there.'
+        line-6: '<#fff0d5>Where would a spare barrel go?'
+        outburst: '<#fff0d5>Who filled this barrel with shit?<newline>Oh. Right. Me.'
+      full-bag:
+        line-0: '<#fff0d5>Out of pockets, too.'
+        line-1: '<#fff0d5>Guess I could use my teeth.'
+        line-2: '<#fff0d5>Breathe out, bag. Come on.'
+      undelivered:
+        line-0: '<#fff0d5>Another walk, old parcel?'
+        line-1: '<#fff0d5>My tea is getting cold…'
+        line-2: '<#fff0d5>Here we stand. Me and my sack.'
     conversation:
       topic-0:
         line-0: '<#fff0d5>Where''s it driest in mud season?'

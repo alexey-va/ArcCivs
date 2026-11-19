@@ -58,6 +58,12 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             val pause = requireNotNull(actor.outputFullPause)
             val retryAt = pause.retryAt
             actor.supplyRetryAt shouldBe 0L
+            val remark = requireNotNull(h.owner.hologramSnapshots().single().speech)
+            remark.startsWith("workers.transfer.full-barrel.") shouldBe true
+            h.paper.performTicks(CITIZEN_BUBBLE_TICKS.toLong() - 1)
+            h.owner.hologramSnapshots().single().speech shouldBe remark
+            h.paper.performTicks(1)
+            h.owner.hologramSnapshots().single().speech shouldBe null
             val pausedAt = npc.location
             val roadSteps = h.steps.size
             var walked = 0.0
@@ -114,7 +120,11 @@ class CivsProducerStorageFullWanderTest : FunSpec({
                 withClue(h.navigationState()) { attempts shouldBe 2 }
                 actor.supplyPickup?.returnOutputs shouldBe true
                 h.city shouldBe fullCity
-                if (resume == "receipt") {
+                if (resume == "retry") {
+                    pendingRetry.completeExceptionally(CivsRejection("storage-full"))
+                    h.owner.pulse(requireNotNull(h.navigationNow))
+                    h.owner.hologramSnapshots().single().speech shouldBe null
+                } else if (resume == "receipt") {
                     h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = originalItems) })
                     pendingRetry.complete(h.city)
                     h.owner.pulse(requireNotNull(h.navigationNow))
@@ -133,6 +143,32 @@ class CivsProducerStorageFullWanderTest : FunSpec({
             h.deliveries shouldBe 0
             h.pickups shouldBe 0
             h.unloads shouldBe 0
+        }
+    }
+
+    for (cause in listOf("bag-emptied", "viewer-left", "worker-left", "storage-unavailable"))
+    test("a rejected output transfer stays quiet after $cause") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.actor()
+            actor.npc.teleport(Location(h.world, 19.5, 64.0, .5))
+            h.city = h.city.copy(workers = h.city.workers.map { worker -> worker.copy(
+                items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("COBBLESTONE", 64) else null }) })
+            val rejected = CompletableFuture<Settlement>()
+            h.owner.returnResidentOutputs = { city, worker, source ->
+                h.owner.requireStorageArrival(city, worker, source)
+                rejected
+            }
+            h.owner.pulse(2_000)
+            actor.supplyPickup?.buildingId shouldBe farm.id
+            when (cause) {
+                "bag-emptied" -> h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = null) })
+                "viewer-left" -> h.paper.server.onlinePlayers.single().teleport(Location(h.world, -6.5, 64.0, .5))
+                "worker-left" -> actor.npc.teleport(Location(h.world, 15.5, 64.0, .5))
+            }
+            rejected.completeExceptionally(CivsRejection(if (cause == "storage-unavailable") cause else "storage-full"))
+            h.owner.pulse(3_000)
+            h.owner.hologramSnapshots().single().speech shouldBe null
         }
     }
 

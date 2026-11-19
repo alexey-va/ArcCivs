@@ -426,6 +426,8 @@ class CivsCitizens(
         runtime.collectionBudget = 2 // Two 32-item discoveries or four-holder home checks across the whole owner.
         runtime.recoveryBudget = 2 // At most two bounded safe-position searches after real route failures per pulse.
         runtime.constructionBudget = 2 // Each construction inspects at most sixteen exterior columns, once while valid.
+        val viewers = audience.viewers()
+        leisure.viewers = viewers
         logistics.drainCompletions(nowMillis)
         logistics.drainSupplies(nowMillis)
         life.drainResidentLife(nowMillis)
@@ -439,8 +441,6 @@ class CivsCitizens(
         voices.retain(workers.keys)
         statuses.keys.retainAll(workers.keys)
         admission.retain(workers.keys, actors.keys)
-        val viewers = audience.viewers()
-        leisure.viewers = viewers
 
         for (actor in actors.values.toList()) {
             val current = workers[actor.workerId]
@@ -607,9 +607,9 @@ class CivsCitizens(
         if (closed.get()) return
         // Both owner cadences can submit observed resident-life and work receipts.
         runtime.residentObservedAt = nowMillis
-        logistics.drainCompletions(nowMillis)
         val viewers = audience.viewers()
         leisure.viewers = viewers
+        logistics.drainCompletions(nowMillis)
         // At most eight existing actors, rotated after admission; no spawn, scan or threat pulse.
         // Extra worksite kinds use slots only for admitted work or a brief committed handoff.
         val candidates = actors.values.filter { it.workerId !in pendingHarm &&
@@ -781,6 +781,12 @@ class CivsCitizens(
         return actors[workerId]?.takeIf { it.cityId == cityId }?.plan?.worldWork?.takeIf { it.autonomousVisual }
     }
 
+    internal fun deliveringWorldWork(cityId: UUID, work: CivWorldWork): Boolean {
+        checkCitizenMainThread()
+        val actor = actors[work.workerId] ?: return false
+        return actor.cityId == cityId && actor.cycle.phase == CitizenPhase.DELIVERING && actor.plan.worldWork == work
+    }
+
     internal fun pendingStockDelivery(cityId: UUID, workerId: UUID): Stock? {
         checkCitizenMainThread()
         return actors[workerId]?.takeIf { it.cityId == cityId }?.plan?.pendingStockDelivery
@@ -871,7 +877,7 @@ class CivsCitizens(
     internal fun terrainChanged(worldId: UUID, positions: Collection<CivPosition>) {
         checkCitizenMainThread()
         if (closed.get()) return
-        positions.forEach { navigation.changed(worldId, it); worksiteTerrainChanged(worldId, it) }
+        positions.forEach { invalidateTerrain(worldId, it) }
     }
     @EventHandler(priority = EventPriority.MONITOR)
     fun onQuit(event: PlayerQuitEvent) {
@@ -892,9 +898,12 @@ class CivsCitizens(
         invalidateTerrain(block)
     }
 
-    private fun invalidateTerrain(block: org.bukkit.block.Block) {
-        navigation.changed(block.world.uid, CivPosition(block.x, block.y, block.z))
-        worksiteTerrainChanged(block.world.uid, CivPosition(block.x, block.y, block.z))
+    private fun invalidateTerrain(block: org.bukkit.block.Block) =
+        invalidateTerrain(block.world.uid, CivPosition(block.x, block.y, block.z))
+
+    private fun invalidateTerrain(world: UUID, point: CivPosition) {
+        navigation.changed(world, point)
+        worksiteTerrainChanged(world, point)
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -952,7 +961,7 @@ class CivsCitizens(
     fun onTerrainEntity(event: org.bukkit.event.entity.EntityChangeBlockEvent) = invalidateTerrain(event.block)
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainTree(event: org.bukkit.event.world.StructureGrowEvent) {
-        event.blocks.forEach { invalidateTerrain(it.block) }
+        event.blocks.forEach { invalidateTerrain(it.world.uid, CivPosition(it.x, it.y, it.z)) }
     }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainPiston(event: org.bukkit.event.block.BlockPistonExtendEvent) {

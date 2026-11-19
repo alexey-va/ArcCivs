@@ -15,13 +15,8 @@ import org.bukkit.Material
 import org.bukkit.inventory.ItemStack
 
 class CivsCourierServiceTest : FunSpec({
-    test("courier pickup and unload journal both physical endpoints and persist cargo between them") {
-        serviceScenario(storageFactory = { plugin ->
-            CivsStorage(plugin) { emptyArray() }.also { storage ->
-                // Native region persistence is covered separately; this fixture checks service receipt ordering.
-                storage.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
-            }
-        }) { h ->
+    test("courier pickup and unload publish each physical transfer once with cargo between them") {
+        serviceScenario { h ->
             val home = h.city.buildings.last()
             val warehouse = home.copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 63, 0))
             val smith = home.copy(id = UUID.randomUUID(), type = BuildingType.BLACKSMITH, anchor = CivPosition(20, 64, 0),
@@ -39,37 +34,28 @@ class CivsCourierServiceTest : FunSpec({
             val target = (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory
             source.setItem(0, org.bukkit.inventory.ItemStack(Material.IRON_INGOT, 3))
             source.setItem(1, org.bukkit.inventory.ItemStack(Material.COBBLESTONE, 2))
-            val journals = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                CompletableFuture<CivInventoryTransaction>().also { journals += firstArg<CivInventoryTransaction>() to it }
-            }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            val receipts = mutableListOf<CivInventoryTransaction>()
+            every { h.store.beginLocalInventory(any(), capture(receipts)) } returns Unit
             h.start()
             val current = h.service.city(h.player)!!
             val plan = h.supplyPlan(current.workers.first().id)
-            val pickup = h.service.pickupCargo(current.id, current.workers.first().id, plan.cargo)
-            source.getItem(0)!!.amount shouldBe 3
-            h.service.city(h.player)!!.workers.first().cargo shouldBe null
-            journals.single().let { it.second.complete(it.first) }; h.tick()
+            h.await(h.service.pickupCargo(current.id, current.workers.first().id, plan.cargo))
             source.getItem(0) shouldBe null
             target.isEmpty shouldBe true
-            h.service.city(h.player)!!.workers.first().cargo shouldBe null
-            h.commit(); pickup.join()
             h.service.city(h.player)!!.workers.first().cargo shouldBe plan.cargo.copy(inventoryBacked = true)
             h.service.pickupCargo(current.id, current.workers.first().id, plan.cargo).join()
-            journals.size shouldBe 1
-            val dropoff = h.service.dropoffCargo(current.id, current.workers.first().id, plan.cargo, smith.id)
-            target.isEmpty shouldBe true
-            journals.last().let { it.second.complete(it.first) }; h.tick()
+            receipts.single().changes.single().container shouldBe warehouse.control
+            h.await(h.service.dropoffCargo(current.id, current.workers.first().id, plan.cargo, smith.id))
             target.getItem(0)!!.amount shouldBe 3
-            h.service.city(h.player)!!.workers.first().cargo shouldBe plan.cargo.copy(inventoryBacked = true)
-            h.commit(); dropoff.join()
             val finished = h.service.city(h.player)!!.workers.first()
             finished.cargo shouldBe null
             finished.completedCycles shouldBe 1L
             finished.skills!!["WAREHOUSE"] shouldBe 1L
             h.service.dropoffCargo(current.id, current.workers.first().id, plan.cargo, smith.id).isCompletedExceptionally shouldBe true
-            journals.size shouldBe 2
+            receipts.size shouldBe 2
+            receipts.last().beforeRevision shouldBe receipts.first().after.revision
+            receipts.last().changes.single().container shouldBe smith.control
+            h.saves shouldBe emptyList()
             source.getItem(1)!!.amount shouldBe 2
             target.getItem(0)!!.type shouldBe Material.IRON_INGOT
         }
@@ -92,10 +78,6 @@ class CivsCourierServiceTest : FunSpec({
             h.world.getBlockAt(20, 63, 0).type = Material.BARREL
             val source = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
             source.setItem(0, ItemStack(Material.IRON_INGOT, 3))
-            val journal = CompletableFuture<CivInventoryTransaction>()
-            val receipts = mutableListOf<CivInventoryTransaction>()
-            every { h.store.saveInventoryTransaction(any()) } answers { receipts += firstArg<CivInventoryTransaction>(); journal }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val city = requireNotNull(h.service.city(h.player))
             val couriers = city.workers.filter { it.assignment == warehouse.id }
@@ -110,20 +92,14 @@ class CivsCourierServiceTest : FunSpec({
             val at = h.time
             val refused = h.service.pickupCargo(city.id, first.id, original.cargo)
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(refused) })?.reason shouldBe "resident-inventory-full"
-            receipts shouldBe emptyList()
+            verify(exactly = 0) { h.store.beginLocalInventory(any(), any()) }
             source.getItem(0) shouldBe ItemStack(Material.IRON_INGOT, 3)
 
             val replacement = h.supplyPlan(second.id)
             h.time shouldBe at
             replacement.cargo.copy(id = original.cargo.id) shouldBe original.cargo
-            val pickingUp = h.service.pickupCargo(city.id, second.id, replacement.cargo)
-            h.tickUntil("replacement pickup reaches its journal") { receipts.isNotEmpty() || pickingUp.isDone }
-            if (pickingUp.isDone) h.await(pickingUp)
-            source.getItem(0) shouldBe ItemStack(Material.IRON_INGOT, 3)
-            journal.complete(receipts.single())
-            h.tickUntil("replacement pickup awaits city publication") { h.saves.size == 1 }
-            h.commit()
-            val saved = h.await(pickingUp)
+            val saved = h.await(h.service.pickupCargo(city.id, second.id, replacement.cargo))
+            verify(exactly = 1) { h.store.beginLocalInventory(any(), any()) }
             source.getItem(0) shouldBe null
             saved.workers.first { it.id == first.id } shouldBe full
             saved.workers.first { it.id == second.id }.cargo shouldBe replacement.cargo.copy(inventoryBacked = true)
@@ -219,13 +195,8 @@ class CivsCourierServiceTest : FunSpec({
         }
     }
 
-    test("producer returns fitting native output after its journal and a courier then reads the workplace") {
-        serviceScenario(storageFactory = { plugin ->
-            CivsStorage(plugin) { emptyArray() }.also { storage ->
-                // Native region persistence is covered separately; this fixture checks service receipt ordering.
-                storage.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
-            }
-        }) { h ->
+    test("producer returns fitting native output after checked admission and a courier then reads the workplace") {
+        serviceScenario { h ->
             val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 63, 0))
             val forester = warehouse.copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, anchor = CivPosition(20, 64, 0),
                 entrance = CivPosition(20, 64, -2), control = CivPosition(20, 63, 0),
@@ -251,25 +222,17 @@ class CivsCourierServiceTest : FunSpec({
                 editMeta { meta -> meta.displayName(Component.text("Reserved fixture cargo")) }
             }) }
             source.setItem(0, ItemStack(Material.OAK_LOG, 60))
-            val journals = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                CompletableFuture<CivInventoryTransaction>().also { journals += firstArg<CivInventoryTransaction>() to it }
-            }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            every { h.store.beginLocalInventory(any(), any()) } throws CivsRejection("stale-city")
             h.start()
             val failed = h.service.returnResidentOutputs(ready.id, producer.id, forester.id)
-            journals.single().second.completeExceptionally(CivsRejection("storage-transaction-too-large")); h.tick()
-            failed.isCompletedExceptionally shouldBe true
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(failed) })?.reason shouldBe "stale-city"
             source.getItem(0)!!.amount shouldBe 60
             CivsEquipment.plainCount(h.service.city(h.player)!!.workers.last(), "OAK_LOG") shouldBe 64
-            val returning = h.service.returnResidentOutputs(ready.id, producer.id, forester.id)
-            val receipt = journals.last().first
-            receipt.changes.single().container shouldBe forester.control
-            source.getItem(0)!!.amount shouldBe 60
-            journals.last().second.complete(receipt); h.tick()
+            val receipts = mutableListOf<CivInventoryTransaction>()
+            every { h.store.beginLocalInventory(any(), capture(receipts)) } returns Unit
+            h.await(h.service.returnResidentOutputs(ready.id, producer.id, forester.id))
+            receipts.single().changes.single().container shouldBe forester.control
             source.getItem(0)!!.amount shouldBe 64
-            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.last(), "OAK_LOG") shouldBe 64
-            h.commit(); returning.join()
             val deposited = h.service.city(h.player)!!
             CivsEquipment.plainCount(deposited.workers.last(), "OAK_LOG") shouldBe 60
             deposited.workers.last().items!!.take(6) shouldBe producer.items!!.take(6)
@@ -279,15 +242,11 @@ class CivsCourierServiceTest : FunSpec({
             plan.cargo.sourceBuildingId shouldBe forester.id
             plan.cargo.sourceWorkerId shouldBe null
             plan.cargo.sourceEntrance shouldBe forester.entrance
-            val pickup = h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo)
-            journals.last().let { it.second.complete(it.first) }; h.tick()
-            h.commit(); pickup.join()
+            h.await(h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo))
             val carried = h.service.city(h.player)!!
             CivsEquipment.plainCount(carried.workers.last(), "OAK_LOG") shouldBe 60
             CivsEquipment.plainCount(carried.workers.first(), "OAK_LOG") shouldBe plan.cargo.amount.toInt()
-            val dropoff = h.service.dropoffCargo(ready.id, ready.workers.first().id, plan.cargo, warehouse.id)
-            journals.last().let { it.second.complete(it.first) }; h.tick()
-            h.commit(); dropoff.join()
+            h.await(h.service.dropoffCargo(ready.id, ready.workers.first().id, plan.cargo, warehouse.id))
             val finished = h.service.city(h.player)!!
             finished.workers.first().cargo shouldBe null
             CivsEquipment.plainCount(finished.workers.first(), "OAK_LOG") shouldBe 0

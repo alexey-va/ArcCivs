@@ -385,15 +385,17 @@ class CivsProtection(
                 forestryPath(world.uid, location.blockX, location.blockZ)
         } ?: false
         if (blockedRoot(event.location) || event.blocks.any { proposed ->
-                val world = proposed.world
+                val world = proposed.world.uid
                 val point = CivPosition(proposed.x, proposed.y, proposed.z)
+                if (worldLocked(world, point) || citizenCollision(world, point)) return@any true
                 val before = proposed.block
-                val leaves = before.blockData as? org.bukkit.block.data.type.Leaves
-                val proposedWood = proposed.type.name.let { it.endsWith("_LOG") || it.endsWith("_WOOD") }
-                worldLocked(world.uid, point) || citizenCollision(world.uid, point) ||
-                    before.blockData.asString != proposed.blockData.asString &&
-                    (protected(proposed.location) && (!before.type.isAir || proposedWood) || !before.type.isAir &&
-                        forestryPath(world.uid, proposed.x, proposed.z) && (leaves == null || leaves.isPersistent))
+                val air = before.type.isAir
+                if (air && proposed.type.name.let { !it.endsWith("_LOG") && !it.endsWith("_WOOD") }) return@any false
+                val protected = isProtected(world, point.x, point.y, point.z)
+                if (!protected && (air || !forestryPath(world, point.x, point.z))) return@any false
+                val current = before.blockData
+                if (!protected && current is org.bukkit.block.data.type.Leaves && !current.isPersistent) return@any false
+                current.asString != proposed.blockData.asString
             }) event.isCancelled = true
     }
 

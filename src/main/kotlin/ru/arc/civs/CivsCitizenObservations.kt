@@ -422,8 +422,10 @@ internal class CivsCitizenObservations(
             child = CivsResidents.isChild(resident),
             sleep = sleep,
             statusInputs = if (status == "waiting-inputs") workStatusInputs(city, resident).distinct() else emptyList(),
-            speech = actor.social.visit?.conversation?.takeIf { status == "talking" }?.let {
-                it.bubble(resident.id, Bukkit.getCurrentTick())
+            speech = when {
+                status == "talking" -> actor.social.visit?.conversation?.bubble(resident.id, Bukkit.getCurrentTick())
+                actor.sleeping || actor.sheltering -> null
+                else -> actor.transferRemark?.visible(Bukkit.getCurrentTick())
             })
     }
 }

@@ -14,7 +14,11 @@ import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.CompletionException
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class CivsStoreCheckpointTest : FreeSpec({
     lateinit var root: Path
@@ -189,6 +193,108 @@ class CivsStoreCheckpointTest : FreeSpec({
         store.checkpointStats().fullCityWrites[CivsCheckpointReason.EXPLICIT_SAVE] shouldBe 1L
         store.flush().join()
         CivsStore(root, direct).load().join() shouldBe listOf(latest)
+    }
+
+    "two local native commits finish while storage holds the previous checkpoint acknowledgement" {
+        val city = checkpointCity()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val holdNextClockRead = AtomicBoolean(false)
+        val io = Executors.newSingleThreadExecutor()
+        val store = CivsStore(root, io, checkpointClock = {
+            if (holdNextClockRead.compareAndSet(true, false)) {
+                entered.countDown()
+                check(release.await(10, TimeUnit.SECONDS))
+            }
+            0L
+        })
+        try {
+            store.save(city).join()
+            store.load().join()
+            val first = checkpointTransaction(city, 3, 2)
+            store.beginLocalInventory(city, first)
+            store.completeLocalInventory(first) shouldBe first.after
+            holdNextClockRead.set(true)
+            val checkpoint = store.flush()
+            entered.await(5, TimeUnit.SECONDS) shouldBe true
+            val second = checkpointTransaction(first.after, 2, 1)
+            val third = checkpointTransaction(second.after, 1, 3)
+            // The file worker is holding ioLock after the first revision reached disk.
+            val latest = CompletableFuture.supplyAsync {
+                store.beginLocalInventory(first.after, second)
+                store.completeLocalInventory(second)
+                store.beginLocalInventory(second.after, third)
+                store.completeLocalInventory(third)
+            }.get(3, TimeUnit.SECONDS)
+            latest shouldBe third.after
+            store.completeLocalInventory(third) shouldBe latest
+            shouldThrow<IllegalStateException> { store.completeLocalInventory(second) }
+            shouldThrow<CivsRejection> { store.beginLocalInventory(city, first) }
+            release.countDown()
+            checkpoint.join()
+            CivsStore(root, direct).load().join() shouldBe listOf(first.after)
+            store.checkpointStats().dirtyCities shouldBe 1
+            store.close()
+            store.drained().join()
+            CivsStore(root, direct).load().join() shouldBe listOf(third.after)
+        } finally {
+            release.countDown()
+            io.shutdownNow()
+        }
+    }
+
+    "a local native reservation survives reload and only its exact holder can resolve a partial transfer" {
+        val city = checkpointCity()
+        val store = CivsStore(root, direct)
+        store.save(city).join()
+        store.load().join()
+        val tx = checkpointTransaction(city, 3, 2)
+        store.beginLocalInventory(city, tx)
+        shouldThrow<CivsRejection> { store.beginLocalInventory(city, tx) }
+        shouldThrow<CompletionException> { store.stage(tx.after).join() }
+        shouldThrow<CompletionException> { store.save(tx.after).join() }
+        shouldThrow<CompletionException> { store.delete(city).join() }
+        shouldThrow<CompletionException> { store.saveInventoryTransaction(tx).join() }
+        store.hasLocalInventory(tx.copy()) shouldBe false
+        shouldThrow<IllegalStateException> { store.completeLocalInventory(tx.copy()) }
+        shouldThrow<IllegalStateException> { store.cancelLocalInventory(tx.copy()) }
+        (shouldThrow<CompletionException> { store.flush().join() }.cause as CivsCheckpointFailure).failures.keys shouldBe setOf(city.id)
+        val recovered = store.loadInventoryTransactions().join().single()
+        (recovered === tx) shouldBe true
+        store.load().join() shouldBe listOf(city)
+        store.hasLocalInventory(recovered) shouldBe true
+        store.cancelLocalInventory(recovered)
+        store.loadInventoryTransactions().join() shouldBe emptyList()
+
+        val replacement = tx.copy(id = UUID.randomUUID())
+        store.beginLocalInventory(city, replacement)
+        store.completeLocalInventory(replacement) shouldBe replacement.after
+        val staged = store.stage(replacement.after.copy(revision = 2)).join()
+        val legacyLane = checkpointTransaction(staged, 2, 1)
+        store.saveInventoryTransaction(legacyLane).join()
+        shouldThrow<IllegalArgumentException> { store.beginLocalInventory(staged, legacyLane.copy(id = UUID.randomUUID())) }
+        val next = store.completeInventoryTransaction(legacyLane).join()
+        store.deleteInventoryTransaction(legacyLane.id).join()
+        shouldThrow<CompletionException> { store.delete(staged).join() }
+        val local = checkpointTransaction(next, 1, 2)
+        store.beginLocalInventory(next, local)
+        store.completeLocalInventory(local) shouldBe local.after
+        store.delete(local.after).join()
+        store.load().join() shouldBe emptyList()
+    }
+
+    "a stopped store reports the exact unfinished local city on drain" {
+        val city = checkpointCity()
+        val store = CivsStore(root, direct)
+        store.save(city).join()
+        store.load().join()
+        val tx = checkpointTransaction(city, 3, 2)
+        store.beginLocalInventory(city, tx)
+        store.close()
+        val failure = shouldThrow<CompletionException> { store.drained().join() }.cause as CivsCheckpointFailure
+        failure.failures.keys shouldBe setOf(city.id)
+        shouldThrow<CivsRejection> { store.completeLocalInventory(tx) }
+        CivsStore(root, direct).load().join() shouldBe listOf(city)
     }
 
     "retired UUID cannot be admitted after a later revision even when native slots return to its before image" {
@@ -435,6 +541,10 @@ private fun checkpointTransaction(city: Settlement, before: Int, after: Int) = C
 /** Existing journal fixtures control durable acknowledgements through their save future; real files are tested above. */
 internal fun CivsStore.stubCheckpointAcknowledgements() {
     val store = this
+    every { store.beginLocalInventory(any(), any()) } returns Unit
+    every { store.completeLocalInventory(any()) } answers { firstArg<CivInventoryTransaction>().after }
+    every { store.cancelLocalInventory(any()) } returns Unit
+    every { store.hasLocalInventory(any()) } returns false
     every { store.completeInventoryTransaction(any()) } answers { store.save(firstArg<CivInventoryTransaction>().after) }
     every { store.stage(any()) } answers { store.save(firstArg()) }
     every { store.flush() } returns CompletableFuture.completedFuture(Unit)

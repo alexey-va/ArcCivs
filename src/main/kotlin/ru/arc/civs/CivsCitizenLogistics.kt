@@ -194,11 +194,17 @@ internal class CivsCitizenLogistics(
                     now + if (completion.pickup.returnOutputs && reason == "storage-full") 5_000 else 1_000
                 if (definiteOutputFull) {
                     // This rejected output transfer owns its own cooldown; food/tool receipts cannot clear it.
-                    actor.outputFullPause = CitizenOutputFullPause(completion.pickup.buildingId, now + 5_000)
+                    val buildingId = completion.pickup.buildingId
+                    actor.outputFullPause = CitizenOutputFullPause(buildingId, now + 5_000,
+                        firstRejection = actor.outputFullPause?.buildingId != buildingId)
                     actor.outputReturn = null
                     routes.cancelRoute(actor)
                 }
                 val failure = completion.pickup.buildingId to reason
+                if (!completion.pickup.returnOutputs && error is CivsRejection && reason == "resident-inventory-full" &&
+                    actor.supplyFailure != failure) runtime.cityById(actor.cityId)?.building(completion.pickup.buildingId)?.control?.let {
+                    leisure.reactToTransfer(actor, it, CitizenTransferReaction.FULL_BAG)
+                }
                 if (actor.plan.type == BuildingType.BUILDER_HUT && actor.supplyFailure != failure) CivsDiagnostics.event("citizen_supplies_blocked",
                     "city" to actor.cityId, "worker" to actor.workerId, "source" to completion.pickup.buildingId,
                     "order" to actor.plan.token.constructionId, "phase" to actor.cycle.phase, "reason" to reason)
@@ -420,6 +426,7 @@ internal class CivsCitizenLogistics(
                     else actor.cycle.acceptsCompletion(completion.ticket))) continue
             val error = (completion.error as? CompletionException)?.cause ?: completion.error
             if (error != null) {
+                if (error is CivsRejection) reactToCourierFailure(actor, completion.pickup, error.reason)
                 if (completion.pickup) {
                     couriers.releaseCourierSource(actor, now)
                     actor.cycle.failPickup((error as? CivsRejection)?.reason, now)
@@ -474,6 +481,21 @@ internal class CivsCitizenLogistics(
             }
             if (!completion.pickup) workRuntime.fieldCareHand(actor, null)
         }
+    }
+
+    private fun reactToCourierFailure(actor: CitizenActor, pickup: Boolean, reason: String) {
+        val trip = actor.plan.courier ?: return
+        if (trip.cargo.stockResource != null) return
+        val reaction = when {
+            pickup && reason == "resident-inventory-full" && trip.cargo.sourceWorkerId == null -> CitizenTransferReaction.FULL_BAG
+            !pickup && trip.carrying && reason == "storage-full" -> CitizenTransferReaction.UNDELIVERED
+            else -> return
+        }
+        val leg = trip.cargo.id to if (pickup) trip.cargo.sourceBuildingId else trip.destinationBuildingId
+        if (actor.lastCourierRemark == leg) return
+        actor.lastCourierRemark = leg
+        val control = if (pickup) actor.plan.workplace ?: return else actor.plan.storage
+        leisure.reactToTransfer(actor, control, reaction)
     }
 }
 

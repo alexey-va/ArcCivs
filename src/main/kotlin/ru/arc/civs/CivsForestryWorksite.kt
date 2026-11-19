@@ -169,8 +169,10 @@ internal class CivsForestryWorksite(
     }
     fun changed(workerId: UUID, point: CivPosition) {
         forestSearches[workerId]?.let { search ->
-            search.byColumn[point.x to point.z]?.let { search.dirty += it }
-            search.treeColumns.removeIf { it.x == point.x && it.z == point.z }
+            search.byColumn[point.x to point.z]?.let { column ->
+                search.dirty += column
+                search.treeColumns.remove(column)
+            }
             fun nearby(root: CivPosition) = kotlin.math.abs(root.x - point.x) <= CivsForestry.MAX_RADIUS &&
                 kotlin.math.abs(root.z - point.z) <= CivsForestry.MAX_RADIUS &&
                 point.y in root.y - 1..root.y + CivsForestry.MAX_HEIGHT

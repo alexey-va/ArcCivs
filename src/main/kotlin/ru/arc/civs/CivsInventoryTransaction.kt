@@ -65,7 +65,7 @@ data class CivStorageSupplyPlan(val plan: CivStoragePlan, val result: CivsSupply
 data class CivResidentTransferPlan(val plan: CivStoragePlan, val worker: CivWorker)
 data class CivCorpseTransferPlan(val worker: CivWorker, val transfer: CivResidentTransfer?)
 
-/** Exact slot receipt; the service persists this before applying any native item change. */
+/** Exact slot receipt reserved before applying its native item changes. */
 data class CivInventoryTransaction(
     val id: UUID, val cityId: UUID, val beforeRevision: Long,
     val after: Settlement, val changes: List<CivInventorySlotChange>,
@@ -238,6 +238,15 @@ internal fun CivMineReceipt.detached(): CivMineReceipt = copy(
 internal fun CivInventoryTransaction.mixedBufferPickup() = bufferPickup != null && changes.isNotEmpty()
 
 internal fun CivInventoryTransaction.playerId(): UUID? = playerDebit?.playerId ?: residentTransfer?.playerId ?: resurrection?.playerId ?: trade?.playerId
+
+/** Cold, external and proof-backed endpoints retain their storage-worker admission. */
+internal fun CivInventoryTransaction.localInventoryEndpoints(): Boolean =
+    after.inventory?.mode == CivStorageMode.PHYSICAL && playerId() == null &&
+        collected?.ground.isNullOrEmpty() && collected?.forestryLeafLoot == null &&
+        (collected?.food?.materialized ?: 0) == 0 && collected?.food?.servingFor == null &&
+        containerRelocation == null && bufferPickup == null && autoSupplyBuildingId == null && forestry == null && upkeep == null &&
+        autonomousVisual == null && mine == null && mineOpening == null && authoredVegetation == null &&
+        gateRefit == null && warehouseRefit == null
 
 sealed interface CivInventoryApplyResult {
     data object Applied : CivInventoryApplyResult

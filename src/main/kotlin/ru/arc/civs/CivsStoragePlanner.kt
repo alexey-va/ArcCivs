@@ -489,6 +489,7 @@ internal class CivsStoragePlanner(
             outputs.forEach { (material, amount) -> after = creditVirtual(city.copy(inventory = after), material, amount, buildingId).inventoryAfter }
             return CivStoragePlan(after, emptyList(), worldChanges = worldChanges.toList(), mine = mine)
         }
+        if (inputs.isEmpty() && outputs.isEmpty()) return CivStoragePlan(inventory, emptyList(), worldChanges = worldChanges.toList(), mine = mine)
         val sources = containers.localSources(city, buildingId).iterator()
         val captured = mutableListOf<Snapshot>()
         fun snapshots() = sequence {

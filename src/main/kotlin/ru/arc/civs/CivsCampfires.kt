@@ -11,6 +11,7 @@ import kotlin.random.Random
 
 internal const val CITIZEN_CAMP_RANGE = 24
 internal const val CITIZEN_CONVERSATION_RANGE = 24
+internal const val CITIZEN_BUBBLE_TICKS = 55
 private const val CAMP_CACHE_TICKS = 2_400
 private const val MAX_CAMP_CHUNKS = 256
 private const val MAX_FIRES_PER_CHUNK = 16
@@ -63,7 +64,7 @@ internal class CitizenConversation(private val lines: List<String>, private val 
     }
 
     fun bubble(worker: UUID, tick: Int): String? =
-        if (line >= 0 && (line % 2 == 0) == (worker == first) && tick - spokenAt in 0 until TURN_TICKS - 5)
+        if (line >= 0 && (line % 2 == 0) == (worker == first) && tick - spokenAt in 0 until CITIZEN_BUBBLE_TICKS)
             lines[line] else null
 
     fun finished(tick: Int): Boolean = line == lines.lastIndex && tick - spokenAt >= TURN_TICKS

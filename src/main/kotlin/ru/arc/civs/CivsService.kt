@@ -420,6 +420,7 @@ class CivsService(
         citizens.productionOrder = ::productionOrder
         worksites.mutationBlocked = citizens::growthBlocked
         worksites.residentFeet = citizens::residentFeet
+        worksites.deliveringWorldWork = citizens::deliveringWorldWork
         citizens.residentLifeEnabled = true
         citizens.returnResidentOutputs = { cityId, workerId, buildingId -> residentSupplies.returnResidentOutputs(cityId, workerId, buildingId) }
         citizens.finishResidentMeal = residentLife::finishMeal
@@ -828,6 +829,7 @@ class CivsService(
         keepViewersOpen: Boolean = false,
         freshAdmission: ((Settlement) -> Unit)? = null,
         trading: Boolean = false,
+        fieldWork: CivWorldWork? = null,
         transition: (Settlement, CivInventory) -> Settlement,
     ): CompletableFuture<Settlement> {
         checkMain()
@@ -836,13 +838,16 @@ class CivsService(
         val city = cities[cityId] ?: throw CivsRejection("no-city")
         rejectIf(city.pendingDeletion != null, "deletion-pending")
         val id = UUID.randomUUID()
-        if (trading) storage.reserveTrade(city, id, requireNotNull(sourcePlayer)) else storage.reserve(city, id, sourcePlayer)
+        if (trading) storage.reserveTrade(city, id, requireNotNull(sourcePlayer))
+        else if (fieldWork != null && sourcePlayer == null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+            city.building(fieldWork.buildingId)?.type == BuildingType.FARM) storage.reserveFieldWork(city, id, fieldWork)
+        else storage.reserve(city, id, sourcePlayer)
         val tx = try {
             val prepared = prepare(city) ?: run {
                 storage.unlock(id)
                 return CompletableFuture.completedFuture(city)
             }
-            val after = CivsRules.validate(transition(city, prepared.inventoryAfter))
+            val after = transition(city, prepared.inventoryAfter)
             require((prepared.trade != null) == trading)
             if (after == city && prepared.changes.isEmpty() && prepared.residentTransfer == null && prepared.worldChanges.orEmpty().isEmpty()) {
                 storage.unlock(id)
@@ -857,10 +862,10 @@ class CivsService(
                 .also { storage.seal(it, keepViewersOpen) }
         } catch (failure: Exception) { storage.unlock(id); throw failure }
         return if (tx.cargoPickup != null || tx.mixedBufferPickup())
-            inventoryJournal.submitCargoPickup(city, tx) { freshAdmission?.invoke(city) }
+            inventoryJournal.submitCargoPickup(city, tx, local = true) { freshAdmission?.invoke(city) }
         else if (tx.trade != null)
             inventoryJournal.submitTrade(city, tx) { requireNotNull(freshAdmission)(city) }
-        else inventoryJournal.submit(tx)
+        else inventoryJournal.submit(tx, city, fieldWork)
     }
 
     /** Native player-only operations share the existing exact receipt without inventing town stock. */

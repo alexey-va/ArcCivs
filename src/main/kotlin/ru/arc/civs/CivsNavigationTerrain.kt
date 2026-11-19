@@ -39,9 +39,13 @@ internal class CivsNavigationTerrain(private val maximumBlocks: Int, private val
 
     /** Neighbour-dependent fences, walls, stairs and doors share the local invalidation. */
     fun changed(world: UUID, point: CivPosition) {
-        for (dx in -1..1) for (dz in -1..1) for (dy in -2..2) {
-            val at = CivPosition(point.x + dx, point.y + dy, point.z + dz)
-            if (chunks[Key(world, at.x shr 4, at.z shr 4)]?.blocks?.remove(at) != null) blocks--
+        if (blocks == 0) return
+        for (dx in -1..1) for (dz in -1..1) {
+            val x = point.x + dx
+            val z = point.z + dz
+            val cached = chunks[Key(world, x shr 4, z shr 4)]?.blocks ?: continue
+            if (cached.isEmpty()) continue
+            for (dy in -2..2) if (cached.remove(CivPosition(x, point.y + dy, z)) != null) blocks--
         }
     }
 

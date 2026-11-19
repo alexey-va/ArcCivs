@@ -112,6 +112,7 @@ internal class CivsWorkerCommits(
                 }
             } else if (building.type in CivsWorksites.TYPES) {
                 val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                rejectIf(worker.nextDeliveryAt != nextAt, "stale-delivery")
                 val work = worksites.plan(city, worker) ?: throw CivsRejection("stale-worksite")
                 rejectIf(work.cycle != cycle || work.buildingId != assignment, "stale-delivery")
                 if (citizenWorkFocus(work) == null) citizens.requireStorageArrival(cityId, workerId, assignment)
@@ -127,7 +128,7 @@ internal class CivsWorkerCommits(
                         if (failure.reason == "resident-inventory-full") throw CivsRejection("storage-full") else throw failure
                     }
                     storage.prepareWork(current, assignment, work.storageInputs(currentWorker), emptyMap(), work.changes, work)
-                }, keepViewersOpen = true) { _, inventory ->
+                }, keepViewersOpen = true, fieldWork = work) { _, inventory ->
                     requireNotNull(completedWork).copy(inventory = inventory)
                 } } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
                 completion.whenCompleteSync(tasks) { saved, failure ->

@@ -28,15 +28,18 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 
 internal fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
     allowedWorlds: Set<String> = setOf("vanilla"), storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)? = null,
-    nativeGeometry: Boolean = false, serverFixture: ServerMock? = null,
+    nativeGeometry: Boolean = false, serverFixture: ServerMock? = null, actualStore: CivsStore? = null,
     action: (ServiceScenario) -> Unit) =
     failOnUnsupportedMockBukkitOperation {
         val runtime = if (serverFixture == null) MockBukkitTestRuntime.open() else MockBukkitTestRuntime.open(serverFixture)
-        runtime.use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory, nativeGeometry).use(action) }
+        runtime.use { paper ->
+            ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory, nativeGeometry, actualStore).use(action)
+        }
     }
 
 internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int,
-    worldName: String, allowedWorlds: Set<String>, storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)?, nativeGeometry: Boolean) : AutoCloseable {
+    worldName: String, allowedWorlds: Set<String>, storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)?,
+    nativeGeometry: Boolean, actualStore: CivsStore?) : AutoCloseable {
     val plugin = paper.createSimplePlugin("CivsServiceTest")
     val world = if (nativeGeometry) CivsWorksiteWorldFixture(worldName).also(paper.server::addWorld) else paper.addSimpleWorld(worldName)
     val player = mockk<Player>(relaxed = true)
@@ -53,6 +56,9 @@ internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean,
     var time = System.currentTimeMillis()
     val city: Settlement
     val service: CivsService
+    val buildingRequests: CivsBuildingRequests
+        get() = CivsService::class.java.getDeclaredField("buildingRequests").also { it.isAccessible = true }
+            .get(service) as CivsBuildingRequests
 
     init {
         every { worldAdapter.canModify(any(), any(), any()) } returns true
@@ -116,7 +122,7 @@ internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean,
             CompletableFuture<Settlement>().also { saves += firstArg<Settlement>() to it }
         }
         service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), allowedWorlds, 96,
-            maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens,
+            maximumCities, 50_000, 4, 120, 48, 96), actualStore ?: store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens,
             backendTransfer = transfer, clock = { time }, boundaryRenderer = boundary,
             storageAdapter = storageFactory?.invoke(plugin) ?: CivsStorage(plugin, supplyClock = { time }) { emptyArray() },
             supplyExecutor = Executor(Runnable::run))

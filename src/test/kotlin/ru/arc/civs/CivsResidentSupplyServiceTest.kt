@@ -393,32 +393,40 @@ class CivsResidentSupplyServiceTest : FunSpec({
         }
     }
 
-    test("resident supply and return conserve native items through delayed city commits") {
+    test("resident supply and return conserve native items in the same tick") {
         serviceScenario { h ->
             h.supplySite(h.owner, 1)
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val worker = h.city.workers.last().id
             val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
-            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.IRON_HELMET))
+            barrel.setItem(0, ItemStack(Material.IRON_HELMET))
             val supplied = h.service.supplyWorker(h.player, worker, "IRON_HELMET")
-            h.tick()
-            supplied.isDone shouldBe false
+            supplied.isDone shouldBe true
+            supplied.join() shouldBe Unit
             barrel.getItem(0) shouldBe null
-            h.service.city(h.player)!!.workers.last().inventory shouldBe null
-            h.commit(); supplied.join()
             CivsEquipment.plainCount(h.service.city(h.player)!!.workers.last(), "IRON_HELMET") shouldBe 1
             val returned = h.service.returnWorkerItem(h.player, worker, "IRON_HELMET")
-            h.tick()
-            barrel.getItem(0)!!.type shouldBe Material.IRON_HELMET
-            h.commit(); returned.join()
+            returned.isDone shouldBe true
+            returned.join() shouldBe Unit
             CivsEquipment.slots(h.service.city(h.player)!!.workers.last()).all { it == null } shouldBe true
-            barrel.getItem(0)!!.amount shouldBe 1
+            val repeated = h.service.returnWorkerItem(h.player, worker, "IRON_HELMET")
+            repeated.isCompletedExceptionally shouldBe true
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { repeated.join() })?.reason shouldBe "resident-item-missing"
+            barrel.getItem(0) shouldBe ItemStack(Material.IRON_HELMET)
+            h.saves shouldBe emptyList()
+            verify(exactly = 2) {
+                h.store.beginLocalInventory(any(), any())
+                h.store.completeLocalInventory(any())
+            }
+            verify(exactly = 0) {
+                h.store.saveInventoryTransaction(any())
+                h.store.completeInventoryTransaction(any())
+                h.store.deleteInventoryTransaction(any())
+            }
         }
     }
 
-    test("physical resident supplies queue each request and debit each durable receipt exactly once") {
+    test("physical resident supplies queue behind a city write and debit each request exactly once") {
         serviceScenario { h ->
             val control = CivPosition(0, 63, 0)
             h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
@@ -427,50 +435,32 @@ class CivsResidentSupplyServiceTest : FunSpec({
             val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
                 buildings = h.city.buildings.mapIndexed { index, b -> if (index == 0) b.copy(control = control) else b })
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
-            val journals = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
-            val retirements = mutableListOf<CompletableFuture<Boolean>>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                CompletableFuture<CivInventoryTransaction>().also { journals += firstArg<CivInventoryTransaction>() to it }
-            }
-            every { h.store.deleteInventoryTransaction(any()) } answers {
-                CompletableFuture<Boolean>().also { retirements += it }
-            }
+            val receipts = mutableListOf<CivInventoryTransaction>()
+            every { h.store.beginLocalInventory(any(), capture(receipts)) } returns Unit
             h.start()
-            val recruiting = h.service.supplyWorker(h.player, city.workers.first().id, "BREAD")
+            val write = h.service.mutate(city.id) { it.copy(name = "Oak Village", revision = it.revision + 1) }
+            val (first, second) = city.workers
+            val suppliedFirst = h.service.supplyWorker(h.player, first.id, "BREAD")
+            val suppliedSecond = h.service.supplyWorker(h.player, second.id, "BREAD")
+            write.isDone shouldBe false
+            suppliedFirst.isDone shouldBe false
+            suppliedSecond.isDone shouldBe false
             barrel.getItem(0)!!.amount shouldBe 24
-            h.saves.size shouldBe 0
-            val queued = h.service.supplyWorker(h.player, city.workers.first().id, "BREAD")
-            queued.isDone shouldBe false
-            journals.size shouldBe 1
-            journals.first().let { (receipt, durable) -> durable.complete(receipt) }; h.tick()
-            barrel.getItem(0)!!.amount shouldBe 23
-            h.service.city(h.player)!!.workers.size shouldBe 4
-            h.saves.size shouldBe 1
+            receipts shouldBe emptyList()
+
             h.commit()
-            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "BREAD") shouldBe 1
-            recruiting.isDone shouldBe false
-            queued.isDone shouldBe false
-            journals.size shouldBe 1
-            retirements.single().complete(true); h.tick()
-            recruiting.join() shouldBe Unit
-            barrel.getItem(0)!!.amount shouldBe 23
-            journals.size shouldBe 2
-            journals.map { it.first.id }.distinct().size shouldBe 2
-            journals.last().first.beforeRevision shouldBe journals.first().first.after.revision
-            queued.isDone shouldBe false
-            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "BREAD") shouldBe 1
-            journals.last().let { (receipt, durable) -> durable.complete(receipt) }; h.tick()
+            h.await(suppliedFirst) shouldBe Unit
+            h.await(suppliedSecond) shouldBe Unit
+            val published = write.join()
+            receipts.map { it.id }.distinct().size shouldBe 2
+            receipts.map { it.beforeRevision } shouldBe listOf(published.revision, published.revision + 1)
+            receipts.map { receipt -> receipt.after.workers.take(2).map { CivsEquipment.plainCount(it, "BREAD") } } shouldBe
+                listOf(listOf(1, 0), listOf(1, 1))
+            h.service.city(h.player) shouldBe receipts.last().after
             barrel.getItem(0)!!.amount shouldBe 22
-            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "BREAD") shouldBe 1
-            h.saves.size shouldBe 2
-            h.commit()
-            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "BREAD") shouldBe 2
-            queued.isDone shouldBe false
-            retirements.size shouldBe 2
-            retirements.last().complete(true); h.tick()
-            queued.join() shouldBe Unit
-            barrel.getItem(0)!!.amount shouldBe 22
-            verify(exactly = 2) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
+            h.saves.map { it.first } shouldBe listOf(published)
+            verify(exactly = 2) { h.store.completeLocalInventory(any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
 })
@@ -491,8 +481,6 @@ class CivsLostToolReceiptServiceTest : FunSpec({
             barrel.setItem(0, ItemStack(Material.IRON_PICKAXE))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
             every { h.store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val runtime = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
                 .get(h.service) as CivsWorksites
@@ -534,10 +522,16 @@ class CivsLostToolReceiptServiceTest : FunSpec({
             runtime.idleReason(afterFirst, waiting) shouldBe "waiting-tool"
             afterFirst.minePlans shouldBe before.minePlans
             afterFirst.mineProgress shouldBe before.mineProgress
-            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 1) {
+                h.store.beginLocalInventory(any(), any())
+                h.store.completeLocalInventory(any())
+            }
 
             // A silent native write becomes visible to planning through the next bounded capture.
             barrel.setItem(0, ItemStack(Material.IRON_PICKAXE))
+            val replay = shouldThrow<CompletionException> { complete(workers.first()).join() }
+            CivsDiagnostics.rejection(replay)?.reason shouldBe "stale-delivery"
+            barrel.getItem(0) shouldBe ItemStack(Material.IRON_PICKAXE)
             captureServicePlanningStorage(h.service, afterFirst)
             runtime.pulse(listOf(afterFirst))
             val retry = requireNotNull(runtime.plan(afterFirst, waiting))
@@ -550,7 +544,15 @@ class CivsLostToolReceiptServiceTest : FunSpec({
             afterBoth.workers.first { it.id == waiting.id }.completedCycles shouldBe waiting.completedCycles + 1
             afterBoth.minePlans shouldBe before.minePlans
             afterBoth.mineProgress shouldBe before.mineProgress
-            verify(exactly = 2) { h.store.saveInventoryTransaction(any()) }
+            verify {
+                h.citizens.requireStorageArrival(before.id, winner.id, quarry.id)
+                h.citizens.requireStorageArrival(before.id, waiting.id, quarry.id)
+            }
+            verify(exactly = 2) {
+                h.store.beginLocalInventory(any(), any())
+                h.store.completeLocalInventory(any())
+            }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
 })

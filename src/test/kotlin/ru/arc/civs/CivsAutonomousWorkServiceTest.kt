@@ -18,14 +18,15 @@ import org.bukkit.block.Barrel
 import org.bukkit.inventory.ItemStack
 
 class CivsAutonomousWorkServiceTest : FunSpec({
-    test("a farmer discovers work during another resident's held barrel receipt but execution keeps the write fence") {
+    test("a farmer discovers work during a held player-to-barrel receipt but execution keeps the write fence") {
         serviceScenario(nativeGeometry = true, serverFixture = CivsWorksiteServerFixture()) { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
             val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(30, 63, 0)).copy(production = "WHEAT")
-            val hungry = h.city.workers.first().copy(hunger = 10)
             val farmer = spatialWorker(farm, "IRON_HOE")
-            val town = CivsRules.validate(h.city.copy(buildings = listOf(hall, farm), workers = listOf(hungry, farmer),
-                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+            val player = h.paper.addPlayer("SupplyOwner")
+            player.inventory.setItem(0, ItemStack(Material.COBBLESTONE, 4))
+            val town = CivsRules.validate(h.city.copy(owner = player.uniqueId, buildings = listOf(hall, farm),
+                workers = listOf(farmer), stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
             for (x in -1..4) for (z in -3..1) h.world.loadChunk(x, z)
             val plots = CivsWorksiteLayouts.field(farm)
             plots.forEach { soil ->
@@ -39,14 +40,12 @@ class CivsAutonomousWorkServiceTest : FunSpec({
             val fieldBefore = (plots.flatMap { listOf(it, it.copy(y = it.y + 1)) } + water).associateWith {
                 h.world.getBlockAt(it.x, it.y, it.z).blockData.asString
             }
-            val source = CivResidentFoodSource(hall.id, requireNotNull(hall.control), CivPosition(0, 64, 1))
-            val barrel = h.world.getBlockAt(source.container.x, source.container.y, source.container.z)
+            val source = requireNotNull(hall.control)
+            val barrel = h.world.getBlockAt(source.x, source.y, source.z)
                 .also { it.type = Material.BARREL }.let { (it.state as Barrel).inventory }
-            barrel.setItem(0, ItemStack(Material.BREAD, 4))
             barrel.setItem(1, ItemStack(Material.WHEAT, 64))
             val farmControl = requireNotNull(farm.control)
             h.world.getBlockAt(farmControl.x, farmControl.y, farmControl.z).type = Material.BARREL
-            every { h.citizens.residentCollectionFeet(hungry.id, false) } returns source.standing.location(h.world)
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(town))
             val admission = CompletableFuture<CivInventoryTransaction>()
             var held: CivInventoryTransaction? = null
@@ -61,19 +60,21 @@ class CivsAutonomousWorkServiceTest : FunSpec({
             val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
                 .get(h.service) as CivsWorksites
             CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }.set(worksites, { 0L })
-            val pickup = h.service.start().thenCompose {
+            val deposit = h.service.start().thenCompose {
                 // Warm only the native holder cache. A retained order would mask this regression.
                 val capture = storage.startSupplyCapture(town)
                 while (!capture.step()) Unit
                 requireNotNull(capture.result).plainStock?.get("WHEAT") shouldBe 64L
                 h.service.productionOrder(town, farmer) shouldBe null
-                h.service.pickupResidentFood(town.id, hungry.id, source)
+                h.service.inventoryMutation(town.id, { city ->
+                    storage.prepareConstructionSupply(city, hall.id, mapOf("COBBLESTONE" to 4L), player).plan
+                }, sourcePlayer = player) { city, inventory -> city.copy(inventory = inventory, revision = city.revision + 1) }
             }
-            h.tickUntil("unrelated barrel receipt waits for storage acknowledgement") { held != null }
+            h.tickUntil("player-to-barrel receipt waits for storage acknowledgement") { held != null }
             h.service.collectionAvailable(town.id) shouldBe false
             h.service.productionOrder(town, farmer) shouldBe null
             storage.planningBuildingStock(town, hall.id) shouldBe null
-            storage.planningContainer(town, hall.id, source.container) shouldBe null
+            storage.planningContainer(town, hall.id, source) shouldBe null
             h.tickUntil("dispatcher publishes the first farm order during the unrelated receipt") {
                 h.service.productionOrder(town, farmer) != null
             }
@@ -93,17 +94,19 @@ class CivsAutonomousWorkServiceTest : FunSpec({
                     city.copy(inventory = inventory)
                 }
             }.reason shouldBe "city-busy"
-            pickup.isDone shouldBe false
-            barrel.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
+            deposit.isDone shouldBe false
+            barrel.getItem(0) shouldBe null
+            player.inventory.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 4)
             h.service.settlements().single() shouldBe town
             fieldBefore.forEach { (point, before) -> h.world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe before }
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
             verify(exactly = 0) { h.store.completeInventoryTransaction(any()) }
 
             admission.complete(requireNotNull(held))
-            val after = h.await(pickup)
-            CivsEquipment.plainCount(after.workers.first { it.id == hungry.id }, "BREAD") shouldBe 4L
-            barrel.getItem(0) shouldBe null
+            val after = h.await(deposit)
+            after shouldBe town.copy(revision = town.revision + 1)
+            barrel.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 4)
+            player.inventory.getItem(0) shouldBe null
             barrel.getItem(1) shouldBe ItemStack(Material.WHEAT, 64)
             worksites.plan(after, farmer) shouldBe work
             worksites.validate(after, work)

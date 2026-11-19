@@ -169,7 +169,8 @@ class CivsResidentProductionServiceTest : FunSpec({
         }
     }
 
-    test("useful crop care requires arrival at the plot and commits its cycle only through the journal") {
+    for (conflict in listOf(null, "stale-worksite", "stale-delivery"))
+    test("submitted crop care waits for its own plot when a neighbour ripens (conflict=$conflict)") {
         serviceScenario { h ->
             val world = CivsWorksiteWorldFixture("service-crop-care").also(h.paper.server::addWorld)
             val anchor = CivPosition(30, 63, 0)
@@ -212,7 +213,38 @@ class CivsResidentProductionServiceTest : FunSpec({
                 .also { it.isAccessible = true }
             fun complete() = deliver.invokeService(h.service, ready.id, worker.id, farm.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            every { h.citizens.deliveringWorldWork(ready.id, work) } returns true
+            every { h.citizens.requireWorldWorkArrival(ready.id, worker.id, any()) } answers {
+                if (thirdArg<CivWorldWork>() != work) throw CivsRejection("route-unreachable")
+            }
+            val prior = h.service.mutate(ready.id) { city ->
+                val residents = if (conflict == "stale-delivery") listOf(worker.copy(nextDeliveryAt = worker.nextDeliveryAt + 1))
+                    else city.workers
+                city.copy(name = "Field Town", workers = residents, revision = city.revision + 1)
+            }
             val completion = complete()
+            val focus = requireNotNull(work.focus)
+            val neighbour = CivsWorksiteLayouts.field(farm).map { it.copy(y = it.y + 1) }.first { it != focus }
+            val ripe = world.getBlockAt(neighbour.x, neighbour.y, neighbour.z)
+            ripe.blockData = Bukkit.createBlockData("minecraft:wheat[age=7]")
+            runtime.changed(world.uid, neighbour)
+            h.paper.performTicks(10)
+            completion.isDone shouldBe false
+            receipt shouldBe null
+            runtime.plan(ready, worker) shouldBe work
+            val target = world.getBlockAt(focus.x, focus.y, focus.z)
+            if (conflict == "stale-worksite") target.type = Material.STONE
+            h.commit()
+            h.saves.map { it.first } shouldBe listOf(prior.join())
+            ripe.blockData.asString shouldBe "minecraft:wheat[age=7]"
+            if (conflict != null) {
+                completion.isCompletedExceptionally shouldBe true
+                CivsDiagnostics.rejection(shouldThrow<CompletionException> { completion.join() })?.reason shouldBe conflict
+                target.blockData.asString shouldBe if (conflict == "stale-worksite") "minecraft:stone" else "minecraft:wheat[age=2]"
+                h.service.city(h.player)!!.workers.single() shouldBe prior.join().workers.single()
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+                return@serviceScenario
+            }
             val accepted = requireNotNull(receipt)
             accepted.changes shouldBe emptyList()
             accepted.worldChanges shouldBe work.changes
@@ -220,13 +252,14 @@ class CivsResidentProductionServiceTest : FunSpec({
             accepted.after.workers.single().skills shouldBe worker.skills
             accepted.after.workers.single().items shouldBe worker.items
             h.service.city(h.player)!!.workers.single().completedCycles shouldBe 0L
-            h.saves shouldBe emptyList()
             completion.isDone shouldBe false
             verify(exactly = 2) { h.citizens.requireWorldWorkArrival(ready.id, worker.id, work) }
             verify(exactly = 0) { h.citizens.requireStorageArrival(any(), any(), any()) }
             journal.complete(accepted); h.tick()
             h.service.city(h.player)!!.workers.single().completedCycles shouldBe 0L
             h.commit(); completion.join()
+            target.blockData.asString shouldBe "minecraft:wheat[age=3]"
+            ripe.blockData.asString shouldBe "minecraft:wheat[age=7]"
             h.service.city(h.player)!!.workers.single().completedCycles shouldBe 1L
             complete().isCompletedExceptionally shouldBe true
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }

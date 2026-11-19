@@ -5,6 +5,24 @@ import org.bukkit.Location
 import org.bukkit.World
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.random.Random
+
+internal enum class CitizenTransferReaction(path: String, commonLines: Int) {
+    FULL_BARREL("full-barrel", 7), FULL_BAG("full-bag", 3), UNDELIVERED("undelivered", 3);
+
+    private val prefix = "workers.transfer.$path."
+    private val lines = List(commonLines) { "${prefix}line-$it" }
+
+    fun draw(previous: String?, random: Random = Random.Default): String {
+        val outburst = "${prefix}outburst"
+        if (this == FULL_BARREL && previous != outburst && random.nextInt(24) == 0) return outburst
+        return lines.filterNot { it == previous }.random(random)
+    }
+}
+
+internal data class CitizenTransferRemark(val key: String, val tick: Int) {
+    fun visible(now: Int): String? = key.takeIf { now - tick in 0 until CITIZEN_BUBBLE_TICKS }
+}
 
 /** Campfire, conversation and idle-walk admission and interruption. */
 internal class CivsCitizenLeisure(
@@ -27,6 +45,16 @@ internal class CivsCitizenLeisure(
 
     private fun observed(actor: CitizenActor): Boolean = viewers.isNotEmpty() && actor.npc.isValid &&
         citizenHasViewer(actor.worldId, actor.npc.location.point(), viewers, CITIZEN_CONVERSATION_RANGE)
+
+    fun reactToTransfer(actor: CitizenActor, control: CivPosition, reaction: CitizenTransferReaction) {
+        if (actor.sleeping || actor.sheltering || actor.workerId in runtime.pendingHarm || !observed(actor) ||
+            actor.npc.world.uid != actor.worldId ||
+            !citizenAtStorage(actor.npc.world, actor.npc.location.point(), control)) return
+        val tick = Bukkit.getCurrentTick()
+        val previous = actor.transferRemark
+        if (previous?.visible(tick) != null) return
+        actor.transferRemark = CitizenTransferRemark(reaction.draw(previous?.key), tick)
+    }
 
     fun releaseUnseen(remaining: List<CitizenViewer>) {
         viewers = remaining

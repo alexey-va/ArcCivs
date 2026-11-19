@@ -90,9 +90,7 @@ class CivsPlacementSelectionServiceTest : FunSpec({
             h.world.loadChunk(site.control!!.x shr 4, site.control.z shr 4)
             h.world.getBlockAt(site.control.x, site.control.y, site.control.z).type = Material.BARREL
             h.start()
-            val activate = CivsBuildingRequests::class.java.getDeclaredMethod("activateBuilding", Settlement::class.java,
-                CivBuilding::class.java, Player::class.java).also { it.isAccessible = true }
-            val started = activate.invokeService(h.service, city, site, null) as CompletableFuture<*>
+            val started = h.buildingRequests.activateBuilding(city, site)
             h.tick()
             started.isCompletedExceptionally shouldBe false
             verify(exactly = 1) { h.worldAdapter.captureManualFoundation(city.id, city.owner, city.worldId,

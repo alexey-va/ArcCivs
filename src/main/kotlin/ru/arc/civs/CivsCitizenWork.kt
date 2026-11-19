@@ -355,7 +355,14 @@ internal class CivsCitizenWork(
         val building = worker.assignment?.let(city::building)
         if (city.inventory != null && worker.assignment == pause.buildingId && worker.cargo == null &&
             building?.phase == BuildingPhase.ACTIVE && building.control != null && actor.plan.courier == null &&
-            couriers.sourceOffersCargo(actor, city, worker)) return pause
+            couriers.sourceOffersCargo(actor, city, worker)) {
+            // A no-op output receipt can also mean a courier emptied the bag. Only observed surplus may speak.
+            if (pause.firstRejection) {
+                pause.firstRejection = false
+                leisure.reactToTransfer(actor, building.control, CitizenTransferReaction.FULL_BARREL)
+            }
+            return pause
+        }
         actor.outputFullPause = null
         if (actor.route?.idleAnchor != null && actor.foodSource == null && actor.mealVisit == null &&
             actor.social.visit == null) routes.cancelRoute(actor)

@@ -159,6 +159,25 @@ class CivsCampfiresTest : FunSpec({
         }
     }
 
+    test("transfer remarks draw every translated line without repeating and keep the outburst rare") {
+        val source = civsLocaleSource()
+        val locales = YamlConfiguration().apply { loadFromString(source) }
+        val text = CivsText.fromYaml(source)
+        val catalog = requireNotNull(locales.getConfigurationSection("ru.workers.transfer"))
+        val keys = catalog.getKeys(true).filter(catalog::isString).map { "workers.transfer.$it" }.toSet()
+        val drawn = mutableListOf<String>()
+        val random = kotlin.random.Random(15)
+        for (reaction in CitizenTransferReaction.entries) repeat(2_000) {
+            val key = reaction.draw(drawn.lastOrNull(), random)
+            (key != drawn.lastOrNull()) shouldBe true
+            drawn += key
+        }
+        drawn.toSet() shouldBe keys
+        (drawn.count { it.endsWith(".outburst") } in 1..150) shouldBe true
+        for (key in keys) for (locale in listOf("ru", "en"))
+            plainText(text.render(key, locale)).isNotBlank() shouldBe true
+    }
+
     test("discovery reads one loaded chunk per pulse reuses its cache and invalidates extinguished fires") {
         MockBukkitTestRuntime.open().use {
             val worldId = UUID(0, 1)

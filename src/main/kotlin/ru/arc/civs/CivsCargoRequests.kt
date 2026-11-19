@@ -542,15 +542,15 @@ internal class CivsCargoRequests(
         val tx = try {
             val prepared = prepare()
             val transfer = prepared.transfer ?: run { storage.unlock(id); return CompletableFuture.completedFuture(city) }
-            val after = CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) prepared.worker else it },
-                revision = city.revision + 1))
+            val after = city.copy(workers = city.workers.map { if (it.id == workerId) prepared.worker else it },
+                revision = city.revision + 1)
             CivInventoryTransaction(id, city.id, city.revision, after, emptyList(), collected = transfer).also { storage.seal(it) }
         } catch (failure: Exception) {
             storage.unlock(id)
             throw failure
         }
         authority.reserveCity(city.id)
-        return inventoryJournal.submitNative(city, tx)
+        return inventoryJournal.submitNative(city, tx, local = true)
     }
 
     fun validateNativeCollected(tx: CivInventoryTransaction) {

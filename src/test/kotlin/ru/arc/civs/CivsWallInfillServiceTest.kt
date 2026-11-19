@@ -130,11 +130,11 @@ class CivsWallInfillServiceTest : FunSpec({
 
             val runtime = CivsService::class.java.getDeclaredField("construction").also { it.isAccessible = true }
                 .get(h.service) as CivsConstructionRuntime
-            @Suppress("UNCHECKED_CAST")
-            val activate = CivsConstructionRuntime::class.java.getDeclaredField("activateBuilding").also { it.isAccessible = true }
-                .get(runtime) as (Settlement, CivBuilding) -> CompletableFuture<Unit>
-            val failure = shouldThrow<CompletionException> { h.await(activate(queued, oldSite)) }
-            (CivsDiagnostics.rejection(failure) ?: throw failure).reason shouldBe "city-busy"
+            h.paper.addPlayer("WallQueueViewer").teleport(queued.center.location(h.world))
+            h.world.loadChunk(oldSite.entrance.x shr 4, oldSite.entrance.z shr 4)
+            runtime.pulseQueue()
+            h.tickUntil("road crew holds the queued wall site") { runtime.queueFailure(queued.id, oldSite.id) != null }
+            runtime.queueFailure(queued.id, oldSite.id) shouldBe "city-busy"
             maintenance.requirements(queued) shouldBe mapOf(worker.id to work.inputs)
             h.service.settlements().single() shouldBe queued
             h.saves.size shouldBe 1

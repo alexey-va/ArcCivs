@@ -58,6 +58,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     internal var residentFeet: (UUID) -> Location?
         get() = context.residentFeet
         set(value) { context.residentFeet = value }
+    internal var deliveringWorldWork: (UUID, CivWorldWork) -> Boolean = { _, _ -> false }
 
     internal var productionOrder: ((Settlement, CivWorker) -> CivProductionOrder?)?
         get() = context.productionOrder
@@ -295,6 +296,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if (world.time in 12_000L..23_000L || !profession.active(city, building)) continue
             if (worldWritePending(city, worker)) continue
             val current = plan(city, worker)
+            // Newly ripe crops can preempt care until the farmer submits that exact action.
+            if (current?.cropCare == true && deliveringWorldWork(city.id, current)) continue
             if (!profession.hasBudget(city, worker, building, current)) continue
             lastAdmittedWorker = worker.id
             pulseWorker(city, worker, building, world, current)

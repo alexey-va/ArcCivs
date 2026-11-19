@@ -6,7 +6,7 @@ import org.bukkit.entity.Monster
 import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 
-internal data class CitizenOutputFullPause(val buildingId: UUID, val retryAt: Long)
+internal data class CitizenOutputFullPause(val buildingId: UUID, val retryAt: Long, var firstRejection: Boolean = true)
 internal data class CitizenBodyContact(val token: CitizenToken, val at: CitizenPoint, var walked: Double = 0.0)
 internal data class CitizenFoodRouteFailure(val token: CitizenToken, val source: CivResidentFoodSource,
     val feet: CitizenPoint, var lastFailureAt: Long) {
@@ -112,6 +112,8 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var outputReturn: UUID? = null
     var outputFullPause: CitizenOutputFullPause? = null
     var supplyFailure: Pair<UUID, String>? = null
+    var transferRemark: CitizenTransferRemark? = null
+    var lastCourierRemark: Pair<UUID, UUID>? = null
     var supplyRetryAt = 0L
     var collectionCycle: Long? = null
     var collectionRetryAt = 0L

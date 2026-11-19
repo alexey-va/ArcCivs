@@ -312,7 +312,8 @@ class CivsBuildingRequestsServiceTest : FunSpec({
                 listOf(CivPosition(5, 64, 0), CivPosition(6, 64, 0)), 63, 1, 0)
             val target = if (earthworks) existing.copy(phase = BuildingPhase.CONSTRUCTING) else queued.fresh.building
             val plan = queued.fresh.copy(building = target, terrain = terrain.takeIf { earthworks })
-            val old = plan.copy(id = existing.id, terrain = terrain.copy(route = listOf(CivPosition(2, 64, 0))))
+            val previousRoute = if (earthworks) emptyList() else listOf(CivPosition(2, 64, 0))
+            val old = plan.copy(id = existing.id, terrain = terrain.copy(route = previousRoute))
             val unrelated = old.copy(id = UUID.randomUUID(), cityId = UUID.randomUUID())
             val captures = mutableMapOf(old.id to old, unrelated.id to unrelated)
             val writes = mutableListOf<String>()
@@ -331,8 +332,9 @@ class CivsBuildingRequestsServiceTest : FunSpec({
                 else CompletableFuture.completedFuture(capture).thenApply { captures[it.id] = it; it }
             }
             h.start()
-            val starting = h.startCapturedOrder(city, plan, bytes)
+            val starting = h.activateCapturedOrder(city, existing, if (earthworks) old else queued.design, plan, bytes)
             if (autonomous && earthworks) {
+                h.tickUntil("retained capture submitted for persistence") { writes.lastOrNull() == "plan:${existing.id}" }
                 h.saves shouldBe emptyList()
                 starting.isDone shouldBe false
                 captures[existing.id] shouldBe old
@@ -380,7 +382,8 @@ class CivsBuildingRequestsServiceTest : FunSpec({
                 else CompletableFuture.completedFuture(firstArg())
             }
             h.start()
-            val starting = h.startCapturedOrder(city, plan, byteArrayOf(2))
+            val design = plan.copy(id = existing.id, terrain = terrain.copy(route = emptyList()))
+            val starting = h.activateCapturedOrder(city, existing, design, plan, byteArrayOf(2))
             h.tick()
 
             CivsDiagnostics.cause(shouldThrow<CompletionException> { starting.join() }) shouldBe failure
@@ -461,7 +464,7 @@ class CivsBuildingRequestsServiceTest : FunSpec({
         }
     }
 
-    for (legacy in listOf(false, true)) test("a reloaded upgrade head defers legacy controls and retains FIFO after a capture failure legacy=$legacy") {
+    for (legacy in listOf(false, true)) test("a reloaded upgrade retries after a capture failure and a blocked second site legacy=$legacy") {
         serviceScenario { h ->
             val queued = h.queuedUpgrade(legacy)
             val viewer = h.paper.addPlayer("UpgradeQueueViewer")
@@ -480,9 +483,14 @@ class CivsBuildingRequestsServiceTest : FunSpec({
             h.service.city(h.player)!!.constructionQueue shouldBe queued.city.constructionQueue
             h.service.buildingStatus(queued.building.id) shouldBe "building-status.lands-denied"
             verify(exactly = 0) { h.store.deletePlan(queued.design.id) }
+            h.time += 6_000; h.paper.performTicks(20)
+            val secondSite = queued.city.constructionQueue!!.last()
+            h.service.buildingStatus(secondSite) shouldBe "building-status.control-missing"
+            h.service.city(h.player)!!.constructionQueue shouldBe queued.city.constructionQueue
+            h.service.city(h.player)!!.construction shouldBe null
             every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(),
                 constructionStorage = true, acceptedStorage = emptyList()) } returns CompletableFuture.completedFuture(queued.fresh)
-            h.time += 6_000; h.paper.performTicks(20)
+            h.time += 5_000; h.paper.performTicks(20)
             h.saves.last().first.construction!!.let {
                 it.id shouldBe queued.fresh.id
                 it.buildingId shouldBe queued.building.id
@@ -748,12 +756,16 @@ class CivsBuildingRequestsServiceTest : FunSpec({
         }
 })
 
-private fun ServiceScenario.startCapturedOrder(city: Settlement, plan: CivPlacementPlan, bytes: ByteArray): CompletableFuture<*> {
-    val owner = CivsBuildingRequests::class.java
-    val approach = owner.declaredClasses.single { it.simpleName == "QueuedApproach" }
-    val method = owner.getDeclaredMethod("startOrder", UUID::class.java, Settlement::class.java,
-        CivPlacementPlan::class.java, ByteArray::class.java, approach, Function1::class.java)
-    method.isAccessible = true
-    val admit: (Settlement) -> Unit = { current -> current shouldBe city }
-    return method.invokeService(service, city.owner, city, plan, bytes, null, admit) as CompletableFuture<*>
+private fun ServiceScenario.activateCapturedOrder(city: Settlement, previous: CivBuilding, design: CivPlacementPlan,
+    fresh: CivPlacementPlan, bytes: ByteArray): CompletableFuture<Unit> {
+    every { store.loadPlan(design.id) } returns CompletableFuture.completedFuture(design)
+    every { store.loadSchematic(design.id) } returns CompletableFuture.completedFuture(bytes)
+    every { blueprints.recover(design) } returns CompletableFuture.completedFuture(mockk<ArcSchematicSnapshot> {
+        every { blocks() } returns listOf(ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false))
+    })
+    every { worldAdapter.captureManualFoundation(city.id, city.owner, city.worldId, fresh.building, any(), any(), previous) } returns
+        CompletableFuture.completedFuture(fresh.terrain)
+    every { worldAdapter.capture(city.id, city.owner, city.worldId, fresh.building, any(), previous, fresh.terrain,
+        constructionStorage = true, acceptedStorage = emptyList()) } returns CompletableFuture.completedFuture(fresh)
+    return buildingRequests.activateBuilding(city, previous)
 }
