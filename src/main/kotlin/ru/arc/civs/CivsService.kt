@@ -463,9 +463,9 @@ class CivsService(
             if (ready()) supply.pulse()
             if (ready()) forestryLeafLoot.pulse()
             if (ready()) {
-                citizens.activateNavigating()
-                // Use ticks 4/9/14/19. The following tick already runs the shared handoff and supply tasks.
-                if (residentGroupTick == 4) citizens.pulseResidentGroup(now())
+                val viewers = citizens.advanceNavigationFrame()
+                // Every fifth tick already runs the work handoff and supply tasks.
+                if (residentGroupTick != 0) citizens.pulseResidentGroup(now(), viewers)
             }
             if (ready()) vegetation.pulse(cities.values)
         }

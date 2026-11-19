@@ -675,6 +675,8 @@ at the resident's current feet. A bounded local search picks a reachable
 destination, favours public paths and supplies the steps for the trip. A new
 trip can continue along the street or take another direction. A resident inside
 a building can use its exit and continue outdoors.
+If a resident stops with only the edge of a foot on a raised block, the walk
+can start by stepping down to a reachable floor in the same column.
 Residents already inside the shared town hall can move around furniture while idle.
 Workers waiting at a required post still return to their workplace entrance.
 An idle resident can set up a temporary chair on a free spot. Entrance cells
@@ -684,9 +686,11 @@ Idle walks use 0.55 of base motion speed. Base motion is
 at 20 TPS before the current Trails surface multiplier. Idle and combat movement
 retain their existing factors. Routes avoid horizontal footprints
 of foreign buildings and farm fields.
-Active residents update in four groups over 20 ticks. Each group reads the current
-city and worker before planning or applying equipment. Shared budgets limit walks
-and social searches across the entire interval.
+Each active resident receives one ordinary update every 20 ticks. Updates are
+spread over the 16 ticks between the five-tick work handoffs. Small settlements
+keep their first four residents a quarter-second apart. Each update reads the
+current city and worker before planning or applying equipment. Walks and social
+searches share the same budgets across the entire interval.
 Unassigned adults share a bounded five-tick handoff (four actors, existing eight-target
 budget per coarse pulse) instead of waiting for the coarse city timer. Successful
 unassigned leisure trips can start immediately after arrival. If no local step is

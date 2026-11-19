@@ -107,6 +107,7 @@ class CivsDynamicBodyRoutingTest : FunSpec({
                 h.owner.pulse(2_000)
                 requireNotNull(h.routeIdentity()) { "No initial shelter route: feet=${npc.location} ${h.navigationState()}" }
                 var activated = false
+                var approachedHazard = false
                 var after = 0
                 for (tick in 1..800) {
                     h.navigate()
@@ -122,15 +123,18 @@ class CivsDynamicBodyRoutingTest : FunSpec({
                         }
                     }
                     if (activated) {
-                        withClue("hazard=$hazard tick=$tick actual=${npc.location} ${h.navigationState()}") {
-                            (npc.location.x < 7.8) shouldBe true
-                            citizenPacketSupported(h.world, CitizenPoint(npc.location.x, npc.location.y, npc.location.z)) shouldBe true
+                        val feet = npc.location
+                        withClue("hazard=$hazard tick=$tick actual=$feet ${h.navigationState()}") {
+                            (feet.x < 7.8) shouldBe true
+                            citizenPacketSupported(h.world, feet.point()) shouldBe true
                         }
+                        approachedHazard = approachedHazard || feet.x >= 7.2
                         if (++after >= 100) break
                     }
                 }
                 withClue("hazard=$hazard feet=${npc.location} player=${player.location} ${h.navigationState()}") {
                     activated shouldBe true
+                    approachedHazard shouldBe true
                 }
                 player.location shouldBe Location(h.world, 6.5, 64.0, .5)
                 h.deliveries shouldBe 0
@@ -152,7 +156,7 @@ private fun dynamicBodyHome(h: ResidentRuntime): CivBuilding {
 }
 
 private fun dynamicBodyCorridor(h: ResidentRuntime) {
-    // The narrow transit opens into a real bedroom; a sleeping body is wider than the one-block corridor.
-    for (x in -96..9) for (z in listOf(-1, 1)) for (y in 64..66)
-        h.world.getBlockAt(x, y, z).type = Material.STONE
+    // A roof closes the two-block-high corridor to hooks until it opens into the bedroom.
+    for (x in -96..9) for (z in -1..1) for (y in 64..66)
+        if (z != 0 || y == 66) h.world.getBlockAt(x, y, z).type = Material.STONE
 }

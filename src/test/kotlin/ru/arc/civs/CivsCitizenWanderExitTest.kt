@@ -8,6 +8,48 @@ import org.bukkit.Material
 import java.util.UUID
 
 class CivsCitizenWanderExitTest : FunSpec({
+    test("a farmer at the edge of a hay bale steps down onto the path before wandering") {
+        residentRuntime(workerId = UUID.fromString("1ab10d1f-0176-4dab-aa06-f2c040403f96")) { h ->
+            val farm = h.assignFarm()
+            h.world.loadChunk(1, 0)
+            // Auto4 after a full-barrel return. The toe overlaps hay, 17/16 above the adjacent dirt path.
+            val hay = h.world.getBlockAt(20, 64, 1)
+            hay.type = Material.HAY_BLOCK
+            h.world.getBlockAt(21, 63, 1).type = Material.DIRT_PATH
+            val start = CitizenPoint(21.156, 65.0, 1.5)
+            val landing = CitizenPoint(21.5, 63.9375, 1.5)
+            val walk = CitizenWanderWalk(farm, false, CivRouteTerritory(h.city), CitizenToken(farm.id, 0, 0, null),
+                0, 4, farm, CivPosition(21, 65, 1), CivsPaths.RetainedRoads.EMPTY)
+            fun choose() = citizenWanderPath(h.world, start, walk, h.city.buildings, CitizenWander(h.workerId), 0f, .3) { true }
+            val path = choose()
+            path.take(1) shouldBe listOf(landing)
+            (path.size > 1) shouldBe true
+
+            val from = Location(h.world, start.x, start.y, start.z)
+            val route = CitizenPacketRoute(h.world, from, Location(h.world, landing.x, landing.y, landing.z),
+                walk::permits, { a, b -> walk.permitsStep(a, b, .3) }, { 1.0 })
+            route.readyWanderStep()
+            var actual = from
+            var movements = 0
+            repeat(40) {
+                route.move(actual, .55) { true }?.let { next ->
+                    citizenPacketBodyClear(h.world, next.point(), false) shouldBe true
+                    if (actual.point() != next.point()) movements++
+                    actual = next
+                }
+            }
+            route.finished shouldBe true
+            actual.point() shouldBe landing
+            (movements > 1) shouldBe true
+
+            h.world.getBlockAt(21, 65, 1).type = Material.STONE
+            choose() shouldBe emptyList()
+            h.world.getBlockAt(21, 65, 1).type = Material.AIR
+            hay.type = Material.AIR
+            choose() shouldBe emptyList()
+        }
+    }
+
     test("an unassigned resident can move away from the entrance of her own Auto3 house") {
         residentRuntime(workerId = UUID.fromString("eb3bb491-61ac-46de-8992-94dd5e7486e3")) { h ->
             val hall = h.city.buildings.single()

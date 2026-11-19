@@ -8,31 +8,33 @@ import org.bukkit.Location
 import java.util.UUID
 
 class CivsResidentPulseDistributionTest : FunSpec({
-    test("the service schedules four groups one tick before existing handoffs each second") {
+    test("the service uses every spare tick and keeps the original five-tick handoffs and deadlines") {
         serviceScenario(empty = true) { h ->
             h.start()
             val groups = mutableListOf<Int>()
             val handoffs = mutableListOf<Int>()
             val deadlines = mutableListOf<Int>()
             var tick = 0
-            every { h.citizens.pulseResidentGroup(any()) } answers { groups += tick }
+            val viewers = listOf(CitizenViewer(h.player.world.uid, h.player.location.point()))
+            every { h.citizens.advanceNavigationFrame() } returns viewers
+            every { h.citizens.pulseResidentGroup(any(), refEq(viewers)) } answers { groups += tick }
             every { h.citizens.pulseFieldWork(any()) } answers { handoffs += tick }
             every { h.citizens.pulse(any()) } answers { deadlines += tick }
             repeat(40) {
                 tick++
                 h.paper.performTicks(1)
             }
-            groups.size shouldBe 8
-            groups.zipWithNext { a, b -> b - a }.toSet() shouldBe setOf(5)
-            groups.filter { it < 40 }.map { it + 1 } shouldBe handoffs.filter { it > 1 }
+            groups shouldBe (1..40).filterNot { it in handoffs }
+            handoffs.size shouldBe 8
+            handoffs.zipWithNext { a, b -> b - a }.toSet() shouldBe setOf(5)
             deadlines.size shouldBe 2
             handoffs.containsAll(deadlines) shouldBe true
         }
     }
 
-    test("eight residents receive one ordinary plan and equipment update in four equal groups") {
+    test("every resident receives exactly one ordinary plan and equipment update across the sixteen ticks") {
         residentRuntime { h ->
-            val residents = waitingResidents(h)
+            val residents = waitingResidents(h, 29)
             val planned = mutableListOf<UUID>()
             val equipped = mutableListOf<Pair<UUID, String>>()
             h.courierProvider = { _, worker -> planned += worker.id; null }
@@ -48,37 +50,58 @@ class CivsResidentPulseDistributionTest : FunSpec({
                 return planned.toList()
             }
             fun round(start: Long): List<List<UUID>> {
-                val groups = (1..4).map { step ->
-                    val at = start + 250 * step
-                    val group = actions { h.owner.pulseResidentGroup(at - 50) }
-                    actions { h.owner.pulseFieldWork(at) } shouldBe emptyList()
-                    group
+                val groups = mutableListOf<List<UUID>>()
+                for (tick in 1..20) {
+                    val at = start + 50 * tick
+                    if (tick % 5 == 0) actions { h.owner.pulseFieldWork(at) } shouldBe emptyList()
+                    else groups += actions { h.owner.pulseResidentGroup(at) }
                 }
                 actions { h.owner.pulse(start + 1_000) } shouldBe emptyList()
                 return groups
             }
-            val first = round(10_000L)
-            first.map { it.size } shouldBe listOf(2, 2, 2, 2)
+            val first = round(20_000L)
+            first.map { it.size }.sorted() shouldBe List(3) { 1 } + List(13) { 2 }
             first.flatten().toSet() shouldBe residents.map { it.id }.toSet()
-            round(11_000L).map { it.toSet() } shouldBe first.map { it.toSet() }
+            round(21_000L).map { it.toSet() } shouldBe first.map { it.toSet() }
 
-            val alreadyUpdated = actions { h.owner.pulseResidentGroup(12_200L) }
-            val remainder = actions { h.owner.pulse(13_000L) }
-            alreadyUpdated.size shouldBe 2
-            remainder.size shouldBe 6
+            val alreadyUpdated = actions { h.owner.pulseResidentGroup(22_050L) }
+            val remainder = actions { h.owner.pulse(23_000L) }
+            alreadyUpdated.size shouldBe first.first().size
+            remainder.size shouldBe residents.size - alreadyUpdated.size
             (alreadyUpdated + remainder).toSet() shouldBe residents.map { it.id }.toSet()
-            actions { h.owner.pulse(14_000L) }.size shouldBe 8
+            actions { h.owner.pulse(24_000L) }.size shouldBe residents.size
         }
     }
 
-    test("all four groups can walk and look for company under contention without exceeding the shared budgets") {
+    test("small rosters keep their original spaced updates and can walk on their first ordinary turn") {
+        for (count in 1..4) residentRuntime { h ->
+            val residents = waitingResidents(h, count, BuildingType.BUILDER_HUT)
+            for (worker in residents) {
+                val actor = h.actor(worker.id)
+                actor.route?.motion?.cancel()
+                actor.route = null
+                actor.wander.finish(9_999L, arrived = true, resumeImmediately = true)
+            }
+            val turns = mutableListOf<Int>()
+            for (tick in (1..20).filter { it % 5 != 0 }) {
+                val at = 10_000L + 50 * tick
+                val before = residents.count { h.actor(it.id).route != null || !h.actor(it.id).wander.ready(at) }
+                h.owner.pulseResidentGroup(at)
+                val after = residents.count { h.actor(it.id).route != null || !h.actor(it.id).wander.ready(at) }
+                if (before != after) turns += tick
+            }
+            turns shouldBe listOf(4, 9, 14, 19).take(count)
+        }
+    }
+
+    test("each of sixteen groups can walk and look for company without exceeding the shared budgets") {
         residentRuntime { h ->
-            val residents = waitingResidents(h, 16, BuildingType.BUILDER_HUT)
+            val residents = waitingResidents(h, 32, BuildingType.BUILDER_HUT)
             h.paper.server.onlinePlayers.single().teleport(Location(h.world, 20.5, 64.0, .5))
             val searched = mutableSetOf<UUID>()
-            val campSearches = IntArray(4)
-            val walks = IntArray(4)
-            repeat(12) { round ->
+            val campSearches = IntArray(16)
+            val walks = IntArray(16)
+            repeat(16) { round ->
                 // An empty fire search cools down for 100 server ticks; start each round with real fresh demand.
                 h.paper.performTicks(101)
                 val now = 20_000L + 6_000L * round
@@ -95,8 +118,8 @@ class CivsResidentPulseDistributionTest : FunSpec({
                     actor.route != null || !actor.wander.ready(at)
                 }.map { it.id }.toSet()
                 val before = ready()
-                for (group in 0..3) {
-                    val at = now + 250L * group
+                for ((group, tickInRound) in (1..19).filter { it % 5 != 0 }.withIndex()) {
+                    val at = now + 50L * tickInRound
                     val waiting = ready()
                     val walking = walkers(at)
                     h.owner.pulseResidentGroup(at)
@@ -106,12 +129,13 @@ class CivsResidentPulseDistributionTest : FunSpec({
                     walks[group] += (walkers(at) - walking).size
                 }
                 (before - ready()).size shouldBe 2
-                walkers(now + 750).size shouldBe 8
+                walkers(now + 950).size shouldBe 8
                 h.owner.pulse(now + 1_000)
+                h.clearRecordedCalls()
             }
             searched shouldBe residents.map { it.id }.toSet()
-            campSearches.toList() shouldBe listOf(6, 6, 6, 6)
-            walks.toList() shouldBe listOf(24, 24, 24, 24)
+            campSearches.toList() shouldBe List(16) { 2 }
+            walks.toList() shouldBe List(16) { 8 }
         }
     }
 
@@ -159,7 +183,10 @@ private fun waitingResidents(h: ResidentRuntime, count: Int = 8, type: BuildingT
         val point = Location(h.world, 14.5 + 3 * (index % 4), 64.0, -4.5 + 3 * (index / 4))
         h.owner.requestAdmissionAt(h.city.id, worker.id, point)
     }
-    for (second in 2..count / 2 + 4) h.owner.pulse(second * 1_000L)
+    for (second in 2..count / 2 + 4) {
+        h.owner.pulse(second * 1_000L)
+        h.clearRecordedCalls()
+    }
     h.owner.activeCount() shouldBe residents.size
     return residents
 }

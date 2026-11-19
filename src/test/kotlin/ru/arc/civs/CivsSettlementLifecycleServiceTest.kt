@@ -252,14 +252,14 @@ class CivsSettlementLifecycleServiceTest : FunSpec({
             h.service.ready() shouldBe false
             h.service.unavailableReason() shouldBe "storage-unavailable"
             h.service.settlements() shouldBe emptyList()
-            verify(exactly = 0) { h.citizens.activateNavigating() }
+            verify(exactly = 0) { h.citizens.advanceNavigationFrame() }
         }
     }
 
     test("one Core heartbeat activates navigation every tick only while the service is ready") {
         serviceScenario { h ->
             var activations = 0
-            every { h.citizens.activateNavigating() } answers { activations++; Unit }
+            every { h.citizens.advanceNavigationFrame() } answers { activations++; emptyList() }
             h.paper.performTicks(3)
             activations shouldBe 0
             h.start()
@@ -276,7 +276,7 @@ class CivsSettlementLifecycleServiceTest : FunSpec({
         serviceScenario { h ->
             h.start()
             var activations = 0
-            every { h.citizens.activateNavigating() } answers { activations++; Unit }
+            every { h.citizens.advanceNavigationFrame() } answers { activations++; emptyList() }
             val pending = CompletableFuture<List<Settlement>>()
             every { h.store.load() } returns pending
             val reload = h.service.reload(h.player)

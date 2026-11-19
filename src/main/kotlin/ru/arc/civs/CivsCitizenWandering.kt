@@ -112,7 +112,8 @@ private const val WANDER_EDGES = 96
 /** Small owner-thread flood. Only its chosen feet survive admission; movement samples native terrain again. */
 internal fun citizenWanderPath(world: World, start: CitizenPoint, walk: CitizenWanderWalk, buildings: List<CivBuilding>, wander: CitizenWander,
     yaw: Float, halfWidth: Double, firstStepFree: (CitizenPoint) -> Boolean): List<CitizenPoint> {
-    if (!citizenPacketSupported(world, start, false)) return emptyList()
+    val centerSupported = citizenPacketSupported(world, start, false)
+    if (!centerSupported && !citizenWanderLipSupport(world, start, halfWidth)) return emptyList()
     val directions = wander.directions(yaw, allowDiagonal = true)
     val cells = hashMapOf<CitizenPoint, WanderFloor?>()
     val shapes = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
@@ -171,10 +172,18 @@ internal fun citizenWanderPath(world: World, start: CitizenPoint, walk: CitizenW
 
     val origin = floorAt(floor(start.x).toInt(), floor(start.z).toInt(), start.y)
     val root = WanderNode(origin?.takeIf { it.feet == start } ?: WanderFloor(start, false, false), null, 0)
+    // A storage receipt can stop a step with only the edge of the feet still on a higher block.
+    // Descend to the real floor in this very column before considering the other streets.
+    val first = if (centerSupported) root else {
+        if (origin == null || origin.feet.y >= start.y || !citizenPacketBodyClear(world, start, false) ||
+            !edge(root.floor, origin, false) || !firstStepFree(origin.feet)) return emptyList()
+        WanderNode(origin, root, 1)
+    }
     val reached = hashSetOf(start)
     val queue = ArrayDeque<WanderNode>()
-    queue += root
+    queue += first
     var best: WanderNode? = null
+    if (first !== root) { reached += first.floor.feet; best = first }
     var bestScore = Int.MIN_VALUE
     var followStreet = false
     var leavingDeadEnd = false
@@ -193,9 +202,9 @@ internal fun citizenWanderPath(world: World, start: CitizenPoint, walk: CitizenW
             if (floor.feet in reached || followStreet && !floor.street) continue
             if (edge(node.floor, floor, dx != 0 && dz != 0) && (node !== root || firstStepFree(floor.feet))) next += floor
         }
-        if (node === root) {
+        if (node === first) {
             val paved = next.filter { it.street }
-            leavingDeadEnd = root.floor.street && paved.size == 1 && next.size > 1 && paved.single().feet.let {
+            leavingDeadEnd = first.floor.street && paved.size == 1 && next.size > 1 && paved.single().feet.let {
                 (it.x - at.x) * heading.first + (it.z - at.z) * heading.second < 0
             }
             followStreet = paved.isNotEmpty() && !leavingDeadEnd
@@ -222,6 +231,22 @@ internal fun citizenWanderPath(world: World, start: CitizenPoint, walk: CitizenW
     }
     if (path.isNotEmpty()) wander.rememberStart(start)
     return path
+}
+
+private fun citizenWanderLipSupport(world: World, feet: CitizenPoint, halfWidth: Double): Boolean {
+    val width = minOf(halfWidth - .001, .299)
+    val y = citizenSupportY(feet.y)
+    if (y !in world.minHeight until world.maxHeight) return false
+    for (x in floor(feet.x - width).toInt()..floor(feet.x + width).toInt())
+        for (z in floor(feet.z - width).toInt()..floor(feet.z + width).toInt()) {
+            if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
+            val block = world.getBlockAt(x, y, z)
+            if (!block.isLiquid && citizenRouteOpenable(block.blockData) == null && block.collisionShape.boundingBoxes.any {
+                kotlin.math.abs(y + it.maxY - feet.y) <= .001 && x + it.minX < feet.x + width && x + it.maxX > feet.x - width &&
+                    z + it.minZ < feet.z + width && z + it.maxZ > feet.z - width
+            }) return true
+        }
+    return false
 }
 
 private val CITIZEN_WANDER_DIRECTIONS = listOf(0 to 1, -1 to 0, 0 to -1, 1 to 0)

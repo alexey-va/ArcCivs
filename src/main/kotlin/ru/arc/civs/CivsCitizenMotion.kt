@@ -32,9 +32,9 @@ internal class CivsCitizenMotion(
     private val audience get() = audienceOwner()
 
     /** One shared timer advances bounded searches and resident movement; no server entity is ticked. */
-    fun activateNavigating() {
+    fun activateNavigating(): List<CitizenViewer>? {
         checkCitizenMainThread()
-        if (runtime.closed.get() || runtime.actors.isEmpty()) return
+        if (runtime.closed.get() || runtime.actors.isEmpty()) return null
         runtime.navigationTick++
         val now = navigationClock()
         runtime.navigationCadenceMillis = if (runtime.navigationAt == 0L) 0 else (now - runtime.navigationAt).coerceAtLeast(0)
@@ -390,6 +390,7 @@ internal class CivsCitizenMotion(
             it.npc.isSeated || it.sleeping || it.traversal != null && routes.transferPending(it) || it.route?.motion?.navigating == true &&
                 (it.traversal == null || it.route?.motion?.nextTraversal == it.traversal)
         }.mapTo(hashSetOf()) { it.workerId })
+        return viewers
     }
 
     /** Dropping a route doesn't create headroom or a foothold. Gravity owns an unhooked body until it lands. */

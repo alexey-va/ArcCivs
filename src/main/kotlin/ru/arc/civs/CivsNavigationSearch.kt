@@ -358,7 +358,9 @@ internal class CitizenNavigationSearch(
         val distance = max(0.0, sqrt(pickupContainer?.let { pickupDistanceSquared(origin, it) } ?: origin.distanceSquared(target)) - reach)
         if (distance < minimumGain) return null
         return costs.keys.asSequence().filter { it != start && it in parents && it !in proneOnly }
-            .filter { distance - max(0.0, sqrt(distanceToTargetSquared(it)) - reach) >= minimumGain }
+            // Neither a hinted nor a budget-limited segment may end at feet the live owner already rejected.
+            .filter { distance - max(0.0, sqrt(distanceToTargetSquared(it)) - reach) >= minimumGain &&
+                checkedPickupFeet?.contains(it.point()) != true }
             .minWithOrNull(compareBy<CitizenSearchNode> { distanceToTargetSquared(it) }.thenBy { costs.getValue(it) })
     }
 
@@ -880,7 +882,17 @@ private class CitizenSearchGeometry(
                             box.maxX + x, box.maxY + y, box.maxZ + z)
                     }
                 }
-        if (citizenSlideBody(Vector(from.x, from.y + .001, from.z), Vector(to.x, to.y + .001, to.z),
+        // Match the solver's contact epsilon and arithmetic order before allocating its vectors and list view.
+        val sweep = occupiedScratch.resize(minOf(from.x, to.x) - .299,
+            minOf(from.y + .001, to.y + .001), minOf(from.z, to.z) - .299,
+            maxOf(from.x, to.x) + .299, maxOf(from.y + .001, to.y + .001) + (height - .002),
+            maxOf(from.z, to.z) + .299).expand(1.0e-7)
+        var intersects = false
+        for (index in 0 until obstacleCount) if (sweep.overlaps(segmentObstacles[index])) {
+            intersects = true
+            break
+        }
+        if (intersects && citizenSlideBody(Vector(from.x, from.y + .001, from.z), Vector(to.x, to.y + .001, to.z),
                 .299, height - .002, .299, segmentObstacles.subList(0, obstacleCount)) != null) return false
         val samples = ceil(sqrt(from.distanceSquared(to)) / .15).toInt().coerceIn(1, 16)
         val occupiedBody = occupiedScratch.resize(occupied.x - .299, occupied.y - .001, occupied.z - .299,

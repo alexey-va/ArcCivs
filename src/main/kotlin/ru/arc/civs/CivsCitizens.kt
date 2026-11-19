@@ -155,9 +155,12 @@ class CivsCitizens(
     private val skins: List<CitizenSkin>
     private val actors = runtime.actors
     private class ResidentUpdate(val actor: CitizenActor, val group: Int, var workerIndex: Int)
-    private val residentGroups = List(4) { linkedSetOf<ResidentUpdate>() }
+    private val residentGroups = List(16) { linkedSetOf<ResidentUpdate>() }
+    // Fill the original ticks 4/9/14/19 first, so a small roster still spans the whole second.
+    private val residentAdmissionOrder = residentGroups.indices.sortedBy { (it + 1) % 4 }
     private val residentUpdates = mutableMapOf<UUID, ResidentUpdate>()
     private var nextResidentGroup = 0
+    private var occupiedGroups = emptyList<Int>()
     private var leisureShareOffset = 0
     private var wanderToShare = 0
     private var campToShare = 0
@@ -468,7 +471,9 @@ class CivsCitizens(
             else if (!audience.activeAt(actor.cityId, actor.worldId, actor.npc.location.point(), viewers) &&
                 !audience.hydrating(actor.cityId)) remove(actor, "sleeping")
         }
-        if (nextResidentGroup != 0) leisureShareOffset = (leisureShareOffset + 1) % residentGroups.size
+        if (nextResidentGroup != 0 && occupiedGroups.isNotEmpty()) {
+            leisureShareOffset = (leisureShareOffset + 1) % occupiedGroups.size
+        }
         nextResidentGroup = 0
 
         var budget = citizenSpawnBudget(0, maxActive)
@@ -584,7 +589,7 @@ class CivsCitizens(
     }
 
     private fun registerUpdate(actor: CitizenActor, workerIndex: Int): ResidentUpdate {
-        val group = residentGroups.indices.minBy { residentGroups[it].size }
+        val group = residentAdmissionOrder.minBy { residentGroups[it].size }
         val slot = ResidentUpdate(actor, group, workerIndex)
         residentGroups[group] += slot
         residentUpdates[actor.workerId] = slot
@@ -680,30 +685,37 @@ class CivsCitizens(
     }
 
     /** Advance one ordinary group ahead of the next work handoff; every group keeps its 20-tick period. */
-    internal fun pulseResidentGroup(nowMillis: Long) {
+    internal fun pulseResidentGroup(nowMillis: Long, navigationViewers: List<CitizenViewer>? = null) {
         checkCitizenMainThread()
         if (closed.get() || nextResidentGroup == residentGroups.size) return
         val index = nextResidentGroup++
         val group = residentGroups[index]
         if (index == 0) {
             // One occupied group and standalone full pulses can use their whole allowance immediately.
-            val split = residentGroups.count { it.isNotEmpty() } > 1
+            occupiedGroups = residentGroups.indices.filter { residentGroups[it].isNotEmpty() }
+            val split = occupiedGroups.size > 1
             wanderToShare = if (split) minOf(wanderToShare, runtime.wanderBudget) else 0
             campToShare = if (split) minOf(campToShare, runtime.campBudget) else 0
             runtime.wanderBudget -= wanderToShare
             runtime.campBudget -= campToShare
         }
-        // For four busy groups, eight walks yield two each. Two camp searches alternate their recipients.
-        // Unused releases remain available to subsequent groups and the existing fast handoffs.
-        val share = (index + leisureShareOffset) % residentGroups.size
-        runtime.wanderBudget += (wanderToShare + share) / residentGroups.size
-        val campShare = (campToShare + share) / residentGroups.size
+        // Spread new credits evenly among occupied slots and rotate who receives the first credit.
+        val seat = occupiedGroups.indexOf(index)
+        val count = occupiedGroups.size
+        val remaining = if (seat < 0) 0 else count - (seat + leisureShareOffset) % count
+        fun share(credits: Int) = if (remaining == 0) 0 else
+            remaining * credits / count - (remaining - 1) * credits / count
+        runtime.wanderBudget += share(wanderToShare)
+        val campShare = share(campToShare)
         runtime.campBudget += campShare
-        if (group.isEmpty()) return
+        // Keep the four existing receipt opportunities, including a quarter whose last slot was retired.
+        val drain = index % 4 == 3 && (index - 3..index).any { residentGroups[it].isNotEmpty() }
+        if (group.isEmpty() && !drain) return
         runtime.residentObservedAt = nowMillis
-        val viewers = audience.viewers()
+        if (drain) drainResidentReceipts(nowMillis)
+        if (group.isEmpty()) return
+        val viewers = navigationViewers ?: audience.viewers()
         leisure.viewers = viewers
-        drainResidentReceipts(nowMillis)
         val slots = group.toList()
         for (slot in slots) {
             if (actors[slot.actor.workerId] === slot.actor) updateResident(slot, nowMillis, viewers)
@@ -1192,7 +1204,11 @@ class CivsCitizens(
     internal fun prepareNavigation(cities: Collection<Settlement>, active: (UUID) -> Boolean) =
         navigation.prepareNavigation(cities, active)
 
-    fun activateNavigating() = motion.activateNavigating()
+    fun activateNavigating() {
+        advanceNavigationFrame()
+    }
+
+    internal fun advanceNavigationFrame() = motion.activateNavigating()
 
     internal fun courierSources(cityId: UUID, courierId: UUID): Map<UUID, CivPosition> = couriers.courierSources(cityId, courierId)
 
