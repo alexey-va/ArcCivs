@@ -42,7 +42,9 @@ internal class CivsCitizenNap(
         val npc = actor.npc
         val ground = npc.location
         if (ground.world != world || !hasViewer(world, ground)) return false
-        if (runtime.actors.values.count { it.idleNap != null } >= 2 || !safeGround(city, world, ground)) return false
+        if (collisions().napSeats.size >= 2 || !safeGround(city, world, ground)) return false
+        if (city.buildings.any { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure && it.type != BuildingType.DECORATION &&
+                it.entrance.x == ground.blockX && it.entrance.z == ground.blockZ && abs(it.entrance.y - ground.y) <= .5 }) return false
         val yaw = npc.bodyYaw
         val bounds = seatedBounds(ground, yaw, npc.scale)
         if (!clear(actor, world, ground, bounds)) return false
@@ -54,6 +56,7 @@ internal class CivsCitizenNap(
         try {
             val visual = render(ground.clone(), yaw, npc.scale)
             actor.idleNap = CitizenIdleNap(ground, seat.point(), bounds, Bukkit.getCurrentTick(), visual)
+            collisions().napSeats[actor] = bounds
             npc.sit(seat)
             visual.pulse(0)
         } catch (error: Exception) {
@@ -102,6 +105,7 @@ internal class CivsCitizenNap(
     fun stop(actor: CitizenActor, restoreStanding: Boolean = true): Boolean {
         val nap = actor.idleNap ?: return actor.npc.isValid
         actor.idleNap = null
+        collisions().napSeats.remove(actor)
         runCatching { nap.visual.close() }.onFailure { runtime.logFailure(actor, "idle-nap-close", it) }
         CivsDiagnostics.event("citizen_idle_nap", "city" to actor.cityId, "worker" to actor.workerId,
             "action" to "end")
@@ -152,10 +156,9 @@ internal class CivsCitizenNap(
     }
 
     private fun clear(actor: CitizenActor, world: World, ground: Location, bounds: BoundingBox): Boolean =
-        citizenDiningVolumeClear(world, bounds) && (!runtime.entityCollisions ||
-            collisions().shelterOccupied(actor).none(bounds::overlaps) &&
+        citizenDiningVolumeClear(world, bounds) && collisions().occupiedBodies(actor, bounds).isEmpty() &&
             world.players.none { it.isOnline && it.isCollidable && it.location.distanceSquared(ground) < 9.0 &&
-                bounds.overlaps(it.boundingBox) })
+                bounds.overlaps(it.boundingBox) }
 
     private fun hasViewer(world: World, ground: Location, excluding: UUID? = null): Boolean =
         world.players.any { it.uniqueId != excluding && it.isOnline && !it.hasMetadata("NPC") &&

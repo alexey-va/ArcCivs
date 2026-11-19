@@ -150,6 +150,13 @@ class CivsCitizens(
     private val audience: CivsCitizenAudience
     private val skins: List<CitizenSkin>
     private val actors = runtime.actors
+    private class ResidentUpdate(val actor: CitizenActor, val group: Int, var workerIndex: Int)
+    private val residentGroups = List(4) { linkedSetOf<ResidentUpdate>() }
+    private val residentUpdates = mutableMapOf<UUID, ResidentUpdate>()
+    private var nextResidentGroup = 0
+    private var leisureShareOffset = 0
+    private var wanderToShare = 0
+    private var campToShare = 0
     private val statuses = runtime.statuses
     private val admission = CivsCitizenAdmissions({ city, world, point, viewers -> audience.activeAt(city, world, point, viewers) }) { worldId, body ->
         actors.values.any { actor ->
@@ -421,6 +428,9 @@ class CivsCitizens(
         checkCitizenMainThread()
         if (closed.get()) return
         runtime.residentObservedAt = nowMillis
+        // Carry an unused opportunity straight into the next window. Share only newly replenished credits.
+        val unusedWander = if (nextResidentGroup == residentGroups.size) runtime.wanderBudget else 0
+        val unusedCamp = if (nextResidentGroup == residentGroups.size) runtime.campBudget else 0
         runtime.wanderBudget = 8 // Aggregate native target checks across all idle actors, not eight per NPC.
         runtime.campBudget = 2 // At most two six-place campfire admission searches for the entire owner.
         runtime.collectionBudget = 2 // Two 32-item discoveries or four-holder home checks across the whole owner.
@@ -428,11 +438,7 @@ class CivsCitizens(
         runtime.constructionBudget = 2 // Each construction inspects at most sixteen exterior columns, once while valid.
         val viewers = audience.viewers()
         leisure.viewers = viewers
-        logistics.drainCompletions(nowMillis)
-        logistics.drainSupplies(nowMillis)
-        life.drainResidentLife(nowMillis)
-        logistics.drainCollected(nowMillis)
-        combat.drainHarm()
+        drainResidentReceipts(nowMillis)
         val cities = cityProvider().associateBy { it.id }
         combat.retain(cities.keys, nowMillis)
         workRuntime.retainConstruction(cities.values)
@@ -442,56 +448,23 @@ class CivsCitizens(
         statuses.keys.retainAll(workers.keys)
         admission.retain(workers.keys, actors.keys)
 
+        // Finish every outstanding group before publishing this round, including coarse pulse-only callers.
         for (actor in actors.values.toList()) {
-            val current = workers[actor.workerId]
-            if (current == null) {
+            if (actors[actor.workerId] !== actor) continue
+            val row = workers[actor.workerId]
+            if (row == null || row.first.id != actor.cityId) {
                 remove(actor, "unavailable")
                 continue
             }
-            val (city, worker) = current
-            if (worker.id in pendingHarm) {
-                statuses[worker.id] = "injury-pending"
-                continue
-            }
-            val world = plugin.server.getWorld(city.worldId)
-            // Native inventory slots can change before the canonical cargo revision is published.
-            // Keep this exact transfer stationary until its receipt resolves instead of choosing a new request.
-            val plan = plans.currentPlan(actor, city, worker)
-            val reason = when {
-                actor.cityId != city.id || actor.worldId != city.worldId -> "unavailable"
-                world == null -> "world-unloaded"
-                !actor.npc.isValid -> "unavailable"
-                actor.npc.world.uid != city.worldId -> "unavailable"
-                !audience.activeAt(city.id, city.worldId, actor.npc.location.point(), viewers) -> "sleeping"
-                plan == null -> "storage-unavailable"
-                !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
-                    !plan.chunksReady(world) || actor.route?.demandChunks?.ready(world) == false -> "chunk-unloaded"
-                else -> null
-            }
-            if (reason != null) {
-                if (actor.idleNap != null) leisure.nap.stop(actor)
-                if (actor.social.visit?.partnerId != null && actor.npc.isValid) leisure.stopCamp(actor, reason)
-                if (reason == "chunk-unloaded" && backgroundActive(city.id) && plan != null) {
-                    // The new plan may precede the next chunk-owner pulse and actor reconciliation.
-                    actor.pendingChunkTarget = plan.workplace ?: plan.storage
-                    continue
-                }
-                // Retiring the actor here would withdraw the very endpoint whose chunks are loading.
-                // Neither work nor movement is admitted while the city reports hydration.
-                if ((reason == "sleeping" || reason == "chunk-unloaded") && audience.hydrating(city.id)) continue
-                remove(actor, reason)
-                continue
-            }
-            if (actor.route != null) actor.pendingChunkTarget = null // This accepted route passed readiness above.
-            if (!plans.reconcilePlan(actor, requireNotNull(plan), city)) continue
-            try {
-                equipment.syncResident(actor.npc, worker, requireNotNull(plan))
-                workRuntime.update(actor, city, requireNotNull(world), nowMillis)
-            } catch (error: Exception) {
-                routes.pause(actor, "route-unreachable", nowMillis)
-                runtime.logFailure(actor, "navigation", error)
-            }
+            val slot = residentUpdates[actor.workerId]
+            if (slot == null || slot.group >= nextResidentGroup) {
+                updateResident(slot ?: registerUpdate(actor, row.first.workers.indexOf(row.second)), nowMillis, viewers)
+            } else if (!actor.npc.isValid || actor.worldId != row.first.worldId) remove(actor, "unavailable")
+            else if (!audience.activeAt(actor.cityId, actor.worldId, actor.npc.location.point(), viewers) &&
+                !audience.hydrating(actor.cityId)) remove(actor, "sleeping")
         }
+        if (nextResidentGroup != 0) leisureShareOffset = (leisureShareOffset + 1) % residentGroups.size
+        nextResidentGroup = 0
 
         var budget = citizenSpawnBudget(0, maxActive)
         workers.values.filter { it.second.id !in actors && it.second.id in pendingHarm }.forEach { (city, worker) ->
@@ -554,8 +527,8 @@ class CivsCitizens(
             var npc: PacketPlayerNpc? = null
             try {
                 requireNotNull(plan)
-                val search = admission.spawnPoint(city, requireNotNull(world), requireNotNull(origin),
-                    city.workers.indexOf(worker), viewers, nowMillis)
+                val workerIndex = city.workers.indexOf(worker)
+                val search = admission.spawnPoint(city, requireNotNull(world), requireNotNull(origin), workerIndex, viewers, nowMillis)
                 val point = search.point?.location(world)
                 if (point == null) {
                     admission.failed(workerId, plan, retry, nowMillis)
@@ -574,6 +547,7 @@ class CivsCitizens(
                 equipment.setEquipment(npc, plan)
                 val actor = CitizenActor(city.id, workerId, city.worldId, npc, plan)
                 actors[workerId] = actor
+                registerUpdate(actor, workerIndex)
                 equipment.syncResident(npc, worker, plan)
                 admission.accepted(workerId)
                 workRuntime.update(actor, city, world, nowMillis)
@@ -582,6 +556,7 @@ class CivsCitizens(
                     "skin" to skin.name, "tool" to (CivsEquipment.slots(worker)[4]?.material ?: citizenTool(plan)?.name))
             } catch (error: Exception) {
                 actors.remove(workerId)?.let { actor ->
+                    forgetUpdate(workerId)
                     life.cancel(actor)
                     logistics.cancel(actor)
                     actor.cycle.close()
@@ -599,6 +574,133 @@ class CivsCitizens(
         threats.pulse(actors.values.filter { it.workerId !in pendingHarm && it.npc.isValid }
             .map { CivsThreatTarget(it.cityId, it.workerId, it.npc) }, nowMillis)
         observations.publishReadFrame(workers, nowMillis, supplyActivityChanged)
+        wanderToShare = (runtime.wanderBudget - unusedWander).coerceAtLeast(0)
+        campToShare = (runtime.campBudget - unusedCamp).coerceAtLeast(0)
+    }
+
+    private fun registerUpdate(actor: CitizenActor, workerIndex: Int): ResidentUpdate {
+        val group = residentGroups.indices.minBy { residentGroups[it].size }
+        val slot = ResidentUpdate(actor, group, workerIndex)
+        residentGroups[group] += slot
+        residentUpdates[actor.workerId] = slot
+        return slot
+    }
+
+    private fun forgetUpdate(workerId: UUID) {
+        residentUpdates.remove(workerId)?.let { residentGroups[it.group].remove(it) }
+    }
+
+    /** A published roster removal cancels its actor before any later handoff or movement tick. */
+    internal fun retireRemovedResidents(previous: Settlement?, current: Settlement?) {
+        if (previous == null || actors.isEmpty()) return
+        val roster = current?.takeIf { it.worldId == previous.worldId && it.pendingDeletion == null }?.workers.orEmpty()
+        if (previous.workers === roster || previous.workers.size <= roster.size &&
+            previous.workers.indices.all { previous.workers[it].id == roster[it].id }) return
+        val retained = roster.mapTo(hashSetOf()) { it.id }
+        for (worker in previous.workers) {
+            if (worker.id in retained) continue
+            val actor = actors[worker.id]?.takeIf { it.cityId == previous.id } ?: continue
+            remove(actor, if (worker.id in pendingHarm) "dead" else "unavailable")
+        }
+    }
+
+    private fun drainResidentReceipts(nowMillis: Long) {
+        logistics.drainCompletions(nowMillis)
+        logistics.drainSupplies(nowMillis)
+        life.drainResidentLife(nowMillis)
+        logistics.drainCollected(nowMillis)
+        combat.drainHarm()
+    }
+
+    private fun updateResident(slot: ResidentUpdate, nowMillis: Long, viewers: List<CitizenViewer>) {
+        val actor = slot.actor
+        val city = runtime.cityById(actor.cityId)
+        if (city == null || city.id != actor.cityId || city.pendingDeletion != null ||
+            city.worldId != actor.worldId || !actor.npc.isValid) {
+            remove(actor, "unavailable")
+            return
+        }
+        // Published citizen lists keep their order across cycle receipts. A roster edit can change the index.
+        val worker = city.workers.getOrNull(slot.workerIndex)?.takeIf { it.id == actor.workerId } ?: run {
+            slot.workerIndex = city.workers.indexOfFirst { it.id == actor.workerId }
+            city.workers.getOrNull(slot.workerIndex)
+        }
+        if (worker == null) {
+            remove(actor, "unavailable")
+            return
+        }
+        if (worker.id in pendingHarm) {
+            statuses[worker.id] = "injury-pending"
+            return
+        }
+        val world = plugin.server.getWorld(city.worldId)
+        // Native inventory slots can change before the canonical cargo revision is published.
+        // Keep this exact transfer stationary until its receipt resolves instead of choosing a new request.
+        val plan = plans.currentPlan(actor, city, worker)
+        val reason = when {
+            world == null -> "world-unloaded"
+            actor.npc.world.uid != city.worldId -> "unavailable"
+            !audience.activeAt(city.id, city.worldId, actor.npc.location.point(), viewers) -> "sleeping"
+            plan == null -> "storage-unavailable"
+            !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
+                !plan.chunksReady(world) || actor.route?.demandChunks?.ready(world) == false -> "chunk-unloaded"
+            else -> null
+        }
+        if (reason != null) {
+            if (actor.idleNap != null) leisure.nap.stop(actor)
+            if (actor.social.visit?.partnerId != null && actor.npc.isValid) leisure.stopCamp(actor, reason)
+            if (reason == "chunk-unloaded" && backgroundActive(city.id) && plan != null) {
+                // The new plan may precede the next chunk-owner pulse and actor reconciliation.
+                actor.pendingChunkTarget = plan.workplace ?: plan.storage
+                return
+            }
+            // Retiring the actor here would withdraw the very endpoint whose chunks are loading.
+            // Neither work nor movement is admitted while the city reports hydration.
+            if ((reason == "sleeping" || reason == "chunk-unloaded") && audience.hydrating(city.id)) return
+            remove(actor, reason)
+            return
+        }
+        if (actor.route != null) actor.pendingChunkTarget = null // This accepted route passed readiness above.
+        if (!plans.reconcilePlan(actor, requireNotNull(plan), city)) return
+        try {
+            equipment.syncResident(actor.npc, worker, requireNotNull(plan))
+            workRuntime.update(actor, city, requireNotNull(world), nowMillis)
+        } catch (error: Exception) {
+            routes.pause(actor, "route-unreachable", nowMillis)
+            runtime.logFailure(actor, "navigation", error)
+        }
+    }
+
+    /** Advance one ordinary group ahead of the next work handoff; every group keeps its 20-tick period. */
+    internal fun pulseResidentGroup(nowMillis: Long) {
+        checkCitizenMainThread()
+        if (closed.get() || nextResidentGroup == residentGroups.size) return
+        val index = nextResidentGroup++
+        val group = residentGroups[index]
+        if (index == 0) {
+            // One occupied group and standalone full pulses can use their whole allowance immediately.
+            val split = residentGroups.count { it.isNotEmpty() } > 1
+            wanderToShare = if (split) minOf(wanderToShare, runtime.wanderBudget) else 0
+            campToShare = if (split) minOf(campToShare, runtime.campBudget) else 0
+            runtime.wanderBudget -= wanderToShare
+            runtime.campBudget -= campToShare
+        }
+        // For four busy groups, eight walks yield two each. Two camp searches alternate their recipients.
+        // Unused releases remain available to subsequent groups and the existing fast handoffs.
+        val share = (index + leisureShareOffset) % residentGroups.size
+        runtime.wanderBudget += (wanderToShare + share) / residentGroups.size
+        val campShare = (campToShare + share) / residentGroups.size
+        runtime.campBudget += campShare
+        if (group.isEmpty()) return
+        runtime.residentObservedAt = nowMillis
+        val viewers = audience.viewers()
+        leisure.viewers = viewers
+        drainResidentReceipts(nowMillis)
+        val slots = group.toList()
+        for (slot in slots) {
+            if (actors[slot.actor.workerId] === slot.actor) updateResident(slot, nowMillis, viewers)
+        }
+        if ((campShare != 0 || campToShare == 0) && slots.size > 1 && group.remove(slots.first())) group += slots.first()
     }
 
     /** Hand over admitted work, courier transfers and short idle legs on the existing bounded pulse. */
@@ -1007,6 +1109,7 @@ class CivsCitizens(
         couriers.releaseCourierSource(actor, runtime.residentObservedAt)
         runCatching { life.stopMeal(actor) }.onFailure { runtime.logFailure(actor, "stop-meal", it) }
         actors.remove(actor.workerId)
+        forgetUpdate(actor.workerId)
         life.cancel(actor)
         logistics.cancel(actor)
         actor.cycle.close()
@@ -1038,6 +1141,8 @@ class CivsCitizens(
             actor.cycle.close(); actor.route?.motion?.cancel(); actor.route?.previousMotion?.cancel()
         }
         actors.clear()
+        residentUpdates.clear()
+        residentGroups.forEach { it.clear() }
         observations.clearReadFrame()
         standaloneFrames.clear()
         combat.clear()

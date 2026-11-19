@@ -48,41 +48,29 @@ class CivsResidentLifecycleServiceTest : FunSpec({
             every { h.citizens.residentCollectionFeet(remoteWorker.id, false) } returns remoteSource.standing.location(h.world)
             every { h.citizens.residentCollectionFeet(replayWorker.id, false) } returns firstSource.standing.location(h.world)
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(town, remote))
-            val admission = CompletableFuture<CivInventoryTransaction>()
-            var held: CivInventoryTransaction? = null
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                val receipt = firstArg<CivInventoryTransaction>()
-                if (receipt.collected?.workerId == firstWorker.id) {
-                    held = receipt
-                    admission
-                } else CompletableFuture.completedFuture(receipt)
-            }
-            every { h.store.completeInventoryTransaction(any()) } answers {
-                CompletableFuture.completedFuture(firstArg<CivInventoryTransaction>().after)
-            }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val clock = h.time
+            fun pickup(city: Settlement, worker: CivWorker, source: CivResidentFoodSource): Settlement {
+                val result = h.service.pickupResidentFood(city.id, worker.id, source)
+                result.isDone shouldBe true
+                return result.join()
+            }
 
-            val first = h.service.pickupResidentFood(town.id, firstWorker.id, firstSource)
-            h.tickUntil("first holder receipt awaits admission") { held != null }
-            val second = h.service.pickupResidentFood(town.id, secondWorker.id, secondSource)
-            val repeated = h.service.pickupResidentFood(town.id, replayWorker.id, firstSource)
-            h.service.collectionAvailable(town.id) shouldBe false
+            val firstAfter = pickup(town, firstWorker, firstSource)
+            firstHolder.isEmpty shouldBe true
+            secondHolder.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
+            h.service.collectionAvailable(town.id) shouldBe true
             h.service.collectionAvailable(remote.id) shouldBe true
-            val remoteAfter = h.await(h.service.pickupResidentFood(remote.id, remoteWorker.id, remoteSource))
+
+            val remoteAfter = pickup(remote, remoteWorker, remoteSource)
             CivsEquipment.plainCount(remoteAfter.workers.single(), "BREAD") shouldBe 4L
             remoteHolder.isEmpty shouldBe true
-            first.isDone shouldBe false
-            second.isDone shouldBe false
-            repeated.isDone shouldBe false
-            firstHolder.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
-            secondHolder.getItem(0) shouldBe ItemStack(Material.BREAD, 4)
 
-            admission.complete(requireNotNull(held))
-            h.await(first)
-            val after = h.await(second)
-            CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(repeated) })?.reason shouldBe "resident-food-missing"
+            val after = pickup(town, secondWorker, secondSource)
+            after.revision shouldBe firstAfter.revision + 1
+            val repeated = h.service.pickupResidentFood(town.id, replayWorker.id, firstSource)
+            repeated.isCompletedExceptionally shouldBe true
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { repeated.join() })?.reason shouldBe "resident-food-missing"
             h.service.collectionAvailable(town.id) shouldBe true
             after.workers.associate { it.id to CivsEquipment.plainCount(it, "BREAD") } shouldBe
                 mapOf(firstWorker.id to 4L, secondWorker.id to 4L, replayWorker.id to 0L)
@@ -90,8 +78,16 @@ class CivsResidentLifecycleServiceTest : FunSpec({
             firstHolder.isEmpty shouldBe true
             secondHolder.isEmpty shouldBe true
             h.time shouldBe clock
-            verify(exactly = 3) { h.store.saveInventoryTransaction(any()); h.store.completeInventoryTransaction(any()) }
-            verify(exactly = 3) { h.store.deleteInventoryTransaction(any()) }
+            h.saves shouldBe emptyList()
+            verify(exactly = 3) {
+                h.store.beginLocalInventory(any(), any())
+                h.store.completeLocalInventory(any())
+            }
+            verify(exactly = 0) {
+                h.store.saveInventoryTransaction(any())
+                h.store.completeInventoryTransaction(any())
+                h.store.deleteInventoryTransaction(any())
+            }
         }
     }
 

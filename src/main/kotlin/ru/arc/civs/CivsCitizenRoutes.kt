@@ -312,11 +312,11 @@ internal class CivsCitizenRoutes(
                 building.bounds.contains(at.blockX, at.blockY, at.blockZ) &&
                 !CivsAutonomousGeometry.horizontalContains(building.bounds, building.entrance)
         }
-        val unassigned = actor.plan.idleReason == "unassigned" && !outsideHome
-        val away = unassigned && !citizenWithinIdleArea(home.entrance, at.point())
+        val localStroll = !outsideHome && actor.plan.idleReason in LOCAL_STROLL_REASONS
+        val away = localStroll && !citizenWithinIdleArea(home.entrance, at.point())
         val anchor = if (away) departure?.takeUnless { it.type == BuildingType.TOWN_HALL }?.entrance
             ?: CivPosition(at.blockX, at.blockY, at.blockZ) else home.entrance
-        val street = if (unassigned && departure == null)
+        val street = if (localStroll && departure == null)
             citizenNearbyStreet(actor.npc.world, at, frame.roads, frame.territory) else null
         val walk = CitizenWanderWalk(home, outsideHome, frame.territory, actor.plan.token, now, actor.wander.legLimit(),
             departure, anchor, frame.roads.takeIf { street != null }, street)
@@ -334,7 +334,7 @@ internal class CivsCitizenRoutes(
         val departure = CivPosition(from.blockX, from.blockY, from.blockZ)
         val room = walk.departureBuilding?.takeIf { it.bounds.contains(departure.x, departure.y, departure.z) }
         // Someone already in the shared hall may walk around its furniture before reaching the door.
-        val leaving = room?.takeUnless { it.type == BuildingType.TOWN_HALL && actor.plan.idleReason == "unassigned" && !walk.outsideHome }
+        val leaving = room?.takeUnless { it.type == BuildingType.TOWN_HALL && !walk.outsideHome && actor.plan.idleReason in LOCAL_STROLL_REASONS }
         val anchor = leaving?.entrance ?: walk.anchor
         val outside = walk.outsideHome && walk.outside(departure.x, departure.z)
         val destinations = when {
@@ -1395,6 +1395,7 @@ internal class CivsCitizenRoutes(
         x !in building.bounds.min.x..building.bounds.max.x || z !in building.bounds.min.z..building.bounds.max.z
 
     private companion object {
+        val LOCAL_STROLL_REASONS = setOf("unassigned", "no-construction", "waiting-orders")
         val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED", maxFields = 48)
         val MINE_ROUTE_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_MINE_ROUTE_BLOCKED")
         val MINE_ROUTE_RECOVERED = StructuredDebugLine("ARCCIVS_MINE_ROUTE_RECOVERED")

@@ -230,7 +230,7 @@ class CivsUpkeepSupplyBufferServiceTest : FunSpec({
 })
 
 class CivsUpkeepResidentPickupServiceTest : FunSpec({
-    test("an empty upkeep bag visits storage and a durable native pickup pays exactly one road repair") {
+    test("an empty upkeep bag visits storage and pays exactly one durably admitted road repair") {
         serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
             val upkeep = ServiceRoadUpkeep(h, physical = true)
             val worker = CivsEquipment.collectSupplies(upkeep.worker, mapOf("BREAD" to 3L))
@@ -239,12 +239,9 @@ class CivsUpkeepResidentPickupServiceTest : FunSpec({
             every { h.worldAdapter.captureRoadUpkeep(any(), any(), any(), any()) } answers {
                 upkeep.work.takeIf { h.world.getBlockAt(20, 63, 0).type == Material.DIRT }
             }
-            val ack = CompletableFuture<CivInventoryTransaction>()
-            val receipts = mutableListOf<CivInventoryTransaction>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                val tx = firstArg<CivInventoryTransaction>().also(receipts::add)
-                if (receipts.size == 1) ack else CompletableFuture.completedFuture(tx)
-            }
+            val repairAck = CompletableFuture<CivInventoryTransaction>()
+            val repairs = mutableListOf<CivInventoryTransaction>()
+            every { h.store.saveInventoryTransaction(capture(repairs)) } returns repairAck
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start(); upkeep.publish()
             val maintenance = CivsService::class.java.getDeclaredField("roadMaintenance").also { it.isAccessible = true }
@@ -263,17 +260,17 @@ class CivsUpkeepResidentPickupServiceTest : FunSpec({
             val barrel = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, ItemStack(Material.COBBLESTONE, 64))
             barrel.setItem(1, ItemStack(Material.BREAD, 5))
-            val pickup = h.service.prepareResidentSupplies(city.id, worker.id, worker.assignment!!)
-            h.tickUntil("upkeep pickup journal") { receipts.isNotEmpty() }
-            receipts.single().changes.single() shouldBe CivInventorySlotChange(CivPosition(10, 64, 0), "BARREL", 0,
+            val pickups = mutableListOf<CivInventoryTransaction>()
+            every { h.store.beginLocalInventory(city, capture(pickups)) } answers {
+                barrel.getItem(0)!!.amount shouldBe 64
+                CivsEquipment.usableCount(h.service.settlements().single().workers.single(), "COBBLESTONE") shouldBe 0
+            }
+            val supplied = h.await(h.service.prepareResidentSupplies(city.id, worker.id, worker.assignment!!))
+            pickups.single().changes.single() shouldBe CivInventorySlotChange(CivPosition(10, 64, 0), "BARREL", 0,
                 CivPlainItem("COBBLESTONE", 64), CivPlainItem("COBBLESTONE", 48))
-            barrel.getItem(0)!!.amount shouldBe 64
-            CivsEquipment.usableCount(h.service.settlements().single().workers.single(), "COBBLESTONE") shouldBe 0
+            h.service.settlements().single() shouldBe supplied
             h.saves shouldBe emptyList()
-            ack.complete(receipts.single())
-            h.tickUntil("upkeep native pickup") { h.saves.isNotEmpty() }
-            h.commit()
-            val supplied = pickup.join()
+            repairs shouldBe emptyList()
             val carrying = supplied.workers.single()
             CivsEquipment.usableCount(carrying, "COBBLESTONE") shouldBe 16
             CivsEquipment.usableCount(carrying, "BREAD") shouldBe 3
@@ -292,11 +289,17 @@ class CivsUpkeepResidentPickupServiceTest : FunSpec({
             cycle.work(h.time + upkeep.work.durationMillis)
             cycle.phase shouldBe CitizenPhase.READY
             val repair = upkeep.deliver()
-            h.tickUntil("paid upkeep repair") { h.saves.size == 2 }
+            h.tickUntil("road repair admission") { repairs.isNotEmpty() }
+            val receipt = repairs.single()
+            receipt.upkeep!!.work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+            receipt.changes shouldBe emptyList()
+            h.world.getBlockAt(20, 63, 0).type shouldBe Material.DIRT
+            h.service.settlements().single() shouldBe supplied
+            h.saves shouldBe emptyList()
+            repairAck.complete(receipt)
+            h.tickUntil("paid upkeep repair") { h.saves.size == 1 }
             h.commit()
             val repaired = repair.join()
-            receipts.last().upkeep!!.work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
-            receipts.last().changes shouldBe emptyList()
             CivsEquipment.usableCount(repaired.workers.single(), "COBBLESTONE") shouldBe 15
             CivsEquipment.usableCount(repaired.workers.single(), "BREAD") shouldBe 3
             repaired.workers.single().hunger shouldBe worker.hunger
@@ -313,25 +316,20 @@ class CivsUpkeepResidentPickupServiceTest : FunSpec({
     test("upkeep pickup respects real stock and the existing sixteen item buffer: carried=$carried available=$available") {
         serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
             val upkeep = ServiceRoadUpkeep(h, physical = true, cobblestone = carried)
-            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start(); upkeep.publish()
             val maintenance = CivsService::class.java.getDeclaredField("roadMaintenance").also { it.isAccessible = true }
                 .get(h.service) as CivsRoadMaintenance
             maintenance.plan(upkeep.city, upkeep.worker) shouldBe upkeep.work
             val barrel = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, ItemStack(Material.COBBLESTONE, available))
-            val pickup = h.service.prepareResidentSupplies(upkeep.city.id, upkeep.worker.id, upkeep.worker.assignment!!)
-            if (picked > 0) {
-                h.tickUntil("bounded upkeep pickup") { h.saves.isNotEmpty() }
-                h.commit()
-            }
-            val after = h.await(pickup)
+            val after = h.await(h.service.prepareResidentSupplies(upkeep.city.id, upkeep.worker.id, upkeep.worker.assignment!!))
             CivsEquipment.usableCount(after.workers.single(), "COBBLESTONE") shouldBe carried + picked
             barrel.getItem(0)?.amount shouldBe (available - picked).takeIf { it > 0 }
             after.stock shouldBe upkeep.city.stock
             after.construction shouldBe null
-            verify(exactly = if (picked > 0) 1 else 0) { h.store.saveInventoryTransaction(any()) }
+            h.saves shouldBe emptyList()
+            verify(exactly = if (picked > 0) 1 else 0) { h.store.completeLocalInventory(any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
 

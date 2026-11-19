@@ -4225,7 +4225,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             val route = requireNotNull(walker.route)
             requireNotNull(route.wanderWalk)
             val text = CivsText.fromYaml(civsLocaleSource())
-            fun caption() = plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[2]
+            fun caption() = plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[1]
             for (reason in listOf("unassigned", "no-research", "storage-surplus", "waiting-growth", "waiting-tool")) {
                 walker.plan = walker.plan.copy(idleReason = reason)
                 h.owner.status(h.workerId) shouldBe "workers.status.wandering"

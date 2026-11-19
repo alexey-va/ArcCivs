@@ -29,6 +29,8 @@ internal class CivsCitizenCollisions(
     private val logistics get() = logisticsOwner()
     private val audience get() = audienceOwner()
     private val life get() = lifeOwner()
+    // Only the two furnished rest spots need a reservation when ordinary body collisions are disabled.
+    val napSeats = mutableMapOf<CitizenActor, BoundingBox>()
 
     /** A small physical push changes only the observed position, never a work or cargo receipt. */
     internal fun nudgeResident(npc: PacketPlayerNpc, impulse: Vector): Boolean {
@@ -66,7 +68,8 @@ internal class CivsCitizenCollisions(
             from.world == to.world && from.world == actor.npc.world &&
             from.x.isFinite() && from.y.isFinite() && from.z.isFinite() &&
             to.x.isFinite() && to.y.isFinite() && to.z.isFinite() &&
-            abs(to.x - from.x) <= 2 && abs(to.y - from.y) <= 2 && abs(to.z - from.z) <= 2
+            abs(to.x - from.x) <= 2 && abs(to.y - from.y) <= 2 && abs(to.z - from.z) <= 2 &&
+            napSeatStepClear(actor, from, to)
         return citizenResidentStepClear(actor.npc, from, to, shelterOccupied(actor, citizenResidentSweep(actor.npc, from, to))) &&
             residentStepAllowed(actor.npc, from, to)
     }
@@ -553,8 +556,15 @@ internal class CivsCitizenCollisions(
         return true
     }
 
+    private fun napSeatStepClear(actor: CitizenActor, from: Location, to: Location): Boolean {
+        if (napSeats.isEmpty()) return true
+        val sweep = citizenResidentSweep(actor.npc, from, to)
+        return napSeats.none { (other, bounds) -> other !== actor && other.worldId == actor.worldId &&
+            sweep.overlaps(bounds) && !citizenResidentStepClear(actor.npc, from, to, listOf(bounds)) }
+    }
+
     fun idleDestinationFree(actor: CitizenActor, to: Location): Boolean {
-        if (!runtime.entityCollisions) return true
+        if (!runtime.entityCollisions) return napSeatStepClear(actor, to, to)
         val body = citizenStandingBounds(to, actor.npc.scale).expand(.15, 0.0, .15)
         if (shelterOccupied(actor, body).any(body::overlaps)) return false
         return runtime.actors.values.none { other -> other !== actor && other.worldId == actor.worldId && other.npc.isValid &&
@@ -599,7 +609,10 @@ internal class CivsCitizenCollisions(
         }
     }
 
-    fun shelterOccupied(actor: CitizenActor, bounds: BoundingBox? = null): List<BoundingBox> = if (!runtime.entityCollisions) emptyList() else buildList {
+    fun shelterOccupied(actor: CitizenActor, bounds: BoundingBox? = null): List<BoundingBox> =
+        if (!runtime.entityCollisions) emptyList() else occupiedBodies(actor, bounds)
+
+    fun occupiedBodies(actor: CitizenActor, bounds: BoundingBox?): List<BoundingBox> = buildList {
         // Only the configured, capped runtime actors and their reservations are read; no world/entity discovery.
         for (other in runtime.actors.values) {
             if (other === actor || other.worldId != actor.worldId || !other.npc.isValid) continue

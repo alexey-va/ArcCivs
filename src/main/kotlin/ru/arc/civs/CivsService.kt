@@ -447,7 +447,9 @@ class CivsService(
         plugin.server.pluginManager.registerEvents(protection, plugin)
         plugin.server.pluginManager.registerEvents(forestryLeafLoot, plugin)
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
+        var residentGroupTick = 0
         tasks.runTimer(1, 1) {
+            residentGroupTick = (residentGroupTick + 1) % 5
             val activeCities = if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList()
             val residentChunks = if (ready()) citizens.chunkPositions() else emptyMap()
             chunkLoading.pulse(activeCities, if (ready()) inventoryJournal.pendingNativeChunks() else emptyList(),
@@ -459,7 +461,11 @@ class CivsService(
             resumeCityActions()
             if (ready()) supply.pulse()
             if (ready()) forestryLeafLoot.pulse()
-            if (ready()) citizens.activateNavigating()
+            if (ready()) {
+                citizens.activateNavigating()
+                // Use ticks 4/9/14/19. The following tick already runs the shared handoff and supply tasks.
+                if (residentGroupTick == 4) citizens.pulseResidentGroup(now())
+            }
             if (ready()) vegetation.pulse(cities.values)
         }
         tasks.runTimer(5, 5) {
@@ -1174,6 +1180,7 @@ class CivsService(
             previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls && previous.pendingDeletion == city.pendingDeletion &&
             previous.owner == city.owner && previous.worldId == city.worldId && cityPlans.initialMinesUnchanged(previous, city)) {
             cities[city.id] = city
+            citizens.retireRemovedResidents(previous, city)
             val supplyChanged = if (CivsAutonomy.legacyStock(city)) previous.revision != city.revision
                 else civSupplyInputs(previous) != civSupplyInputs(city)
             if (supplyChanged) cargoRequests.cityPublished(city)
@@ -1194,7 +1201,8 @@ class CivsService(
             } else runCatching {
                 val (prepared, proofs) = requireNotNull(candidate)
                 if (city == null) storage.removeCity(cityId) else storage.updateCity(city)
-                if (city == null) cities.remove(cityId) else cities[cityId] = city
+                val replaced = if (city == null) cities.remove(cityId) else cities.put(cityId, city)
+                citizens.retireRemovedResidents(replaced, city)
                 if (refreshInitialMines) cityPlans.publishInitialMines(cityId, proofs)
                 if (city == null) {
                     supply.remove(cityId)

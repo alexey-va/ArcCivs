@@ -304,7 +304,9 @@ health/hunger as detached Russian plain text. Corpses, cargo, stock, inventories
 owners and members are omitted. Queries use bounded current memory only, without
 world loading, planning or IO; lifecycle close unregisters the source callback.
 Resident nameplates and courier parcels attach to the same packet actor through an admitted per-viewer
-carrier lease. Skins are stable per worker UUID; no profile network lookup occurs.
+carrier lease. The first nameplate line shows the resident's profession and name,
+the second shows the current action, and the third shows health and hunger.
+Skins are stable per worker UUID; no profile network lookup occurs.
 Successful construction callbacks and the bounded CivsWorld terraforming/repair
 writes publish passive changed-chunk hints. Other native changes remain covered
 by the observer's periodic refresh; no observation authorizes or repeats a write.
@@ -648,16 +650,22 @@ on waking. Support and standing headroom are rechecked during sleep. If the head
 is blocked, the shared recovery budget can select a clear spot in the same home
 through a clear swept sleeping envelope; without room the low pose is retained
 without work or travel. A cramped shelter does not start a sleeping pose.
-Unassigned residents already away from home wander within eight blocks of their
-starting position or departure doorway. They can join a public path within four
+Unassigned residents, builders without a project and workers waiting for orders
+can wander within eight blocks of their starting position or departure doorway
+when away from work. They can join a public path within four
 blocks and follow its walkable neighbours. Without a path they take safe local steps.
 Residents already inside the shared town hall can move around furniture while idle.
 Workers waiting at a required post still return to their workplace entrance.
+An idle resident can set up a temporary chair on a free spot. Entrance cells
+stay clear and other residents respect the chair even with body collisions disabled.
 Idle walks use 0.55 of base motion speed. Base motion is
 0.215 blocks per tick; productive journeys use 0.8 of that, or 3.44 blocks/second
 at 20 TPS before the current Trails surface multiplier. Idle and combat movement
 retain their existing factors. Routes avoid horizontal footprints
 of foreign buildings and farm fields.
+Active residents update in four groups over 20 ticks. Each group reads the current
+city and worker before planning or applying equipment. Shared budgets limit walks
+and social searches across the entire interval.
 Unassigned adults share a bounded five-tick handoff (four actors, existing eight-target
 budget per coarse pulse) instead of waiting for the coarse city timer. Successful
 unassigned leisure legs have no artificial rest; unreachable optional routes retain a 2.5–4s

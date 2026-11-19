@@ -80,6 +80,37 @@ class CivsCitizenNapTest : FunSpec({
         }
     }
 
+    test("a portable chair leaves the Auto3 tavern threshold open and fits on the next ground cell") {
+        residentRuntime { h ->
+            val entrance = CivPosition(12951, 78, 9323)
+            val hallAt = CivPosition(12957, 78, 9327)
+            val hall = h.city.buildings.single().copy(anchor = hallAt, entrance = hallAt, bounds = CivBox(hallAt, hallAt))
+            val tavern = hall.copy(id = UUID(0, 82), type = BuildingType.TAVERN, schematicId = "tavern1",
+                bounds = CivBox(CivPosition(12935, 72, 9312), CivPosition(12950, 90, 9333)), entrance = entrance,
+                anchor = CivPosition(12942, 78, 9323))
+            h.city = h.city.copy(center = hallAt, buildings = listOf(hall, tavern))
+            h.world.loadChunk(entrance.x shr 4, entrance.z shr 4)
+            h.world.getBlockAt(12951, 77, 9323).type = Material.DIRT_PATH
+            h.world.getBlockAt(12951, 77, 9324).type = Material.DIRT_PATH
+            val threshold = Location(h.world, 12951.5, 77.9375, 9323.5)
+            h.paper.server.onlinePlayers.single().teleport(threshold.clone().add(4.0, 0.0, 0.0))
+            val visual = NapVisualProbe(h)
+            val actor = h.actor()
+            actor.npc.teleport(threshold)
+            actor.nextIdleNapAt = 1L
+            h.owner.pulse(1_000)
+            visual.opened shouldBe 0
+            actor.npc.isSeated shouldBe false
+
+            val besideDoor = Location(h.world, 12951.5, 77.9375, 9324.5)
+            actor.npc.teleport(besideDoor)
+            actor.nextIdleNapAt = 1_001L
+            h.owner.pulse(1_001)
+            visual.opened shouldBe 1
+            visual.ground shouldBe besideDoor
+        }
+    }
+
     test("an idle adult cannot sit in the air") {
         residentRuntime { h ->
             val visual = NapVisualProbe(h)

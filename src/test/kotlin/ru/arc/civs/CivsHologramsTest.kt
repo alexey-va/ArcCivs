@@ -343,18 +343,19 @@ class CivsHologramsTest : FunSpec({
         MockBukkitTestRuntime.open().use { paper ->
             val player = paper.addPlayer("Viewer").apply { setLocale(Locale.forLanguageTag("ru-RU")) }
             val text = CivsText.fromYaml(civsLocaleSource())
-            val npc = CivsNpcHologramSnapshot(UUID(0, 1), player.world.uid, 0.0, 64.0, 0.0, "Василий", "working", 18.5, 20.0,
+            val npc = CivsNpcHologramSnapshot(UUID(0, 1), player.world.uid, 0.0, 64.0, 0.0, "Семён", "working", 18.5, 20.0,
                 profession = "farmer")
             val label = civsNpcHologramText(text, npc)
-            plainText(label) shouldContain "Василий\n"
-            plainText(label) shouldContain "\nФермер\n"
+            val vitals = "\uE601 18.5/20   \uE603 20/20"
+            plainText(label).lines() shouldBe listOf("Фермер Семён", "Работает", vitals)
+            val english = CivsText.fromYaml(civsLocaleSource(), "en")
+            plainText(civsNpcHologramText(english, npc)).lines() shouldBe listOf("Farmer Семён", "Working", vitals)
             for ((status, caption) in mapOf("route-preparing" to "Готовится идти", "route-searching" to "Ищет путь",
                 "route-blocked" to "Ждёт свободный проход", "route-stopped" to "Остановился")) {
-                plainText(civsNpcHologramText(text, npc.copy(status = status))).lines()[2] shouldBe caption
-                plainText(civsNpcHologramText(text, npc.copy(status = status, profession = "unassigned"))).lines()[2] shouldBe caption
-                plainText(civsNpcHologramText(text, npc.copy(status = status, child = true))).lines()[2] shouldBe caption
+                plainText(civsNpcHologramText(text, npc.copy(status = status))).lines()[1] shouldBe caption
+                plainText(civsNpcHologramText(text, npc.copy(status = status, profession = "unassigned"))).lines()[1] shouldBe caption
+                plainText(civsNpcHologramText(text, npc.copy(status = status, child = true))).lines()[1] shouldBe caption
             }
-            plainText(label) shouldContain "\n\uE601 18.5/20   \uE603 20/20"
             plainText(civsNpcHologramText(text, npc.copy(hunger = 6))) shouldContain "\uE604 6/20"
             plainText(civsNpcHologramText(text, npc.copy(health = 28.0, maxHealth = 28.0))) shouldContain
                 "\uE600 28/28   \uE603 20/20"
@@ -369,12 +370,14 @@ class CivsHologramsTest : FunSpec({
                 it.color() shouldBe TextColor.color(0xFFFFFF)
                 it.font() shouldBe Key.key("minecraft:default")
             }
-            plainText(civsNpcHologramText(text, npc.copy(child = true, status = "playing"))) shouldContain
-                "\nРебёнок\nИграет\n"
+            plainText(civsNpcHologramText(text, npc.copy(child = true, status = "playing"))).lines() shouldBe
+                listOf("Ребёнок Семён", "Играет", vitals)
+            plainText(civsNpcHologramText(text, npc.copy(profession = "unassigned", status = "sleeping"))).lines() shouldBe
+                listOf("Житель Семён", "Спит", vitals)
             plainText(civsNpcHologramText(text, npc.copy(status = "workers.status.waiting-tool"))) shouldContain "Нужна мотыга"
             plainText(civsNpcHologramText(text, npc.copy(status = "workers.status.waiting-inputs",
                 statusInputs = listOf("COBBLESTONE", "CHARCOAL")))) shouldContain "Ждёт: Булыжник, Древесный уголь"
-            plainText(civsNpcHologramText(text, npc.copy(profession = "courier"))) shouldContain "Грузчик"
+            plainText(civsNpcHologramText(text, npc.copy(profession = "courier"))).lines().first() shouldBe "Грузчик Семён"
             plainText(civsNpcHologramText(text, npc.copy(name = "<red>Worker</red>"))) shouldContain "<red>Worker</red>"
             val building = CivBuilding(UUID(0, 2), BuildingType.FARM, 1, CivPosition(0, 64, 0), 0, "fixture/farm",
                 CivBox(CivPosition(-4, 64, -6), CivPosition(4, 70, 0)), CivPosition(0, 64, 1), BuildingPhase.CONSTRUCTING)

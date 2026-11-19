@@ -252,16 +252,23 @@ class CivsStorageServiceTest : FunSpec({
             h.world.getBlockAt(0, 63, 0).type = Material.BARREL
             val barrel = (h.world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.BREAD, 24))
-            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL, mapOf("BREAD" to 1L)),
                 buildings = h.city.buildings.mapIndexed { i, b -> if (i == 0) b.copy(control = control) else b })
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.store.saveInventoryTransaction(any()) } returns CompletableFuture.failedFuture(CivsRejection("storage-transaction-too-large"))
             h.start()
-            val rejected = h.service.supplyWorker(h.player, city.workers.first().id, "BREAD"); h.tick()
+            val rejected = h.service.materializeStorage(h.player); h.tick()
             (shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection).reason shouldBe "storage-transaction-too-large"
             h.service.cityBusy(h.player) shouldBe false
             h.service.ready() shouldBe true
+            h.service.city(h.player) shouldBe city
             barrel.getItem(0)!!.amount shouldBe 24
+            h.await(h.service.supplyWorker(h.player, city.workers.first().id, "BREAD"))
+            val supplied = h.service.city(h.player)!!
+            CivsEquipment.plainCount(supplied.workers.first(), "BREAD") shouldBe 1
+            supplied.inventory shouldBe city.inventory
+            barrel.getItem(0)!!.amount shouldBe 23
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.store.completeLocalInventory(any()) }
             verify(exactly = 0) { h.store.save(any()); h.store.deleteInventoryTransaction(any()) }
         }
     }

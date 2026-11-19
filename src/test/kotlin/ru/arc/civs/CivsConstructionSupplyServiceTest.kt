@@ -283,8 +283,6 @@ class CivsConstructionSupplyServiceTest : FunSpec({
             }
             serviceScenario { h ->
                 val placement = h.incrementalPlacement()
-                every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-                every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
                 h.start(); h.commit()
                 val worker = h.service.city(h.player)!!.workers.first()
                 repeat(2) {
@@ -300,11 +298,17 @@ class CivsConstructionSupplyServiceTest : FunSpec({
                 results.single()["missing_after"] shouldBe mapOf("STONE" to 1L)
                 results.single()["amount"] shouldBe 0L
                 val barrel = (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory
-                barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 1))
+                barrel.setItem(0, ItemStack(Material.STONE))
+                every { h.store.completeLocalInventory(any()) } answers {
+                    results.size shouldBe 1
+                    firstArg<CivInventoryTransaction>().after
+                }
                 val pickup = h.service.prepareResidentSupplies(placement.city.id, worker.id, worker.assignment!!)
-                h.tick()
-                results.size shouldBe 1 // A prepared transfer is not a committed pickup.
-                h.commit(); pickup.join()
+                pickup.isDone shouldBe true
+                val saved = pickup.join()
+                barrel.getItem(0) shouldBe null
+                h.service.city(h.player) shouldBe saved
+                CivsEquipment.plainCount(saved.workers.first(), "STONE") shouldBe 1
                 results.size shouldBe 2
                 results.last()["outcome"] shouldBe "committed"
                 results.last()["picked"] shouldBe mapOf("STONE" to 1L)
@@ -313,6 +317,13 @@ class CivsConstructionSupplyServiceTest : FunSpec({
                 results.last()["carried_after"] shouldBe mapOf("STONE" to 1L)
                 results.last()["missing_after"] shouldBe emptyMap<String, Long>()
                 results.last()["amount"] shouldBe 1L
+
+                val repeated = h.service.prepareResidentSupplies(placement.city.id, worker.id, worker.assignment!!)
+                repeated.isDone shouldBe true
+                repeated.join() shouldBe saved
+                results.count { it["outcome"] == "committed" } shouldBe 1
+                verify(exactly = 1) { h.store.completeLocalInventory(any()) }
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             }
         } finally { unmockkObject(CivsDiagnostics) }
     }

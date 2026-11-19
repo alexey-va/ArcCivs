@@ -55,6 +55,43 @@ class CivsCitizenWanderVarietyTest : FunSpec({
         }
     }
 
+    for ((type, reason) in listOf(BuildingType.BUILDER_HUT to "no-construction", BuildingType.FORESTER to "waiting-orders")) {
+        test("an idle worker with $reason walks along the nearest path past its bend") {
+            residentRuntime(workerId = UUID(0, 42)) { h ->
+                val hall = h.city.buildings.single()
+                val entrance = CivPosition(4, 64, -14)
+                val workplace = hall.copy(id = UUID(0, 43), type = type, anchor = entrance, entrance = entrance, control = entrance,
+                    bounds = CivBox(CivPosition(2, 63, -18), CivPosition(6, 68, -15)))
+                h.city = h.city.copy(buildings = listOf(hall, workplace), workers = h.city.workers.map { it.copy(assignment = workplace.id) })
+                for (x in -1..1) for (z in -2..1) h.world.loadChunk(x, z)
+                h.idleReason = reason
+                val road = (5..7).map { it to 0 } + (1..3).map { 7 to it }
+                for ((x, z) in road) h.world.getBlockAt(x, 63, z).type = Material.DIRT_PATH
+                // The only step closer to the workshop is blocked. The public lane first leads sideways.
+                for (y in 64..65) h.world.getBlockAt(4, y, -1).type = Material.STONE
+                val npc = h.actor().npc
+                npc.teleport(Location(h.world, 4.5, 64.0, .5, 180f, 0f))
+                h.holdNavigation = true
+                val captures = h.world.chunkSnapshotCaptures
+                h.navigationNow = 3_000
+                h.owner.pulse(3_000)
+                h.actor().plan.idleReason shouldBe reason
+                val walked = mutableSetOf<Pair<Int, Int>>()
+                for (tick in 1..120) {
+                    h.navigate()
+                    if (tick % 10 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    val at = npc.location
+                    walked += at.blockX to at.blockZ
+                    if (7 to 2 in walked) break
+                }
+                walked.containsAll(listOf(5 to 0, 7 to 2)) shouldBe true
+                walked.all { it == (4 to 0) || it in road } shouldBe true
+                h.pendingNavigationWorkers shouldBe 0
+                h.world.chunkSnapshotCaptures shouldBe captures
+            }
+        }
+    }
+
     test("an unassigned resident in the shared hall walks around furniture blocking the door direction") {
         residentRuntime(workerId = UUID(0, 42)) { h ->
             val hall = h.city.buildings.single().copy(entrance = CivPosition(2, 64, 3))

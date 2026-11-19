@@ -136,7 +136,7 @@ class CivsCitizenObservationStatusTest : FunSpec({
                     text.keys(locale).contains("building-status.$key") shouldBe true
                 }
             }
-            plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[2] shouldBe "Ищет путь"
+            plainText(civsNpcHologramText(text, h.owner.hologramSnapshots().single())).lines()[1] shouldBe "Ищет путь"
             h.owner.status(h.workerId) shouldBe "workers.status.route-searching"
             @Suppress("UNCHECKED_CAST")
             val observed = (h.owner.debug(h.city.id, h.workerId)["entries"] as List<Map<String, Any?>>).single()

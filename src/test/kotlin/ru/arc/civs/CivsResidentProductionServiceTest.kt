@@ -370,9 +370,6 @@ class CivsCraftCompletionFreshnessTest : FunSpec({
         serviceScenario { h ->
             val (workshop, carpenter) = prepareFundedCraft(h)
             val receipts = mutableListOf<CivInventoryTransaction>()
-            val journal = CompletableFuture<CivInventoryTransaction>()
-            every { h.store.saveInventoryTransaction(any()) } answers { receipts += firstArg<CivInventoryTransaction>(); journal }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val job = h.craftJob(carpenter.id)
             job.inputs shouldBe mapOf("OAK_LOG" to 1L)
@@ -393,18 +390,19 @@ class CivsCraftCompletionFreshnessTest : FunSpec({
             CivsEquipment.inputsReady(carpenter, job.inputs, emptyMap()) shouldBe true
             val barrel = craftTestBarrel(h, workshop)
             barrel.isEmpty shouldBe true
-            val delivery = deliverCraftTest(h, current, carpenter, job.id)
-            h.tickUntil("accepted craft reaches its journal") { receipts.isNotEmpty() || delivery.isDone }
-            if (delivery.isDone) h.await(delivery)
-            receipts.size shouldBe 1
-            barrel.isEmpty shouldBe true
-            h.service.city(h.player) shouldBe current
-            journal.complete(receipts.single())
-            h.tickUntil("paid craft awaits city publication") { h.saves.size == 1 }
-            delivery.isDone shouldBe false
-            barrel.contents.filterNotNull() shouldBe listOf(ItemStack(Material.OAK_PLANKS, 4))
-            h.commit()
-            val completed = h.await(delivery)
+            every { h.store.beginLocalInventory(current, capture(receipts)) } answers {
+                barrel.isEmpty shouldBe true
+                h.service.city(h.player) shouldBe current
+            }
+            every { h.store.completeLocalInventory(any()) } answers {
+                firstArg<CivInventoryTransaction>() shouldBe receipts.single()
+                barrel.contents.filterNotNull() shouldBe listOf(ItemStack(Material.OAK_PLANKS, 4))
+                h.service.city(h.player) shouldBe current
+                receipts.single().after
+            }
+            val completed = h.await(deliverCraftTest(h, current, carpenter, job.id))
+            completed.revision shouldBe current.revision + 1
+            h.service.city(h.player) shouldBe completed
             val paid = completed.workers.first { it.id == carpenter.id }
             paid.completedCycles shouldBe carpenter.completedCycles + 1
             CivsEquipment.plainCount(paid, "OAK_LOG") shouldBe 0
@@ -415,12 +413,15 @@ class CivsCraftCompletionFreshnessTest : FunSpec({
                 h.citizens.requireSelectedWorkDelivery(current.id, carpenter.id,
                     citizenPlan(current, carpenter)!!.token.copy(craftJobId = job.id), job)
                 h.citizens.requireStorageArrival(current.id, carpenter.id, workshop.id)
-                h.store.saveInventoryTransaction(any())
+                h.store.completeLocalInventory(receipts.single())
             }
             (shouldThrow<CompletionException> { h.await(deliverCraftTest(h, completed, carpenter, job.id)) }
                 .cause as CivsRejection).reason shouldBe "stale-delivery"
-            h.saves.size shouldBe 1
-            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            receipts.size shouldBe 1
+            barrel.contents.filterNotNull() shouldBe listOf(ItemStack(Material.OAK_PLANKS, 4))
+            h.service.city(h.player) shouldBe completed
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
 
@@ -430,9 +431,6 @@ class CivsCraftCompletionFreshnessTest : FunSpec({
             serviceScenario { h ->
                 val (workshop, carpenter) = prepareFundedCraft(h, inputsInStore = true)
                 val receipts = mutableListOf<CivInventoryTransaction>()
-                val journal = CompletableFuture<CivInventoryTransaction>()
-                every { h.store.saveInventoryTransaction(any()) } answers { receipts += firstArg<CivInventoryTransaction>(); journal }
-                every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
                 h.start()
                 val job = h.craftJob(carpenter.id)
                 job.inputs shouldBe mapOf("OAK_LOG" to 1L)
@@ -443,27 +441,31 @@ class CivsCraftCompletionFreshnessTest : FunSpec({
                 h.replaceCityInMemory(current)
                 h.service.craftPlan(current, current.workers.first { it.id == carpenter.id }) shouldBe job
                 val barrel = craftTestBarrel(h, workshop)
-                val pickup = h.service.prepareResidentSupplies(current.id, carpenter.id, workshop.id, job.id)
+                every { h.store.beginLocalInventory(current, capture(receipts)) } answers {
+                    barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG)
+                    h.service.city(h.player) shouldBe current
+                }
+                fun pickup() = h.await(h.service.prepareResidentSupplies(current.id, carpenter.id, workshop.id, job.id))
+                val saved = pickup()
+                verify(exactly = 1) { h.citizens.requireStorageArrival(current.id, carpenter.id, workshop.id) }
                 if (ownInputChanged) {
-                    h.await(pickup) shouldBe current
+                    saved shouldBe current
                     barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG)
                     receipts shouldBe emptyList()
-                    h.saves shouldBe emptyList()
-                    h.service.city(h.player) shouldBe current
                 } else {
-                    h.tickUntil("craft pickup reaches its journal") { receipts.isNotEmpty() || pickup.isDone }
-                    if (pickup.isDone) h.await(pickup)
-                    barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG)
-                    journal.complete(receipts.single())
-                    h.tickUntil("craft pickup awaits city publication") { h.saves.size == 1 }
-                    barrel.getItem(0) shouldBe null
-                    h.commit()
-                    val saved = h.await(pickup)
                     val supplied = saved.workers.first { it.id == carpenter.id }
+                    saved.revision shouldBe current.revision + 1
                     CivsEquipment.plainCount(supplied, "OAK_LOG") shouldBe 1
                     supplied.completedCycles shouldBe carpenter.completedCycles
                     saved.workers.first { it.id == changed.id } shouldBe changed
+                    barrel.isEmpty shouldBe true
+                    pickup() shouldBe saved
+                    receipts.single().after shouldBe saved
+                    verify(exactly = 1) { h.store.completeLocalInventory(receipts.single()) }
                 }
+                h.service.city(h.player) shouldBe saved
+                h.saves shouldBe emptyList()
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             }
         }
 
@@ -498,7 +500,10 @@ class CivsCraftCompletionFreshnessTest : FunSpec({
                 current.workers.first { it.id == carpenter.id }.completedCycles shouldBe carpenter.completedCycles
                 CivsEquipment.plainCount(current.workers.first { it.id == carpenter.id }, "OAK_PLANKS") shouldBe 0
                 h.saves shouldBe emptyList()
-                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+                verify(exactly = 0) {
+                    h.store.beginLocalInventory(any(), any())
+                    h.store.saveInventoryTransaction(any())
+                }
             }
         }
 })

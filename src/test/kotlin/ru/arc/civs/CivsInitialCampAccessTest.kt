@@ -59,19 +59,10 @@ class CivsInitialCampAccessTest : FunSpec({
             source shouldBe CivResidentFoodSource(camp.hall.id, camp.control, camp.standing)
             civsCanReachContainer(camp.feet, camp.control) shouldBe true
             every { h.citizens.residentCollectionFeet(worker.id, false) } returns camp.feet
-            val journal = mutableListOf<CivInventoryTransaction>()
-            every { h.store.saveInventoryTransaction(any()) } answers {
-                CompletableFuture.completedFuture(firstArg<CivInventoryTransaction>().also(journal::add))
-            }
-            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
-            val priorSaves = h.saves.size
-            val pickup = h.service.pickupResidentFood(camp.city.id, worker.id, source)
-            h.tickUntil("ordinary food pickup save") { pickup.isDone || h.saves.size > priorSaves }
-            if (pickup.isCompletedExceptionally) pickup.join()
-            h.saves.size shouldBe priorSaves + 1
-            h.commit()
-            val carried = h.await(pickup)
-            journal.single().collected?.food?.material shouldBe "BREAD"
+            val carried = h.await(h.service.pickupResidentFood(camp.city.id, worker.id, source))
+            h.service.settlements().single() shouldBe carried
+            verify(exactly = 1) { h.store.completeLocalInventory(match { it.collected?.food?.material == "BREAD" }) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             CivsEquipment.plainCount(carried.workers.single(), "BREAD") shouldBe 4
             camp.slots() shouldBe originalSlots.toMutableList().also { it[0] = ItemStack(Material.BREAD, 20) }
             carried.construction shouldBe before.construction

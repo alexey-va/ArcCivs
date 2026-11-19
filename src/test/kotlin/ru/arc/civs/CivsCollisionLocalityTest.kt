@@ -133,6 +133,24 @@ class CivsCollisionLocalityTest : FunSpec({
                 neighbour.npc.location shouldBe to
                 player.location shouldBe to
 
+                val nap = CivsCitizenNap(runtime) { disabled }
+                nap.show = { _, _, _ -> CivsIdleNapVisual({}, {}) }
+                h.world.time = 1_000L
+                val worker = h.city.workers.single { it.id == neighbourId }
+                actor.npc.teleport(to)
+                player.teleport(from.clone().add(-2.0, 0.0, 0.0))
+                neighbour.nextIdleNapAt = 1L
+                nap.start(neighbour, h.city, worker, h.world, 2_100L) shouldBe false
+                actor.npc.teleport(from)
+                neighbour.nextIdleNapAt = 1L
+                nap.start(neighbour, h.city, worker, h.world, 2_200L) shouldBe true
+                disabled.idleDestinationFree(actor, to) shouldBe false
+                disabled.routeMoveAllowed(actor, from, to) shouldBe false
+                disabled.routeMoveAllowed(actor, from, from.clone().add(-1.0, 0.0, 0.0)) shouldBe true
+                nap.stop(neighbour) shouldBe true
+                disabled.idleDestinationFree(actor, to) shouldBe true
+                disabled.routeMoveAllowed(actor, from, to) shouldBe true
+
                 fun route(permitted: Boolean = true) = CitizenPacketRoute(h.world, from, to,
                     { true }, { _, _ -> permitted }, { 1.0 }).also { it.readyWanderStep() }
                 fun advance(motion: CitizenPacketRoute) = motion.move(from, 5.0,
