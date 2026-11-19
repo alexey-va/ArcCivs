@@ -1144,7 +1144,9 @@ internal class CivsCitizenRoutes(
 
     /** A fresh arrival must have a clear body even when contact occurred before its first movement sweep. */
     fun arrivalBodyClear(actor: CitizenActor): Boolean {
-        if (actor.traversal != null || actor.route?.motion?.earlyStartPending == true) return false
+        if (actor.traversal != null) return false
+        // Food pickup checks the selected source against the resident's actual feet on this pulse.
+        if (actor.foodSource == null && actor.route?.motion?.earlyStartPending == true) return false
         // arriveForWork retires its route before accepting work/transfer. Later player occupancy cannot revoke that receipt.
         val supplyArrival = actor.supplyPickup == null && (actor.foodSource != null || actor.outputReturn != null)
         if (actor.route == null && !supplyArrival && actor.cycle.phase !in

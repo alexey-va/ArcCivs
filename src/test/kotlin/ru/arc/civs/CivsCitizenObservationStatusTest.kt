@@ -56,6 +56,10 @@ class CivsCitizenObservationStatusTest : FunSpec({
             every { motion.searching } returns true
             citizenObservedTravelStatus(travel, route) shouldBe "route-searching"
         }
+        every { motion.remainingNodes } returns 2
+        citizenObservedTravelStatus(travel, route) shouldBe travel
+        every { motion.remainingNodes } returns 0
+        citizenObservedTravelStatus(travel, route) shouldBe "route-searching"
         every { motion.searching } returns false
         for (intent in listOf(travel, "moving-to-work", "moving-to-town-hall", "moving-to-tavern",
             "moving-to-pickup", "carrying-cargo", "returning-output", "mine-descending", "mine-returning",

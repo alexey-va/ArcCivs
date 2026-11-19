@@ -436,7 +436,7 @@ internal fun citizenSupplyDestinationStatus(type: BuildingType?): String = when 
     else -> "moving-to-storage"
 }
 
-/** A destination is an intent; only a ready, unblocked route may describe it as walking. */
+/** A checked section can be walked while the worker is still finding the rest of the route. */
 internal fun citizenObservedTravelStatus(activity: String, route: CitizenRoute?, yielding: Boolean = false): String {
     if (activity !in CITIZEN_TRAVEL_STATUSES) return activity
     if (yielding) return "route-blocked"
@@ -444,7 +444,7 @@ internal fun citizenObservedTravelStatus(activity: String, route: CitizenRoute?,
     val motion = route.motion
     return when {
         motion.waitingForCollision || route.nativeCollisionTicks > 0 || route.bodyBlockedSince != null -> "route-blocked"
-        motion.searching -> "route-searching"
+        motion.searching && motion.remainingNodes == 0 -> "route-searching"
         motion.failure != null || route.completion?.cancelReason != null -> "route-unreachable"
         route.preparationRetryAt != null -> "route-preparing"
         route.completion != null || motion.finished ->
