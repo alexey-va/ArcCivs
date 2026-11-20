@@ -238,7 +238,8 @@ class CivsCourierServiceTest : FunSpec({
             deposited.workers.last().items!!.take(6) shouldBe producer.items!!.take(6)
             deposited.workers.last().completedCycles shouldBe producer.completedCycles
             deposited.workers.last().nextDeliveryAt shouldBe producer.nextDeliveryAt
-            val plan = h.supplyPlan(ready.workers.first().id)
+            // A capture started before the receipt can retry after its clock-based coalesce interval.
+            val plan = h.supplyPlan(ready.workers.first().id, tickMillis = 50)
             plan.cargo.sourceBuildingId shouldBe forester.id
             plan.cargo.sourceWorkerId shouldBe null
             plan.cargo.sourceEntrance shouldBe forester.entrance

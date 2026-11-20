@@ -170,10 +170,11 @@ internal class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean,
         }
         error("Supply dispatcher did not assign a carpenter batch within80 ticks")
     }
-    fun supplyPlan(workerId: UUID): CivCourierPlan {
+    fun supplyPlan(workerId: UUID, tickMillis: Long = 0): CivCourierPlan {
         repeat(80) {
             val current = requireNotNull(service.city(player))
             service.courierPlan(current, current.workers.first { it.id == workerId })?.let { return it }
+            time += tickMillis
             paper.performTicks(1)
         }
         error("Supply dispatcher did not assign worker $workerId within80 ticks")
