@@ -183,8 +183,9 @@ private fun waitingResidents(h: ResidentRuntime, count: Int = 8, type: BuildingT
         val point = Location(h.world, 14.5 + 3 * (index % 4), 64.0, -4.5 + 3 * (index / 4))
         h.owner.requestAdmissionAt(h.city.id, worker.id, point)
     }
-    for (second in 2..count / 2 + 4) {
-        h.owner.pulse(second * 1_000L)
+    // Drain admission batches at a fixed time so leisure cannot spend the window under test during setup.
+    repeat(count / 2 + 3) {
+        h.owner.pulse(1_000L)
         h.clearRecordedCalls()
     }
     h.owner.activeCount() shouldBe residents.size
