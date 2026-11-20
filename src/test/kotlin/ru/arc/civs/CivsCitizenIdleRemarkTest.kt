@@ -2,7 +2,9 @@ package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import net.kyori.adventure.text.Component
 import org.bukkit.Bukkit
+import org.bukkit.event.player.PlayerQuitEvent
 
 class CivsCitizenIdleRemarkTest : FunSpec({
     test("an idle adult speaks briefly near a viewer and picks a different line after a long pause") {
@@ -83,6 +85,45 @@ class CivsCitizenIdleRemarkTest : FunSpec({
             dueNow()
             actor.plan.idleReason shouldBe "waiting-inputs"
             actor.idleRemark shouldBe null
+            speech() shouldBe null
+        }
+    }
+
+    test("an idle remark ends when its last nearby viewer walks away or quits and does not replay on return") {
+        residentRuntime { h ->
+            h.background = true
+            val actor = h.actor()
+            val first = h.paper.server.onlinePlayers.single()
+            val second = h.paper.addPlayer("OtherObserver")
+            val near = actor.npc.location
+            val far = near.clone().add(30.0, 0.0, 0.0)
+            first.teleport(near)
+            second.teleport(near)
+            var now = 2_000L
+            fun pulse() = h.owner.pulse(now++)
+            fun speech() = h.owner.hologramSnapshots().single().speech
+            fun speak(): String {
+                actor.nextIdleRemarkTick = Bukkit.getCurrentTick()
+                pulse()
+                return requireNotNull(speech())
+            }
+
+            val firstLine = speak()
+            first.teleport(far)
+            pulse()
+            speech() shouldBe firstLine
+            second.teleport(far)
+            pulse()
+            speech() shouldBe null
+            first.teleport(near)
+            pulse()
+            speech() shouldBe null
+
+            speak()
+            h.owner.onQuit(PlayerQuitEvent(first, Component.empty(), PlayerQuitEvent.QuitReason.DISCONNECTED))
+            speech() shouldBe null
+            second.teleport(near)
+            pulse()
             speech() shouldBe null
         }
     }

@@ -48,7 +48,19 @@ internal class CivsCitizenLeisure(
     private val logistics get() = logisticsOwner()
     private val life get() = lifeOwner()
     val nap = CivsCitizenNap(runtime, collisionsOwner)
+    private val idleSpeakers = mutableSetOf<CitizenActor>()
     var viewers: List<CitizenViewer> = emptyList()
+        set(value) {
+            field = value
+            if (idleSpeakers.isEmpty()) return
+            val tick = Bukkit.getCurrentTick()
+            idleSpeakers.removeIf { actor ->
+                if (actor.idleRemark?.visible(tick) == null) return@removeIf true
+                if (observed(actor)) return@removeIf false
+                actor.idleRemark = null
+                true
+            }
+        }
     var conversations: CitizenConversationDeck? = null
 
     private fun observed(actor: CitizenActor): Boolean = viewers.isNotEmpty() && actor.npc.isValid &&
@@ -78,6 +90,7 @@ internal class CivsCitizenLeisure(
         if (tick - due > 40 || actor.transferRemark?.visible(tick) != null || !observed(actor)) return
         val previous = actor.idleRemark?.key
         actor.idleRemark = CitizenRemark(IDLE_REMARK_LINES.filterNot { it == previous }.random(), tick)
+        idleSpeakers += actor
     }
 
     fun releaseUnseen(remaining: List<CitizenViewer>) {
@@ -101,6 +114,7 @@ internal class CivsCitizenLeisure(
         if (actor.idleNap != null) nap.stop(actor)
         val visit = actor.social.visit ?: return
         actor.social.finish(Bukkit.getCurrentTick())
+        if (idleSpeakers.remove(actor)) actor.idleRemark = null
         actor.nextIdleRemarkTick = null
         CivsDiagnostics.event(if (visit.partnerId == null) "citizen_campfire" else "citizen_meeting",
             "city" to actor.cityId, "worker" to actor.workerId,

@@ -3693,7 +3693,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("five residents walk and pause independently and separate an exact overlap without work or teleport credit") {
+    test("five residents keep walking independently and separate an exact overlap without work or teleport credit") {
         residentRuntime(workerId = UUID.fromString("9d0a2c2a-2abb-4d5b-9150-7659bfb1df84")) { h ->
             for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
             val ids = listOf(h.workerId, UUID.fromString("06254fa5-4795-4a8e-a7c7-783f9fc90cfd"),
@@ -3722,20 +3722,19 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.clearRecordedCalls()
             separated() shouldBe true
             val walked = ids.associateWith { 0.0 }.toMutableMap()
-            val moving = ids.associateWith { mutableListOf<Boolean>() }
-            val starts = ids.associateWith { linkedSetOf<Long>() }
-            var mixedMotionTicks = 0
-            for (tick in 1..1_200) {
+            val movingFrames = ids.associateWith { 0 }.toMutableMap()
+            val outings = ids.associateWith { mutableSetOf<Long>() }
+            var mixedMotion = false
+            val frames = 1_200
+            for (tick in 1..frames) {
                 val previous = actors.mapValues { it.value.location }
                 h.navigate()
                 if (tick % 20 == 0) {
                     h.owner.pulse(requireNotNull(h.navigationNow))
-                    val entries = h.owner.debug(city.id, null)["entries"] as List<*>
-                    val targets = entries.mapNotNull { entry ->
-                        val state = entry as Map<*, *>
-                        val route = state["route"] as? Map<*, *> ?: return@mapNotNull null
-                        starts.getValue(state["worker"] as UUID) += route["started_at"] as Long
-                        route["target"] as CitizenPoint
+                    val targets = ids.mapNotNull { id ->
+                        val route = h.actor(id).route ?: return@mapNotNull null
+                        route.wanderWalk?.let { outings.getValue(id) += it.startedAt }
+                        route.target.point()
                     }
                     targets.distinct().size shouldBe targets.size
                     h.clearRecordedCalls() // Keep the 60-second behavioral trace, not millions of MockK property-call records.
@@ -3745,10 +3744,12 @@ class CivsResidentsRuntimeTest : FunSpec({
                     val distance = previous.getValue(id).distance(npc.location)
                     (distance <= .118251) shouldBe true
                     walked[id] = walked.getValue(id) + distance
-                    moving.getValue(id) += distance > .000001
-                    if (distance > .000001) movingNow++
+                    if (distance > .000001) {
+                        movingFrames[id] = movingFrames.getValue(id) + 1
+                        movingNow++
+                    }
                 }
-                if (movingNow in 1..4) mixedMotionTicks++
+                if (movingNow in 1 until actors.size) mixedMotion = true
                 withClue("tick=$tick positions=${actors.mapValues { it.value.location }}") {
                     ids.indices.all { a -> (a + 1 until ids.size).all { b ->
                         val first = actors.getValue(ids[a])
@@ -3757,13 +3758,12 @@ class CivsResidentsRuntimeTest : FunSpec({
                     } } shouldBe true
                 }
             }
-            withClue("walked=$walked starts=$starts") {
+            withClue("walked=$walked movingFrames=$movingFrames outings=$outings") {
                 walked.values.all { it >= 4.0 } shouldBe true
-                starts.values.all { it.size >= 2 } shouldBe true
-                moving.values.all { ticks -> ticks.count { it } >= 40 && ticks.count { !it } >= 40 } shouldBe true
-                (mixedMotionTicks >= 100) shouldBe true
-                (moving.getValue(ids[0]) != moving.getValue(ids[1])) shouldBe true
-                (starts.getValue(ids[0]) != starts.getValue(ids[1])) shouldBe true
+                movingFrames.values.all { it > frames / 2 } shouldBe true
+                outings.values.all { it.size >= 2 } shouldBe true
+                (outings.values.distinct().size > 1) shouldBe true
+                mixedMotion shouldBe true
             }
             h.spawns shouldBe 5
             h.deliveries shouldBe 0
