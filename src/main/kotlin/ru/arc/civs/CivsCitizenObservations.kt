@@ -331,18 +331,22 @@ internal class CivsCitizenObservations(
     }
 
     /** Reassignment may retire leisure, never an accepted work, transfer or injury episode. */
-    internal fun canReassign(cityId: UUID, workerId: UUID): Boolean {
+    internal fun canReassign(cityId: UUID, workerId: UUID, waitingOrder: UUID? = null): Boolean {
         checkCitizenMainThread()
         if (runtime.closed.get() || workerId in runtime.pendingHarm) return false
-        val actor = runtime.actors[workerId] ?: return true
+        val actor = runtime.actors[workerId] ?: return waitingOrder == null
         if (actor.sleeping || actor.sheltering || actor.alarmSheltering || actor.idleNap != null ||
             actor.attacker != null || actor.residentYield != null || actor.social.visit != null) return false
         val idleTavernkeeper = actor.plan.type == BuildingType.TAVERN && actor.cycle.phase == CitizenPhase.WORKING &&
             actor.npc.isValid && !actor.npc.isSeated && actor.route == null && actor.workDetour == null
-        return actor.cityId == cityId && (actor.cycle.phase == CitizenPhase.IDLE || idleTavernkeeper) &&
+        val waitingBuilder = waitingOrder != null && actor.plan.token.constructionId == waitingOrder &&
+            actor.plan.type == BuildingType.BUILDER_HUT && actor.plan.idleReason == "waiting-materials" &&
+            actor.workDetour == null && actor.tavernService == null && actor.outputReturn == null
+        return actor.cityId == cityId && (actor.cycle.phase == CitizenPhase.IDLE || idleTavernkeeper ||
+            waitingBuilder && actor.cycle.phase == CitizenPhase.PAUSED) &&
             !life.residentLifePending(actor) && actor.mealVisit == null && actor.mentorVisit == null &&
             actor.plan.worldWork == null && actor.plan.courier == null && actor.plan.autonomousWork == null &&
-            actor.plan.token.constructionId == null && actor.plan.token.craftJobId == null &&
+            (actor.plan.token.constructionId == null || waitingBuilder) && actor.plan.token.craftJobId == null &&
             actor.supplyPickup == null && actor.foodSource == null &&
             actor.courierPickupStartedAt == null && !actor.returningToWarehouse &&
             !logistics.collectedPending(actor) && actor.collectionSeek == null && actor.collectionHome == null &&

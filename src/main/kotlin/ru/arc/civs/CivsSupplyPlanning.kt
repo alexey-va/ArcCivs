@@ -49,6 +49,7 @@ internal class CivsSupplyPlanning(
     private val crafts: Map<UUID, CivCraftJob> = emptyMap(),
     private val constructionNeed: Map<String, Long>? = null,
     private val itemReceipt: UUID? = null,
+    private val workReserves: Map<UUID, Map<String, Long>> = emptyMap(),
 ) {
     private var stores: Map<UUID, CivSupplyStore>? = null
     private var requests = emptyList<CivSupplyRequest>()
@@ -65,6 +66,7 @@ internal class CivsSupplyPlanning(
                 val stock = city.inventory?.sourceStock(id, observed.stock) ?: observed.stock
                 val buffered = city.inventory?.bufferStock(id).orEmpty()
                 val reserved = CivsLogistics.desiredStock(city, building).toMutableMap()
+                workReserves[id]?.forEach { (material, count) -> reserved.merge(material, count, Math::max) }
                 // Unknown paid bills protect every observed plain item rather than authorizing surplus.
                 (CivsLogistics.constructionBufferReserve(city, id, constructionNeed) ?: stock).forEach { (material, count) ->
                     reserved.merge(material, count, Math::max)
@@ -78,7 +80,7 @@ internal class CivsSupplyPlanning(
                         observed.unavailable == 0 && observed.containers in 1..64 && observed.key.upgradingOrder == null,
                     bufferedStock = buffered, alternateOutputs = CivsLogistics.alternateProducerOutputs(city, building))
             }.toMap()
-            requests = CivsLogistics.requests(city) { stores?.get(it)?.stock.orEmpty() }
+            requests = CivsLogistics.requests(city, workReserves) { stores?.get(it)?.stock.orEmpty() }
             // The universe also includes arbitrary plain excess such as gravel and dirt.
             val names = requests.map(CivSupplyRequest::material).toMutableSet()
             stores.orEmpty().values.forEach { names += it.stock.keys }

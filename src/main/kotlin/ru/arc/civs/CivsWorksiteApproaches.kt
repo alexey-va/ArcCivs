@@ -262,9 +262,8 @@ internal class CivsWorksiteApproaches(
         if (!citizenChunkReady(world, focus.x shr 4, focus.z shr 4))
             return context.blocked(worker, "worksite-unloaded", point = focus, reason = "chunk-unloaded")
         try { CivsForestry.validateWork(city, work) } catch (_: IllegalArgumentException) { return changed() }
-        val timber = requireNotNull(CivsProduction.material(building))
         val roots = work.forestry?.job?.roots ?: if (CivsForestry.care(work))
-            forestry().careRoots(city, building, world, focus, timber) ?: return changed()
+            forestry().careRoots(city, building, world, focus, requireNotNull(CivsForestry.workTimber(work))) ?: return changed()
             else CivsForestry.plantingRoots(work)
         val paths = context.protectedForestryPaths(city)
         val clear = if (work.forestry != null || CivsForestry.care(work)) CivsForestry.rootsClear(city, roots, paths)

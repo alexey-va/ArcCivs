@@ -403,9 +403,27 @@ internal class CivsConstructionRuntime(
         if (!ready()) return null
         val city = cities[cityId] ?: return null
         val order = city.construction?.takeIf { it.id == orderId } ?: return null
-        val pending = constructionSites[orderId] ?: store.loadPlan(orderId).thenApplyAsync({ plan ->
+        val pending = loadSite(city, order)
+        return if (pending.isDone && !pending.isCompletedExceptionally) pending.getNow(null) else null
+    }
+
+    /** A cold journal recovery uses the same captured geometry as the resident workplace. */
+    fun verifyRoadSite(tx: CivInventoryTransaction): CompletableFuture<Unit> {
+        val work = requireNotNull(tx.upkeep).work
+        val batch = requireNotNull(work.upkeep?.waitingBatch)
+        val order = requireNotNull(tx.after.construction)
+        require(order.id == batch.orderId && order.workDone == batch.batch)
+        return loadSite(tx.after, order).thenApply { site ->
+            require(site.building == order.plannedBuilding && site.outside(work))
+        }
+    }
+
+    private fun loadSite(city: Settlement, order: CivConstruction): CompletableFuture<CivConstructionSite> {
+        val orderId = order.id
+        val cityId = city.id
+        return constructionSites[orderId] ?: store.loadPlan(orderId).thenApplyAsync({ plan ->
             requireNotNull(plan) { "Missing captured construction plan $orderId" }
-            require(plan.cityId == cityId && plan.worldId == city.worldId && plan.building == order.plannedBuilding)
+            require(plan.id == orderId && plan.cityId == cityId && plan.worldId == city.worldId && plan.building == order.plannedBuilding)
             civsConstructionSite(plan)
         }, executor).also { load ->
             constructionSites[orderId] = load
@@ -417,7 +435,6 @@ internal class CivsConstructionRuntime(
                 }
             }
         }
-        return if (pending.isDone && !pending.isCompletedExceptionally) pending.getNow(null) else null
     }
 
     private fun startPlacement(city: Settlement, order: CivConstruction) {

@@ -46,7 +46,12 @@ internal class CivsRoadWorld(
 
     /** Discovery is externally budgeted. This method never loads chunks or writes a block. */
     internal fun captureRoadUpkeep(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep,
-        registerSurface: ((UUID, CivPosition) -> Unit)? = null, rejectedStandings: Set<CivPosition> = emptySet()): CivWorldWork? {
+        registerSurface: ((UUID, CivPosition) -> Unit)? = null, rejectedStandings: Set<CivPosition> = emptySet()): CivWorldWork? =
+        captureRoadUpkeep(city, worker, upkeep, registerSurface, rejectedStandings, null, null)
+
+    internal fun captureRoadUpkeep(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep,
+        registerSurface: ((UUID, CivPosition) -> Unit)?, rejectedStandings: Set<CivPosition>,
+        waitingSite: CivConstructionSite?, observedHealthy: (() -> Unit)?): CivWorldWork? {
         check(Bukkit.isPrimaryThread())
         val world = plugin.server.getWorld(city.worldId) ?: return null
         val p = upkeep.floor
@@ -154,6 +159,7 @@ internal class CivsRoadWorld(
         } else CivsRoadMaintenance.covers(p, clearance) ?: CivsRoadMaintenance.covers(p, clearance, pavement) ?: return null
         val changes = foundation + listOfNotNull(change) + cover
         if (changes.isEmpty()) {
+            observedHealthy?.invoke()
             val stairs = block.blockData as? Stairs
             if (registerSurface != null && stairs != null && stairs.material != Material.COBBLESTONE_STAIRS &&
                 stairs.half == Bisected.Half.BOTTOM && !stairs.isWaterlogged && !isClosed() && city.autonomy != null &&
@@ -170,7 +176,7 @@ internal class CivsRoadWorld(
         val standingHeights = listOf(1, 0, 2, 3) + if (foundation.isNotEmpty()) listOf(-1, -2, -3) else emptyList()
         for (dy in standingHeights) for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) {
             val standing = CivPosition(p.x + dx, p.y + dy, p.z + dz)
-            if (standing in rejectedStandings) continue
+            if (standing in rejectedStandings || waitingSite?.outside(standing) == false) continue
             if (!city.contains(standing.x, standing.z) || !citizenControlClear(city, standing) ||
                 !citizenStandable(world, standing) || !citizenPacketBodyClear(world,
                     CitizenPoint(standing.x + .5, standing.y.toDouble(), standing.z + .5), false)) continue

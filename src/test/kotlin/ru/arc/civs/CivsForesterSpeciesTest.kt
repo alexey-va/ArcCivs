@@ -28,6 +28,80 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsForesterSpeciesTest : FunSpec({
+    for (anyTimber in listOf(false, true)) test("a birch order with anyTimber=$anyTimber chooses the appropriate single sapling") {
+        forestryWorksite("ordered-birch-$anyTimber", autonomous = false, strict = true) { _, runtime, original ->
+            val mill = original.buildings.first { it.type == BuildingType.FORESTER }
+            val worker = CivsEquipment.collectSupplies(original.workers.single(), mapOf("BIRCH_SAPLING" to 1L, "OAK_SAPLING" to 1L))
+            val city = original.copy(workers = listOf(worker))
+            runtime.productionOrder = { _, _ -> CivProductionOrder(mill.id, "OAK_LOG", "BIRCH_LOG", 0, 1, 1, anyTimber) }
+            val work = speciesNext(runtime, city)
+            val species = if (anyTimber) "OAK" else "BIRCH"
+            work.status shouldBe "planting-tree"
+            work.inputs shouldBe mapOf("${species}_SAPLING" to 1L)
+            work.changes.single().after shouldBe "minecraft:${species.lowercase()}_sapling[stage=0]"
+            runtime.validate(city, work)
+            val after = CivsRules.finishWorldWork(city, work, 1_000)
+            CivsEquipment.plainCount(after.workers.single(), "${species}_SAPLING") shouldBe 0
+            CivsEquipment.plainCount(after.workers.single(), if (anyTimber) "BIRCH_SAPLING" else "OAK_SAPLING") shouldBe 1
+        }
+    }
+
+    test("an exact spruce order waits for a complete kit and plants four real saplings at an oak forester") {
+        forestryWorksite("ordered-spruce", autonomous = false, strict = true) { world, runtime, original ->
+            val mill = original.buildings.first { it.type == BuildingType.FORESTER }
+            val worker = CivsEquipment.collectSupplies(original.workers.single(), mapOf("SPRUCE_SAPLING" to 3L, "OAK_SAPLING" to 1L))
+            val city = original.copy(workers = listOf(worker), inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy())
+            var order = CivProductionOrder(mill.id, "OAK_LOG", "BIRCH_LOG", 0, 8, 1)
+            runtime.productionOrder = { _, resident -> order.takeIf { it.matches(resident) } }
+            repeat(500) { if (runtime.requirement(city, worker)?.first != "BIRCH_SAPLING") runtime.pulse(listOf(city)) }
+            runtime.requirement(city, worker)?.first shouldBe "BIRCH_SAPLING"
+
+            order = order.copy(material = "SPRUCE_LOG")
+            repeat(500) { if (runtime.requirement(city, worker)?.first != "SPRUCE_SAPLING") runtime.pulse(listOf(city)) }
+            runtime.idleReason(city, worker) shouldBe "waiting-saplings"
+            runtime.requirement(city, worker)?.first shouldBe "SPRUCE_SAPLING"
+            runtime.plan(city, worker) shouldBe null
+
+            val ready = city.copy(workers = listOf(CivsEquipment.collectSupplies(worker, mapOf("SPRUCE_SAPLING" to 1L))))
+            val work = speciesNext(runtime, ready)
+            work.status shouldBe "planting-tree"
+            work.inputs shouldBe mapOf("SPRUCE_SAPLING" to 4L)
+            work.outputs shouldBe emptyMap()
+            work.changes.map { it.after } shouldBe List(4) { "minecraft:spruce_sapling[stage=0]" }
+            runtime.validate(ready, work)
+            val after = CivsRules.finishWorldWork(ready, work, 1_000)
+            CivsEquipment.plainCount(after.workers.single(), "SPRUCE_SAPLING") shouldBe 0
+            CivsEquipment.plainCount(after.workers.single(), "OAK_SAPLING") shouldBe 1
+            after.building(mill.id)?.production shouldBe "OAK_LOG"
+            work.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                .blockData = Bukkit.createBlockData(cell.after) }
+            runtime.invalidate(worker.id, work)
+            val care = speciesNext(runtime, after)
+            care.status shouldBe "watering"
+            care.inputs shouldBe emptyMap()
+            care.changes.single().after shouldBe "minecraft:spruce_sapling[stage=1]"
+            runtime.validate(after, care)
+        }
+    }
+
+    test("an exact spruce order replants one real sapling after harvesting a naturally single spruce") {
+        forestryWorksite("ordered-single-spruce", autonomous = false, strict = true) { world, runtime, original ->
+            val worker = CivsEquipment.collectSupplies(original.workers.single(), mapOf("SPRUCE_SAPLING" to 1L))
+            val city = original.copy(workers = listOf(worker))
+            val root = CivPosition(10, 64, 10)
+            for (y in root.y..root.y + 2) world.getBlockAt(root.x, y, root.z).type = Material.SPRUCE_LOG
+            world.getBlockAt(root.x, root.y + 3, root.z).blockData = Bukkit.createBlockData(
+                "minecraft:spruce_leaves[distance=1,persistent=false,waterlogged=false]")
+            runtime.productionOrder = { _, _ -> CivProductionOrder(requireNotNull(worker.assignment), "OAK_LOG", "SPRUCE_LOG", 0, 1, 1) }
+            val work = speciesNext(runtime, city)
+            work.status shouldBe "felling-tree"
+            work.forestry!!.job.roots shouldBe listOf(root)
+            work.inputs shouldBe mapOf("SPRUCE_SAPLING" to 1L)
+            work.changes.single { it.position == root }.after shouldBe "minecraft:spruce_sapling[stage=0]"
+            runtime.validate(city, work)
+        }
+    }
+
     for (autonomous in listOf(false, true)) {
         test("all six species persist per forester without changing inventory or an accepted tree in Auto $autonomous") {
             val directory = Files.createTempDirectory("civs-species-store")

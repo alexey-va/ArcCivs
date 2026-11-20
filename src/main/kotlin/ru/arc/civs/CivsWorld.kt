@@ -326,6 +326,10 @@ class CivsWorld(
     internal fun captureRoadUpkeepAvoiding(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep,
         registerSurface: ((UUID, CivPosition) -> Unit)?, rejectedStandings: Set<CivPosition>): CivWorldWork? =
         roadWorld.captureRoadUpkeep(city, worker, upkeep, registerSurface, rejectedStandings)
+    internal fun captureWaitingRoadRepair(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep,
+        registerSurface: ((UUID, CivPosition) -> Unit)?, rejected: Set<CivPosition>, site: CivConstructionSite,
+        healthy: () -> Unit): CivWorldWork? =
+        roadWorld.captureRoadUpkeep(city, worker, upkeep, registerSurface, rejected, site, healthy)
     internal fun validateRoadUpkeep(city: Settlement, work: CivWorldWork) = roadWorld.validateRoadUpkeep(city, work)
 
     /** Called only for Core's accepted writes; no synthetic barrel impacts or block mutations. */

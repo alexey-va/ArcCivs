@@ -11,7 +11,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import ru.arc.civs.CivsUi.Companion.PAGE_SIZE
-import ru.arc.civs.CivsUi.Companion.CARPENTRY_PAGE_SIZE
+import ru.arc.civs.CivsUi.Companion.ORDER_CARD_PAGE_SIZE
 import ru.arc.civs.CivsUi.Companion.WHITE
 import ru.arc.civs.CivsUi.Companion.LAND
 import ru.arc.civs.CivsUi.Companion.COMMIT
@@ -135,8 +135,7 @@ internal fun CivsUi.showBuilding(player: Player, buildingId: UUID, error: Compon
             }
             if (building.type != BuildingType.HOUSE && CivsRules.slots(city, building) > 0) add(tr(player, "label.workers") to tr(player, "common.fraction", "value" to assigned, "limit" to CivsRules.slots(city, building)))
             if (building.type == BuildingType.SAWMILL) add(tr(player, "label.output") to tr(player, "carpentry.automatic"))
-            if (acceptedToolOrders.isNotEmpty()) add(tr(player, "label.output") to Component.join(text.literal(" · "),
-                acceptedToolOrders.map { it.material }.distinct().map { materialName(player, it) }))
+            if (acceptedToolOrders.isNotEmpty()) add(tr(player, "label.output") to orderOutputs(player, acceptedToolOrders))
             CivsProduction.material(building)?.takeIf { acceptedToolOrders.isEmpty() && !CivsRules.isBuilder(city, building) && building.type != BuildingType.SAWMILL }?.let { material ->
                 if (building.type != BuildingType.QUARRY) add(tr(player, if (building.type == BuildingType.FORESTER)
                     "forestry.species-label" else "label.output") to
@@ -329,9 +328,7 @@ internal fun CivsUi.showProduction(player: Player, buildingId: UUID, error: Comp
                 inputs.isEmpty() -> "production.help"
                 building.type == BuildingType.TOWN_HALL -> "production.scribe-help"
                 else -> "production.processor-help" }) else null,
-        if (toolOrders.isNotEmpty()) body(tr(player, "blacksmith.active-orders", "items" to
-            Component.join(text.literal(" · "), toolOrders.map { order -> tr(player, "buildings.output",
-                "resource" to materialName(player, order.material), "amount" to order.amount) }))) else null,
+        if (toolOrders.isNotEmpty()) body(tr(player, "blacksmith.active-orders", "items" to orderOutputs(player, toolOrders))) else null,
         if (building.type == BuildingType.BLACKSMITH) body(player, "blacksmith.manual-help") else null,
         if (inputs.isNotEmpty()) table(inputs.map { (material, needed) -> materialName(player, material) to
             tr(player, "common.required", "have" to if (available?.isSuccess == true)
@@ -404,6 +401,11 @@ internal fun CivsUi.showForesterSpecies(player: Player, cityId: UUID, buildingId
 }
 
 
+private fun CivsUi.orderOutputs(player: Player, orders: List<CivCarpentryOrderView>): Component =
+    Component.join(text.literal(" · "), orders.groupBy(CivCarpentryOrderView::material).map { (material, batches) ->
+        tr(player, "buildings.output", "resource" to materialName(player, material), "amount" to batches.sumOf(CivCarpentryOrderView::amount))
+    })
+
 internal fun CivsUi.showCarpentry(player: Player, buildingId: UUID, page: Int = 0) {
     val city = city(player) ?: return
     val building = city.building(buildingId) ?: return showBuildings(player)
@@ -411,8 +413,8 @@ internal fun CivsUi.showCarpentry(player: Player, buildingId: UUID, page: Int = 
     val forge = building.type == BuildingType.BLACKSMITH
     val result = runCatching { host.carpentry(player, buildingId) }
     val view = result.getOrNull()
-    val orders = view?.orders.orEmpty()
-    val current = page.coerceIn(0, lastPage(orders.size, CARPENTRY_PAGE_SIZE))
+    val orders = view?.orders.orEmpty().groupBy(CivCarpentryOrderView::material).entries.toList()
+    val current = page.coerceIn(0, lastPage(orders.size, ORDER_CARD_PAGE_SIZE))
     present(player, "civs.production", if (forge) "blacksmith.title" else "carpentry.title", buildList {
         add(body(buildingName(player, building.type, building.level)))
         add(body(player, if (forge) "blacksmith.help" else "carpentry.help"))
@@ -420,26 +422,31 @@ internal fun CivsUi.showCarpentry(player: Player, buildingId: UUID, page: Int = 
         if (view == null) add(body(player, "carpentry.unavailable"))
         else if (view.paused) add(body(tr(player, "carpentry.paused").color(STOCK)))
         else if (orders.isEmpty()) add(body(player, if (view.planning) "carpentry.planning" else if (forge) "blacksmith.waiting" else "carpentry.waiting"))
-        orders.drop(current * CARPENTRY_PAGE_SIZE).take(CARPENTRY_PAGE_SIZE).forEach { order ->
-            val status = if (view?.paused == true) "order-paused"
-                else if (order.status == "waiting-materials") "waiting-materials" else "crafting"
-            add(card(listOfNotNull(
-                tr(player, "buildings.output", "resource" to materialName(player, order.material), "amount" to order.amount).color(STOCK),
-                tr(player, "carpentry.worker-status", "worker" to text.literal(order.workerName).color(PEOPLE),
-                    "status" to tr(player, "carpentry.$status")),
-                tr(player, "carpentry.target", "target" to (order.targetBuildingId?.let(city::building)?.let {
-                    buildingName(player, it.type, it.level) } ?: tr(player, "carpentry.storage"))),
-                if (order.demandMaterial != order.material) tr(player, "carpentry.demand", "item" to materialName(player, order.demandMaterial)) else null,
-                tr(player, if (order.missing.isEmpty()) "carpentry.inputs" else "carpentry.missing",
-                    "items" to materialAmounts(player, if (order.missing.isEmpty()) order.inputs else order.missing))
-                    .color(if (order.missing.isEmpty()) CivsText.BODY else STOCK),
-            ), 360))
+        orders.drop(current * ORDER_CARD_PAGE_SIZE).take(ORDER_CARD_PAGE_SIZE).forEach { (material, batches) ->
+            add(card(buildList {
+                add(tr(player, "buildings.output", "resource" to materialName(player, material),
+                    "amount" to batches.sumOf(CivCarpentryOrderView::amount)).color(STOCK))
+                for (order in batches) {
+                    val status = if (view?.paused == true) "order-paused"
+                        else if (order.status == "waiting-materials") "waiting-materials" else "crafting"
+                    add(tr(player, if (batches.size == 1) "carpentry.worker-status" else "carpentry.worker-batch",
+                        "worker" to text.literal(order.workerName).color(PEOPLE), "amount" to order.amount,
+                        "status" to tr(player, "carpentry.$status")))
+                    add(tr(player, "carpentry.target", "target" to (order.targetBuildingId?.let(city::building)?.let {
+                        buildingName(player, it.type, it.level) } ?: tr(player, "carpentry.storage"))))
+                    if (order.demandMaterial != material) add(tr(player, "carpentry.demand", "item" to materialName(player, order.demandMaterial)))
+                    add(tr(player, if (order.missing.isEmpty()) "carpentry.inputs" else "carpentry.missing",
+                        "items" to materialAmounts(player, if (order.missing.isEmpty()) order.inputs else order.missing))
+                        .color(if (order.missing.isEmpty()) CivsText.BODY else STOCK))
+                }
+                add(orderComment(player, buildingId, material))
+            }, 360))
         }
     }, buildList {
         if (view != null) add(button(player, "recipes", "carpentry.recipes-open", PERSONAL) {
             showCarpentryRecipes(player, buildingId, view.level.coerceIn(1, 3))
         })
-        pages(player, current, orders.size, CARPENTRY_PAGE_SIZE) { showCarpentry(player, buildingId, it) }
+        pages(player, current, orders.size, ORDER_CARD_PAGE_SIZE) { showCarpentry(player, buildingId, it) }
     }, reopen = { showCarpentry(player, buildingId, current) }, cityId = city.id)
 }
 
@@ -450,14 +457,14 @@ internal fun CivsUi.showCarpentryRecipes(player: Player, buildingId: UUID, tier:
     val view = runCatching { host.carpentry(player, buildingId) }.getOrNull() ?: return showCarpentry(player, buildingId)
     val recipes = view.recipes.filter { it.level == tier }
     val forge = building.type == BuildingType.BLACKSMITH
-    val current = page.coerceIn(0, lastPage(recipes.size, CARPENTRY_PAGE_SIZE))
+    val current = page.coerceIn(0, lastPage(recipes.size, ORDER_CARD_PAGE_SIZE))
     present(player, "civs.carpentry-recipes", if (forge) "blacksmith.recipes-title" else "carpentry.recipes-title", buildList {
         add(body(buildingName(player, building.type, building.level)))
         add(body(tr(player, "carpentry.tier", "level" to tier).color(PERSONAL)))
         add(body(player, if (forge) "blacksmith.recipes-help" else "carpentry.recipes-help"))
         if (tier > view.level) add(body(tr(player, "carpentry.locked", "level" to tier).color(STOCK)))
         if (recipes.isEmpty()) add(body(player, "carpentry.no-recipes"))
-        recipes.drop(current * CARPENTRY_PAGE_SIZE).take(CARPENTRY_PAGE_SIZE).forEach { recipe ->
+        recipes.drop(current * ORDER_CARD_PAGE_SIZE).take(ORDER_CARD_PAGE_SIZE).forEach { recipe ->
             add(card(listOfNotNull(
                 tr(player, "buildings.output", "resource" to materialName(player, recipe.material), "amount" to recipe.amount).color(STOCK),
                 tr(player, "carpentry.inputs", "items" to materialAmounts(player, recipe.inputs)),
@@ -473,7 +480,7 @@ internal fun CivsUi.showCarpentryRecipes(player: Player, buildingId: UUID, tier:
             if (level > view.level) tr(player, "carpentry.locked", "level" to level) else Component.empty()) {
                 showCarpentryRecipes(player, buildingId, level)
             })
-        pages(player, current, recipes.size, CARPENTRY_PAGE_SIZE) { showCarpentryRecipes(player, buildingId, tier, it) }
+        pages(player, current, recipes.size, ORDER_CARD_PAGE_SIZE) { showCarpentryRecipes(player, buildingId, tier, it) }
     }, reopen = { showCarpentryRecipes(player, buildingId, tier, current) }, cityId = city.id)
 }
 

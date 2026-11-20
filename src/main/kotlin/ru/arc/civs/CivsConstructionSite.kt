@@ -7,11 +7,34 @@ import kotlin.math.abs
 
 /** Detached construction geometry; a moving earthwork cursor never owns the builder's feet. */
 data class CivConstructionSite(val orderId: UUID, val building: CivBuilding, val changedColumns: Set<Long>,
-    val exteriorColumns: List<CivPosition> = citizenConstructionColumns(building, changedColumns))
+    val exteriorColumns: List<CivPosition> = citizenConstructionColumns(building, changedColumns),
+    val approachColumns: Set<Long> = emptySet()) {
+    internal fun outside(point: CivPosition): Boolean {
+        val key = civsTerrainKey(point.x, point.z)
+        return key !in changedColumns && key !in approachColumns &&
+            !CivsAutonomousGeometry.horizontalContains(building.bounds, point) &&
+            exteriorColumns.none { it.x == point.x && it.z == point.z }
+    }
+
+    internal fun outside(work: CivWorldWork) = outside(work.standing) && work.focus?.let(::outside) == true &&
+        work.changes.all { outside(it.position) }
+}
 
 internal fun civsConstructionSite(plan: CivPlacementPlan): CivConstructionSite = CivConstructionSite(
     plan.id, plan.building, plan.terrain?.blocks.orEmpty().asSequence().filter { it.before != it.after }
-        .map { civsTerrainKey(it.position.x, it.position.z) }.toSet())
+        .map { civsTerrainKey(it.position.x, it.position.z) }.toSet(),
+    approachColumns = buildSet {
+        fun reserve(point: CivPosition) { add(civsTerrainKey(point.x, point.z)) }
+        plan.terrain?.let { terrain ->
+            addAll(CivsAutonomousTerraform.roadProfile(terrain.route).keys)
+            terrain.requiredGrass.orEmpty().forEach(::reserve)
+            terrain.paidGateFloors.orEmpty().forEach(::reserve)
+            terrain.waterFloors().forEach(::reserve)
+        }
+        CivsAutonomousGeometry.approach(plan.building).forEach(::reserve)
+        plan.building.transit.orEmpty().forEach(::reserve)
+        plan.blocks.forEach { if (!CivsAutonomousGeometry.horizontalContains(plan.building.bounds, it.position)) reserve(it.position) }
+    })
 
 internal fun citizenConstructionStanding(city: Settlement, world: World, site: CivConstructionSite, point: CivPosition): Boolean =
     world.uid == city.worldId && civsTerrainKey(point.x, point.z) !in site.changedColumns &&

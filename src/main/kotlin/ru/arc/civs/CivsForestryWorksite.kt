@@ -52,9 +52,8 @@ internal class CivsForestryWorksite(
                 context.read(city, building, world, point, allowOwn = false)?.blockData?.asString
             } } catch (_: IllegalArgumentException) { throw CivsRejection("stale-worksite") }
             if (work.forestry == null || city.forestryJobs?.get(building.id.toString()) == null) {
-                val timber = work.forestry?.job?.timber ?: requireNotNull(CivsProduction.material(building))
                 val roots = work.forestry?.job?.roots ?: if (CivsForestry.care(work))
-                    careRoots(city, building, world, requireNotNull(work.focus), timber)
+                    careRoots(city, building, world, requireNotNull(work.focus), requireNotNull(CivsForestry.workTimber(work)))
                         ?: throw CivsRejection("stale-worksite") else CivsForestry.plantingRoots(work)
                 val paths = context.protectedForestryPaths(city)
                 val clear = if (work.forestry != null || CivsForestry.care(work)) CivsForestry.rootsClear(city, roots, paths)
@@ -103,7 +102,7 @@ internal class CivsForestryWorksite(
     }
     private val forestPlants = hashMapOf<UUID, ForestPlant>()
     private data class ForestRetry(val atTick: Long, val planting: Boolean)
-    private data class ForestSearch(val building: CivBuilding, var saplings: Long, val columns: List<CivPosition>,
+    private data class ForestSearch(val building: CivBuilding, var timber: String, var saplings: Long, val columns: List<CivPosition>,
         var next: Int = 0, var y: Int? = null, var surface: Int? = null, var refresh: Int = 0,
         var column: CivPosition? = null, var scanningDirty: Boolean = false,
         val care: MutableSet<CivPosition> = linkedSetOf(), val planting: MutableSet<CivPosition> = linkedSetOf(),
@@ -232,9 +231,8 @@ internal class CivsForestryWorksite(
         if (paid != null) return forestBatch(city, worker, building, world, paid)
         if (!takeDiscoveryTurn(city, worker, building)) return blocked(worker, "waiting")
         val paths = context.protectedForestryPaths(city)
-        val timber = requireNotNull(CivsProduction.material(building))
-        val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
-        val growConfiguredTimber = order?.allows(timber) != false
+        val timber = CivsForestry.plantingTimber(building, order)
+        val sapling = CivsForestry.sapling(timber)
         val availableSaplings = if (!CivsAutonomy.legacyStock(city))
             CivsEquipment.available(worker, context.stock(city, building.id)).filterKeys { it.endsWith("_SAPLING") } else emptyMap()
         val supplies = if (!CivsAutonomy.legacyStock(city)) availableSaplings[sapling] ?: 0L else forestSupply(city, worker, building, sapling)
@@ -249,13 +247,22 @@ internal class CivsForestryWorksite(
                 val columns = (min.z..max.z).flatMap { z -> (min.x..max.x).map { x ->
                     CivsWorksiteLayouts.point(building, CivPosition(x, 0, z))
                 } }
-                ForestSearch(building, supplies, if (feet == null) columns else columns.sortedBy {
+                ForestSearch(building, timber, supplies, if (feet == null) columns else columns.sortedBy {
                     val dx = it.x + .5 - feet.x; val dz = it.z + .5 - feet.z
                     dx * dx + dz * dz
                 })
             }.also { forestSearches[worker.id] = it }
         if (feet != null) approaches.refreshForestApproaches(worker.id, feet, deferred)
-        if (search.saplings != supplies || search.availableSaplings != availableSaplings) {
+        val speciesChanged = search.timber != timber
+        if (speciesChanged) {
+            search.timber = timber
+            search.care.clear()
+            search.planting += search.unplantable
+            search.unplantable.clear()
+            search.retryRoots.entries.removeIf { it.value.planting }
+            forestPlants.remove(worker.id)?.let { search.planting += it.roots.first() }
+        }
+        if (speciesChanged || search.saplings != supplies || search.availableSaplings != availableSaplings) {
             search.saplings = supplies
             search.availableSaplings = availableSaplings
             search.unfunded.clear()
@@ -266,9 +273,8 @@ internal class CivsForestryWorksite(
                 return finishForestScan(city, worker, building, world, scan)
             forestScans.remove(worker.id) // No first receipt exists yet; another needed species may still be admitted.
         }
-        if (!growConfiguredTimber) forestPlants.remove(worker.id)
         forestPlants[worker.id]?.takeIf { it.building == building &&
-            forestSupply(city, worker, building, it.timber.removeSuffix("_LOG") + "_SAPLING") >= it.roots.size }?.let { plant ->
+            supplies >= it.roots.size }?.let { plant ->
             val result = finishForestPlant(city, worker, building, world, plant, paths)
             if (result != null || forestPlants[worker.id] != null || spotSearchPending || !forestBudget()) return result
         }
@@ -305,7 +311,7 @@ internal class CivsForestryWorksite(
         }
         // The initial sweep gives existing trees priority. Once covered, alternate an
         // available planting action with harvest/care so natural growth cannot starve it.
-        val plantingTurn = growConfiguredTimber && search.next == search.columns.size && search.plantNext && search.planting.isNotEmpty() &&
+        val plantingTurn = search.next == search.columns.size && search.plantNext && search.planting.isNotEmpty() &&
             supplies >= (if (CivsForestry.large(timber)) 4L else 1L) && !harvestOnly
         if (!plantingTurn) for (point in search.mature.toList()) {
             val result = matureCandidate(point)
@@ -376,7 +382,6 @@ internal class CivsForestryWorksite(
         if (search.next < search.columns.size) return blocked(worker, "searching-work")
         if (harvestOnly) return null
         fun plant(): CivWorldWork? {
-            if (!growConfiguredTimber) return null
             // Stable pseudo-random ranks scatter sites across the whole field instead
             // of laying a grid or filling adjacent columns beside the entrance.
             for (point in search.planting.sortedBy { plantingRank(building.id, it) }) {
@@ -406,7 +411,7 @@ internal class CivsForestryWorksite(
             if (result != null || forestPlants[worker.id] != null || spotSearchPending || !forestBudget()) return result
             search.plantNext = false
         }
-        for (point in search.care.toList().takeIf { growConfiguredTimber }.orEmpty()) {
+        for (point in search.care.toList()) {
             if (!forestBudget()) return blocked(worker, "searching-work")
             if (point in deferred) continue
             val roots = careRoots(city, building, world, point, timber, budgeted = true)
@@ -497,7 +502,7 @@ internal class CivsForestryWorksite(
 
     fun careRoots(city: Settlement, building: CivBuilding, world: World, focus: CivPosition,
         timber: String, budgeted: Boolean = false): List<CivPosition>? {
-        val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
+        val sapling = CivsForestry.sapling(timber)
         fun at(point: CivPosition) = if (budgeted) forestRead(city, building, world, point)
             else read(city, building, world, point)
         if (at(focus)?.blockData?.asString != CivsForestry.saplingState(sapling)) return null

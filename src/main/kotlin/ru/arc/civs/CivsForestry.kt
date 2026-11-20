@@ -94,6 +94,21 @@ internal object CivsForestry {
     const val MAX_RADIUS = 15
     private val species = setOf("OAK", "SPRUCE", "BIRCH", "JUNGLE", "ACACIA", "DARK_OAK")
     fun supportedTimber(material: String): Boolean = material.endsWith("_LOG") && material.removeSuffix("_LOG") in species
+    private fun orderedTimber(building: CivBuilding, order: CivProductionOrder?): String? = order?.takeIf {
+        building.type == BuildingType.FORESTER && !it.anyTimber && it.material != it.configured &&
+            supportedTimber(it.material) && it.matches(building)
+    }?.material
+
+    fun plantingTimber(building: CivBuilding, order: CivProductionOrder?): String =
+        orderedTimber(building, order) ?: requireNotNull(CivsProduction.material(building))
+
+    fun orderedSaplings(city: Settlement, worker: CivWorker, order: CivProductionOrder?): Map<String, Long> {
+        val building = order?.takeIf { city.inventory != null && it.matches(worker) }?.buildingId?.let(city::building)
+            ?.takeIf { it.control != null && CivsRules.workplaceAvailable(city, it) } ?: return emptyMap()
+        return orderedTimber(building, order)?.let { mapOf(sapling(it) to if (large(it)) 4L else 1L) }.orEmpty()
+    }
+
+    fun sapling(timber: String): String = timber.removeSuffix("_LOG") + "_SAPLING"
     val soils = setOf("DIRT", "GRASS_BLOCK", "COARSE_DIRT", "ROOTED_DIRT", "PODZOL", "MYCELIUM", "MOSS_BLOCK")
     val soilPreparationStates = setOf("minecraft:sand", "minecraft:red_sand")
 
@@ -140,6 +155,10 @@ internal object CivsForestry {
     }
     fun saplingState(sapling: String, stage: Int = 0): String = "minecraft:${sapling.lowercase()}[stage=$stage]"
     fun care(work: CivWorldWork): Boolean = work.status == "watering" && work.forestry == null
+    fun workTimber(work: CivWorldWork): String? = work.forestry?.job?.timber ?: (
+        if (care(work)) work.changes.singleOrNull()?.before?.let(::material)
+        else work.inputs.keys.singleOrNull { it.endsWith("_SAPLING") }
+    )?.takeIf { it.endsWith("_SAPLING") }?.let { it.removeSuffix("_SAPLING") + "_LOG" }?.takeIf(::supportedTimber)
     fun plantingRootState(state: String): Boolean = material(state) in setOf("AIR", "CAVE_AIR", "VOID_AIR") ||
         state == "minecraft:short_grass" || state == "minecraft:tall_grass[half=lower]"
     fun plantingRoots(work: CivWorldWork): List<CivPosition> = work.changes.filter {
@@ -291,12 +310,15 @@ internal object CivsForestry {
         val progress = work.forestry
         if (progress == null) {
             require(city.forestryJobs?.get(building.id.toString()) == null)
+            // A physical action carries its exact species and debit after the transient order has been admitted.
+            val timber = requireNotNull(workTimber(work))
+            require(city.inventory != null || timber == CivsProduction.material(building))
+            val sapling = sapling(timber)
             if (care(work)) {
-                validateCare(building, work)
+                validateCare(sapling, work)
                 return
             }
             require(work.outputs.isEmpty())
-            val sapling = requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING"
             val planted = work.changes.filter { it.after == saplingState(sapling) }
             require(planted.size in setOf(1, 4) && planted.all { plantingRootState(it.before) })
             val roots = planted.map { it.position }
@@ -312,7 +334,7 @@ internal object CivsForestry {
             require(work.changes.all { it in planted || it in prepared || it.position in cleared &&
                 it.before == "minecraft:tall_grass[half=upper]" && it.after == "minecraft:air" })
             require(roots.distinct().size == roots.size && roots.all { it.y == roots.first().y })
-            require(if (large(sapling.removeSuffix("_SAPLING") + "_LOG")) roots.size == 4 &&
+            require(if (large(timber)) roots.size == 4 &&
                 roots.maxOf { it.x } - roots.minOf { it.x } == 1 && roots.maxOf { it.z } - roots.minOf { it.z } == 1 else roots.size == 1)
             return
         }
@@ -343,9 +365,7 @@ internal object CivsForestry {
         if (progress.next == job.cells.size) require(work.changes.filter { it.position in job.roots }.size == job.roots.size)
     }
 
-    private fun validateCare(building: CivBuilding, work: CivWorldWork) {
-        val timber = requireNotNull(CivsProduction.material(building))
-        val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
+    private fun validateCare(sapling: String, work: CivWorldWork) {
         require(work.inputs.isEmpty() && work.outputs.isEmpty() && work.equipmentAfter == null && work.durationMillis == 4_000L)
         require(work.miningStep == null && work.miningPlanVersion == null && !work.miningGenerator && work.miningAccessStep == null)
         val focus = requireNotNull(work.focus)

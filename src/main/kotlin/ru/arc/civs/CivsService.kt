@@ -67,7 +67,7 @@ class CivsService(
     private val workstations = CivsWorkstations(blueprints::workstations, plugin.logger)
     private val roadMaintenance = CivsRoadMaintenance(world,
         registerSurface = { cityId, position -> footTraffic.registerSurface(cityId, position) },
-        paymentPossible = ::roadUpkeepPaymentPossible)
+        paymentPossible = ::roadUpkeepPaymentPossible, constructionSite = { city, order -> construction.site(city, order) })
     private val layoutDebug = CivsLayoutDebug(plugin.dataFolder.toPath(), tasks, executor, { id ->
         store.loadPlan(id).whenComplete { _, failure ->
             if (failure != null) plugin.logger.log(Level.WARNING, "ArcCivs layout export could not read plan=$id", failure)
@@ -207,7 +207,11 @@ class CivsService(
         ::track, { tx -> cargoRequests.validateNativeCollected(tx) }, ::resurrectionRejection, ::requestResurrectionAdmission,
         ::inventoryRetired, ::updateHealth, clock,
         verifyGateCaptures = { tx -> gateMaintenance.verifyCaptures(tx) },
-        verifyHallCaptures = { tx -> cityPlans.verifyHallCaptures(tx) },
+        verifyHallCaptures = { tx ->
+            val source = cityPlans.verifyHallCaptures(tx)
+            if (tx.upkeep?.work?.upkeep?.waitingBatch == null) source
+            else source.thenCombine(construction.verifyRoadSite(tx)) { _, _ -> Unit }
+        },
         verifyWarehouseCaptures = { tx -> warehouseMaintenance.verifyCaptures(tx) },
         requireBufferedPickupArrival = citizens::requireStorageArrival,
         verifyAuthoredVegetationSource = { tx -> authoredVegetationRepair.verifySource(tx) })
@@ -1233,7 +1237,10 @@ class CivsService(
         plugin.server.onlinePlayers.forEach({ player -> placement.refreshBoundary(player) })
         if (ready()) {
             cities.values.asSequence().filter { it.id !in busy && it.id !in unhealthy && it.pendingDeletion == null }
-                .forEach { city -> roadMaintenance.backfillSurfaces(city) { citizens.canReassign(city.id, it) } }
+                .forEach { city -> roadMaintenance.backfillSurfaces(city) { worker ->
+                    if (city.construction?.phase == ConstructionPhase.WAITING_MATERIALS) citizens.availableForRoad(city, worker)
+                    else citizens.canReassign(city.id, worker)
+                } }
             inventoryJournal.recover()
             mineMaintenance.pulse()
             pulseCorpses()

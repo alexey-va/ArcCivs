@@ -155,7 +155,7 @@ internal class CivsCargoRequests(
         }
         val capture = CivsSupplyPlanning(city, storage.startSupplyCapture(city), retained,
             { frame.residents.courierPosition(cityId, it) }, { frame.residents.courierUnavailable(cityId, it) }, supply.craftJobs(cityId),
-            construction.supplyNeed(city)?.toMap(), itemReceipt = itemReceipt)
+            construction.supplyNeed(city)?.toMap(), itemReceipt = itemReceipt, workReserves = residentSupplies.forestrySaplingReserves(city))
         return {
             if (!authority.ready() || cityId in records.unhealthy) throw CivsRejection("storage-unavailable")
             if (supplyReadReceipt(cityId) != itemReceipt) throw CivsRejection("storage-observation-stale")
@@ -250,16 +250,18 @@ internal class CivsCargoRequests(
                     val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else {
                         val constructionReserve = CivsLogistics.constructionBufferReserve(city, accepted.sourceBuildingId,
                             construction.supplyNeed(city)) ?: throw CivsRejection("stale-delivery")
-                        maxOf(city.building(accepted.sourceBuildingId)?.let {
+                        val source = city.building(accepted.sourceBuildingId)
+                        val forestryReserve = if (source?.type == BuildingType.FORESTER && accepted.material.endsWith("_SAPLING"))
+                            residentSupplies.forestrySaplingReserves(city, source.id)[source.id]?.get(accepted.material) ?: 0L else 0L
+                        maxOf(source?.let {
                             CivsLogistics.desiredStock(city, it)[accepted.material]
-                        } ?: 0L, constructionReserve[accepted.material] ?: 0L) +
+                        } ?: 0L, constructionReserve[accepted.material] ?: 0L, forestryReserve) +
                             (residentSupplies.craftRequired(city, accepted.sourceBuildingId)[accepted.material] ?: 0L)
                     }
                     (sourceCount - reserve).coerceAtLeast(0)
                 }
                 val needed = if (accepted.sourceBuildingId != accepted.warehouseId && !accepted.directInput) CivsLogistics.MAX_CARGO else {
-                    val local = residentSupplies.localStocks(city)
-                    (CivsLogistics.requests(city, local) + residentSupplies.workSupplyRequests(city, local)).firstOrNull { request ->
+                    residentSupplies.supplyRequests(city, residentSupplies.localStocks(city)).firstOrNull { request ->
                         request.material == accepted.material &&
                             (request.buildingId == accepted.targetBuildingId ||
                             request.construction && city.construction?.let { order ->
@@ -314,7 +316,7 @@ internal class CivsCargoRequests(
                 !CivsLogistics.redistributionAllowed(current, cargo), "stale-delivery")
             citizens.requireStorageArrival(current.id, worker.id, cargo.sourceBuildingId)
             val local = residentSupplies.localStocks(current)
-            val required = (CivsLogistics.requests(current, local) + residentSupplies.workSupplyRequests(current, local))
+            val required = residentSupplies.supplyRequests(current, local)
                 .filter { it.material == cargo.material }.groupBy { it.buildingId to it.construction }
                 .values.sumOf { same -> same.maxOf { (it.needed - it.inTransit).coerceAtLeast(0) } }
             val otherDebits = reservations(current).filter { !it.carrying && it.cargo.sourceWorkerId == null &&
@@ -489,7 +491,7 @@ internal class CivsCargoRequests(
     }
 
     private fun collectionReserve(city: Settlement, worker: CivWorker): Map<String, Long> =
-        CivsLogistics.workerReserve(city, worker, residentSupplies.craftPlan(city, worker)?.inputs.orEmpty(), residentFoods)
+        CivsLogistics.workerReserve(city, worker, residentSupplies.workInputReserve(city, worker), residentFoods)
 
     internal fun collectedHome(city: Settlement, worker: CivWorker): CivCollectedHome? {
         if (!collectionAvailable(city.id) || worker.hasCollectedItems != true) return null

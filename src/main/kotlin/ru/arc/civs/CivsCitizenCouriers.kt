@@ -17,6 +17,7 @@ internal class CivsCitizenCouriers(
     private val residentFoods: CivsResidentFoods,
     private val craftPlan: (Settlement, CivWorker) -> CivCraftJob?,
     private val navigationSettings: CivsNavigationSettings,
+    private val productionOrder: (Settlement, CivWorker) -> CivProductionOrder? = { _, _ -> null },
 ) {
     private val routes get() = routesOwner()
     private val leisure get() = leisureOwner()
@@ -117,7 +118,9 @@ internal class CivsCitizenCouriers(
     }
 
     fun sourceOffersCargo(actor: CitizenActor, city: Settlement, worker: CivWorker): Boolean {
-        val excess = CivsLogistics.workerExcess(city, worker, craftPlan(city, worker)?.inputs.orEmpty(), residentFoods)
+        val inputs = if (actor.plan.type == BuildingType.FORESTER)
+            CivsForestry.orderedSaplings(city, worker, productionOrder(city, worker)) else craftPlan(city, worker)?.inputs.orEmpty()
+        val excess = CivsLogistics.workerExcess(city, worker, inputs, residentFoods)
         if (excess.isEmpty()) return false
         if (actor.outputFullPause?.let { it.buildingId == worker.assignment } == true) return true
         if (CivsAutonomy.legacyStock(city)) return true

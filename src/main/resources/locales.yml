@@ -1574,7 +1574,31 @@ ru:
     start: 'Начать строительство'
     unknown: 'неизвестный материал'
     legacy-start-help: 'Назначьте строителя в ратушу. Можно начать без полного запаса: предметы расходуются постепенно, а при нехватке строитель ждёт пополнения.'
+  order-comment:
+    saplings:
+      '0': '«Подгони саженцы — лес будет!»'
+      '1': '«Маленький росток, большие планы.»'
+    logs:
+      '0': '«Подгони брёвен по-братски!»'
+      '1': '«Только без заноз, ладно?»'
+    wood:
+      '0': '«Пахнет свежей стружкой!»'
+      '1': '«Щепки оставь плотнику.»'
+    stone:
+      '0': '«Камешки берём. Валун тоже!»'
+      '1': '«Ещё один камень телега выдержит.»'
+    grain:
+      '0': '«Каждый колосок на счету!»'
+      '1': '«Только курам не показывай!»'
+    metal:
+      '0': '«Звякнет — значит, привезли!»'
+      '1': '«Услышу звон — встречу сам.»'
+    other:
+      '0': '«Как раз такой штуки и не хватало!»'
+      '1': '«В накладной сердечко нарисую.»'
   logistics:
+    order-counts: '<remaining> шт. к отправке · <transit> шт. в пути'
+    recipients: 'По получателям'
     board-help: 'Нужно — осталось отправить. В пути — уже у кладовщика; Запас — на складах города.'
     material-page: 'Материалы <page>/<pages>'
     materials-previous: 'Материалы'
@@ -1631,6 +1655,7 @@ ru:
     planning: 'Подбираем изделия для текущих заявок…'
     waiting: 'Подходящих заказов пока нет. Для пополнения запаса нужны свободный плотник, сырьё и место на складе.'
     worker-status: '<worker> · <status>'
+    worker-batch: '<worker> · <amount> шт. · <status>'
     waiting-materials: 'Ждёт материалы'
     crafting: 'Изготавливает'
     order-paused: 'Приостановлено'
@@ -3355,7 +3380,31 @@ en:
     start: 'Start construction'
     unknown: 'unknown material'
     legacy-start-help: 'Assign a builder to the town hall. You can start without all supplies: items are used gradually, and the builder waits for missing materials.'
+  order-comment:
+    saplings:
+      '0': '“Spare a sapling? I’ll grow the forest.”'
+      '1': '“Little sapling, big plans.”'
+    logs:
+      '0': '“Got a few logs to spare, mate?”'
+      '1': '“Easy on the splinters, will you?”'
+    wood:
+      '0': '“Smells like fresh shavings!”'
+      '1': '“Save the offcuts for me.”'
+    stone:
+      '0': '“Pebbles welcome. Boulders too!”'
+      '1': '“My cart can take one more rock.”'
+    grain:
+      '0': '“Every last grain counts!”'
+      '1': '“Just don’t let the hens see!”'
+    metal:
+      '0': '“Give us a clang when you get here!”'
+      '1': '“I’d know that clink anywhere.”'
+    other:
+      '0': '“Just the thing I’ve been missing!”'
+      '1': '“I’ll draw a heart on the receipt.”'
   logistics:
+    order-counts: '<remaining> to send · <transit> in transit'
+    recipients: 'By recipient'
     board-help: 'Need — still to dispatch. Transit — already with a courier; Stock — town storage.'
     material-page: 'Materials <page>/<pages>'
     materials-previous: 'Materials'
@@ -3412,6 +3461,7 @@ en:
     planning: 'Choosing products for current requests…'
     waiting: 'No suitable orders right now. Replenishing the reserve needs an idle carpenter, ingredients and warehouse space.'
     worker-status: '<worker> · <status>'
+    worker-batch: '<worker> · ×<amount> · <status>'
     waiting-materials: 'Waiting for materials'
     crafting: 'Crafting'
     order-paused: 'Paused'

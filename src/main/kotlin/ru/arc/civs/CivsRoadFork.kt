@@ -57,7 +57,7 @@ internal object CivsRoadFork {
 
     fun current(city: Settlement, access: CivAutonomousAccess, target: CivRoadUpkeep): Boolean {
         val partner = target.forkPartner ?: return false
-        return city.construction == null && city.constructionQueue.isNullOrEmpty() &&
+        return city.construction?.id == target.waitingBatch?.orderId && city.constructionQueue.isNullOrEmpty() &&
             city.building(partner.source.id) == partner.source && target.source.id in access.sharedRoadCaptures &&
             partner.source.id in access.sharedRoadCaptures && access.routes[target.source.id] == target.route &&
             access.routes[partner.source.id] == partner.route
@@ -66,7 +66,7 @@ internal object CivsRoadFork {
     /** Run only while rebuilding the detached paid network. Native selection uses the ordinary per-tick builder budget. */
     fun targets(city: Settlement, access: CivAutonomousAccess, context: CivAutonomousAccessContext, profiles: Map<UUID, Map<Long, CivPosition>>,
         occupied: Set<Long>, excluded: (CivPosition) -> Boolean): List<CivRoadUpkeep> {
-        if (city.construction != null || !city.constructionQueue.isNullOrEmpty()) return emptyList()
+        if (!city.constructionQueue.isNullOrEmpty()) return emptyList()
         val roads = access.sharedRoadCaptures.values.filter { !it.source.type.isInfrastructure && it.source.id in access.routes }
         if (roads.size < 2 || !CivsWallApproachCleanup.claimsComplete(city, access.routes.keys, context::adoptedRoute)) return emptyList()
         val reserved = occupied.toMutableSet()

@@ -13,6 +13,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import ru.arc.civs.CivsUi.Companion.PAGE_SIZE
+import ru.arc.civs.CivsUi.Companion.ORDER_CARD_PAGE_SIZE
 import ru.arc.civs.CivsUi.Companion.LOGISTICS_MATERIAL_PAGE_SIZE
 import ru.arc.civs.CivsUi.Companion.MATERIALS_PAGE_SIZE
 import ru.arc.civs.CivsUi.Companion.WHITE
@@ -427,7 +428,51 @@ internal fun CivsUi.showBuilderMaterials(player: Player, hutId: UUID, workerId: 
 }
 
 
-internal fun CivsUi.showSupplyRequests(player: Player, warehouseId: UUID, page: Int = 0,
+// Native stock targets at the same recipient can describe the same deficit twice (e.g. recipe and accepted job).
+// Construction is a separate demand, as in the courier's native redistribution check.
+private fun List<CivSupplyRequest>.remainingToSend(): Long =
+    groupBy { it.buildingId to it.construction }.values.sumOf { same ->
+        same.maxOf { (it.needed - it.inTransit).coerceAtLeast(0) }
+    }
+
+private fun List<CivSupplyRequest>.carriedToRecipients(constructionStores: Set<UUID>): Long {
+    fun incoming(rows: List<CivSupplyRequest>) = rows.groupBy(CivSupplyRequest::buildingId).values.sumOf { same ->
+        same.maxOf(CivSupplyRequest::inTransit)
+    }
+    if (none { it.construction && it.buildingId in constructionStores }) return incoming(this)
+    // A construction request already includes every builder hut's incoming cargo. A hut's upkeep can list it again.
+    val (huts, others) = partition { it.buildingId in constructionStores }
+    return incoming(others) + maxOf(huts.filter(CivSupplyRequest::construction).maxOf(CivSupplyRequest::inTransit),
+        incoming(huts.filterNot(CivSupplyRequest::construction)))
+}
+
+internal fun CivsUi.showSupplyRequests(player: Player, warehouseId: UUID, page: Int = 0) {
+    val city = city(player) ?: return
+    val warehouse = city.building(warehouseId) ?: return showBuildings(player)
+    if (warehouse.type != BuildingType.WAREHOUSE) return showBuilding(player, warehouseId)
+    val result = runCatching { host.supplyRequests(player) }
+    val materials = result.getOrDefault(emptyList()).groupBy(CivSupplyRequest::material).entries.toList()
+    val current = page.coerceIn(0, lastPage(materials.size, ORDER_CARD_PAGE_SIZE))
+    val stores = city.construction?.let { CivsRules.constructionStores(city, it.buildingId).map(CivBuilding::id).toSet() }.orEmpty()
+    present(player, "civs.logistics", "logistics.title", buildList {
+        result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
+        if (result.isSuccess && materials.isEmpty()) add(body(player, "logistics.empty"))
+        for ((material, requests) in materials.drop(current * ORDER_CARD_PAGE_SIZE).take(ORDER_CARD_PAGE_SIZE)) {
+            val counts = tr(player, "logistics.order-counts", "remaining" to requests.remainingToSend(),
+                "transit" to requests.carriedToRecipients(stores))
+            add(presentation.panel(Component.join(Component.newline(), materialName(player, material).color(STOCK),
+                counts, orderComment(player, city.id, material)), DialogTables.PanelSkin.NAVY))
+        }
+    }, buildList {
+        if (materials.isNotEmpty()) add(button(player, "recipients", "logistics.recipients", NAVIGATION) {
+            showSupplyRecipients(player, warehouseId)
+        })
+        pages(player, current, materials.size, ORDER_CARD_PAGE_SIZE) { showSupplyRequests(player, warehouseId, it) }
+    }, reopen = { showSupplyRequests(player, warehouseId, current) }, cityId = city.id)
+}
+
+
+private fun CivsUi.showSupplyRecipients(player: Player, warehouseId: UUID, page: Int = 0,
     materialPages: Map<UUID, Int> = emptyMap()) {
     val city = city(player) ?: return
     val warehouse = city.building(warehouseId) ?: return showBuildings(player)
@@ -436,7 +481,8 @@ internal fun CivsUi.showSupplyRequests(player: Player, warehouseId: UUID, page: 
     val requests = result.getOrDefault(emptyList())
     data class SupplyCard(val id: UUID, val page: Int, val lastPage: Int, val body: PaperDialogBody, val lines: Int)
     val cards = requests.groupBy(CivSupplyRequest::buildingId).map { (buildingId, orders) ->
-        val last = lastPage(orders.size, LOGISTICS_MATERIAL_PAGE_SIZE)
+        val materials = orders.groupBy(CivSupplyRequest::material).entries.toList()
+        val last = lastPage(materials.size, LOGISTICS_MATERIAL_PAGE_SIZE)
         val materialPage = (materialPages[buildingId] ?: 0).coerceIn(0, last)
         val building = city.building(buildingId)
         var source = building?.let { buildingName(player, it.type, it.level)
@@ -444,11 +490,9 @@ internal fun CivsUi.showSupplyRequests(player: Player, warehouseId: UUID, page: 
             ?: tr(player, "buildings.generic")
         if (last > 0) source = source.append(text.literal(" · ")).append(tr(player, "logistics.material-page",
             "page" to materialPage + 1, "pages" to last + 1).color(CivsText.BODY))
-        val table = presentation.supplyTable(orders.drop(materialPage * LOGISTICS_MATERIAL_PAGE_SIZE)
-            .take(LOGISTICS_MATERIAL_PAGE_SIZE).map { request ->
-            val remaining = (request.needed - request.inTransit).coerceAtLeast(0)
-            listOf(materialName(player, request.material).color(STOCK),
-                text.literal(remaining).color(CivsText.BODY))
+        val table = presentation.supplyTable(materials.drop(materialPage * LOGISTICS_MATERIAL_PAGE_SIZE)
+            .take(LOGISTICS_MATERIAL_PAGE_SIZE).map { (material, requests) ->
+            listOf(materialName(player, material).color(STOCK), text.literal(requests.remainingToSend()).color(CivsText.BODY))
         }, listOf(tr(player, "materials.item"), tr(player, "materials.missing")))
         val body = PaperDialogBody(source.append(Component.newline()).append(table.text), table.width)
         SupplyCard(buildingId, materialPage, last, body,
@@ -464,24 +508,24 @@ internal fun CivsUi.showSupplyRequests(player: Player, warehouseId: UUID, page: 
     }
     val current = page.coerceIn(0, sourcePages.lastIndex.coerceAtLeast(0))
     val visible = sourcePages.getOrNull(current).orEmpty()
-    present(player, "civs.logistics", "logistics.title", buildList {
+    present(player, "civs.logistics-recipients", "logistics.recipients", buildList {
         result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
         if (result.isSuccess && requests.isEmpty()) add(body(player, "logistics.empty"))
         addAll(visible.map(SupplyCard::body))
     }, buildList {
         visible.singleOrNull()?.takeIf { it.lastPage > 0 }?.let { card ->
             if (card.page > 0) add(button(player, "materials_previous", "logistics.materials-previous", NAVIGATION) {
-                showSupplyRequests(player, warehouseId, current, materialPages + (card.id to card.page - 1))
+                showSupplyRecipients(player, warehouseId, current, materialPages + (card.id to card.page - 1))
             })
             if (card.page < card.lastPage) add(button(player, "materials_next", "logistics.materials-next", NAVIGATION) {
-                showSupplyRequests(player, warehouseId, current, materialPages + (card.id to card.page + 1))
+                showSupplyRecipients(player, warehouseId, current, materialPages + (card.id to card.page + 1))
             })
         }
         if (current > 0) add(button(player, "previous", "logistics.sources-previous", NAVIGATION) {
-            showSupplyRequests(player, warehouseId, current - 1, materialPages)
+            showSupplyRecipients(player, warehouseId, current - 1, materialPages)
         })
         if (current < sourcePages.lastIndex) add(button(player, "next", "logistics.sources-next", NAVIGATION) {
-            showSupplyRequests(player, warehouseId, current + 1, materialPages)
+            showSupplyRecipients(player, warehouseId, current + 1, materialPages)
         })
-    }, reopen = { showSupplyRequests(player, warehouseId, current, materialPages) }, cityId = city.id)
+    }, reopen = { showSupplyRecipients(player, warehouseId, current, materialPages) }, cityId = city.id)
 }

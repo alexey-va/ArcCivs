@@ -1828,6 +1828,8 @@ class CivsUiTest : FunSpec({
             val beforeRequests = stockSnapshots
             h.click("logistics")
             h.screen.id shouldBe "civs.logistics"
+            h.body() shouldContain "1 шт. к отправке · 2 шт. в пути"
+            h.click("recipients")
             logisticsTableCells(h.screen).first() shouldBe listOf("Материал", "Не хватает")
             logisticsTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "1")
             logisticsTableCells(h.screen).first { it.first() == "Кожа" } shouldBe listOf("Кожа", "1")
@@ -1842,13 +1844,15 @@ class CivsUiTest : FunSpec({
             export("logistics-stock-unavailable-ru")
             every { h.host.availableMaterials(h.player) } answers { stockSnapshots++; physical }
             physical = physical + ("OAK_LOG" to 6L)
-            h.click("history")
+            h.click("history"); h.click("history")
             val beforeRefresh = stockSnapshots
-            h.click("logistics")
+            h.click("logistics"); h.click("recipients")
             logisticsTableCells(h.screen).first { it.first() == "Дубовое бревно" } shouldBe listOf("Дубовое бревно", "4")
             stockSnapshots shouldBe beforeRefresh
             h.screen.buttons shouldBe emptyList()
             export("logistics-requests-refreshed-ru")
+            h.click("history")
+            h.screen.id shouldBe "civs.logistics"
             h.click("history")
             h.screen.id shouldBe "civs.building"
             h.ui.openBuilding(h.player, base.id, hall.id)
@@ -1896,7 +1900,7 @@ class CivsUiTest : FunSpec({
             fun export(name: String) = System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
                 exportUiScreen(it, "$name-$locale", h.screen, listOf(640, 360))
             }
-            h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
+            h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics"); h.click("recipients")
             h.screen.body.single().width shouldBe 320
             h.body().codePoints().anyMatch { it in 0x100000..0x101FFF } shouldBe true
             val observed = mutableListOf<List<String>>()
@@ -1951,6 +1955,8 @@ class CivsUiTest : FunSpec({
             h.screen.buttons.map { it.id.value } shouldBe listOf("previous")
             export("logistics-grouped-last")
             h.click("history")
+            h.screen.id shouldBe "civs.logistics"
+            h.click("history")
             h.screen.id shouldBe "civs.building"
         }
     }
@@ -1966,12 +1972,59 @@ class CivsUiTest : FunSpec({
                 CivSupplyRequest(base.buildings.first().id, "LEATHER", 2, 0))
             every { h.host.availableMaterials(h.player) } returns emptyMap()
             h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
+            h.body() shouldContain "0 шт. к отправке · 5 шт. в пути"
+            h.click("recipients")
             logisticsTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "0")
             logisticsTableCells(h.screen).first { it.first() == "Кожа" } shouldBe listOf("Кожа", "2")
             logisticsTableCells(h.screen).drop(1).none { it.getOrNull(1)?.startsWith("-") == true } shouldBe true
             h.body().codePoints().anyMatch { it in 0x100000..0x101FFF } shouldBe font.isNotEmpty()
             if (font.isEmpty()) h.body().codePoints().anyMatch { Character.getType(it) == Character.PRIVATE_USE.toInt() } shouldBe false
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-covered-and-short-ru", h.screen, listOf(588, 380)) }
+        }
+    }
+
+    test("material order cards sum independent recipients and keep shared cargo and comments stable across pages") {
+        for (language in listOf("ru", "en")) withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            val base = settlement(h.player).copy(id = UUID(0L, 2L))
+            val first = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+            val second = base.buildings.last().copy(type = BuildingType.BUILDER_HUT)
+            val warehouse = first.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE)
+            h.city = base.copy(buildings = base.buildings.dropLast(1) + second + warehouse,
+                construction = CivConstruction(UUID.randomUUID(), first.id, 2, 100, 25, ConstructionPhase.CONSTRUCTING, Stock()))
+            val requests = listOf(
+                CivSupplyRequest(first.id, "OAK_LOG", 9, 3), CivSupplyRequest(first.id, "STONE", 5, 0),
+                CivSupplyRequest(second.id, "WHEAT", 6, 1), CivSupplyRequest(second.id, "IRON_INGOT", 2, 0),
+                CivSupplyRequest(second.id, "OAK_LOG", 8, 2), CivSupplyRequest(first.id, "OAK_LOG", 7, 3),
+                CivSupplyRequest(first.id, "OAK_LOG", 7, 5, true), CivSupplyRequest(second.id, "SPRUCE_SAPLING", 4, 0))
+            every { h.host.supplyRequests(h.player) } returns requests
+            h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
+            val labels = CivsText.fromYaml(civsLocaleSource())
+            val oak = plainText(labels.material(h.player, "OAK_LOG"))
+            val cards = h.screen.body.map { plainText(it.text) }
+            cards.size shouldBe 3
+            cards.count { oak in it } shouldBe 1
+            cards.first() shouldContain if (language == "ru") "14 шт. к отправке · 5 шт. в пути" else "14 to send · 5 in transit"
+            cards.first() shouldContain if (language == "ru") "Подгони брёвен по-братски!" else "Got a few logs to spare, mate?"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "orders-by-material-$language", h.screen, listOf(640, 360)) }
+            h.click("next")
+            val last = h.body()
+            last shouldContain plainText(labels.material(h.player, "IRON_INGOT"))
+            last shouldContain if (language == "ru") "Маленький росток, большие планы." else "Little sapling, big plans."
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "orders-by-material-last-$language", h.screen, listOf(640, 360)) }
+            h.screen.buttons.map { it.id.value } shouldBe listOf("recipients", "previous")
+            h.click("recipients"); h.click("history")
+            h.body() shouldBe last
+            h.click("previous")
+            h.screen.body.map { plainText(it.text) } shouldBe cards
+            h.click("recipients")
+            val firstRows = logisticsTableCells(h.screen)
+            firstRows.count { it.first() == oak } shouldBe 1
+            firstRows.first { it.first() == oak }[1] shouldBe "8"
+            every { h.host.supplyRequests(h.player) } returns emptyList()
+            h.click("history")
+            h.screen.buttons shouldBe emptyList()
+            h.body() shouldContain if (language == "ru") "нет заявок" else "No input requests"
         }
     }
 
@@ -3128,29 +3181,40 @@ class CivsUiTest : FunSpec({
             h.city = base.copy(buildings = base.buildings + forge, research = CivResearchState(CivResearchId.entries.toSet()))
             val order = CivCarpentryOrderView(base.workers.first().id, "Александра", "IRON_PICKAXE", 1,
                 mapOf("IRON_INGOT" to 3L, "STICK" to 2L), emptyMap(), "IRON_PICKAXE", null, "crafting")
-            every { h.host.carpentry(h.player, forge.id) } returns CivCarpentryView(2, false, false,
-                listOf(order), CivsCarpentry.views(BuildingType.BLACKSMITH))
+            val second = order.copy(workerId = base.workers.last().id, workerName = "Борис", status = "waiting-materials",
+                targetBuildingId = base.buildings.first().id, missing = mapOf("STICK" to 1L))
+            var view = CivCarpentryView(2, false, false, listOf(order, second), CivsCarpentry.views(BuildingType.BLACKSMITH))
+            every { h.host.carpentry(h.player, forge.id) } answers { view }
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
                 exportUiScreen(it, "$id-$language", h.screen, listOf(640, 360))
             } }
             val pickaxe = if (language == "ru") "Железная кирка" else "Iron Pickaxe"
             val shovel = if (language == "ru") "Железная лопата" else "Iron Shovel"
             h.ui.openBuilding(h.player, base.id, forge.id)
-            h.body() shouldContain pickaxe
+            h.body() shouldContain "2 · $pickaxe"
             h.body().contains(shovel) shouldBe false
             export("blacksmith-accepted-card")
             h.click("tool_orders")
             h.body() shouldContain pickaxe
+            h.screen.body.count { pickaxe in plainText(it.text) } shouldBe 1
+            h.body() shouldContain "2 · $pickaxe"
             h.body() shouldContain "Александра"
+            h.body() shouldContain "Борис"
+            h.body() shouldContain if (language == "ru") "Ждёт материалы" else "Waiting for materials"
             h.body().contains(shovel) shouldBe false
             export("blacksmith-tool-orders")
             h.click("recipes")
             h.screen.id shouldBe "civs.carpentry-recipes"
             export("blacksmith-tool-recipes")
             h.ui.openBuilding(h.player, base.id, forge.id); h.click("production")
-            h.body() shouldContain pickaxe
+            h.body() shouldContain "2 · $pickaxe"
             h.screen.buttons.map { plainText(it.label) }.joinToString() shouldContain shovel
             export("blacksmith-manual-and-accepted")
+            view = view.copy(orders = listOf(order, order.copy(material = "IRON_AXE", demandMaterial = "IRON_AXE"),
+                order.copy(material = "IRON_HOE", demandMaterial = "IRON_HOE"), second))
+            h.click("tool_orders")
+            h.body() shouldContain "2 · $pickaxe"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("recipes") // Four batches, three distinct products.
             verify(exactly = 0) { h.host.setProduction(any(), any(), any()) }
         }
     }
@@ -4441,6 +4505,7 @@ private fun exportUiActionBar(directory: String, id: String, component: Componen
 private fun uiSourceHashes(): Map<String, String> = listOf(
     "src/main/kotlin/ru/arc/civs/CivsTradeScreens.kt", "src/main/kotlin/ru/arc/civs/CivsTrade.kt",
     "src/main/kotlin/ru/arc/civs/CivsUi.kt", "src/main/kotlin/ru/arc/civs/CivsText.kt", "src/main/resources/locales.yml",
+    "src/main/kotlin/ru/arc/civs/CivsStorageScreens.kt", "src/main/kotlin/ru/arc/civs/CivsBuildingScreens.kt",
     "src/main/kotlin/ru/arc/civs/CivsDialogPresentation.kt", "src/main/kotlin/ru/arc/civs/CivsResearchScreens.kt",
     "src/main/kotlin/ru/arc/civs/CivsResearch.kt", "src/main/resources/config.yml",
     "src/main/kotlin/ru/arc/civs/CivsResidentLife.kt", "src/main/kotlin/ru/arc/civs/CivsResidents.kt",

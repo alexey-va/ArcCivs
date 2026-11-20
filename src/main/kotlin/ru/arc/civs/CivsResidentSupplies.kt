@@ -66,7 +66,10 @@ internal class CivsResidentSupplies(
         return required
     }
 
-    fun workSupplyRequests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> =
+    fun supplyRequests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> =
+        CivsLogistics.requests(city, forestrySaplingReserves(city), stock) + craftSupplyRequests(city, stock) + upkeepSupplyRequests(city, stock)
+
+    private fun craftSupplyRequests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> =
         city.buildings.filter { it.type in CivsCarpentry.workshops }.flatMap { building ->
             craftRequired(city, building.id).mapNotNull { (material, count) ->
                 val needed = (count - (stock(building.id)[material] ?: 0L)).coerceAtLeast(0)
@@ -75,7 +78,25 @@ internal class CivsResidentSupplies(
                 }.sumOf(CivCargo::amount)
                 if (needed > 0 || incoming > 0) CivSupplyRequest(building.id, material, needed, incoming) else null
             }
-        } + upkeepSupplyRequests(city, stock)
+        }
+
+    internal fun forestrySaplingReserves(city: Settlement, buildingId: UUID? = null): Map<UUID, Map<String, Long>> {
+        if (city.inventory == null || city.autonomy?.paused == true || city.pendingDeletion != null) return emptyMap()
+        val reserves = linkedMapOf<UUID, MutableMap<String, Long>>()
+        for (worker in city.workers) {
+            val assignment = worker.assignment ?: continue
+            if (buildingId != null && buildingId != assignment || CivsResidents.isChild(worker)) continue
+            val order = productionOrder(city, worker) ?: continue
+            val saplings = CivsForestry.orderedSaplings(city, worker, order)
+            if (saplings.isEmpty()) continue
+            for ((material, count) in CivsEquipment.storageInputs(worker, saplings))
+                reserves.getOrPut(assignment, ::linkedMapOf).merge(material, count, Math::addExact)
+        }
+        return reserves
+    }
+
+    internal fun workInputReserve(city: Settlement, worker: CivWorker): Map<String, Long> =
+        craftPlan(city, worker)?.inputs ?: CivsForestry.orderedSaplings(city, worker, productionOrder(city, worker))
 
     fun deliverCraft(cityId: UUID, workerId: UUID, assignment: UUID, cycle: Long, nextAt: Long,
         jobId: UUID, at: Long): CompletableFuture<Settlement> = authority.action("craft", null,
@@ -166,6 +187,7 @@ internal class CivsResidentSupplies(
         if (CivsAutonomy.legacyStock(city)) return false
         if (building.type == BuildingType.UNIVERSITY) return CivsRules.productionAvailable(city, building)
         if (CivsRules.isBuilder(city, building)) {
+            if (roadMaintenance.waitingInputsReady(city, worker)) return true
             val order = city.construction ?: return roadMaintenance.requirements(city)[worker.id]?.let {
                 CivsEquipment.inputsReady(worker, it, authority.planningBuildingStock(city, building.id))
             } ?: true
@@ -219,7 +241,7 @@ internal class CivsResidentSupplies(
                 authority.inventoryMutation(cityId, { city ->
                     citizens.requireStorageArrival(cityId, workerId, buildingId)
                     val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
-                    val prepared = storage.prepareResidentReturn(city, workerId, buildingId, craftPlan(city, worker)?.inputs.orEmpty())
+                    val prepared = storage.prepareResidentReturn(city, workerId, buildingId, workInputReserve(city, worker))
                     returned = prepared.worker
                     rejectIf(prepared.worker == worker, "storage-full")
                     prepared.plan

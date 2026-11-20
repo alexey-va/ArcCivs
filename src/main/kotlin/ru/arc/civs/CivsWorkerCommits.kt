@@ -212,10 +212,11 @@ internal class CivsWorkerCommits(
         }
 
     private fun autonomousUpkeepMutation(city: Settlement, work: CivWorldWork, at: Long): CompletableFuture<Settlement> {
-        rejectIf(!CivsRoadMaintenance.eligible(city), "stale-worksite")
         rejectIf(CivsAutonomy.legacyStock(city) && city.stock.stone <= (CivsAutonomy.nextGoal(city, blueprints::maximumLevel)?.cost?.stone ?: 0L), "materials-missing")
         val worker = city.workers.firstOrNull { it.id == work.workerId } ?: throw CivsRejection("worker-not-found")
         rejectIf(worker.completedCycles != work.cycle || worker.assignment != work.buildingId, "stale-delivery")
+        rejectIf(!(work.upkeep?.waitingBatch?.let { roadMaintenance.waitingInputsReady(city, worker) } ?:
+            CivsRoadMaintenance.eligible(city)), "stale-worksite")
         rejectIf(at < worker.nextDeliveryAt, "delivery-too-early")
         val id = UUID.randomUUID()
         storage.reserve(city, id)
@@ -237,6 +238,8 @@ internal class CivsWorkerCommits(
         val receipt = tx.upkeep ?: return null
         val current = cities[tx.cityId] ?: return CivInventoryApplyResult.Conflict(mapOf("reason" to "city-unavailable"))
         if (current == tx.after && storage.upkeepNativeApplied(tx)) return null
+        if (receipt.work.upkeep?.waitingBatch != null && current != tx.after && current != receipt.before(tx.after))
+            return CivInventoryApplyResult.Conflict(mapOf("reason" to "stale-city"))
         return try {
             world.validateRoadUpkeep(if (current == tx.after) receipt.before(tx.after) else current, receipt.work)
             null

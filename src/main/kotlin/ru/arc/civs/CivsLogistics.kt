@@ -96,7 +96,11 @@ object CivsLogistics {
             withinRoute(city, source.control, target.control)
     }
 
-    fun requests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> {
+    fun requests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> =
+        requests(city, emptyMap(), stock)
+
+    internal fun requests(city: Settlement, workReserves: Map<UUID, Map<String, Long>>,
+        stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> {
         if (city.inventory == null || city.pendingDeletion != null) return emptyList()
         val carried = city.workers.mapNotNull(CivWorker::cargo)
         val destinations = carried.associate { it.id to destination(city, it)?.id }
@@ -129,7 +133,7 @@ object CivsLogistics {
             }
         }
         city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.control != null && !CivsRules.isBuilder(city, it) }.forEach { building ->
-            val required = desiredStock(city, building)
+            val required = withMinimumStock(desiredStock(city, building), workReserves[building.id])
             if (required.isNotEmpty()) request(building.id, required, false)
         }
         return requests
@@ -153,6 +157,11 @@ object CivsLogistics {
         }).filterValues { it > 0 }.mapValues { (_, amount) ->
             Math.multiplyExact(amount, workers.toLong())
         }
+    }
+
+    private fun withMinimumStock(stock: Map<String, Long>, reserve: Map<String, Long>?): Map<String, Long> {
+        if (reserve.isNullOrEmpty()) return stock
+        return stock.toMutableMap().also { merged -> reserve.forEach { (material, count) -> merged.merge(material, count, Math::max) } }
     }
 
     /** A physical construction buffer keeps the unpaid bill, not merely its next missing row.
@@ -224,7 +233,7 @@ object CivsLogistics {
     }
 
     /** Equipped and custom items stay personal; real work inputs and sixteen bread stay available. */
-    internal fun workerExcess(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap(),
+    internal fun workerExcess(city: Settlement, worker: CivWorker, workInputs: Map<String, Long> = emptyMap(),
         foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): Map<String, Long> {
         if (city.autonomy != null && city.inventory == null) return if (worker.cargo == null && !CivsResidents.isChild(worker))
             Resource.entries.associate { it.name to (worker.pendingStock?.get(it) ?: 0L) }.filterValues { it > 0 }
@@ -234,7 +243,7 @@ object CivsLogistics {
         if (worker.cargo != null || CivsResidents.isChild(worker) || CivsRules.isBuilder(city, building) ||
             building.type !in setOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.SAWMILL,
                 BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.TOWN_HALL)) return emptyMap()
-        val reserve = workerReserve(city, worker, craftInputs, foods)
+        val reserve = workerReserve(city, worker, workInputs, foods)
         return CivsEquipment.slots(worker).drop(CivsEquipment.BAG).filterNotNull().filter { item ->
             val type = org.bukkit.Material.valueOf(item.material)
             item.data == null && type.maxDurability.toInt() == 0 && CivsEquipment.armorSlot(item.material) == null
@@ -244,9 +253,9 @@ object CivsLogistics {
     }
 
     /** The same personal food and profession supplies stay with a worker on a home visit. */
-    internal fun workerReserve(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap(),
+    internal fun workerReserve(city: Settlement, worker: CivWorker, workInputs: Map<String, Long> = emptyMap(),
         foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): Map<String, Long> {
-        val reserve = workerWorkReserve(city, worker, craftInputs).toMutableMap()
+        val reserve = workerWorkReserve(city, worker, workInputs).toMutableMap()
         foods.personalReserve(worker).forEach { (material, count) ->
             reserve[material] = if (material == "BREAD") maxOf(reserve[material] ?: 0, count)
                 else Math.addExact(reserve[material] ?: 0, count)
@@ -254,13 +263,13 @@ object CivsLogistics {
         return reserve
     }
 
-    internal fun workerWorkReserve(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
+    internal fun workerWorkReserve(city: Settlement, worker: CivWorker, workInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
         val building = worker.assignment?.let(city::building)
         if (building == null) return emptyMap()
         val inputs = when {
             CivsRules.isBuilder(city, building) -> CivsMaterials.unpaid(city.construction?.materials.orEmpty())
-            building.type == BuildingType.SAWMILL -> craftInputs
-            building.type in CivsCarpentry.workshops && craftInputs.isNotEmpty() -> craftInputs
+            building.type == BuildingType.SAWMILL -> workInputs
+            building.type in CivsCarpentry.workshops && workInputs.isNotEmpty() -> workInputs
             else -> CivsProduction.inputs(city, building)
         }
         return inputs + when (building.type) {
@@ -268,7 +277,8 @@ object CivsLogistics {
                 "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS"
             }) to (CivsWorksiteLayouts.field(building).size.toLong().takeIf { it > 0 } ?: 16L), "BONE_MEAL" to 16L)
             BuildingType.QUARRY -> quarrySupplies(building)
-            BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "DIRT" to 4L)
+            BuildingType.FORESTER -> withMinimumStock(
+                mapOf(CivsForestry.sapling(requireNotNull(CivsProduction.material(building))) to 4L, "DIRT" to 4L), workInputs)
             else -> emptyMap()
         }
     }

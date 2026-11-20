@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.event.HoverEvent
+import net.kyori.adventure.text.format.NamedTextColor
 import net.kyori.adventure.text.format.TextColor
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
 import org.bukkit.GameMode
@@ -386,6 +387,22 @@ class CivsUi internal constructor(
     )
     internal fun busyBody(player: Player): PaperDialogBody? = if (host.cityBusy(player)) body(tint(tr(player, "reason.city-busy"), STOCK)) else null
     internal fun materialName(player: Player, material: String): Component = text.material(player, material)
+    internal fun orderComment(player: Player, place: UUID, material: String): Component {
+        val family = when {
+            material.endsWith("_SAPLING") || material == "MANGROVE_PROPAGULE" -> "saplings"
+            material.endsWith("_LOG") || material.endsWith("_WOOD") || material.endsWith("_STEM") || material.endsWith("_HYPHAE") -> "logs"
+            material.endsWith("_PLANKS") || CivsCarpentry.woods.any { material.startsWith(it + "_") } ||
+                material in setOf("STICK", "LADDER", "CHEST", "BARREL") -> "wood"
+            material == "WHEAT" || material == "WHEAT_SEEDS" || material == "HAY_BLOCK" || material == "BREAD" -> "grain"
+            material.startsWith("IRON_") || material.startsWith("COPPER_") || material.startsWith("GOLD") ||
+                material.startsWith("RAW_") || material.endsWith("_INGOT") -> "metal"
+            material.contains("STONE") && !material.startsWith("REDSTONE") || material.contains("DEEPSLATE") ||
+                material == "ANDESITE" || material == "DIORITE" || material == "GRANITE" || material == "GRAVEL" -> "stone"
+            else -> "other"
+        }
+        val variant = Math.floorMod(place.hashCode() xor material.hashCode(), 2)
+        return tr(player, "order-comment.$family.$variant").color(NamedTextColor.GRAY)
+    }
     internal fun warehouseAmount(player: Player, own: Long, reserve: Long): Component = if (reserve > 0)
         tr(player, "warehouse.amount-with-reserve", "own" to own, "reserve" to reserve) else text.literal(own)
     internal fun buildingName(player: Player, type: BuildingType, level: Int): Component =
@@ -395,7 +412,7 @@ class CivsUi internal constructor(
 
     internal fun screenColor(id: String): TextColor = when (id) {
         "civs.workers", "civs.worker", "civs.members", "civs.member", "civs.member-add", "civs.building-workers" -> PEOPLE
-        "civs.stock", "civs.warehouse", "civs.materials", "civs.building-materials", "civs.builder-materials", "civs.logistics",
+        "civs.stock", "civs.warehouse", "civs.materials", "civs.building-materials", "civs.builder-materials", "civs.logistics", "civs.logistics-recipients",
         "civs.containers", "civs.container", "civs.industry", "civs.industry-building", "civs.trade" -> STOCK
         "civs.management", "civs.upgrades", "civs.upgrade", "civs.worker-skills", "civs.production", "civs.carpentry-recipes", "civs.storage-mode", "civs.testing-settings", "civs.research", "civs.research-detail" -> PERSONAL
         "civs.guide", "civs.remote", "civs.villages" -> NAVIGATION
@@ -455,7 +472,7 @@ class CivsUi internal constructor(
         const val BUILDING_OVERVIEW_PAGE_SIZE = 8
         const val SKILLS_PAGE_SIZE = 6
         const val LOGISTICS_MATERIAL_PAGE_SIZE = 6
-        const val CARPENTRY_PAGE_SIZE = 3
+        const val ORDER_CARD_PAGE_SIZE = 3
         const val MATERIALS_PAGE_SIZE = 16
         val NAME = PaperDialogInputId.of("city_name")
         val DELETE_NAME = PaperDialogInputId.of("delete_city_name")

@@ -311,7 +311,8 @@ class CivsCitizens(
             paths = paths,
             residentFoods = residentFoods,
             craftPlan = craftPlan,
-            navigationSettings = navigationSettings)
+            navigationSettings = navigationSettings,
+            productionOrder = { city, worker -> productionOrder?.invoke(city, worker) })
         leisure = CivsCitizenLeisure(runtime,
             collisionsOwner = { collisions },
             routesOwner = { routes },
@@ -1255,6 +1256,8 @@ class CivsCitizens(
     internal fun workingResidentIds(cityId: UUID): Set<UUID> = observations.workingResidentIds(cityId)
 
     internal fun canReassign(cityId: UUID, workerId: UUID): Boolean = observations.canReassign(cityId, workerId)
+    internal fun availableForRoad(city: Settlement, workerId: UUID): Boolean =
+        observations.canReassign(city.id, workerId, city.construction?.id)
 
     fun workplaceSnapshots(): List<CivsWorkplaceSnapshot> = observations.workplaceSnapshots()
     internal fun visibleWorkplaceSnapshots(viewers: List<CitizenViewer>) = observations.workplaceSnapshots(viewers)

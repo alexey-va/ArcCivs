@@ -151,10 +151,11 @@ internal class CivsCitizenPlanning(
             return base.copy(workMillis = 0, workplace = if (base.completeAtWorkplace)
                 currentActor.plan.workplace ?: base.workplace else base.workplace)
         }
-        if (base.type == BuildingType.BUILDER_HUT && base.idleReason in setOf("no-construction", "queued-construction") &&
-            CivsRoadMaintenance.eligible(city)) {
-            workPlan(city, worker)?.takeIf { it.upkeep != null }?.let { work ->
-                base = base.copy(workplace = work.standing, workMillis = work.durationMillis, idleReason = null,
+        if (base.type == BuildingType.BUILDER_HUT && (base.idleReason in setOf("no-construction", "queued-construction") &&
+            CivsRoadMaintenance.eligible(city) || base.idleReason == "waiting-materials")) {
+            workPlan(city, worker)?.takeIf { it.upkeep != null && (base.token.constructionId == null ||
+                it.upkeep.waitingBatch?.orderId == base.token.constructionId) }?.let { work ->
+                base = base.copy(token = base.token.copy(constructionId = null), workplace = work.standing, workMillis = work.durationMillis, idleReason = null,
                     completeAtWorkplace = true, worldWork = work)
             }
         }

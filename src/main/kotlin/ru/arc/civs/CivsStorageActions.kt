@@ -235,7 +235,7 @@ internal class CivsStorageActions(
     fun localMaterials(player: Player, buildingId: UUID): Map<String, Long> =
         authority.managed(player).let { residentSupplies.localStocks(it)(buildingId) }
     fun supplyRequests(player: Player): List<CivSupplyRequest> =
-        authority.managed(player).let { city -> residentSupplies.localStocks(city).let { CivsLogistics.requests(city, it) + residentSupplies.workSupplyRequests(city, it) } }
+        authority.managed(player).let { city -> residentSupplies.supplyRequests(city, residentSupplies.localStocks(city)) }
 
     fun carpentry(player: Player, buildingId: UUID): CivCarpentryView? {
         val city = authority.managed(player)
