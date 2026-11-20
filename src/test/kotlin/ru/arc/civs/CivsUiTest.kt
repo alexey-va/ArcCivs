@@ -1828,7 +1828,8 @@ class CivsUiTest : FunSpec({
             val beforeRequests = stockSnapshots
             h.click("logistics")
             h.screen.id shouldBe "civs.logistics"
-            h.body() shouldContain "1 шт. к отправке · 2 шт. в пути"
+            h.body() shouldContain "К отправке: 1 шт."
+            h.body() shouldContain "В пути: 2 шт."
             h.click("recipients")
             logisticsTableCells(h.screen).first() shouldBe listOf("Материал", "Не хватает")
             logisticsTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "1")
@@ -1972,7 +1973,10 @@ class CivsUiTest : FunSpec({
                 CivSupplyRequest(base.buildings.first().id, "LEATHER", 2, 0))
             every { h.host.availableMaterials(h.player) } returns emptyMap()
             h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
-            h.body() shouldContain "0 шт. к отправке · 5 шт. в пути"
+            h.body() shouldContain "К отправке: 0 шт."
+            h.body() shouldContain "В пути: 5 шт."
+            h.screen.body.size shouldBe if (font.isEmpty()) 2 else 1
+            if (font.isEmpty()) h.body().codePoints().anyMatch { Character.getType(it) == Character.PRIVATE_USE.toInt() } shouldBe false
             h.click("recipients")
             logisticsTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "0")
             logisticsTableCells(h.screen).first { it.first() == "Кожа" } shouldBe listOf("Кожа", "2")
@@ -1996,31 +2000,67 @@ class CivsUiTest : FunSpec({
                 CivSupplyRequest(first.id, "OAK_LOG", 9, 3), CivSupplyRequest(first.id, "STONE", 5, 0),
                 CivSupplyRequest(second.id, "WHEAT", 6, 1), CivSupplyRequest(second.id, "IRON_INGOT", 2, 0),
                 CivSupplyRequest(second.id, "OAK_LOG", 8, 2), CivSupplyRequest(first.id, "OAK_LOG", 7, 3),
-                CivSupplyRequest(first.id, "OAK_LOG", 7, 5, true), CivSupplyRequest(second.id, "SPRUCE_SAPLING", 4, 0))
+                CivSupplyRequest(first.id, "OAK_LOG", 7, 5, true),
+                CivSupplyRequest(first.id, "WAXED_WEATHERED_CUT_COPPER_STAIRS", 12468, 123),
+                CivSupplyRequest(second.id, "STRIPPED_DARK_OAK_LOG", 4355, 34),
+                CivSupplyRequest(first.id, "MOSSY_COBBLESTONE_STAIRS", 123, 0),
+                CivSupplyRequest(second.id, "POLISHED_BLACKSTONE_BRICKS", 234, 10),
+                CivSupplyRequest(second.id, "SPRUCE_SAPLING", 4, 0))
             every { h.host.supplyRequests(h.player) } returns requests
             h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
             val labels = CivsText.fromYaml(civsLocaleSource())
             val oak = plainText(labels.material(h.player, "OAK_LOG"))
+            // One native baseline can contain part of a caption from each column.
+            fun containsWrapped(row: String, caption: String) = Regex(
+                caption.split(' ').joinToString(".*?", transform = Regex::escape), RegexOption.DOT_MATCHES_ALL,
+            ).containsMatchIn(row)
             val cards = h.screen.body.map { plainText(it.text) }
-            cards.size shouldBe 3
+            cards.size shouldBe 2
             cards.count { oak in it } shouldBe 1
-            cards.first() shouldContain if (language == "ru") "14 шт. к отправке · 5 шт. в пути" else "14 to send · 5 in transit"
-            cards.first() shouldContain if (language == "ru") "Подгони брёвен по-братски!" else "Got a few logs to spare, mate?"
+            cards.first() shouldContain plainText(labels.material(h.player, "STONE"))
+            cards.last() shouldContain plainText(labels.material(h.player, "WHEAT"))
+            cards.last() shouldContain plainText(labels.material(h.player, "IRON_INGOT"))
+            cards.first() shouldContain if (language == "ru") "К отправке: 14 шт." else "To send: 14"
+            cards.first() shouldContain if (language == "ru") "В пути: 5 шт." else "In transit: 5"
+            containsWrapped(cards.first(), if (language == "ru") "Подгони брёвен по-братски!" else "Got a few logs to spare, mate?") shouldBe true
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "orders-by-material-$language", h.screen, listOf(640, 360)) }
             h.click("next")
+            val dense = h.screen.body.map { plainText(it.text) }
+            dense.size shouldBe 2
+            val longNames = listOf("WAXED_WEATHERED_CUT_COPPER_STAIRS", "STRIPPED_DARK_OAK_LOG",
+                "MOSSY_COBBLESTONE_STAIRS", "POLISHED_BLACKSTONE_BRICKS")
+            longNames.forEachIndexed { index, material ->
+                containsWrapped(dense[index / 2], plainText(labels.material(h.player, material))) shouldBe true
+            }
+            dense.first() shouldContain if (language == "ru") "К отправке: 12345 шт." else "To send: 12345"
+            dense.first() shouldContain if (language == "ru") "В пути: 123 шт." else "In transit: 123"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("recipients", "previous", "next")
+            h.screen.columns shouldBe 3
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "orders-by-material-dense-$language", h.screen, listOf(640, 360)) }
+            h.click("next")
             val last = h.body()
-            last shouldContain plainText(labels.material(h.player, "IRON_INGOT"))
-            last shouldContain if (language == "ru") "Маленький росток, большие планы." else "Little sapling, big plans."
+            h.screen.body.size shouldBe 1
+            last shouldContain plainText(labels.material(h.player, "SPRUCE_SAPLING"))
+            containsWrapped(last, if (language == "ru") "Маленький росток, большие планы." else "Little sapling, big plans.") shouldBe true
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "orders-by-material-last-$language", h.screen, listOf(640, 360)) }
             h.screen.buttons.map { it.id.value } shouldBe listOf("recipients", "previous")
             h.click("recipients"); h.click("history")
             h.body() shouldBe last
+            h.click("previous")
+            h.screen.body.map { plainText(it.text) } shouldBe dense
             h.click("previous")
             h.screen.body.map { plainText(it.text) } shouldBe cards
             h.click("recipients")
             val firstRows = logisticsTableCells(h.screen)
             firstRows.count { it.first() == oak } shouldBe 1
             firstRows.first { it.first() == oak }[1] shouldBe "8"
+            every { h.host.supplyRequests(h.player) } returns requests.take(3)
+            h.click("history")
+            h.screen.body.size shouldBe 2
+            plainText(h.screen.body.last().text) shouldContain plainText(labels.material(h.player, "WHEAT"))
+            h.screen.buttons.map { it.id.value } shouldBe listOf("recipients")
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "orders-by-material-odd-$language", h.screen, listOf(640, 360)) }
+            h.click("recipients")
             every { h.host.supplyRequests(h.player) } returns emptyList()
             h.click("history")
             h.screen.buttons shouldBe emptyList()

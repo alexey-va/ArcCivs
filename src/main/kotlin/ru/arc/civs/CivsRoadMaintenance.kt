@@ -504,7 +504,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             CivsAutonomy.legacyStock(city) && !funded(city)) {
             selected.remove(worker.id)
             if (claim != null && worker.assignment == claim.hutId) releaseBuilder(city.id)
-            waiting.remove(worker.id)
+            // Waiting builders read their plan before the same pulse's background inspection gets its turn.
+            if (city.construction?.phase != ConstructionPhase.WAITING_MATERIALS) waiting.remove(worker.id)
             return null
         }
         val network = networks[city.id]?.takeIf { it.worldId == city.worldId && it.buildings == city.buildings &&
@@ -587,19 +588,20 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         if (city.autonomy?.paused != false || city.pendingDeletion != null) return
         val network = networks[city.id]?.takeIf { it.worldId == city.worldId && it.buildings == city.buildings &&
             it.routeOverrides == city.roadRouteOverrides && it.targets.isNotEmpty() } ?: return
-        if (city.construction?.phase == ConstructionPhase.WAITING_MATERIALS) {
-            if (network.waitingRepairs.isEmpty()) return
-            val site = waitingSite(city) ?: return
+        val acceptedSite = if (city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && network.waitingRepairs.isNotEmpty())
+            waitingSite(city) else null
+        // The ordinary surface pass below can still use any inspection budget the paid repair leaves.
+        acceptedSite?.let { site ->
             val pass = network.waitingPass?.takeIf { it.site === site } ?: CivRoadWaitingPass(site, network.waitingRepairs)
                 .also { network.waitingPass = it }
-            if (pass.remaining.isEmpty()) return
-            val crew = pass.crew(city) ?: return
+            if (pass.remaining.isEmpty()) return@let
+            val crew = pass.crew(city) ?: return@let
             val previous = pass.workerId?.let { id -> city.workers.firstOrNull { it.id == id } }
-            if (previous != null && waitingInputsReady(city, previous)) return
-            val id = crew.available(canReassign) ?: return
+            if (previous != null && waitingInputsReady(city, previous)) return@let
+            val id = crew.available(canReassign) ?: return@let
             val spare = city.workers.first { it.id == id }
             repeat(minOf(SCAN_COLUMNS, pass.remaining.size)) {
-                if (!budget(spare.id)) return
+                if (!budget(spare.id)) return@let
                 val target = pass.remaining.removeFirst()
                 if (!site.outside(target.floor)) return@repeat
                 var healthy = false
@@ -612,10 +614,9 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
                     previous?.takeIf { it.id != spare.id }?.let { selected.remove(it.id) }
                     selected[spare.id] = Selection(priced, carriedOnly = true)
                     pass.workerId = spare.id
-                    return
+                    return@let
                 }
             }
-            return
         }
         val assigned = city.workers.firstOrNull { worker ->
             !CivsResidents.isChild(worker) && worker.cargo == null && worker.assignment?.let(city::building)?.let {

@@ -13,7 +13,6 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import ru.arc.civs.CivsUi.Companion.PAGE_SIZE
-import ru.arc.civs.CivsUi.Companion.ORDER_CARD_PAGE_SIZE
 import ru.arc.civs.CivsUi.Companion.LOGISTICS_MATERIAL_PAGE_SIZE
 import ru.arc.civs.CivsUi.Companion.MATERIALS_PAGE_SIZE
 import ru.arc.civs.CivsUi.Companion.WHITE
@@ -446,29 +445,35 @@ private fun List<CivSupplyRequest>.carriedToRecipients(constructionStores: Set<U
         incoming(huts.filterNot(CivSupplyRequest::construction)))
 }
 
+private const val SUPPLY_BOARD_PAGE_SIZE = 4
+
 internal fun CivsUi.showSupplyRequests(player: Player, warehouseId: UUID, page: Int = 0) {
     val city = city(player) ?: return
     val warehouse = city.building(warehouseId) ?: return showBuildings(player)
     if (warehouse.type != BuildingType.WAREHOUSE) return showBuilding(player, warehouseId)
     val result = runCatching { host.supplyRequests(player) }
     val materials = result.getOrDefault(emptyList()).groupBy(CivSupplyRequest::material).entries.toList()
-    val current = page.coerceIn(0, lastPage(materials.size, ORDER_CARD_PAGE_SIZE))
+    val current = page.coerceIn(0, lastPage(materials.size, SUPPLY_BOARD_PAGE_SIZE))
     val stores = city.construction?.let { CivsRules.constructionStores(city, it.buildingId).map(CivBuilding::id).toSet() }.orEmpty()
-    present(player, "civs.logistics", "logistics.title", buildList {
-        result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
-        if (result.isSuccess && materials.isEmpty()) add(body(player, "logistics.empty"))
-        for ((material, requests) in materials.drop(current * ORDER_CARD_PAGE_SIZE).take(ORDER_CARD_PAGE_SIZE)) {
-            val counts = tr(player, "logistics.order-counts", "remaining" to requests.remainingToSend(),
-                "transit" to requests.carriedToRecipients(stores))
-            add(presentation.panel(Component.join(Component.newline(), materialName(player, material).color(STOCK),
-                counts, orderComment(player, city.id, material)), DialogTables.PanelSkin.NAVY))
-        }
-    }, buildList {
+    val controls = buildList {
         if (materials.isNotEmpty()) add(button(player, "recipients", "logistics.recipients", NAVIGATION) {
             showSupplyRecipients(player, warehouseId)
         })
-        pages(player, current, materials.size, ORDER_CARD_PAGE_SIZE) { showSupplyRequests(player, warehouseId, it) }
-    }, reopen = { showSupplyRequests(player, warehouseId, current) }, cityId = city.id)
+        pages(player, current, materials.size, SUPPLY_BOARD_PAGE_SIZE) { showSupplyRequests(player, warehouseId, it) }
+    }
+    val buttonWidth = if (controls.size == 3) 130 else 180
+    present(player, "civs.logistics", "logistics.title", buildList {
+        result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
+        if (result.isSuccess && materials.isEmpty()) add(body(player, "logistics.empty"))
+        val tickets = materials.drop(current * SUPPLY_BOARD_PAGE_SIZE).take(SUPPLY_BOARD_PAGE_SIZE).map { (material, requests) ->
+            val counts = tr(player, "logistics.order-counts", "remaining" to requests.remainingToSend(),
+                "transit" to requests.carriedToRecipients(stores))
+            materialName(player, material).color(STOCK).append(Component.newline()).append(counts)
+                .append(Component.newline()).append(orderComment(player, city.id, material))
+        }
+        addAll(presentation.orderBoard(tickets))
+    }, controls.map { it.copy(width = buttonWidth) }, reopen = { showSupplyRequests(player, warehouseId, current) },
+        cityId = city.id, actionColumns = controls.size.coerceAtLeast(1))
 }
 
 

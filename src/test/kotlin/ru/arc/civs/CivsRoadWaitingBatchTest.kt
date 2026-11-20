@@ -16,6 +16,41 @@ import java.util.concurrent.Executor
 import java.util.UUID
 
 class CivsRoadWaitingBatchTest : FunSpec({
+    test("a material-waiting builder keeps one native inspection turn among other towns") {
+        for (houseFirst in listOf(false, true)) {
+            val h = WaitingHouse(listOf(4, 1, 5), registerSurface = { _, _ -> })
+            val others = (1..4).map { index ->
+                val base = roadAdmissionCity()
+                base.copy(id = UUID(91, index.toLong()), workers = listOf(base.workers.single().copy(id = UUID(90, index.toLong()))))
+            }
+            val probes = mutableMapOf<UUID, Int>()
+            every { h.native.captureRoadUpkeep(any(), any(), any(), any()) } answers {
+                probes.merge(firstArg<Settlement>().id, 1, Int::plus)
+                null
+            }
+            for (town in others) h.maintenance.publish(town, roadAdmissionNetwork(town))
+            repeat(4) {
+                h.tick += 20
+                for (town in others) h.maintenance.backfillSurfaces(town)
+            }
+            val cities = if (houseFirst) listOf(h.city) + others else others + h.city
+            var work: CivWorldWork? = null
+            repeat(24) {
+                h.tick += 20
+                val before = probes.values.sum() + h.probes
+                // The service visits residents before running each town's surface checks.
+                for (resident in h.city.workers) h.planning.plan(h.city, resident)?.worldWork?.let { work = it }
+                for (town in cities) h.maintenance.backfillSurfaces(town)
+                (probes.values.sum() + h.probes - before <= 8) shouldBe true
+            }
+            val paid = requireNotNull(work) { "No paid road turn, houseFirst=$houseFirst, probes=$probes" }
+            paid.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+            paid.workerId shouldBe h.city.workers.last().id
+            (probes.getValue(h.city.id) > 0) shouldBe true
+            others.all { probes.getValue(it.id) > 4 } shouldBe true
+        }
+    }
+
     test("one builder pays a captured repair while the 188th house row lacks one spruce log") {
         val h = WaitingHouse()
         val worker = h.city.workers.first()
@@ -218,7 +253,7 @@ class CivsRoadWaitingBatchTest : FunSpec({
     }
 })
 
-private class WaitingHouse {
+private class WaitingHouse(bags: List<Int> = listOf(4, 1, 3), registerSurface: ((UUID, CivPosition) -> Unit)? = null) {
     private val base = roadAdmissionCity()
     private val route = (0..4).map { CivPosition(0, 64, it) }
     private val source = base.buildings.last().copy(type = BuildingType.HOUSE, transit = null, entrance = route.last(),
@@ -231,7 +266,7 @@ private class WaitingHouse {
         payment = CivConstructionPayment(awaiting = mapOf("SPRUCE_LOG" to 1)), blocksPlaced = 665, blocksRequired = 1573)
     val city = CivsRules.validate(base.copy(buildings = base.buildings.dropLast(1).map {
         it.copy(level = 3, control = it.anchor)
-    } + source + building, construction = order, workers = listOf(4, 1, 3).mapIndexed { index, amount ->
+    } + source + building, construction = order, workers = bags.mapIndexed { index, amount ->
         val worker = base.workers.single().copy(id = UUID(0, 40L + index), name = "Builder ${index + 1}")
         CivsEquipment.replace(worker, List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("COBBLESTONE", amount) else null })
     }))
@@ -243,13 +278,13 @@ private class WaitingHouse {
     var site: CivConstructionSite? = civsConstructionSite(housePlan)
     private val network = CivsRoadMaintenance.prepare(city, listOf(paid), proposeCuts = false, restrictTo = setOf(civsTerrainKey(floor.x, floor.z)))
     val target = network.targets.single()
-    private var tick = 0
+    var tick = 0
     var before = "minecraft:coarse_dirt"
     var healthy = false
     var unavailable = false
     var probes = 0
-    private val native = mockk<CivsWorld>()
-    val maintenance = CivsRoadMaintenance(native, constructionSite = { _, _ -> site }) { tick }
+    val native = mockk<CivsWorld>()
+    val maintenance = CivsRoadMaintenance(native, registerSurface, constructionSite = { _, _ -> site }) { tick }
     val supplies = CivsResidentSupplies(mockk(), mockk(), { mockk() }, mockk(), mockk(), CivsResidentFoods.BREAD_ONLY,
         native, maintenance, mockk(), mockk(), mockk(), mockk(), mockk())
     private val workRuntime = mockk<CivsCitizenWork> { every { constructionWorkplace(any(), any()) } returns building.entrance }

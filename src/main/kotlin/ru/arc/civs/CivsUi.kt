@@ -267,7 +267,8 @@ class CivsUi internal constructor(
         present(player, id, title, listOf(body(content)), listOf(button(player, "return", destinationKey) { destination() }))
 
     internal fun present(player: Player, id: String, title: String, bodies: List<PaperDialogBody>, buttons: List<PaperDialogButton>,
-        inputs: List<PaperDialogTextInput> = emptyList(), reopen: (() -> Unit)? = null, cityId: UUID? = null): Visit? {
+        inputs: List<PaperDialogTextInput> = emptyList(), reopen: (() -> Unit)? = null, cityId: UUID? = null,
+        actionColumns: Int = if (buttons.size == 1) 1 else 2): Visit? {
         if (closed || !player.isOnline) return null
         val visit = Visit(id, tasks.token(), cityId)
         visits[player.uniqueId] = visit
@@ -296,7 +297,7 @@ class CivsUi internal constructor(
         }
         val screen = PaperDialogScreen(id = id, title = tint(tr(player, title), screenColor(id)), body = bodies,
             inputs = inputs, buttons = guarded,
-            columns = if (guarded.size == 1) 1 else 2,
+            columns = actionColumns,
             exitButton = if (hasParent) presentation.button(
                 button(player, "history", "common.back").copy(width = 200), Action.BACK,
             ) else button(player, "close", "common.close").copy(width = 200, tooltip = tr(player, "common.close")),

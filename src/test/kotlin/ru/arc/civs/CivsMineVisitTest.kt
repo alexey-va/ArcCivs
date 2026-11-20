@@ -487,16 +487,18 @@ class CivsMineVisitTest : FunSpec({
             h.at = requireNotNull(owner.target).location(h.world)
             val mine = h.staircaseMine(entranceOutside = false)
             val waiting = h.addMiner(mine, h.standing.copy(x = h.standing.x + 12).location(h.world))
+            // Exercise a spread start later than two seconds.
+            waiting.actor.wander = CitizenWander(UUID(0, 1))
             val before = h.city
             val (work, routes) = h.nativeWorkOwner()
-            for (tick in 1..40) {
+            for (tick in 1..60) {
                 h.now += 50
                 h.runtime.wanderBudget = 8
                 work.update(waiting.actor, h.city, h.world, h.now)
                 h.runtime.statuses[waiting.worker.id] shouldBe "mine-waiting"
                 if (waiting.actor.route != null) break
             }
-            val idle = requireNotNull(waiting.actor.route) { "No idle route after 2 seconds of mine waiting" }
+            val idle = requireNotNull(waiting.actor.route) { "No idle route within 3 seconds of mine waiting" }
             withClue("target=${idle.authored} bounds=${mine.bounds}") {
                 mine.bounds.contains(idle.authored.x, idle.authored.y, idle.authored.z) shouldBe false
             }

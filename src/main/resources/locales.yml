@@ -1597,7 +1597,9 @@ ru:
       '0': '«Как раз такой штуки и не хватало!»'
       '1': '«В накладной сердечко нарисую.»'
   logistics:
-    order-counts: '<remaining> шт. к отправке · <transit> шт. в пути'
+    order-counts: |-
+      К отправке: <remaining> шт.
+      В пути: <transit> шт.
     recipients: 'По получателям'
     board-help: 'Нужно — осталось отправить. В пути — уже у кладовщика; Запас — на складах города.'
     material-page: 'Материалы <page>/<pages>'
@@ -3403,7 +3405,9 @@ en:
       '0': '“Just the thing I’ve been missing!”'
       '1': '“I’ll draw a heart on the receipt.”'
   logistics:
-    order-counts: '<remaining> to send · <transit> in transit'
+    order-counts: |-
+      To send: <remaining>
+      In transit: <transit>
     recipients: 'By recipient'
     board-help: 'Need — still to dispatch. Transit — already with a courier; Stock — town storage.'
     material-page: 'Materials <page>/<pages>'

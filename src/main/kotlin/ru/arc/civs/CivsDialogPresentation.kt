@@ -31,6 +31,24 @@ internal class CivsDialogPresentation(font: String) {
     fun panel(text: Component, skin: DialogTables.PanelSkin, width: Int = 320): PaperDialogBody =
         table(listOf(listOf(text)), null, listOf(1), skin, width)
 
+    fun orderBoard(tickets: List<Component>): List<PaperDialogBody> {
+        if (decoration == null) return tickets.map { PaperDialogBody(it, 320) }
+        val width = 372
+        // The native panel grid reserves 10px outside the cards and an 8px gutter between them.
+        val singleWidth = (width - 10 - 8) / 2 + 10
+        return tickets.chunked(2).map { pair ->
+            val row = DialogTables.factsBody(pair.map { it to Component.empty() }, DialogTables.FactsLayout.ROWS,
+                DialogTables.PanelSpec(DialogTables.PanelSkin.COCOA, if (pair.size == 2) width else singleWidth,
+                    pair.size, false))
+            if (pair.size == 2) row else {
+                // Plain-message bodies are centred. Reserve the unoccupied column on every native line.
+                val right = DialogTextLayout.spacing.padding(width - row.width)
+                val left = row.text.replaceText { it.matchLiteral("\n").replacement(right.append(Component.newline())) }
+                PaperDialogBody(left.append(right), width)
+            }
+        }
+    }
+
     fun table(rows: List<List<Component>>, headers: List<Component>?, columnWeights: List<Int>,
         skin: DialogTables.PanelSkin, width: Int = 320): PaperDialogBody =
         if (decoration == null) PaperDialogBody(Component.join(Component.newline(), (listOfNotNull(headers) + rows).map {
